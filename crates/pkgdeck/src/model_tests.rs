@@ -18,7 +18,7 @@ fn row(value: Value) -> Row {
 fn pages_name_their_icons_capabilities_and_filters() {
     for page in Page::ALL {
         assert!(!page.name().is_empty());
-        assert!(!page.icon().is_empty());
+        assert!(crate::ui::icons::drawn(page.icon()), "{page:?}");
         assert_eq!(page.lists(), page != Page::Settings);
         assert_eq!(page.filters_sources(), page.capability().is_some());
     }
@@ -26,7 +26,7 @@ fn pages_name_their_icons_capabilities_and_filters() {
     assert_eq!(Page::Clean.capability(), Some("clean"));
     assert_eq!(Page::Installed.capability(), Some("installed"));
     assert_eq!(Page::Search.capability(), Some("search"));
-    assert_eq!(Page::Sources.capability(), None);
+    assert_eq!(Page::Settings.capability(), None);
 }
 
 #[test]
@@ -41,10 +41,17 @@ fn rows_know_their_title_identity_and_state() {
     // An empty remote counts as none, as notices and progress send it.
     let target = json!({"source": "flatpak", "name": "org.mozilla.firefox", "architecture": "x86_64", "remote": "", "scope": "system", "reference": "app/org.mozilla.firefox/x86_64/stable"});
     assert_eq!(identity_of_row_value(&target), firefox.identity());
+    // The quick text is the same as the JSON one, with an empty
+    // reference too.
+    for value in [
+        json!({"remote": "flathub", "reference": "", "scope": {"user": 1000}}),
+        json!({"remote": null, "reference": "app/x", "scope": "system"}),
+    ] {
+        let row = row(value);
+        assert_eq!(row.identity(), identity_of(&row.identity_value()));
+    }
     let blank = row(json!({"display_name": "  "}));
     assert_eq!(blank.title(), "app");
-    let source = row(json!({"kind": "source", "source": "flatpak"}));
-    assert_eq!(source.title(), "Flatpak");
     assert!(row(json!({})).fabricated());
     assert!(!row(json!({"candidate": "1"})).fabricated());
     assert!(!row(json!({"kind": "cleanup"})).fabricated());
@@ -212,6 +219,14 @@ fn activity_entries_say_what_happened() {
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");
+    for (log, has) in [
+        (json!({"log": "line"}), true),
+        (json!({"log": "", "output": ["a"]}), true),
+        (json!({"log": [], "output": ""}), false),
+        (json!({"log": 3}), false),
+    ] {
+        assert_eq!(entry(log.clone()).has_log(), has, "{log}");
+    }
     assert_eq!(entry(json!({})).title(), "Change");
     let two_ops =
         entry(json!({"operations": [install, {"clean": {"backend": "apt", "key": "cache"}}]}));
@@ -338,11 +353,26 @@ fn source_lines_say_where_a_row_comes_from() {
         ),
         "Docker images, User"
     );
+    for (source, name) in [
+        ("docker", "Docker, System"),
+        ("podman", "Podman, System"),
+        ("apt", "APT"),
+    ] {
+        assert_eq!(
+            line(json!({"kind": "cleanup", "source": source}), false),
+            name
+        );
+    }
 }
 
 #[test]
 fn versions_read_by_kind_and_state() {
     let version = |value: Value| version_text(&row(value));
+    // A newer version the source doesn't offer as an update isn't one.
+    assert_eq!(
+        version(json!({"installed": "1", "candidate": "2", "update": "current"})),
+        "1"
+    );
     assert_eq!(
         version(json!({"kind": "cleanup", "cleanup_kind": "orphan_dependencies"})),
         "Dependencies"
@@ -355,15 +385,30 @@ fn versions_read_by_kind_and_state() {
         version(json!({"kind": "cleanup", "cleanup_kind": "package_cache"})),
         "Cache"
     );
+    for (kind, text) in [
+        ("unused", "Unused"),
+        ("build_files", "Build files"),
+        ("worktree", "Worktree"),
+        ("data", "Data"),
+    ] {
+        assert_eq!(
+            version(json!({"kind": "cleanup", "cleanup_kind": kind})),
+            text
+        );
+    }
+    // What a task frees, when it can tell.
+    assert_eq!(
+        version(json!({"kind": "cleanup", "cleanup_kind": "data", "bytes": 4_200_000})),
+        "4.2 MB"
+    );
+    assert_eq!(
+        version(json!({"kind": "cleanup", "cleanup_kind": "worktree", "bytes": 0})),
+        "Worktree"
+    );
     assert_eq!(version(json!({"kind": "failure"})), "Failed");
     assert_eq!(
-        version(json!({"kind": "source", "available": true})),
-        "Available"
-    );
-    assert_eq!(version(json!({"kind": "source"})), "Unavailable");
-    assert_eq!(
         version(json!({"update": "available", "installed": "1", "candidate": "2"})),
-        "1 → 2"
+        "2 from 1"
     );
     assert_eq!(
         version(json!({"update": "available", "installed": "2", "candidate": "2"})),
@@ -411,7 +456,6 @@ fn row_actions_follow_source_page_and_state() {
         action(json!({"kind": "cleanup"}), Page::Clean),
         Some(Action::Clean)
     );
-    assert_eq!(action(json!({"kind": "source"}), Page::Sources), None);
     assert_eq!(
         action(json!({"installed": "1"}), Page::Updates),
         Some(Action::Upgrade)
@@ -463,6 +507,11 @@ fn row_actions_follow_source_page_and_state() {
     assert_eq!(mac_remove, Some(Action::Remove));
     assert_eq!(
         row_action(&row(json!({"source": "macos-apps"})), Page::Installed, &[]),
+        None
+    );
+    // Failures and notes have nothing to do.
+    assert_eq!(
+        row_action(&row(json!({"kind": "failure"})), Page::Installed, &[]),
         None
     );
     for action in [
@@ -535,8 +584,7 @@ fn visible_rows_filter_by_page_source_and_text() {
         row(json!({"kind": "failure", "name": "snap", "source": "snap"})),
         row(json!({"kind": "cleanup", "name": "cache", "cleanup_kind": "package_cache"})),
         row(json!({"name": "ghost"})),
-        row(json!({"kind": "source", "name": "apt", "source": "apt", "available": true})),
-        row(json!({"kind": "source", "name": "snap", "source": "snap", "available": false})),
+        row(json!({"name": "apt", "source": "apt", "installed": "1"})),
     ];
     let options = |page| ViewOptions {
         page: Some(page),
@@ -546,15 +594,6 @@ fn visible_rows_filter_by_page_source_and_text() {
         names(&rows, &visible(&rows, &options(Page::Clean))),
         ["cache"]
     );
-    assert_eq!(
-        names(&rows, &visible(&rows, &options(Page::Sources))),
-        ["apt"]
-    );
-    let all = ViewOptions {
-        show_unavailable: true,
-        ..options(Page::Sources)
-    };
-    assert_eq!(names(&rows, &visible(&rows, &all)), ["apt", "snap"]);
     let search = ViewOptions {
         query: "s",
         ..options(Page::Search)
@@ -606,43 +645,43 @@ fn visible_rows_sort_by_column_relevance_or_name() {
         ..ViewOptions::default()
     };
     assert_eq!(names(&rows, &visible(&rows, &options))[0], "c");
-    let sources = vec![
-        row(json!({"kind": "source", "name": "z", "source": "zypper", "available": true})),
-        row(json!({"kind": "source", "name": "a", "source": "apt", "available": false})),
-        row(json!({"kind": "source", "name": "b", "source": "bun", "available": true})),
-    ];
-    let options = ViewOptions {
-        page: Some(Page::Sources),
-        show_unavailable: true,
-        ..ViewOptions::default()
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &options)),
-        ["a", "b", "z"]
-    );
-    // Enabled managers come first, and nothing is hidden for being off.
-    let enabled = HashSet::from(["zypper".to_owned(), "bun".to_owned()]);
-    let enabled_first = ViewOptions {
-        sources: Some(&enabled),
-        ..options
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &enabled_first)),
-        ["b", "z", "a"]
-    );
-    let by_status = ViewOptions {
-        sort: Some((Column::Summary, true)),
-        ..options
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &by_status)),
-        ["a", "b", "z"]
-    );
+    // Without a search, or off Search, rows keep the order they came in.
+    for (page, query) in [(Page::Search, " "), (Page::Updates, "match")] {
+        let options = ViewOptions {
+            page: Some(page),
+            query,
+            ..ViewOptions::default()
+        };
+        assert_eq!(
+            names(&rows, &visible(&rows, &options)),
+            ["b", "a", "c"],
+            "{page:?}"
+        );
+    }
     for column in [Column::Name, Column::Version, Column::Summary] {
         assert_eq!(Column::from_key(column.key()), Some(column));
     }
     assert_eq!(Column::from_key("status"), Some(Column::Summary));
     assert_eq!(Column::from_key("capabilities"), None);
+    // Ties fall back to the name, then the source, both turned around too.
+    let rows = vec![
+        row(json!({"name": "x", "source": "snap", "installed": "1"})),
+        row(json!({"name": "x", "source": "apt", "installed": "1"})),
+        row(json!({"name": "w", "source": "apt", "installed": "1"})),
+    ];
+    let order = |column, ascending| {
+        let options = ViewOptions {
+            page: Some(Page::Updates),
+            sort: Some((column, ascending)),
+            ..ViewOptions::default()
+        };
+        visible(&rows, &options)
+            .iter()
+            .map(|item| format!("{}/{}", rows[item.raw].name, rows[item.raw].source))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(Column::Version, true), ["w/apt", "x/apt", "x/snap"]);
+    assert_eq!(order(Column::Version, false), ["x/snap", "x/apt", "w/apt"]);
 }
 
 #[test]
@@ -818,7 +857,7 @@ fn the_search_hint_counts_what_can_search() {
     );
     assert_eq!(
         search_hint(&catalog(), &HashSet::new(), ""),
-        "No enabled source can search. Turn one on in Sources."
+        "No enabled source can search. Turn one on in Settings."
     );
 }
 
@@ -1095,4 +1134,67 @@ fn installed_lists_every_source_a_to_z() {
         names(&rows, &visible(&rows, &updates)),
         ["zed", "Anchor", "7zip", "bat", "bat"]
     );
+}
+
+#[test]
+fn cleanup_tasks_sort_by_what_they_free() {
+    let rows: Vec<Row> = [
+        ("small", Some(9_000)),
+        ("unknown", None),
+        ("big", Some(2_000_000_000)),
+    ]
+    .into_iter()
+    .map(|(name, bytes)| row(json!({"kind": "cleanup", "name": name, "bytes": bytes})))
+    .collect();
+    let sorted = |ascending| {
+        let options = ViewOptions {
+            page: Some(Page::Clean),
+            sort: Some((Column::Version, ascending)),
+            ..ViewOptions::default()
+        };
+        names(&rows, &visible(&rows, &options))
+    };
+    assert_eq!(sorted(false), ["big", "small", "unknown"]);
+    assert_eq!(sorted(true), ["unknown", "small", "big"]);
+}
+
+#[test]
+fn automatic_cleaning_says_what_it_freed() {
+    let said = |tasks, failed, bytes| {
+        AutoCleaned {
+            tasks,
+            failed,
+            bytes,
+        }
+        .message()
+    };
+    assert_eq!(said(0, 0, 0), None);
+    assert_eq!(said(3, 0, 4_200_000_000).as_deref(), Some("Freed 4.2 GB"));
+    assert_eq!(
+        said(1, 0, 0).as_deref(),
+        Some("Cleaned up caches and build files")
+    );
+    assert_eq!(
+        said(2, 1, 900).as_deref(),
+        Some("Freed 900 bytes, 1 task failed")
+    );
+    assert_eq!(said(0, 2, 0).as_deref(), Some("2 cleanup tasks failed"));
+    assert_eq!(said(0, 1, 0).as_deref(), Some("1 cleanup task failed"));
+}
+
+#[test]
+fn cleanup_previews_split_into_a_note_and_items() {
+    assert_eq!(
+        cleanup_preview("Empties these folders:\n~/a\n\n  ~/b \n"),
+        ("Empties these folders:", vec!["~/a", "~/b"])
+    );
+    assert_eq!(
+        cleanup_preview("APT selects obsolete downloads during cleanup."),
+        ("APT selects obsolete downloads during cleanup.", vec![])
+    );
+    assert_eq!(
+        cleanup_preview("libfoo\nlibbar"),
+        ("", vec!["libfoo", "libbar"])
+    );
+    assert_eq!(cleanup_preview(""), ("", vec![]));
 }

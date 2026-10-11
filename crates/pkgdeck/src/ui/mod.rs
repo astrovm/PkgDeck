@@ -74,7 +74,7 @@ pub fn filter_id() -> Id {
 /// One frame of the window.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
-    set_reduce_motion(&ctx, app.settings.reduce_motion);
+    set_reduce_motion(&ctx, app.reduce_motion());
     ctx.set_theme(match app.settings.appearance {
         Appearance::System => egui::ThemePreference::System,
         Appearance::Light => egui::ThemePreference::Light,
@@ -129,16 +129,9 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
         || app.ui.add_repo.is_some()
         || app.ui.picker_open;
     let command = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key));
-    for (index, key) in [
-        Key::Num1,
-        Key::Num2,
-        Key::Num3,
-        Key::Num4,
-        Key::Num5,
-        Key::Num6,
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5]
+        .into_iter()
+        .enumerate()
     {
         if !dialog_open && command(key) {
             app.open_page(Page::ALL[index]);
@@ -176,6 +169,12 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::L) && !app.items.is_empty() {
         app.ui.focus_list = true;
     }
+    // Before Cmd+R, which would take Shift+Cmd+R too.
+    let refresh = if cfg!(target_os = "macos") {
+        ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
+    } else {
+        command(Key::M)
+    };
     if command(Key::R) && app.page.lists() {
         app.reload(true, true);
     }
@@ -200,13 +199,8 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::U) && can_change {
         app.propose("upgrade");
     }
-    let refresh = if cfg!(target_os = "macos") {
-        ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
-    } else {
-        command(Key::M)
-    };
     if refresh && can_change {
-        app.propose("refresh");
+        app.refresh_sources();
     }
     let back = ctx.input_mut(|i| {
         i.consume_key(Modifiers::ALT, Key::ArrowLeft)
@@ -393,12 +387,20 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
                 secs(&ctx, REVEAL),
                 egui::emath::easing::back_out,
             );
-            let center = if rail {
-                pos2(entry.center().x + 12.0, entry.top() + 9.0)
+            // In the rail, smaller and up in the corner, clear of the icon.
+            let (center, size) = if rail {
+                (pos2(entry.center().x + 15.0, entry.top() + 6.0), 0.8)
             } else {
-                pos2(entry.right() - 20.0, entry.center().y)
+                (pos2(entry.right() - 20.0, entry.center().y), 1.0)
             };
-            paint_badge(ui, center, &count, palette.accent, palette.accent_ink, pop);
+            paint_badge(
+                ui,
+                center,
+                &count,
+                palette.accent,
+                palette.accent_ink,
+                pop * size,
+            );
         }
         if rail {
             response.clone().on_hover_text(page.name());
@@ -604,10 +606,7 @@ fn header(app: &mut App, ui: &mut Ui) {
                 }
             }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
-            if matches!(app.page, Page::Search | Page::Sources)
-                && can_open_files
-                && app.opened.is_none()
-            {
+            if app.page == Page::Search && can_open_files && app.opened.is_none() {
                 let response = Button::new(Look::Secondary, "Install from file…")
                     .icon("package")
                     .icon_only(compact)
@@ -862,7 +861,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
 }
 
 fn failure_banner(app: &mut App, ui: &mut Ui) {
-    if !app.page.lists() || app.page == Page::Sources {
+    if !app.page.lists() {
         return;
     }
     let failures = app.read_failures();
@@ -1008,14 +1007,28 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 }
 
+/// How much **Clean all** frees: every shown task but data, which it
+/// leaves alone.
+fn clean_all_frees(app: &App) -> u64 {
+    let rows = app.shown_rows();
+    // Rows may be on their way while a list reloads.
+    app.items
+        .iter()
+        .filter_map(|item| rows.get(item.raw))
+        .filter(|row| row.kind == "cleanup" && row.cleanup_kind != "data")
+        .filter_map(|row| row.bytes)
+        .sum()
+}
+
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
-        Page::Updates => app
-            .items
-            .iter()
-            .any(|i| app.shown_rows()[i.raw].is_package()),
+        Page::Updates => {
+            app.items
+                .iter()
+                .any(|i| app.shown_rows()[i.raw].is_package())
+                || !app.refreshable_sources().is_empty()
+        }
         Page::Clean => app.items.len() > 1,
-        Page::Sources => true,
         _ => false,
     };
     if any {
@@ -1080,42 +1093,38 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     app.items.iter().map(|i| rows[i.raw].identity()).collect();
                 app.unchecked = all;
             }
+            // Package lists older than the last check can hide updates.
+            if !app.refreshable_sources().is_empty()
+                && Button::new(
+                    if total == 0 {
+                        Look::Primary
+                    } else {
+                        Look::Secondary
+                    },
+                    "Refresh sources",
+                )
+                .icon("refresh")
+                .icon_only(narrow && total > 0)
+                .tooltip("Download the latest package lists")
+                .enabled(app.can_act() && app.retained.is_none())
+                .show(ui)
+                .clicked()
+            {
+                app.refresh_sources();
+            }
         }
         Page::Clean => {
-            if Button::new(Look::Solid(Tone::Danger), "Clean all")
+            let label = match clean_all_frees(app) {
+                0 => "Clean all".to_owned(),
+                bytes => format!("Clean all ({})", model::size(bytes)),
+            };
+            if Button::new(Look::Solid(Tone::Danger), &label)
                 .icon("remove")
                 .enabled(app.can_act() && app.retained.is_none())
                 .show(ui)
                 .clicked()
             {
                 app.propose("clean-all");
-            }
-        }
-        Page::Sources => {
-            let selected = app.selected_row().map(|row| row.source.clone());
-            if let Some(source) = selected {
-                if Button::new(Look::Primary, "Refresh sources")
-                    .icon("refresh")
-                    .enabled((!app.busy || app.writing) && app.available(&source))
-                    .show(ui)
-                    .clicked()
-                {
-                    app.propose("refresh");
-                }
-            }
-            let repos = ["flatpak", "fwupd", "apt", "dnf", "zypper"]
-                .iter()
-                .any(|id| app.available(id));
-            if repos
-                && Button::new(Look::Secondary, "Repositories")
-                    .icon("sources")
-                    .enabled(!app.busy)
-                    .show(ui)
-                    .clicked()
-            {
-                app.ui.repos_open = true;
-                app.c().load_repositories();
-                app.react();
             }
         }
         _ => {}
@@ -1212,6 +1221,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                     let label = match action {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
+                        crate::app::ToastAction::StartAtLogin => "Start at login",
                     };
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()
@@ -1384,7 +1394,7 @@ mod header_tests {
             }
             let harness = draw(app, header);
             [
-                "Filter sources",
+                "All sources",
                 "Duplicates",
                 &format!("{}, duplicates", model::source_name("apt")),
                 model::source_name("apt"),
@@ -1399,13 +1409,49 @@ mod header_tests {
             Some(format!("{}, duplicates", model::source_name("apt")))
         );
         // Duplicates belong to Installed.
-        assert_eq!(
-            label(Page::Updates, false).as_deref(),
-            Some("Filter sources")
-        );
+        assert_eq!(label(Page::Updates, false).as_deref(), Some("All sources"));
         assert_eq!(
             label(Page::Updates, true).as_deref(),
             Some(model::source_name("apt"))
+        );
+    }
+
+    #[test]
+    fn clean_all_says_what_it_frees_without_the_data_it_leaves() {
+        let clean = |tasks: &[(&str, Option<u64>)]| {
+            let mut app = app(Page::Clean, 0);
+            app.rows = tasks
+                .iter()
+                .enumerate()
+                .map(|(i, (kind, bytes))| {
+                    serde_json::from_value(serde_json::json!({
+                        "kind": "cleanup", "name": format!("task-{i}"), "source": "apt",
+                        "cleanup_kind": kind, "bytes": bytes,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            app.invalidate();
+            app.refresh_items();
+            let harness = draw(app, page_actions);
+            ["Clean all", "Clean all (2.5 GB)"]
+                .into_iter()
+                .find(|label| harness.query_by_label(label).is_some())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            clean(&[
+                ("package_cache", Some(2_000_000_000)),
+                ("build_files", Some(500_000_000)),
+                ("data", Some(9_000_000_000)),
+                ("package_cache", None),
+            ])
+            .as_deref(),
+            Some("Clean all (2.5 GB)")
+        );
+        assert_eq!(
+            clean(&[("package_cache", None), ("data", Some(9))]).as_deref(),
+            Some("Clean all")
         );
     }
 
@@ -1432,7 +1478,7 @@ mod header_tests {
     fn a_filtered_page_clears_from_the_filter_s_right_end() {
         let harness = draw(app(Page::Installed, 1), header);
         assert!(harness.query_by_label("Clear filter").is_none());
-        let unfiltered = harness.get_by_label("Filter sources").rect();
+        let unfiltered = harness.get_by_label("All sources").rect();
 
         let mut filtered = app(Page::Installed, 1);
         filtered.duplicates_only = true;
@@ -1460,20 +1506,20 @@ mod header_tests {
         // Clearing doesn't open the menu.
         assert!(!app.ui.picker_open);
         assert!(harness.query_by_label("Clear filter").is_none());
-        harness.get_by_label("Filter sources");
+        harness.get_by_label("All sources");
     }
 
     #[test]
     fn the_source_filter_button_opens_the_picker_and_hides_behind_an_opened_file() {
         let mut harness = draw(app(Page::Installed, 1), header);
-        harness.get_by_label("Filter sources").click();
+        harness.get_by_label("All sources").click();
         harness.run_steps(2);
         assert!(harness.state().1.ui.picker_open);
 
         let mut opened = app(Page::Installed, 1);
         opened.opened = Some(Default::default());
         let harness = draw(opened, header);
-        assert!(harness.query_by_label("Filter sources").is_none());
+        assert!(harness.query_by_label("All sources").is_none());
     }
 
     #[test]
@@ -1487,7 +1533,7 @@ mod header_tests {
         assert!(harness
             .get_by_role(egui::accesskit::Role::TextInput)
             .is_focused());
-        // No Duplicates button beside it any more: it's in Filter sources.
+        // No Duplicates button beside it any more: it's in the sources filter.
         assert!(harness.query_by_label("Duplicates").is_none());
 
         harness

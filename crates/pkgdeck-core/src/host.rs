@@ -386,6 +386,12 @@ impl Host {
             "GOPROXY",
             "DOTNET_ROOT",
             "DOTNET_CLI_HOME",
+            // Build caches that Clean empties, when moved.
+            "GOCACHE",
+            "GOMODCACHE",
+            "GRADLE_USER_HOME",
+            "YARN_CACHE_FOLDER",
+            "SCCACHE_DIR",
             // A custom Homebrew location (command ownership) and cache
             // (when cached Homebrew listings expire).
             "HOMEBREW_PREFIX",

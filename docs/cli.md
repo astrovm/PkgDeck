@@ -244,19 +244,26 @@ pkd clean --all               # run every task
 ```
 
 Each task has a key like `apt:autoremove` and a preview from the package
-manager itself. Running a task uses the same confirmation, permission, and
-cancellation rules as other changes. PkgDeck checks the task again right
-before running it.
+manager itself. The list shows how much space each task frees, biggest
+first, and what `pkd clean --all` frees in total. Running a task uses the
+same confirmation, permission, and cancellation rules as other changes.
+PkgDeck checks the task again right before running it.
 
 | Source | What it cleans |
 | --- | --- |
 | APT | Unused dependencies and old downloaded packages |
 | Homebrew | Unused dependencies and old downloads |
-| Docker, Podman | Untagged images |
+| Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
+| `dev-caches` | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
+| `projects` | Build folders and finished Git worktrees of projects you haven't touched in a while |
 
-- Volumes are never cleaned.
+- `--all` skips unused volumes, because they hold data. Clean them by their
+  key.
+- `projects` uses the folders and age set in the app's Clean settings
+  (`clean.json` in PkgDeck's config folder). By default: your home folder and
+  a week.
 - pip needs a virtual environment, like its other commands.
 - pnpm, the Podman build cache, and unused Flatpak runtimes aren't offered,
   because their package managers can't show an exact preview.

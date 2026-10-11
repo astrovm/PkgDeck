@@ -47,6 +47,7 @@ pub struct Toast {
 pub enum ToastAction {
     Undo,
     Restart,
+    StartAtLogin,
 }
 
 /// How the window asked to be launched.
@@ -104,8 +105,7 @@ pub struct App {
     pub search_due: Option<Instant>,
     pub filter: String,
     pub duplicates_only: bool,
-    pub show_unavailable: bool,
-    /// Sources turned on in Sources; empty is all of them.
+    /// Sources turned on in Settings; empty is all of them.
     pub enabled: HashSet<String>,
     /// Sources a page shows, when the person narrowed it.
     pub page_sources: HashMap<Page, HashSet<String>>,
@@ -118,6 +118,8 @@ pub struct App {
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
     pub selected: Option<String>,
+    /// Where the selection was last found in `items`.
+    selected_hint: std::cell::Cell<usize>,
     /// The Flatpak group of the selected row, to find its other copy if
     /// this one goes away.
     selected_group: Option<String>,
@@ -155,6 +157,9 @@ pub struct App {
     post_write_reload: bool,
     close_pending: bool,
     pub force_quit: bool,
+    /// Set while something is being dragged, such as a column divider:
+    /// settings wait for the drop instead of being written every frame.
+    pub dragging: bool,
     /// Set while a [`crate::ui::Window`] is up. A copy started in the
     /// background never had one, so a restart keeps it hidden.
     pub window_visible: bool,
@@ -258,7 +263,6 @@ impl App {
             search_due: None,
             filter: String::new(),
             duplicates_only: false,
-            show_unavailable: false,
             enabled,
             page_sources: HashMap::new(),
             sort,
@@ -267,6 +271,7 @@ impl App {
             parsed: vec![],
             retained: None,
             selected: None,
+            selected_hint: Default::default(),
             selected_group: None,
             page_open: false,
             cursor_moved: false,
@@ -298,6 +303,7 @@ impl App {
             post_write_reload: false,
             close_pending: false,
             force_quit: false,
+            dragging: false,
             window_visible: false,
             window_request: WindowRequest::None,
             listener: None,
@@ -334,9 +340,11 @@ impl App {
             self.settings.auto_update,
             self.settings.allow_removals,
         );
+        let (clean, cleaned_at) = (self.settings.auto_clean, self.settings.auto_cleaned_at);
         self.c().set_check_interval(interval);
         self.c().set_auto_update(auto);
         self.c().set_allow_removals(removals);
+        self.c().set_auto_clean(clean, cleaned_at);
     }
 
     pub fn save_settings(&mut self) {
@@ -404,7 +412,9 @@ impl App {
         }
         self.flashes.retain(|_, at| now.duration_since(*at) < FLASH);
         self.expire_toasts(now);
-        self.save_settings();
+        if !self.dragging {
+            self.save_settings();
+        }
         // Workers wake the window when they reply, so it only has to come
         // back for a poll it put off and for its own timers.
         let mut wait = if deferred {
@@ -704,6 +714,18 @@ impl App {
             })
             .to_string();
         }
+        // Automatic cleaning just ran.
+        if let Some(at) = self
+            .background
+            .cleaned_at
+            .filter(|at| *at != self.settings.auto_cleaned_at)
+        {
+            self.settings.auto_cleaned_at = at;
+            let message = self.background.cleaned.as_ref().and_then(|c| c.message());
+            if let Some(message) = message.filter(|_| self.can_notify()) {
+                self.platform.notify("PkgDeck cleanup", &message);
+            }
+        }
         let count = self.background.available;
         self.platform.set_badge(&if count > 0 {
             count.to_string()
@@ -829,7 +851,40 @@ impl App {
                 self.restart_toast = None;
                 self.restart();
             }
+            ToastAction::StartAtLogin => {
+                self.restart_toast = None;
+                if self.c().set_autostart(true) {
+                    self.settings.autostart = true;
+                }
+            }
         }
+    }
+
+    /// Offers once to start at login, so updates are checked without
+    /// opening PkgDeck first. Only when it can keep running in the tray.
+    pub fn ask_about_login(&mut self) {
+        if self.settings.login_asked
+            || self.settings.autostart
+            || !self.settings.background_mode
+            || !self.platform.tray_available()
+            || self.restart_toast.is_some()
+        {
+            return;
+        }
+        self.settings.login_asked = true;
+        self.restart_toast = Some(Toast {
+            text: "Check for updates in the background after you log in?".into(),
+            tone: Tone::Accent,
+            action: Some(ToastAction::StartAtLogin),
+            shown: Instant::now(),
+            lasts: Duration::from_secs(24 * 60 * 60),
+            from_notice: false,
+        });
+    }
+
+    /// Whether to keep movement down: asked here, or by the desktop.
+    pub fn reduce_motion(&self) -> bool {
+        self.settings.reduce_motion || self.platform.reduce_motion()
     }
 
     pub fn restart(&mut self) {
@@ -897,9 +952,6 @@ impl App {
     }
 
     fn sources_csv(&self, page: Page) -> String {
-        if page == Page::Sources {
-            return String::new();
-        }
         if self.enabled.is_empty() && !self.page_sources.contains_key(&page) {
             return String::new();
         }
@@ -975,14 +1027,39 @@ impl App {
         }
     }
 
-    /// "Flatpak", "12 enabled sources", "3 sources".
+    /// The sources on Updates that can download their package lists.
+    pub fn refreshable_sources(&self) -> Vec<String> {
+        let shown = self.effective_sources(Page::Updates);
+        all_sources(&self.catalog)
+            .into_iter()
+            .filter(|id| shown.contains(id))
+            .filter(|id| {
+                let entry = catalog_entry(&self.catalog, id);
+                entry.available && entry.capabilities.iter().any(|c| c == "refresh")
+            })
+            .collect()
+    }
+
+    /// Refresh sources on Updates: the package lists of every source it
+    /// shows, after one review.
+    pub fn refresh_sources(&mut self) {
+        let sources = self.refreshable_sources();
+        if sources.is_empty() || self.retained.is_some() {
+            return;
+        }
+        self.review_on = ReviewOn::Dialog;
+        self.c().propose_refresh(sources.join(",").into());
+        self.react();
+    }
+
+    /// "Flatpak", "3 sources", or "All sources": what the filter shows.
     pub fn source_summary(&self, page: Page) -> String {
         match self.page_sources.get(&page) {
             Some(chosen) if chosen.len() == 1 => {
                 source_name(chosen.iter().next().expect("one")).to_owned()
             }
             Some(chosen) => format!("{} sources", chosen.len()),
-            None => "Filter sources".into(),
+            None => "All sources".into(),
         }
     }
 
@@ -1139,12 +1216,7 @@ impl App {
             return;
         }
         self.items_stale = false;
-        // Sources lists every manager, with the enabled ones first.
-        let sources = Some(if self.page == Page::Sources {
-            self.enabled_sources()
-        } else {
-            self.effective_sources(self.page)
-        });
+        let sources = Some(self.effective_sources(self.page));
         let narrowing = self.retained.is_some() && self.page == Page::Search;
         let rows = self.shown_rows();
         let options = ViewOptions {
@@ -1157,7 +1229,6 @@ impl App {
             sources: sources.as_ref(),
             filter: &self.filter,
             duplicates_only: self.duplicates_only,
-            show_unavailable: self.show_unavailable,
             sort: self.sort,
             scope_choices: Some(&self.scope_choices),
         };
@@ -1182,11 +1253,7 @@ impl App {
     // Selection
 
     pub fn selected_item(&self) -> Option<&Item> {
-        let identity = self.selected.as_ref()?;
-        let rows = self.shown_rows();
-        self.items
-            .iter()
-            .find(|item| rows[item.raw].identity() == *identity)
+        self.selected_index().map(|index| &self.items[index])
     }
 
     pub fn selected_row(&self) -> Option<&Row> {
@@ -1194,12 +1261,24 @@ impl App {
             .map(|item| &self.shown_rows()[item.raw])
     }
 
+    /// Where the selected row is in the list. Each frame asks several
+    /// times, so the last answer is checked first.
     pub fn selected_index(&self) -> Option<usize> {
         let identity = self.selected.as_ref()?;
         let rows = self.shown_rows();
-        self.items
-            .iter()
-            .position(|item| rows[item.raw].identity() == *identity)
+        let is_selected = |index: usize| {
+            self.items
+                .get(index)
+                .and_then(|item| rows.get(item.raw))
+                .is_some_and(|row| row.identity() == *identity)
+        };
+        let last = self.selected_hint.get();
+        if is_selected(last) {
+            return Some(last);
+        }
+        let index = (0..self.items.len()).find(|&index| is_selected(index))?;
+        self.selected_hint.set(index);
+        Some(index)
     }
 
     /// The key of the open page: "opened", the open row's identity, or
@@ -1415,10 +1494,7 @@ impl App {
         if self.retained.is_some() {
             return;
         }
-        let whole_page = matches!(
-            action,
-            "upgrade-all" | "adopt-all" | "refresh" | "clean-all"
-        );
+        let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "clean-all");
         let selected = self.selected_item().cloned();
         if whole_page {
             self.review_on = ReviewOn::Dialog;
@@ -1582,9 +1658,7 @@ impl App {
         } else {
             self.report.failures.clone()
         };
-        failures.retain(|f| {
-            f.kind != "cancelled" && (self.page == Page::Sources || sources.contains(&f.source))
-        });
+        failures.retain(|f| f.kind != "cancelled" && sources.contains(&f.source));
         failures
     }
 
@@ -1603,9 +1677,13 @@ impl App {
             .unwrap_or_else(|| "This source could not be checked.".into())
     }
 
+    /// Whether `source` is on and another source that is here stays on.
     pub fn can_turn_off(&self, source: &str) -> bool {
         let enabled = self.enabled_sources();
-        enabled.contains(source) && enabled.len() > 1
+        enabled.contains(source)
+            && enabled
+                .iter()
+                .any(|other| other != source && self.available(other))
     }
 
     pub fn queued_count(&self) -> usize {

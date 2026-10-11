@@ -332,10 +332,9 @@ impl Desktop {
             "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
+        // Refresh sources lives on Updates; open it and let it load first.
         if op == "refresh" {
-            self.key("ctrl+5");
-            self.key("ctrl+l");
-            self.key("Home");
+            self.key("ctrl+3");
         } else {
             self.search(name);
         }

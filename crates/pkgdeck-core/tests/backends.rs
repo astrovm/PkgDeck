@@ -180,7 +180,7 @@ impl Transport for Fixture {
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
             }
             "autoremove" => Ok(output("unused-formula\n")),
-            "cleanup" => Ok(output("Would remove: /tmp/synthetic-cache (1MB)\n")),
+            "cleanup" => Ok(output("Would remove: /tmp/synthetic-cache (1MB)\n==> This operation would free approximately 1MB of disk space.\n")),
             _ => panic!("unexpected metadata query"),
         }
     }
@@ -218,6 +218,10 @@ impl Transport for Fixture {
         if executable == "find" {
             assert_eq!(args[0], "/var/cache/apt/archives/");
             return Ok(output("..."));
+        }
+        if executable == "dpkg-query" {
+            assert_eq!(args.last().unwrap(), "synthetic-orphan");
+            return Ok(output("2048\n"));
         }
         if executable == "apt-get" {
             if let Some(simulation) = self
@@ -488,6 +492,7 @@ fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id.backend, "apt");
     assert_eq!(items[0].id.key, "autoremove");
+    assert_eq!(items[0].bytes, Some(2048 * 1024));
     assert_eq!(items[1].id.key, "autoclean");
     assert_eq!(items[1].summary, "3 cached downloads");
     assert!(!items[1].preview.contains("synthetic-cache"));
@@ -527,7 +532,9 @@ fn homebrew_cleanup_uses_native_dry_run_plans() {
     let items = brew.cleanup(&cancel).unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().any(|item| item.id.key == "autoremove"));
-    assert!(items.iter().any(|item| item.id.key == "cleanup"));
+    let cleanup = items.iter().find(|item| item.id.key == "cleanup");
+    // Sized from what brew says it would free.
+    assert_eq!(cleanup.and_then(|item| item.bytes), Some(1_000_000));
     for item in items {
         brew.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();
@@ -5276,6 +5283,9 @@ impl Transport for CleanupFixture {
         if exe == "find" {
             return Ok(output(if self.apt_cache_empty { "" } else { "..." }));
         }
+        if exe == "dpkg-query" {
+            return Err(ExecutionError::Io("dpkg-query is missing".into()));
+        }
         assert_eq!(exe, "apt-get");
         Ok(output("Remv unused-package [1.0]\n"))
     }
@@ -5530,6 +5540,8 @@ fn apt_cleanup_loads_cache_without_authentication_and_preserves_orphans_on_failu
     let report = backend.cleanup_report(&Cancellation::default());
     assert_eq!(report.items.len(), 1);
     assert_eq!(report.items[0].id.key, "autoremove");
+    // Without a size the task is still offered.
+    assert_eq!(report.items[0].bytes, None);
     assert_eq!(report.failures.len(), 1);
     assert!(fixture
         .calls

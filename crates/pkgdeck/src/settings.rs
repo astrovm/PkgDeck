@@ -139,8 +139,14 @@ pub struct Settings {
     pub check_interval: i32,
     pub auto_update: bool,
     pub allow_removals: bool,
+    /// Clean caches and build files once a day, from the background.
+    pub auto_clean: bool,
+    /// When that last happened, in seconds since 1970.
+    pub auto_cleaned_at: u64,
     pub system_approval: String,
     pub autostart: bool,
+    /// Whether PkgDeck already offered to start at login. It asks once.
+    pub login_asked: bool,
     pub notification_history: String,
     pub last_background_state: String,
     pub sidebar_width: f32,
@@ -167,11 +173,14 @@ impl Default for Settings {
             sort_column: String::new(),
             sort_ascending: true,
             background_mode: true,
-            check_interval: 30,
+            check_interval: 360,
             auto_update: false,
             allow_removals: true,
+            auto_clean: false,
+            auto_cleaned_at: 0,
             system_approval: String::new(),
             autostart: false,
+            login_asked: false,
             notification_history: "{}".into(),
             last_background_state: "{}".into(),
             sidebar_width: 212.0,
@@ -345,6 +354,11 @@ pub struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub fn saved(&self) -> &Settings {
+        &self.saved
+    }
+
     /// The settings in `directory`, the Qt app's if there are none yet, or
     /// the defaults. Without a directory nothing is saved.
     pub fn open(directory: Option<PathBuf>, home: Option<&Path>) -> (Self, Settings) {
@@ -424,7 +438,7 @@ mod tests {
     fn the_qt_ini_file_carries_over() {
         let values = parse_ini(
             "[General]\nother=1\n\n[Browser]\nappearance=2\nreduceMotion=true\n\
-             checkInterval=360\nsourceList=\"apt,flatpak\"\n\
+             checkInterval=720\nsourceList=\"apt,flatpak\"\n\
              systemApproval=sudoers:automatic-updates\n\
              notificationHistory=\"{\\\"notified\\\":{}}\"\nsidebarWidth=0\n\
              autoUpdate=false\nbroken line\n",
@@ -433,7 +447,7 @@ mod tests {
         assert_eq!(settings.appearance, Appearance::Light);
         assert!(settings.reduce_motion);
         assert!(!settings.auto_update);
-        assert_eq!(settings.check_interval, 360);
+        assert_eq!(settings.check_interval, 720);
         assert_eq!(settings.source_list, "apt,flatpak");
         assert_eq!(settings.system_approval, "sudoers:automatic-updates");
         assert_eq!(settings.notification_history, "{\"notified\":{}}");
@@ -450,7 +464,7 @@ mod tests {
         let settings = from_qt(&values);
         assert_eq!(settings.appearance, Appearance::Dark);
         assert!(settings.auto_update);
-        assert_eq!(settings.check_interval, 30);
+        assert_eq!(settings.check_interval, 360);
         assert_eq!(settings.search_hint, "Searches 17 sources as you type.");
         assert!(parse_plist_json("not json").is_empty());
         assert!(parse_plist_json("[1]").is_empty());

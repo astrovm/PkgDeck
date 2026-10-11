@@ -124,10 +124,11 @@ fn sample_app() -> App {
         ),
     ];
     app.catalog = serde_json::from_value(json!([
-        {"source": "apt", "name": "APT", "available": true, "capabilities": ["search", "installed", "upgrade", "clean"]},
+        {"source": "apt", "name": "APT", "available": true, "capabilities": ["search", "installed", "upgrade", "clean", "refresh"]},
         {"source": "flatpak", "name": "Flatpak", "available": true, "capabilities": ["search", "installed", "upgrade"]},
         {"source": "cargo", "name": "Cargo", "available": true, "capabilities": ["installed", "upgrade"]},
         {"source": "snap", "name": "Snap", "available": false, "summary": "snapd isn't running"},
+        {"source": "homebrew", "name": "Homebrew", "available": false, "check_failed": true, "summary": "Homebrew took too long to answer."},
     ]))
     .unwrap();
     app.background =
@@ -144,6 +145,8 @@ fn offline(app: &mut App, page: Page) {
 fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)) {
     let mut app = sample_app();
     prepare(&mut app);
+    // Past the page's fade-in, which runs on the wall clock.
+    app.page_changed = std::time::Instant::now() - std::time::Duration::from_secs(1);
     app.settings.appearance = if dark {
         pkgdeck::settings::Appearance::Dark
     } else {
@@ -199,20 +202,38 @@ fn main() {
         app.invalidate();
     });
     render("clean", [1500.0, 860.0], true, |app| {
-        let task = |name: &str, display: &str, source: &str, kind: &str, summary: &str| {
-            serde_json::from_value::<model::Row>(json!({
-                "kind": "cleanup", "name": name, "display_name": display, "source": source,
-                "cleanup_kind": kind, "summary": summary, "preview": "",
-            }))
-            .unwrap()
-        };
+        let task =
+            |name: &str, display: &str, source: &str, kind: &str, summary: &str, bytes: u64| {
+                serde_json::from_value::<model::Row>(json!({
+                    "kind": "cleanup", "name": name, "display_name": display, "source": source,
+                    "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
+                }))
+                .unwrap()
+            };
         app.rows = vec![
             task(
-                "apt-cache",
-                "APT download cache",
-                "apt",
+                "build:~/code/website",
+                "website build files",
+                "projects",
+                "build_files",
+                "Unchanged for 3 months",
+                2_400_000_000,
+            ),
+            task(
+                "cargo",
+                "Cargo downloads",
+                "dev-caches",
                 "package_cache",
-                "104 cached downloads",
+                "Downloaded crates and Git checkouts",
+                1_800_000_000,
+            ),
+            task(
+                "unused-images",
+                "Unused images",
+                "docker",
+                "unused",
+                "4 images no container uses",
+                950_000_000,
             ),
             task(
                 "brew-cleanup",
@@ -220,6 +241,15 @@ fn main() {
                 "homebrew",
                 "package_cache",
                 "Old files that brew cleanup would remove",
+                310_000_000,
+            ),
+            task(
+                "unused-volumes",
+                "Unused volumes",
+                "docker",
+                "data",
+                "2 volumes no container uses",
+                120_000_000,
             ),
             task(
                 "apt-autoremove",
@@ -227,20 +257,16 @@ fn main() {
                 "apt",
                 "orphan_dependencies",
                 "3 packages nothing needs",
-            ),
-            task(
-                "npm-cache",
-                "npm package cache",
-                "npm",
-                "package_cache",
-                "Clear cached downloads",
+                48_000_000,
             ),
         ];
+        app.rows[1].preview =
+            "Empties these folders:\n~/.cargo/registry/cache\n~/.cargo/registry/src\n~/.cargo/git/checkouts".into();
         offline(app, Page::Clean);
         app.refresh_items();
         app.selected = Some(app.rows[app.items[1].raw].identity());
     });
-    render("settings", [1180.0, 900.0], true, |app| {
+    render("settings", [1180.0, 2200.0], true, |app| {
         offline(app, Page::Settings)
     });
     for width in [900.0, 700.0, 460.0] {

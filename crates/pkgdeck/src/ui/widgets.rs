@@ -673,6 +673,16 @@ impl<'a> Field<'a> {
     }
 }
 
+/// Asks for the next frame of a looping animation in `rect`, at most 60 a
+/// second so fast screens don't redraw the whole window for a spinner, and
+/// none while it is scrolled out of sight.
+fn next_frame(ui: &Ui, rect: Rect) {
+    if ui.is_rect_visible(rect) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
 /// An open arc that turns.
 pub fn spinner(ui: &mut Ui, size: f32, color: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
@@ -683,7 +693,7 @@ pub fn paint_spinner(ui: &Ui, rect: Rect, color: Color32) {
     if reduce_motion(ui.ctx()) || !ui.is_rect_visible(rect) {
         return;
     }
-    ui.ctx().request_repaint();
+    next_frame(ui, rect);
     let turn = clock(ui.ctx()) * std::f32::consts::TAU / 1.1;
     let radius = rect.width() * 0.38;
     let points: Vec<Pos2> = (0..=24)
@@ -702,7 +712,8 @@ pub fn paint_spinner(ui: &Ui, rect: Rect, color: Color32) {
 pub fn paint_bar(ui: &Ui, rect: Rect, fraction: Option<f32>, color: Color32, id: Id) {
     let radius = CornerRadius::same((rect.height() / 2.0).round() as u8);
     ui.painter().rect_filled(rect, radius, alpha(color, 0.18));
-    match fraction {
+    // Nothing done yet sweeps too: an empty bar looks stuck.
+    match fraction.filter(|fraction| *fraction > 0.0) {
         Some(fraction) => {
             let shown = glide(ui.ctx(), id, fraction.clamp(0.0, 1.0), LAYOUT);
             if shown > 0.0 {
@@ -716,8 +727,9 @@ pub fn paint_bar(ui: &Ui, rect: Rect, fraction: Option<f32>, color: Color32, id:
             let x = if reduce_motion(ui.ctx()) {
                 rect.center().x - width / 2.0
             } else {
-                ui.ctx().request_repaint();
-                let t = (clock(ui.ctx()) / 1.25).fract();
+                next_frame(ui, rect);
+                // Starts a third of the way in, so it shows from the first frame.
+                let t = (clock(ui.ctx()) / 1.25 + 0.35).fract();
                 let eased = easing::cubic_in_out(t);
                 rect.left() - width + (rect.width() + width) * eased
             };
@@ -737,7 +749,7 @@ pub fn paint_skeleton(ui: &Ui, rect: Rect, color: Color32) {
     let pulse = if reduce_motion(ui.ctx()) {
         0.75
     } else {
-        ui.ctx().request_repaint();
+        next_frame(ui, rect);
         0.55 + 0.45 * (0.5 + 0.5 * (clock(ui.ctx()) * std::f32::consts::TAU / 1.6).sin())
     };
     ui.painter()

@@ -13,8 +13,8 @@ Search, install, update, and clean up software, from the app or the `pkd` comman
 | **Search**    | Compare results across sources and install for you or the whole system      |
 | **Installed** | Browse installed packages and spot duplicate installs                       |
 | **Updates**   | Apply one update, a selection, or everything at once                        |
-| **Clean**     | Preview what will be removed before you confirm                             |
-| **Sources**   | Turn package managers on or off and manage repositories                     |
+| **Clean**     | See how much space each task frees, preview it, or clean automatically      |
+| **Settings**  | Turn package managers on or off, manage repositories, and set up checks     |
 
 PkgDeck works with the package managers you already have, like APT, Flatpak, Snap, Homebrew, npm, Cargo, Docker, and Podman.
 

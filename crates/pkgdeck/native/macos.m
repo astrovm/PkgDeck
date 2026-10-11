@@ -48,6 +48,11 @@ int pkgdeck_mac_bundled(void) {
     return [[NSBundle mainBundle] bundleIdentifier] != nil;
 }
 
+// **Reduce motion** in System Settings → Accessibility → Display.
+int pkgdeck_mac_reduce_motion(void) {
+    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldReduceMotion];
+}
+
 static void pkgdeck_set_allowed(BOOL granted) {
     pkgdeck_allowed = granted;
     if (pkgdeck_mac_event) pkgdeck_mac_event(granted ? PKGDECK_ALLOWED : PKGDECK_DENIED);

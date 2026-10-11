@@ -79,7 +79,7 @@ fn main() {
             },
             (false, app),
         );
-    for page in [Page::Installed, Page::Updates, Page::Clean, Page::Sources] {
+    for page in [Page::Installed, Page::Updates, Page::Clean, Page::Settings] {
         harness.state_mut().1.open_page(page);
         settle(&mut harness, page.name());
         save(&mut harness, page.name());

@@ -58,6 +58,11 @@ pub struct Container<T> {
     remote_offers: bool,
     cleanup_images: Option<Vec<String>>,
     cleanup_build_cache: Option<Vec<String>>,
+    /// The stopped containers, unused image tags and unused volumes the
+    /// last preview listed, which a cleanup must find unchanged.
+    cleanup_containers: Option<Vec<String>>,
+    cleanup_unused_images: Option<Vec<String>>,
+    cleanup_volumes: Option<Vec<String>>,
 }
 
 impl<T> Container<T> {
@@ -68,6 +73,9 @@ impl<T> Container<T> {
             remote_offers: false,
             cleanup_images: None,
             cleanup_build_cache: None,
+            cleanup_containers: None,
+            cleanup_unused_images: None,
+            cleanup_volumes: None,
         }
     }
     pub fn podman(transport: T) -> Self {
@@ -77,6 +85,9 @@ impl<T> Container<T> {
             remote_offers: false,
             cleanup_images: None,
             cleanup_build_cache: None,
+            cleanup_containers: None,
+            cleanup_unused_images: None,
+            cleanup_volumes: None,
         }
     }
     pub fn with_remote_offers(mut self, enabled: bool) -> Self {
@@ -116,6 +127,11 @@ fn safe_reference(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:@[]".contains(&byte))
 }
 
+/// An image ID without its `sha256:` prefix, which Podman leaves out.
+fn bare_id(id: &str) -> &str {
+    id.strip_prefix("sha256:").unwrap_or(id)
+}
+
 fn short_id(id: &str) -> &str {
     let id = id.strip_prefix("sha256:").unwrap_or(id);
     id.get(..12).unwrap_or(id)
@@ -138,7 +154,11 @@ impl<T: Transport> Container<T> {
 
     // Pin the default builder for both preview and execution; changing the user's
     // selected builder must never redirect an already approved cleanup.
-    fn build_cache(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+    /// The reclaimable records and, when every one says, what they take.
+    fn build_cache(
+        &self,
+        cancel: &Cancellation,
+    ) -> Result<(Vec<String>, Option<u64>), EngineError> {
         let result = self.call(
             &["buildx", "du", "--builder", "default", "--format=json"],
             cancel,
@@ -153,6 +173,7 @@ impl<T: Transport> Container<T> {
                 reason: error.to_string(),
             })?;
         let mut ids = Vec::new();
+        let mut bytes = Some(0);
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let value: Value =
                 serde_json::from_str(line).map_err(|error| EngineError::InvalidResponse {
@@ -171,11 +192,180 @@ impl<T: Transport> Container<T> {
                     backend: self.kind.id().into(),
                     reason: "invalid build cache ID".into(),
                 })?;
+            // A byte count, or a size as `docker` prints one ("4.096kB").
+            let size = match value.get("Size") {
+                Some(Value::Number(size)) => size.as_u64(),
+                Some(Value::String(size)) => crate::disk::parse_size(size),
+                _ => None,
+            };
+            bytes = bytes.zip(size).map(|(total, size)| total + size);
             ids.push(id.to_owned());
         }
         ids.sort();
         ids.dedup();
-        Ok(ids)
+        Ok((ids, bytes))
+    }
+
+    /// A read that must succeed in full, as text.
+    fn text(&self, args: &[&str], cancel: &Cancellation) -> Result<String, EngineError> {
+        let result = self.call(args, cancel, false)?;
+        if result.code != Some(0) || result.truncated {
+            return Err(ExecutionError::Failed(result).into());
+        }
+        String::from_utf8(result.stdout).map_err(|error| EngineError::InvalidResponse {
+            backend: self.kind.id().into(),
+            reason: error.to_string(),
+        })
+    }
+
+    /// The sum of the byte counts `args` followed by `ids` prints, one per
+    /// line, such as image or container sizes. Unknown when any is missing.
+    fn total(&self, args: &[&str], ids: &[String], cancel: &Cancellation) -> Option<u64> {
+        let mut args = args.to_vec();
+        args.extend(ids.iter().map(String::as_str));
+        self.text(&args, cancel)
+            .ok()?
+            .lines()
+            .map(|line| line.trim().parse::<u64>().ok())
+            .sum()
+    }
+
+    /// Containers that aren't running, by full ID, each with how to show it:
+    /// "name (image)".
+    fn stopped_containers(
+        &self,
+        cancel: &Cancellation,
+    ) -> Result<Vec<(String, String)>, EngineError> {
+        let text = self.text(
+            &[
+                "container",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                "status=exited",
+                "--filter",
+                "status=created",
+                "--format",
+                "{{.ID}}\t{{.Names}}\t{{.Image}}",
+            ],
+            cancel,
+        )?;
+        let mut containers = Vec::new();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let mut fields = line.split('\t').map(str::trim);
+            let id = fields.next().unwrap_or_default();
+            if !safe_id(id) {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "invalid container ID".into(),
+                });
+            }
+            let name = fields
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(short_id(id));
+            let shown = match fields.next().filter(|image| !image.is_empty()) {
+                Some(image) => format!("{name} ({image})"),
+                None => name.to_owned(),
+            };
+            containers.push((id.to_owned(), shown));
+        }
+        containers.sort();
+        containers.dedup();
+        Ok(containers)
+    }
+
+    /// The images some container, running or not, was made from.
+    fn images_in_use(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+        let containers = self.text(
+            &["container", "ls", "--all", "--no-trunc", "--quiet"],
+            cancel,
+        )?;
+        let containers: Vec<_> = containers
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if containers.is_empty() {
+            return Ok(vec![]);
+        }
+        if !containers.iter().all(|id| safe_id(id)) {
+            return Err(EngineError::InvalidResponse {
+                backend: self.kind.id().into(),
+                reason: "invalid container ID".into(),
+            });
+        }
+        let mut args = vec!["container", "inspect", "--format", "{{.Image}}"];
+        args.extend(containers);
+        Ok(self
+            .text(&args, cancel)?
+            .lines()
+            .map(|id| bare_id(id.trim()).to_owned())
+            .filter(|id| !id.is_empty())
+            .collect())
+    }
+
+    /// Tagged images no container uses, as `repository:tag` with the image
+    /// ID behind each. Untagged ones are the dangling-image task's.
+    fn unused_images(&self, cancel: &Cancellation) -> Result<Vec<(String, String)>, EngineError> {
+        let used = self.images_in_use(cancel)?;
+        let text = self.text(
+            &[
+                "image",
+                "ls",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}\t{{.Repository}}:{{.Tag}}",
+            ],
+            cancel,
+        )?;
+        let mut images = Vec::new();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let (id, reference) = line.split_once('\t').unwrap_or((line, ""));
+            let (id, reference) = (id.trim(), reference.trim());
+            if !safe_id(id) {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "invalid image ID".into(),
+                });
+            }
+            if reference.contains("<none>")
+                || !safe_reference(reference)
+                || used.iter().any(|used| used == bare_id(id))
+            {
+                continue;
+            }
+            images.push((reference.to_owned(), id.to_owned()));
+        }
+        images.sort();
+        images.dedup();
+        Ok(images)
+    }
+
+    /// Volumes no container uses, by name.
+    fn unused_volumes(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+        let text = self.text(
+            &["volume", "ls", "--quiet", "--filter", "dangling=true"],
+            cancel,
+        )?;
+        let mut volumes = Vec::new();
+        for name in text.lines().map(str::trim).filter(|name| !name.is_empty()) {
+            if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+            {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "invalid volume name".into(),
+                });
+            }
+            volumes.push(name.to_owned());
+        }
+        volumes.sort();
+        volumes.dedup();
+        Ok(volumes)
     }
 
     fn dangling_images(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
@@ -357,6 +547,68 @@ impl<T: Transport> Container<T> {
     }
 }
 
+impl<T: Transport> Container<T> {
+    /// Remove the stopped containers, unused images or unused volumes the
+    /// reviewed preview listed, after checking they are still exactly
+    /// those. Nothing is forced: a container that started, or an image or
+    /// volume that came into use, makes the engine refuse. `None` for any
+    /// other task.
+    fn clean_unused(
+        &mut self,
+        key: &str,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Option<OperationOutcome>, EngineError> {
+        let (planned, current, args, what) = match key {
+            "stopped-containers" => (
+                self.cleanup_containers.take(),
+                self.stopped_containers(cancel)
+                    .map(|found| found.into_iter().map(|(id, _)| id).collect::<Vec<_>>()),
+                ["container", "rm"],
+                "stopped containers",
+            ),
+            "unused-images" => (
+                self.cleanup_unused_images.take(),
+                self.unused_images(cancel).map(|found| {
+                    found
+                        .into_iter()
+                        .map(|(reference, _)| reference)
+                        .collect::<Vec<_>>()
+                }),
+                ["image", "rm"],
+                "unused images",
+            ),
+            "unused-volumes" => (
+                self.cleanup_volumes.take(),
+                self.unused_volumes(cancel),
+                ["volume", "rm"],
+                "unused volumes",
+            ),
+            _ => return Ok(None),
+        };
+        let planned = planned.ok_or(EngineError::NotFound)?;
+        if planned.is_empty() || current? != planned {
+            return Err(EngineError::InvalidResponse {
+                backend: self.kind.id().into(),
+                reason: format!("The {what} changed. Reload and review them again."),
+            });
+        }
+        progress(Progress::Message(format!(
+            "Removing {what} from {}",
+            self.kind.label()
+        )));
+        let mut args = args.to_vec();
+        args.extend(planned.iter().map(String::as_str));
+        let result = self.call(&args, cancel, true)?;
+        if result.code != Some(0) {
+            return Err(ExecutionError::Failed(result).into());
+        }
+        Ok(Some(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        }))
+    }
+}
+
 impl<T: Transport> Backend for Container<T> {
     fn id(&self) -> &str {
         self.kind.id()
@@ -443,20 +695,92 @@ impl<T: Transport> Backend for Container<T> {
         self.inventory(cancel)
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        let (backend, label) = (self.kind.id(), self.kind.label());
+        let item =
+            |key: &str, kind, title: String, summary: String, preview: String, bytes| CleanupItem {
+                id: CleanupId {
+                    backend: backend.into(),
+                    key: key.into(),
+                },
+                kind,
+                title,
+                summary,
+                preview,
+                bytes,
+            };
         self.cleanup_images = None;
         let images = self.dangling_images(cancel)?;
         let mut items = if images.is_empty() {
             vec![]
         } else {
-            vec![CleanupItem {
-            id: CleanupId { backend: self.kind.id().into(), key: "dangling-images".into() },
-            kind: CleanupKind::PackageCache,
-            title: format!("Dangling {} images", self.kind.label()),
-            summary: format!("{} untagged images in {}", images.len(), self.kind.store()),
-            preview: format!("Removes these untagged images. Images used by containers are kept. Shared layers may remain.\n{}", images.join("\n")),
-        }]
+            vec![item(
+                "dangling-images",
+                CleanupKind::PackageCache,
+                format!("Dangling {label} images"),
+                format!("{} untagged images in {}", images.len(), self.kind.store()),
+                format!("Removes these untagged images. Images used by containers are kept. Shared layers may remain.\n{}", images.join("\n")),
+                self.total(&["image", "inspect", "--format", "{{.Size}}"], &images, cancel),
+            )]
         };
         self.cleanup_images = Some(images);
+        // The newer tasks are extras: one that fails to list leaves the
+        // others, and only cancelling stops them all.
+        fn optional<V>(result: Result<V, EngineError>) -> Result<Option<V>, EngineError> {
+            match result {
+                Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
+                other => Ok(other.ok()),
+            }
+        }
+        self.cleanup_containers = None;
+        if let Some(containers) = optional(self.stopped_containers(cancel))? {
+            let ids: Vec<_> = containers.iter().map(|(id, _)| id.clone()).collect();
+            if !ids.is_empty() {
+                items.push(item(
+                    "stopped-containers",
+                    CleanupKind::Unused,
+                    format!("Stopped {label} containers"),
+                    format!("{} containers that aren't running", ids.len()),
+                    format!("Removes these containers and the files they changed. Running containers are kept.\n{}", containers.iter().map(|(_, shown)| shown.as_str()).collect::<Vec<_>>().join("\n")),
+                    self.total(&["container", "inspect", "--size", "--format", "{{.SizeRw}}"], &ids, cancel),
+                ));
+            }
+            self.cleanup_containers = Some(ids);
+        }
+        self.cleanup_unused_images = None;
+        if let Some(unused) = optional(self.unused_images(cancel))? {
+            let references: Vec<_> = unused
+                .iter()
+                .map(|(reference, _)| reference.clone())
+                .collect();
+            if !references.is_empty() {
+                let mut ids: Vec<_> = unused.iter().map(|(_, id)| id.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                items.push(item(
+                    "unused-images",
+                    CleanupKind::Unused,
+                    format!("Unused {label} images"),
+                    format!("{} images no container uses", references.len()),
+                    format!("Removes these images. They come back with a pull or a build. Shared layers may remain.\n{}", references.join("\n")),
+                    self.total(&["image", "inspect", "--format", "{{.Size}}"], &ids, cancel),
+                ));
+            }
+            self.cleanup_unused_images = Some(references);
+        }
+        self.cleanup_volumes = None;
+        if let Some(volumes) = optional(self.unused_volumes(cancel))? {
+            if !volumes.is_empty() {
+                items.push(item(
+                    "unused-volumes",
+                    CleanupKind::Data,
+                    format!("Unused {label} volumes"),
+                    format!("{} volumes no container uses", volumes.len()),
+                    format!("Deletes these volumes and everything in them, such as databases. This can't be undone.\n{}", volumes.join("\n")),
+                    None,
+                ));
+            }
+            self.cleanup_volumes = Some(volumes);
+        }
         self.cleanup_build_cache = None;
         // Buildx is an optional Docker plugin. Older installations retain image
         // cleanup without claiming unsupported cache cleanup is available, and
@@ -469,15 +793,16 @@ impl<T: Transport> Backend for Container<T> {
                 .is_ok_and(|result| result.code == Some(0))
         {
             match self.build_cache(cancel) {
-                Ok(ids) => {
+                Ok((ids, bytes)) => {
                     if !ids.is_empty() {
-                        items.push(CleanupItem {
-                            id: CleanupId { backend: self.kind.id().into(), key: "build-cache".into() },
-                            kind: CleanupKind::PackageCache,
-                            title: "Docker build cache".into(),
-                            summary: format!("{} unused records in the default builder", ids.len()),
-                            preview: format!("Removes unused build cache from the default builder. Later builds may take longer. Some shared storage may remain.\n{}", ids.join("\n")),
-                        });
+                        items.push(item(
+                            "build-cache",
+                            CleanupKind::PackageCache,
+                            "Docker build cache".into(),
+                            format!("{} unused records in the default builder", ids.len()),
+                            format!("Removes unused build cache from the default builder. Later builds may take longer. Some shared storage may remain.\n{}", ids.join("\n")),
+                            bytes,
+                        ));
                     }
                     self.cleanup_build_cache = Some(ids);
                 }
@@ -550,7 +875,7 @@ impl<T: Transport> Backend for Container<T> {
                     .cleanup_build_cache
                     .clone()
                     .ok_or(EngineError::NotFound)?;
-                if planned.is_empty() || self.build_cache(cancel)? != planned {
+                if planned.is_empty() || self.build_cache(cancel)?.0 != planned {
                     return Err(EngineError::InvalidResponse {
                         backend: self.kind.id().into(),
                         reason: "The build cache changed. Reload and review it again.".into(),
@@ -585,6 +910,11 @@ impl<T: Transport> Backend for Container<T> {
                 return Ok(OperationOutcome {
                     cancellation_deferred: deferred,
                 });
+            }
+            if id.backend == self.kind.id() {
+                if let Some(outcome) = self.clean_unused(&id.key, cancel, progress)? {
+                    return Ok(outcome);
+                }
             }
             if id.backend != self.kind.id() || id.key != "dangling-images" {
                 return Err(EngineError::NotFound);
@@ -682,6 +1012,11 @@ mod tests {
         du: Option<Completion>,
         write_failure: Option<ExecutionError>,
         write_code: Option<i32>,
+        /// Answers to reads by how their arguments start. Container,
+        /// volume and size reads answer nothing unless set here.
+        answers: Vec<(String, String)>,
+        /// Replaces the answer to reads starting this way, failures too.
+        replies: Vec<(String, Result<Completion, ExecutionError>)>,
     }
     impl Fixture {
         fn new(output: &str) -> Self {
@@ -697,7 +1032,13 @@ mod tests {
                 du: None,
                 write_failure: None,
                 write_code: None,
+                answers: vec![],
+                replies: vec![],
             }
+        }
+        fn answer(mut self, args: &str, output: &str) -> Self {
+            self.answers.push((args.into(), output.into()));
+            self
         }
         fn bytes(output: &[u8]) -> Self {
             Self {
@@ -774,6 +1115,38 @@ mod tests {
             if write {
                 if let Some(error) = &self.write_failure {
                     return Err(error.clone());
+                }
+            }
+            let joined = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !write {
+                if let Some((_, reply)) = self
+                    .replies
+                    .iter()
+                    .find(|(prefix, _)| joined.starts_with(prefix.as_str()))
+                {
+                    return reply.clone();
+                }
+                if let Some((_, output)) = self
+                    .answers
+                    .iter()
+                    .find(|(prefix, _)| joined.starts_with(prefix.as_str()))
+                {
+                    return Ok(completed(output.as_bytes(), self.code));
+                }
+                if [
+                    "container ",
+                    "volume ",
+                    "image inspect",
+                    "image ls --no-trunc --format",
+                ]
+                .iter()
+                .any(|prefix| joined.starts_with(prefix))
+                {
+                    return Ok(completed(&[], self.code));
                 }
             }
             Ok(completed(
@@ -951,10 +1324,18 @@ mod tests {
                 .execute(&Operation::Clean(plans[0].id.clone()), &cancel, &mut ignore)
                 .unwrap();
             let calls = calls.lock().unwrap();
-            assert_eq!(calls.len(), 3);
-            assert_eq!(calls[0].1, calls[1].1);
-            assert_eq!(calls[2].1, ["image", "rm", "sha256:0123456789abcdef"]);
-            assert!(calls[2].2);
+            // Listed for the preview and again right before removing.
+            let listed: Vec<_> = calls
+                .iter()
+                .filter(|call| {
+                    call.1[0] == "image" && call.1.iter().any(|arg| arg == "dangling=true")
+                })
+                .collect();
+            assert_eq!(listed.len(), 2);
+            assert_eq!(listed[0].1, listed[1].1);
+            let last = calls.last().unwrap();
+            assert_eq!(last.1, ["image", "rm", "sha256:0123456789abcdef"]);
+            assert_eq!(calls.iter().filter(|call| call.2).count(), 1);
         }
     }
 
@@ -1227,6 +1608,283 @@ mod tests {
                 .execute(&Operation::Remove(id), &cancel, &mut |_| {})
                 .is_err());
         }
+    }
+
+    const STOPPED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const RUNNING: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const USED: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const SPARE: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+
+    /// A store with a stopped container, a running one, an image each uses,
+    /// a spare image, an untagged one and a volume nobody mounts.
+    fn busy_store() -> Fixture {
+        Fixture::new("")
+            .answer(
+                "container ls --all --no-trunc --filter",
+                &format!("{STOPPED}\tweb\tnginx:1\n"),
+            )
+            .answer("container ls --all --no-trunc --quiet", &format!("{STOPPED}\n{RUNNING}\n"))
+            .answer("container inspect --size", "4096\n")
+            // Docker names images with their prefix, Podman without.
+            .answer("container inspect --format", &format!("sha256:{USED}\n{USED}\n"))
+            .answer(
+                "image ls --no-trunc --format",
+                &format!("sha256:{USED}\tnginx:1\nsha256:{SPARE}\tredis:7\nsha256:{SPARE}\tredis:latest\nsha256:{STOPPED}\t<none>:<none>\n"),
+            )
+            .answer("image inspect --format", "1000000\n")
+            .answer("volume ls", "pgdata\n")
+    }
+
+    #[test]
+    fn stopped_containers_unused_images_and_volumes_are_offered_with_sizes() {
+        let cancel = Cancellation::default();
+        let mut backend = Container::podman(busy_store());
+        let plans = backend.cleanup(&cancel).unwrap();
+        let keys: Vec<_> = plans.iter().map(|plan| plan.id.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["stopped-containers", "unused-images", "unused-volumes"]
+        );
+        let (containers, images, volumes) = (&plans[0], &plans[1], &plans[2]);
+        assert_eq!(containers.kind, CleanupKind::Unused);
+        assert!(
+            containers.preview.ends_with("\nweb (nginx:1)"),
+            "{}",
+            containers.preview
+        );
+        assert_eq!(containers.bytes, Some(4096));
+        // The image a container uses stays, whichever way its ID is written.
+        assert!(
+            images.preview.ends_with("\nredis:7\nredis:latest"),
+            "{}",
+            images.preview
+        );
+        // Two tags of one image count its size once.
+        assert_eq!(images.bytes, Some(1_000_000));
+        assert_eq!(images.summary, "2 images no container uses");
+        // Volumes may hold the only copy of something: never in Clean all,
+        // and with no size to tell.
+        assert_eq!(volumes.kind, CleanupKind::Data);
+        assert!(!volumes.kind.in_clean_all());
+        assert!(CleanupKind::Unused.in_clean_all());
+        assert_eq!(volumes.bytes, None);
+        let calls = backend.transport.calls.clone();
+        for (plan, removal) in [
+            (containers, vec!["container", "rm", STOPPED]),
+            (images, vec!["image", "rm", "redis:7", "redis:latest"]),
+            (volumes, vec!["volume", "rm", "pgdata"]),
+        ] {
+            backend
+                .execute(&Operation::Clean(plan.id.clone()), &cancel, &mut ignore)
+                .unwrap();
+            let last = calls.lock().unwrap().last().unwrap().clone();
+            assert_eq!(last.1, removal);
+            assert!(last.2, "removals write");
+            // Each reviewed list is used once.
+            assert!(matches!(
+                backend.execute(&Operation::Clean(plan.id.clone()), &cancel, &mut ignore),
+                Err(EngineError::NotFound)
+            ));
+        }
+    }
+
+    #[test]
+    fn unused_things_that_changed_since_the_review_are_kept() {
+        let cancel = Cancellation::default();
+        for (key, prefix, now) in [
+            (
+                "stopped-containers",
+                "container ls --all --no-trunc --filter",
+                "",
+            ),
+            ("unused-images", "image ls --no-trunc --format", ""),
+            ("unused-volumes", "volume ls", "pgdata\nother\n"),
+        ] {
+            let mut backend = Container::docker(busy_store());
+            backend.cleanup(&cancel).unwrap();
+            backend
+                .transport
+                .answers
+                .insert(0, (prefix.into(), now.into()));
+            let error = backend
+                .execute(
+                    &Operation::Clean(CleanupId {
+                        backend: "docker".into(),
+                        key: key.into(),
+                    }),
+                    &cancel,
+                    &mut ignore,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("changed"), "{key}: {error}");
+            assert!(backend
+                .transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !call.2));
+        }
+        // A removal the engine refuses, such as a container that started.
+        let mut refused = busy_store();
+        refused.write_code = Some(1);
+        let mut backend = Container::docker(refused);
+        backend.cleanup(&cancel).unwrap();
+        assert!(matches!(
+            backend.execute(
+                &Operation::Clean(CleanupId {
+                    backend: "docker".into(),
+                    key: "stopped-containers".into(),
+                }),
+                &cancel,
+                &mut ignore,
+            ),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+    }
+
+    #[test]
+    fn a_list_that_fails_or_looks_wrong_leaves_the_other_tasks() {
+        let cancel = Cancellation::default();
+        for (prefix, output) in [
+            ("volume ls", "-rf\n"),
+            ("volume ls", "data base\n"),
+            (
+                "container ls --all --no-trunc --filter",
+                "not-an-id\tweb\tnginx\n",
+            ),
+            ("container ls --all --no-trunc --quiet", "not-an-id\n"),
+            ("image ls --no-trunc --format", "not-an-id\tredis:7\n"),
+            (
+                "image ls --no-trunc --format",
+                &[0xffu8 as char].iter().collect::<String>(),
+            ),
+        ] {
+            let mut backend = Container::docker(busy_store());
+            backend
+                .transport
+                .answers
+                .insert(0, (prefix.into(), output.into()));
+            let plans = backend.cleanup(&cancel).unwrap();
+            assert_eq!(plans.len(), 2, "{prefix}: {output}");
+        }
+        // Without sizes, a task still shows, with no size.
+        let mut backend = Container::docker(busy_store());
+        backend
+            .transport
+            .answers
+            .insert(0, ("image inspect --format".into(), "lots\n".into()));
+        backend
+            .transport
+            .answers
+            .insert(0, ("container inspect --size".into(), "".into()));
+        let plans = backend.cleanup(&cancel).unwrap();
+        assert_eq!(plans[0].bytes, Some(0));
+        assert_eq!(plans[1].bytes, None);
+        // A store that answers nothing fails the whole check.
+        let mut backend = Container::docker(busy_store());
+        backend.transport.code = Some(1);
+        assert!(backend.cleanup(&cancel).is_err());
+        // No containers: every tagged image is unused.
+        let mut backend = Container::docker(busy_store());
+        backend.transport.answers.insert(
+            0,
+            ("container ls --all --no-trunc --quiet".into(), "".into()),
+        );
+        let plans = backend.cleanup(&cancel).unwrap();
+        assert!(plans[1]
+            .preview
+            .ends_with("\nnginx:1\nredis:7\nredis:latest"));
+        // A list that can't be read, or isn't text, leaves the other tasks.
+        for (prefix, reply, left) in [
+            (
+                "container ls --all --no-trunc --filter",
+                completed(b"", Some(1)),
+                ["unused-images", "unused-volumes"],
+            ),
+            (
+                "container ls --all --no-trunc --quiet",
+                completed(b"", Some(1)),
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "container inspect --format",
+                completed(b"", Some(1)),
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "image ls --no-trunc --format",
+                Completion {
+                    truncated: true,
+                    ..completed(b"", Some(0))
+                },
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "volume ls",
+                completed(&[0xff, 0xfe], Some(0)),
+                ["stopped-containers", "unused-images"],
+            ),
+        ] {
+            let mut backend = Container::docker(busy_store());
+            backend.transport.replies.push((prefix.into(), Ok(reply)));
+            let plans = backend.cleanup(&cancel).unwrap();
+            let keys: Vec<_> = plans.iter().map(|plan| plan.id.key.as_str()).collect();
+            assert_eq!(keys, left, "{prefix}");
+        }
+        // A stopped container shows its name alone without an image, and
+        // its short ID without a name.
+        let mut backend = Container::docker(busy_store());
+        backend.transport.answers.insert(
+            0,
+            (
+                "container ls --all --no-trunc --filter".into(),
+                format!("{STOPPED}\tweb\t\n{RUNNING}\t\t\n"),
+            ),
+        );
+        let plans = backend.cleanup(&cancel).unwrap();
+        let preview = &plans[0].preview;
+        assert!(preview.ends_with("\nweb\n222222222222"), "{preview}");
+        // Cancelling during an extra task stops them all.
+        let mut backend = Container::docker(busy_store());
+        backend
+            .transport
+            .replies
+            .push(("volume ls".into(), Err(ExecutionError::Cancelled)));
+        assert!(matches!(
+            backend.cleanup(&cancel),
+            Err(EngineError::Cancelled)
+        ));
+        // Cancelling stops every task.
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            Container::docker(busy_store()).cleanup(&cancelled),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn build_cache_sizes_add_up_however_docker_writes_them() {
+        let mut fixture = Fixture::new("");
+        fixture.build_cache = Some(
+            r#"{"ID":"one","Reclaimable":true,"Mutable":false,"Size":2048}
+{"ID":"two","Reclaimable":true,"Mutable":false,"Size":"4.096kB"}"#
+                .into(),
+        );
+        let plans = Container::docker(fixture.clone())
+            .cleanup(&Cancellation::default())
+            .unwrap();
+        assert_eq!(plans[0].bytes, Some(6144));
+        fixture.build_cache = Some(
+            r#"{"ID":"one","Reclaimable":true,"Mutable":false,"Size":2048}
+{"ID":"two","Reclaimable":true,"Mutable":false}"#
+                .into(),
+        );
+        let plans = Container::docker(fixture)
+            .cleanup(&Cancellation::default())
+            .unwrap();
+        assert_eq!(plans[0].bytes, None);
     }
 
     fn cache_plan(fixture: Fixture) -> (Container<Fixture>, CleanupId) {

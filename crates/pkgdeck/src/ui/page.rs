@@ -5,7 +5,7 @@
 use super::{list::package_icon, widgets::*};
 use crate::{
     app::App,
-    model::{self, Details, Page, Row, Tone, Variable},
+    model::{self, Details, Row, Tone, Variable},
     theme::{self, Palette},
 };
 use eframe::egui::{
@@ -87,10 +87,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                 app.deselect();
             }
             let cleanup = row.kind == "cleanup" && app.selected_index().is_some();
-            let source = row.kind == "source" && app.page == Page::Sources;
-            let reserve = if narrow { 0.0 } else { 40.0 }
-                + if cleanup { 110.0 } else { 0.0 }
-                + if source { 90.0 } else { 0.0 };
+            let reserve = if narrow { 0.0 } else { 40.0 } + if cleanup { 110.0 } else { 0.0 };
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
             ui.painter()
                 .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
@@ -115,7 +112,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                     )
                     .wrap(),
                 );
-                let source = model::source_name(&row.source);
+                let source = model::row_source_name(row);
                 if source != row.title() {
                     ui.label(egui::RichText::new(source).color(palette.muted));
                 }
@@ -127,22 +124,6 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                 {
                     app.deselect();
                     app.ui.focus_list = true;
-                }
-                // Right to left: the switch's label goes before the switch.
-                if source {
-                    let enabled = app.enabled_sources().contains(&row.source);
-                    ui.label(
-                        egui::RichText::new(if enabled { "On" } else { "Off" })
-                            .color(palette.muted),
-                    );
-                    let mut on = enabled;
-                    let can = row.available.unwrap_or(false)
-                        && !app.writing
-                        && !(enabled && !app.can_turn_off(&row.source));
-                    if switch(ui, &mut on, can, "Enabled").changed() {
-                        let source = row.source.clone();
-                        app.set_source_enabled(&source, on);
-                    }
                 }
                 if let Some(index) = app.selected_index().filter(|_| cleanup) {
                     if Button::new(Look::Soft(Tone::Danger), "Clean")
@@ -157,12 +138,20 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             });
         });
         ui.add_space(12.0);
+        if row.kind == "cleanup" {
+            let (summary, preview) = match &app.details.cleanup {
+                Some(cleanup) => (cleanup.summary.clone(), cleanup.preview.clone()),
+                None => (row.summary.clone(), row.preview.clone()),
+            };
+            egui::ScrollArea::vertical()
+                .id_salt("panel-text")
+                .auto_shrink([false, false])
+                .show(ui, |ui| cleanup_body(ui, row, &summary, &preview, &palette));
+            return;
+        }
         let text = app.details.panel_text(&app.report);
         let text = if text.is_empty() {
-            match row.kind.as_str() {
-                "cleanup" => format!("{}\n\n{}", row.summary, row.preview),
-                _ => row.summary.clone(),
-            }
+            row.summary.clone()
         } else {
             text
         };
@@ -175,13 +164,56 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                         .selectable(true)
                         .wrap(),
                 );
-                if row.kind == "source" && !row.capabilities.is_empty() {
-                    ui.add_space(12.0);
-                    caption(ui, "Can");
-                    chips(ui, &row.capabilities, &palette);
-                }
             });
     });
+}
+
+/// A cleanup task: how much it frees, what it is, and each folder or item
+/// it removes.
+fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &Palette) {
+    ui.spacing_mut().item_spacing.y = 8.0;
+    if let Some(bytes) = row.bytes.filter(|&bytes| bytes > 0) {
+        ui.label(
+            egui::RichText::new(format!("Frees about {}", model::size(bytes)))
+                .font(theme::bold(15.0))
+                .color(palette.ink),
+        );
+    }
+    if !summary.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(summary).color(palette.ink)).wrap());
+    }
+    if row.cleanup_kind == "data" {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Clean all leaves this alone. Clean it on its own.")
+                    .color(palette.warning),
+            )
+            .wrap(),
+        );
+    }
+    let (note, items) = model::cleanup_preview(preview);
+    if !note.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(note).color(palette.muted)).wrap());
+    }
+    if !items.is_empty() {
+        egui::Frame::new()
+            .fill(palette.canvas)
+            .stroke(Stroke::new(1.0, palette.line))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(items.join("\n"))
+                            .font(theme::mono(12.5))
+                            .color(palette.ink),
+                    )
+                    .selectable(true)
+                    .wrap(),
+                );
+            });
+    }
 }
 
 fn paint_card(ui: &Ui, rect: Rect, palette: &Palette) {
@@ -391,7 +423,15 @@ fn app_page(
                 let line = model::source_line(row, variants.len() > 1);
                 ui.add(egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate());
                 let version = row.installed.clone().filter(|v| !v.is_empty()).or(row.candidate.clone()).unwrap_or_default();
-                if !version.is_empty() {
+                let new = row.candidate.clone().filter(|new| row.has_update() && !new.is_empty() && *new != version);
+                if let Some(new) = new {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(new).font(theme::mono(12.5)).color(palette.accent));
+                        if !version.is_empty() {
+                            ui.label(egui::RichText::new(format!("from {version}")).font(theme::font(12.0)).color(palette.muted));
+                        }
+                    });
+                } else if !version.is_empty() {
                     ui.label(egui::RichText::new(version).font(theme::mono(12.5)).color(palette.muted));
                 }
             });

@@ -1,5 +1,6 @@
-//! Settings: how PkgDeck looks, when it checks for updates, what it is,
-//! and its keyboard shortcuts.
+//! Settings: how PkgDeck looks, when it checks for updates, which package
+//! managers it uses, where Clean looks for old projects, what it is, and
+//! its keyboard shortcuts.
 
 use super::widgets::*;
 use crate::{
@@ -9,6 +10,8 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{self, vec2, CornerRadius, Id, Sense, Stroke, Ui, Vec2};
+use pkgdeck_core::{backends::ProjectSettings, host::Host};
+use std::path::{Path, PathBuf};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical()
@@ -21,6 +24,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             appearance(app, ui);
             ui.add_space(8.0);
             update_checks(app, ui);
+            ui.add_space(8.0);
+            sources(app, ui);
+            ui.add_space(8.0);
+            clean(ui);
             ui.add_space(8.0);
             about(app, ui);
             ui.add_space(8.0);
@@ -161,18 +168,19 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.text_size = all[choice];
             }
         });
-        setting_row(
-            ui,
-            "Animations",
-            "Movement when things open, close and change",
-            SWITCH,
-            |ui| {
-                let mut on = !app.settings.reduce_motion;
-                if switch(ui, &mut on, true, "Animations").changed() {
-                    app.settings.reduce_motion = !on;
-                }
-            },
-        );
+        // The desktop can turn movement off for every app; then it stays off.
+        let system = app.platform.reduce_motion();
+        let hint = if system {
+            "Off in system settings"
+        } else {
+            "Movement when things open, close and change"
+        };
+        setting_row(ui, "Animations", hint, SWITCH, |ui| {
+            let mut on = !app.reduce_motion();
+            if switch(ui, &mut on, !system, "Animations").changed() {
+                app.settings.reduce_motion = !on;
+            }
+        });
     });
 }
 
@@ -361,6 +369,20 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
         });
         setting_row(
             ui,
+            "Clean automatically",
+            "Once a day: caches, unused images and build files of old projects",
+            SWITCH,
+            |ui| {
+                let mut on = app.settings.auto_clean;
+                if switch(ui, &mut on, background, "Clean automatically").changed() {
+                    app.settings.auto_clean = on;
+                    let at = app.settings.auto_cleaned_at;
+                    app.c().set_auto_clean(on, at);
+                }
+            },
+        );
+        setting_row(
+            ui,
             "Allow updates that remove packages",
             "Like an old kernel replaced by a new one",
             SWITCH,
@@ -421,6 +443,8 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 None => "Last check: never".into(),
             };
             ui.label(egui::RichText::new(text).color(palette.muted));
+        });
+        {
             let warning = if !app.platform.tray_available() {
                 Some(if cfg!(target_os = "macos") {
                     "No menu bar icon, so no notifications"
@@ -438,12 +462,15 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             } else {
                 None
             };
+            // Said, not hidden behind a hover: it is why nothing pops up.
             if let Some(warning) = warning {
-                let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                theme::paint_icon(ui.painter(), rect, "warning", palette.warning);
-                response.on_hover_text(warning);
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), rect, "warning", palette.warning);
+                    ui.label(egui::RichText::new(warning).color(palette.warning));
+                });
             }
-        });
+        }
         if let Some(waiting) = app
             .background
             .waiting_text()
@@ -479,6 +506,204 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// How long a project stays untouched before Clean offers its build files.
+const PROJECT_DAYS: [u32; 9] = [1, 3, 7, 14, 30, 60, 90, 180, 365];
+
+/// The step for `days`, or the next longer one.
+fn project_step(days: u32) -> usize {
+    PROJECT_DAYS
+        .iter()
+        .position(|step| *step >= days)
+        .unwrap_or(PROJECT_DAYS.len() - 1)
+}
+
+fn days_text(days: u32) -> String {
+    match days {
+        1 => "1 day".into(),
+        7 => "1 week".into(),
+        14 => "2 weeks".into(),
+        365 => "1 year".into(),
+        days => format!("{days} days"),
+    }
+}
+
+/// `path` with the home folder written as `~`.
+fn shown_folder(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Where Clean looks for old projects, kept in PkgDeck's own config file
+/// for the engine and `pkd` to read too.
+/// Package managers that manage repositories in PkgDeck.
+const REPOSITORY_SOURCES: [&str; 5] = ["flatpak", "fwupd", "apt", "dnf", "zypper"];
+
+/// Every package manager found on this computer, with a switch, and the
+/// repositories of those that have them.
+fn sources(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let shown = shown_sources(&app.catalog);
+    let enabled = app.enabled_sources();
+    section(ui, "Sources", |ui| {
+        let note = if app.catalog.is_empty() {
+            "Looking for package managers…"
+        } else {
+            "PkgDeck uses the package managers that are on."
+        };
+        ui.label(egui::RichText::new(note).color(palette.muted));
+        ui.add_space(4.0);
+        for entry in &shown {
+            let on_now = enabled.contains(&entry.source);
+            ui.horizontal(|ui| {
+                ui.set_min_height(SWITCH.y + 6.0);
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                theme::paint_source_icon(ui.painter(), icon, &entry.source, palette.accent);
+                ui.label(
+                    egui::RichText::new(model::source_name(&entry.source))
+                        .font(theme::font(14.5))
+                        .color(palette.ink),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut on = on_now;
+                    let can = !app.writing && !(on_now && !app.can_turn_off(&entry.source));
+                    if switch(ui, &mut on, can, model::source_name(&entry.source)).changed() {
+                        app.set_source_enabled(&entry.source, on);
+                    }
+                });
+            });
+            if entry.check_failed {
+                ui.label(
+                    egui::RichText::new(&entry.summary)
+                        .font(theme::font(12.5))
+                        .color(palette.danger),
+                );
+                if Button::new(Look::Flat, "Try again")
+                    .icon("refresh")
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    app.c().recheck_sources();
+                    app.react();
+                }
+            }
+        }
+        if REPOSITORY_SOURCES.iter().any(|id| app.available(id)) {
+            ui.add_space(6.0);
+            if Button::new(Look::Secondary, "Repositories")
+                .icon("sources")
+                .small()
+                .enabled(!app.busy)
+                .show(ui)
+                .clicked()
+            {
+                app.ui.repos_open = true;
+                app.c().load_repositories();
+                app.react();
+            }
+        }
+    });
+}
+
+/// The package managers worth a switch: found here, or found but failing
+/// their check, by name.
+fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
+    let mut shown: Vec<model::Source> = catalog
+        .iter()
+        .filter(|entry| entry.available || entry.check_failed)
+        .cloned()
+        .collect();
+    shown.sort_by_key(|entry| model::source_name(&entry.source).to_lowercase());
+    shown
+}
+
+fn clean(ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let id = Id::new("project-settings");
+    let mut projects = ui
+        .data_mut(|data| data.get_temp::<ProjectSettings>(id))
+        .unwrap_or_else(|| ProjectSettings::load(&Host::current()));
+    let before = projects.clone();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    section(ui, "Clean", |ui| {
+        let step = project_step(projects.days);
+        setting_row(
+            ui,
+            "Old projects",
+            &format!(
+                "Build files and worktrees unchanged for {}",
+                days_text(projects.days)
+            ),
+            vec2(240.0, 28.0),
+            |ui| {
+                let mut index = step;
+                if steps(
+                    ui,
+                    Id::new("project-days"),
+                    PROJECT_DAYS.len(),
+                    &mut index,
+                    true,
+                    240.0,
+                ) {
+                    projects.days = PROJECT_DAYS[index];
+                }
+            },
+        );
+        ui.label(egui::RichText::new("Look for projects in").color(palette.muted));
+        let mut removed = None;
+        for (index, folder) in projects.folders.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(shown_folder(folder, home.as_deref()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, "remove", "Stop looking here", palette.muted, true).clicked()
+                    {
+                        removed = Some(index);
+                    }
+                });
+            });
+        }
+        if let Some(index) = removed {
+            projects.folders.remove(index);
+        }
+        if Button::new(Look::Secondary, "Add folder")
+            .icon("add")
+            .small()
+            .show(ui)
+            .clicked()
+        {
+            let mut dialog = rfd::FileDialog::new().set_title("Look for projects in");
+            if let Some(home) = &home {
+                dialog = dialog.set_directory(home);
+            }
+            if let Some(folder) = dialog.pick_folder() {
+                if !projects.folders.contains(&folder) {
+                    projects.folders.push(folder);
+                }
+            }
+        }
+        let error_id = Id::new("project-settings-error");
+        if let Some(error) = ui.data_mut(|data| data.get_temp::<String>(error_id)) {
+            ui.label(egui::RichText::new(error).color(palette.danger));
+        }
+    });
+    if projects != before {
+        let error = projects
+            .save(&Host::current())
+            .err()
+            .map(|error| format!("Couldn't save the folders: {error}"));
+        ui.data_mut(|data| match error {
+            Some(error) => {
+                data.insert_temp(Id::new("project-settings-error"), error);
+            }
+            None => data.remove::<String>(Id::new("project-settings-error")),
+        });
+    }
+    ui.data_mut(|data| data.insert_temp(id, projects));
 }
 
 fn about(app: &mut App, ui: &mut Ui) {
@@ -539,7 +764,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Installed", "Ctrl+2"),
     ("Updates", "Ctrl+3"),
     ("Clean", "Ctrl+4"),
-    ("Sources", "Ctrl+5"),
     ("Settings", "Ctrl+,"),
     ("Search or filter", "Ctrl+F"),
     ("Activity", "Ctrl+J"),
@@ -548,9 +772,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Open the selected row", "Space"),
     ("Install, remove or update the selected row", "Enter"),
     ("Update selected", "Ctrl+Shift+U"),
-    ("Install", "Ctrl+I"),
-    ("Remove", "Ctrl+D"),
-    ("Update", "Ctrl+U"),
     ("Reload the page", "Ctrl+R"),
     ("Apply a confirmation", "Ctrl+Enter"),
     ("Clear search or close details", "Esc"),
@@ -565,8 +786,34 @@ fn shortcuts(ui: &mut Ui) {
         } else {
             "Ctrl+M"
         };
+        // Folded away: most people never need the list.
+        let open_id = Id::new("shortcuts-open");
+        let open = ui
+            .data(|data| data.get_temp::<bool>(open_id))
+            .unwrap_or(false);
+        let label = if open {
+            "Hide shortcuts"
+        } else {
+            "Show shortcuts"
+        };
+        if Button::new(Look::Secondary, label)
+            .icon(if open { "up" } else { "down" })
+            .small()
+            .show(ui)
+            .clicked()
+        {
+            ui.data_mut(|data| data.insert_temp(open_id, !open));
+        }
+        if !open {
+            return;
+        }
+        ui.add_space(6.0);
         let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
-        all.insert(17, ("Refresh the source's package lists", refresh));
+        let after_reload = all
+            .iter()
+            .position(|(label, _)| *label == "Reload the page")
+            .map_or(all.len(), |at| at + 1);
+        all.insert(after_reload, ("Refresh sources", refresh));
         let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
         let per = all.len().div_ceil(columns);
         ui.columns(columns, |cols| {
@@ -593,4 +840,49 @@ fn shortcuts(ui: &mut Ui) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_waits_snap_to_steps_and_read_naturally() {
+        assert_eq!(PROJECT_DAYS[project_step(7)], 7);
+        // A hand-edited wait shows on the next longer step.
+        assert_eq!(PROJECT_DAYS[project_step(10)], 14);
+        assert_eq!(PROJECT_DAYS[project_step(0)], 1);
+        assert_eq!(PROJECT_DAYS[project_step(9999)], 365);
+        let said: Vec<_> = PROJECT_DAYS.iter().map(|days| days_text(*days)).collect();
+        assert_eq!(
+            said,
+            [
+                "1 day", "3 days", "1 week", "2 weeks", "30 days", "60 days", "90 days",
+                "180 days", "1 year"
+            ]
+        );
+        assert_eq!(days_text(10), "10 days");
+    }
+
+    #[test]
+    fn folders_are_shown_from_the_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(shown_folder(home, Some(home)), "~");
+        assert_eq!(
+            shown_folder(Path::new("/home/me/code"), Some(home)),
+            "~/code"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/srv/code"), Some(home)),
+            "/srv/code"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/home/meg"), Some(home)),
+            "/home/meg"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/home/me/code"), None),
+            "/home/me/code"
+        );
+    }
 }

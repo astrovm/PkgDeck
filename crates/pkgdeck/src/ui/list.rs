@@ -66,8 +66,7 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         Width::Wide
     };
     let mut top = rect.top();
-    let heading_shown =
-        !app.items.is_empty() || app.busy || app.writing || app.page == Page::Sources;
+    let heading_shown = !app.items.is_empty() || app.busy || app.writing;
     if heading_shown {
         let heading = Rect::from_min_size(rect.min, vec2(rect.width(), 48.0));
         heading_row(app, ui, heading);
@@ -146,7 +145,6 @@ fn heading_text(app: &App) -> String {
         }
     }
     let noun = match app.page {
-        Page::Sources => "source",
         Page::Clean => "cleanup task",
         Page::Updates => "update",
         _ => "package",
@@ -181,8 +179,11 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
                     .font(theme::font(13.5))
                     .color(palette.muted),
             );
+            // The spinner's place is kept when it stops, so the text after
+            // it doesn't jump.
+            let (slot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
             if (app.busy && !app.writing || app.refreshing) && !app.items.is_empty() {
-                spinner(ui, 16.0, palette.accent);
+                paint_spinner(ui, slot, palette.accent);
             }
             if app.waiting_shown() {
                 let names: Vec<String> = app
@@ -222,24 +223,6 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
                     .clicked()
                 {
                     app.cancel();
-                }
-                if app.page == Page::Sources {
-                    let hidden = app
-                        .rows
-                        .iter()
-                        .filter(|r| r.kind == "source" && !r.available.unwrap_or(false))
-                        .count();
-                    if hidden > 0 || app.show_unavailable {
-                        let label = if app.show_unavailable {
-                            "Hide unavailable".to_owned()
-                        } else {
-                            format!("Show unavailable ({hidden})")
-                        };
-                        if Button::new(Look::Flat, &label).small().show(ui).clicked() {
-                            app.show_unavailable = !app.show_unavailable;
-                            app.invalidate();
-                        }
-                    }
                 }
             });
         },
@@ -300,17 +283,24 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
     let available = (right - x).max(60.0);
     let start = x;
     let share = |dragged: f32, default: f32| if dragged > 0.0 { dragged } else { default };
+    // Sizes are short, and task names long.
+    let (name_share, version_share, medium_version, least) = if page == Page::Clean {
+        // Room for the size and "Not in Clean all" under it.
+        (0.42, 0.18, 0.26, 104.0)
+    } else {
+        (0.36, 0.2, 0.32, 80.0)
+    };
     let (name_w, version_w, summary) = match width {
         Width::Wide => {
-            let name =
-                (available * share(shares.name, 0.36)).clamp(120.0, (available - 200.0).max(120.0));
-            let version = (available * share(shares.version, 0.2))
-                .clamp(80.0, (available - name - 64.0).max(80.0));
+            let name = (available * share(shares.name, name_share))
+                .clamp(120.0, (available - 200.0).max(120.0));
+            let version = (available * share(shares.version, version_share))
+                .clamp(least, (available - name - 64.0).max(least));
             (name, version, true)
         }
         Width::Medium => {
-            let version =
-                (available * share(shares.version, 0.32)).clamp(80.0, (available * 0.6).max(80.0));
+            let version = (available * share(shares.version, medium_version))
+                .clamp(least, (available * 0.6).max(least));
             (available - version - 12.0, version, false)
         }
         Width::Compact => (available, 0.0, false),
@@ -322,7 +312,7 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         x += version_w + 12.0;
         r
     });
-    let summary = (summary && page != Page::Sources && right - x > 40.0)
+    let summary = (summary && right - x > 40.0)
         .then(|| Rect::from_min_max(pos2(x, row.top()), pos2(right, row.bottom())));
     Columns {
         start,
@@ -340,16 +330,10 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     let palette = Palette::current(ui.ctx());
     let cols = columns(rect, width, app.page, ACTIONS_ROOM, Shares::of(app));
     let version_title = match app.page {
-        Page::Clean => "TYPE",
-        Page::Sources => "STATUS",
+        Page::Clean => "SIZE",
         _ => "VERSION",
     };
-    let name_title = if app.page == Page::Sources {
-        "SOURCE"
-    } else {
-        "NAME"
-    };
-    let mut titles = vec![(Column::Name, name_title, cols.name)];
+    let mut titles = vec![(Column::Name, "NAME", cols.name)];
     if let Some(v) = cols.version {
         titles.push((Column::Version, version_title, v));
     }
@@ -445,7 +429,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
 fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
     let palette = Palette::current(ui.ctx());
     let mut dividers = Vec::new();
-    if let (Some(version), true) = (cols.version, app.page != Page::Sources) {
+    if let Some(version) = cols.version {
         dividers.push(("name", version.left() - 6.0));
         if cols.summary.is_some() {
             dividers.push(("version", version.right() + 6.0));
@@ -513,8 +497,8 @@ fn dragged_share(column: &str, x: f32, cols: &Columns) -> f32 {
 }
 
 fn row_height(app: &App, index: usize, width: Width) -> f32 {
-    // Compact rows add a version and summary line, which sources don't have.
-    let base = if width == Width::Compact && app.page != Page::Sources {
+    // Compact rows add a version and summary line.
+    let base = if width == Width::Compact {
         ROW_COMPACT
     } else {
         ROW
@@ -658,17 +642,27 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     app.hovered_row(hovered_raw);
 }
 
-/// Seconds since this list last went from empty to showing rows. A reload
-/// that keeps rows on screen doesn't count, so only new lists animate.
+/// What a task that Clean all skips says under its size.
+const LEFT_OUT: &str = "Not in Clean all";
+
+fn left_out_of_clean_all(row: &Row) -> bool {
+    row.kind == "cleanup" && row.cleanup_kind == "data"
+}
+
+/// Seconds since rows first showed after the page was opened. Reloads,
+/// searches and filters that empty the list for a moment don't count, so
+/// rows only rise into place when the person arrives.
 fn shown_since(app: &App, ctx: &egui::Context, list_id: Id) -> f32 {
     let key = list_id.with("shown-at");
     let now = ctx.input(|i| i.time);
-    if app.items.is_empty() {
-        ctx.data_mut(|d| d.remove::<f64>(key));
-        return 0.0;
-    }
-    let at = ctx.data_mut(|d| *d.get_temp_mut_or(key, now));
-    (now - at) as f32
+    let opened = app.page_changed;
+    let (seen, at) = ctx
+        .data(|d| d.get_temp::<(std::time::Instant, Option<f64>)>(key))
+        .filter(|(seen, _)| *seen == opened)
+        .unwrap_or((opened, None));
+    let at = at.or((!app.items.is_empty()).then_some(now));
+    ctx.data_mut(|d| d.insert_temp(key, (seen, at)));
+    at.map_or(0.0, |at| (now - at) as f32)
 }
 
 /// The selected row's background, sliding from row to row as the selection
@@ -738,21 +732,6 @@ fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin:
 
 /// What a source row adds to its status: why it can't be used, or that
 /// it's turned off.
-fn source_note(app: &App, row: &model::Row) -> String {
-    if !row.available.unwrap_or(false) {
-        return row
-            .summary
-            .strip_prefix("Unavailable: ")
-            .unwrap_or(&row.summary)
-            .to_owned();
-    }
-    if app.enabled_sources().contains(&row.source) {
-        String::new()
-    } else {
-        "Turned off".into()
-    }
-}
-
 /// The warning or lock beside an update that failed last time or needs
 /// the password, which says why when hovered.
 fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
@@ -834,7 +813,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     ui.painter()
         .rect_filled(surface, CornerRadius::same(10), fill);
-    let action = model::row_action(&row, app.page, &app.catalog).filter(|_| row.kind != "source");
+    let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
             || app.progress.for_row(&identity, &row.source).is_some());
@@ -885,16 +864,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     // Name and source.
     let title = row.title().to_owned();
-    let source = row.kind == "source";
-    let line = if source {
-        // The status column already says whether it's available.
-        source_note(app, &row)
-    } else {
-        model::source_line(&row, item.variants.len() > 1)
-    };
+    let line = model::source_line(&row, item.variants.len() > 1);
     let top_y = if line.is_empty() {
         rect.center().y
-    } else if compact && !source {
+    } else if compact {
         rect.top() + 14.0
     } else {
         rect.center().y - 10.0
@@ -922,16 +895,16 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let version = model::version_text(&row);
     let version_color = match row.kind.as_str() {
         "failure" => palette.danger,
-        "source" if !row.available.unwrap_or(false) => palette.muted,
-        "source" => palette.success,
         _ if row.has_update() => palette.accent,
         _ => palette.muted,
     };
-    if compact && !source {
+    if compact {
         // Version in its own colour, then the summary in what's left. Every
         // task here is a cache unless it says otherwise.
         let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
             String::new()
+        } else if left_out_of_clean_all(&row) {
+            format!("{version}, {LEFT_OUT}")
         } else {
             version.clone()
         };
@@ -958,7 +931,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     if let Some(v) = cols.version {
-        if app.page == Page::Updates && row.has_update() {
+        // An update reads the same on every page: the new version, and
+        // what it replaces under it.
+        if row.has_update() {
             let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
             let mut left = v.left();
             if let Some(held) = &held {
@@ -992,14 +967,24 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 theme::font(13.0)
             };
             let galley = one_line(ui, &version, font, version_color, v.width());
-            painter.galley(
-                pos2(v.left(), rect.center().y - galley.size().y / 2.0),
-                galley,
-                version_color,
-            );
+            if left_out_of_clean_all(&row) {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
+                let tag = one_line(ui, LEFT_OUT, theme::font(12.0), palette.warning, v.width());
+                painter.galley(pos2(v.left(), rect.center().y + 2.0), tag, palette.warning);
+            } else {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
+            }
         }
     }
-    if let Some(s) = cols.summary.filter(|_| !source) {
+    if let Some(s) = cols.summary {
         let galley = one_line(
             ui,
             &row.summary,
@@ -1303,7 +1288,6 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
                 Page::Updates => "You're up to date",
                 Page::Clean => "Nothing to clean",
                 Page::Installed => "No installed packages.",
-                Page::Sources => "No available sources.",
                 Page::Search => "No matching packages.",
                 Page::Settings => "No results to show.",
             }
@@ -1483,7 +1467,7 @@ mod column_tests {
     }
 
     #[test]
-    fn compact_source_rows_keep_the_one_line_height() {
+    fn compact_rows_make_room_for_a_second_line() {
         use crate::{app::Launch, platform::Platform, settings::Store};
         let (store, settings) = Store::open(None, None);
         let mut app = App::with_controller(
@@ -1496,18 +1480,15 @@ mod column_tests {
             Launch::default(),
         );
         app.rows = vec![serde_json::from_value(serde_json::json!({
-            "kind": "source", "name": "apt", "source": "apt", "available": true
+            "kind": "package", "name": "apt", "source": "apt", "installed": "1.0"
         }))
         .unwrap()];
-        app.show_unavailable = true;
-        for (page, compact) in [(Page::Sources, ROW), (Page::Installed, ROW_COMPACT)] {
-            app.page = page;
-            app.invalidate();
-            app.refresh_items();
-            assert!(!app.items.is_empty(), "{page:?}");
-            assert_eq!(row_height(&app, 0, Width::Compact), compact, "{page:?}");
-            assert_eq!(row_height(&app, 0, Width::Wide), ROW, "{page:?}");
-        }
+        app.page = Page::Installed;
+        app.invalidate();
+        app.refresh_items();
+        assert!(!app.items.is_empty());
+        assert_eq!(row_height(&app, 0, Width::Compact), ROW_COMPACT);
+        assert_eq!(row_height(&app, 0, Width::Wide), ROW);
     }
 
     #[test]

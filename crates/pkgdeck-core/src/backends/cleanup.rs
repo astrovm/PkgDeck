@@ -54,6 +54,7 @@ impl<T: Transport + Sync> Flatpak<T> {
                     title: format!("Unused Flatpak runtimes ({scope})"),
                     summary: format!("{} unused runtimes and extensions", entries.len()),
                     preview,
+                    bytes: Some(entries.iter().map(|entry| entry.bytes).sum()),
                 })
             })
             .collect())
@@ -134,13 +135,13 @@ impl<T: Transport> DevTool<T> {
             self.cache_call(args, cancel, false)?,
         )?)
         .map_err(|error| invalid(self.kind.id(), error))?;
-        let (present, preview) = match self.kind {
+        let (present, preview, size) = match self.kind {
             DevKind::Uv => {
                 let size: u64 = output
                     .trim()
                     .parse()
                     .map_err(|error| invalid("uv", error))?;
-                (size > 0, format!("{size} bytes cached"))
+                (size > 0, "Everything uv has cached".into(), Some(size))
             }
             DevKind::Pip => {
                 let counts: Vec<_> = output
@@ -152,12 +153,22 @@ impl<T: Transport> DevTool<T> {
                 if counts.len() != 2 || counts.iter().any(Result::is_err) {
                     return Err(invalid("pip", "unrecognized cache inventory"));
                 }
+                // "Package index page cache size: 36.3 MB", "Wheels size: 10 kB".
+                let size = output
+                    .lines()
+                    .filter_map(|line| line.split_once("size: "))
+                    .map(|(_, size)| crate::disk::parse_size(size))
+                    .sum();
                 (
                     counts.into_iter().any(|count| count.unwrap_or(0) > 0),
                     output,
+                    size,
                 )
             }
-            _ => (!output.trim().is_empty(), output),
+            _ => {
+                let size = self.npm_cache_usage(cancel);
+                (!output.trim().is_empty(), output, size)
+            }
         };
         Ok(if present {
             vec![CleanupItem {
@@ -169,10 +180,25 @@ impl<T: Transport> DevTool<T> {
                 title: title.into(),
                 summary: "Clear cached downloads".into(),
                 preview,
+                bytes: size,
             }]
         } else {
             vec![]
         })
+    }
+
+    /// The space npm's cache takes: `npm cache clean` empties `_cacache`
+    /// in the folder `npm config get cache` names.
+    fn npm_cache_usage(&self, cancel: &Cancellation) -> Option<u64> {
+        let output = bytes(
+            "npm",
+            self.cache_call(&["config", "get", "cache"], cancel, false)
+                .ok()?,
+        )
+        .ok()?;
+        let dir = PathBuf::from(String::from_utf8(output).ok()?.trim());
+        dir.is_absolute()
+            .then(|| crate::disk::usage(&dir.join("_cacache"), cancel))
     }
 
     pub(super) fn clean_cache(
@@ -262,8 +288,30 @@ impl<T: Transport> Apt<T> {
             kind: CleanupKind::OrphanDependencies,
             title: "Unused dependencies".into(),
             summary: format!("{} removable entries", actionable.len()),
+            bytes: self.installed_size(&actionable, cancel),
             preview: actionable.join("\n"),
         }))
+    }
+
+    /// What the packages on "Remv name [version]" lines take installed,
+    /// as dpkg recorded it in KiB.
+    fn installed_size(&self, lines: &[&str], cancel: &Cancellation) -> Option<u64> {
+        let mut args: Vec<OsString> =
+            vec!["-W".into(), "-f=${Installed-Size}\\n".into(), "--".into()];
+        args.extend(
+            lines
+                .iter()
+                .filter_map(|line| line.split_whitespace().nth(1))
+                .map(OsString::from),
+        );
+        let output = self
+            .transport
+            .system_manager("dpkg-query", &args, cancel, false)
+            .ok()?;
+        let text = String::from_utf8(bytes("apt", output).ok()?).ok()?;
+        text.lines()
+            .map(|line| line.trim().parse::<u64>().ok().map(|kib| kib * 1024))
+            .sum()
     }
 
     fn cleanup_apt_cache(&self, cancel: &Cancellation) -> Result<Option<CleanupItem>, EngineError> {
@@ -333,6 +381,7 @@ impl<T: Transport> Apt<T> {
             title: "APT download cache".into(),
             summary: format!("{} cached downloads", entries.len()),
             preview: "APT selects obsolete downloads during cleanup.".into(),
+            bytes: None,
         }))
     }
 }

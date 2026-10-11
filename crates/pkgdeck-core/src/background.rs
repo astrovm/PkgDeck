@@ -17,7 +17,7 @@ use std::{
 };
 
 /// Default time between background checks.
-pub const CHECK_INTERVAL_SECONDS: u64 = 30 * 60;
+pub const CHECK_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
 /// The shortest interval a user may pick. Each check can run `brew update`
 /// and query every source, so more often than this mostly adds load.
 pub const MIN_CHECK_INTERVAL_SECONDS: u64 = 15 * 60;
@@ -331,17 +331,18 @@ mod tests {
     #[test]
     fn a_changed_interval_applies_to_the_next_check() {
         let mut schedule = Schedule::default();
-        assert_eq!(schedule.interval(), CHECK_INTERVAL_SECONDS);
+        // Six hours unless changed.
+        assert_eq!(schedule.interval(), 21_600);
         assert!(schedule.ready(0, true, false, false, false, false));
-        let hour = 60 * 60;
-        schedule.set_interval(hour);
-        assert_eq!(schedule.interval(), hour);
+        let day = 24 * 60 * 60;
+        schedule.set_interval(day);
+        assert_eq!(schedule.interval(), day);
         assert!(!schedule.ready(CHECK_INTERVAL_SECONDS, true, false, false, false, false));
-        assert!(schedule.ready(hour, true, false, false, false, false));
+        assert!(schedule.ready(day, true, false, false, false, false));
         // Shorter than the last wait: due as soon as that much has passed.
         schedule.set_interval(MIN_CHECK_INTERVAL_SECONDS);
         assert!(schedule.ready(
-            hour + MIN_CHECK_INTERVAL_SECONDS,
+            day + MIN_CHECK_INTERVAL_SECONDS,
             true,
             false,
             false,

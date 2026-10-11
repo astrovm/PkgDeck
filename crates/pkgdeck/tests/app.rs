@@ -347,7 +347,7 @@ fn sources_turn_off_and_pages_narrow() {
     assert!(app.available("apt"));
     assert!(app.usable("apt", Page::Installed));
     assert!(!app.can_turn_off("apt"), "the last source stays on");
-    assert_eq!(app.source_summary(Page::Installed), "Filter sources");
+    assert_eq!(app.source_summary(Page::Installed), "All sources");
     app.open_page(Page::Installed);
     let only = ["apt".to_owned()].into_iter().collect();
     app.set_page_sources(Page::Installed, only);
@@ -376,14 +376,8 @@ fn sources_turn_off_and_pages_narrow() {
     app.set_source_enabled("flatpak", false);
     assert_eq!(app.settings.source_list, "apt");
     idle(&mut app);
-    app.open_page(Page::Sources);
-    until(&mut app, "sources", |app| {
-        app.rows.iter().any(|row| row.kind == "source")
-    });
-    app.show_unavailable = true;
-    app.invalidate();
-    app.refresh_items();
-    assert!(!app.items.is_empty());
+    app.open_page(Page::Installed);
+    idle(&mut app);
     assert!(app.read_failures().iter().all(|f| f.kind != "cancelled"));
     app.retry_source("apt");
     idle(&mut app);

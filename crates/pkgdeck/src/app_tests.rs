@@ -77,21 +77,12 @@ fn turning_every_source_on_follows_new_sources_too() {
 }
 
 #[test]
-fn sources_list_the_enabled_ones_first() {
+fn pages_keep_their_own_choice_of_sources() {
     let mut app = app_with(Launch {
         from: vec!["homebrew".into()],
         ..Launch::default()
     });
-    app.page = Page::Sources;
-    let source = |id: &str| json!({"kind": "source", "name": id, "source": id, "available": true});
-    rows(&mut app, json!([source("apt"), source("homebrew")]));
-    let order: Vec<&str> = app
-        .items
-        .iter()
-        .map(|item| app.rows[item.raw].source.as_str())
-        .collect();
-    assert_eq!(order, ["homebrew", "apt"]);
-    // Other pages keep their own narrower choice.
+    // Pages keep their own narrower choice.
     app.page_sources
         .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
     app.page = Page::Installed;
@@ -100,6 +91,34 @@ fn sources_list_the_enabled_ones_first() {
         json!([row("a", json!({})), row("b", json!({"source": "homebrew"}))]),
     );
     assert!(app.items.is_empty());
+}
+
+#[test]
+fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
+    let mut app = app();
+    app.refresh_sources();
+    assert!(app.confirmation.is_none());
+    app.c().set_source_catalog(
+        json!([
+            {"source": "apt", "available": true, "capabilities": ["installed", "refresh"]},
+            {"source": "npm", "available": true, "capabilities": ["installed"]},
+            {"source": "dnf", "available": false, "capabilities": ["refresh"]},
+        ])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    assert_eq!(app.refreshable_sources(), ["apt"]);
+    app.retained = Some(vec![]);
+    app.refresh_sources();
+    assert!(app.confirmation.is_none());
+    app.retained = None;
+    app.refresh_sources();
+    assert!(app.confirmation.is_some());
+    // Only what Updates shows.
+    app.page_sources
+        .insert(Page::Updates, HashSet::from(["npm".to_owned()]));
+    assert!(app.refreshable_sources().is_empty());
 }
 
 #[test]
@@ -306,6 +325,121 @@ fn self_updates_restart_now_or_ask() {
 }
 
 #[test]
+fn starting_at_login_is_offered_once() {
+    let mut app = app();
+    app.ask_about_login();
+    let toast = app.restart_toast.clone().unwrap();
+    assert_eq!(toast.action, Some(ToastAction::StartAtLogin));
+    assert_eq!(toast.tone, Tone::Accent);
+    // It waits for an answer for a day.
+    assert_eq!(toast.lasts, Duration::from_secs(86_400));
+    assert!(app.settings.login_asked);
+    // Once asked, never again, even after the toast goes.
+    app.restart_toast = None;
+    app.ask_about_login();
+    assert!(app.restart_toast.is_none());
+    // Saying yes writes the login item and remembers it.
+    let dir = std::env::temp_dir().join(format!("pkgdeck-login-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.c()
+        .use_autostart_path(dir.join("autostart/app.desktop"));
+    app.restart_toast = Some(toast.clone());
+    app.toast_action(ToastAction::StartAtLogin);
+    assert!(app.restart_toast.is_none());
+    assert!(app.settings.autostart);
+    assert!(dir.join("autostart/app.desktop").exists());
+    // When the login item can't be written, it stays off.
+    std::fs::write(dir.join("blocked"), "").unwrap();
+    app.c().use_autostart_path(dir.join("blocked/app.desktop"));
+    app.settings.autostart = false;
+    app.restart_toast = Some(toast);
+    app.toast_action(ToastAction::StartAtLogin);
+    assert!(app.restart_toast.is_none());
+    assert!(!app.settings.autostart);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn starting_at_login_is_not_offered_when_it_makes_no_sense() {
+    let toast = Toast {
+        text: "PkgDeck was updated.".into(),
+        tone: Tone::Success,
+        action: Some(ToastAction::Restart),
+        shown: Instant::now(),
+        lasts: Duration::from_secs(60),
+        from_notice: false,
+    };
+    for case in 0..4 {
+        let mut app = app();
+        match case {
+            0 => app.settings.login_asked = true,
+            1 => app.settings.autostart = true,
+            2 => app.settings.background_mode = false,
+            // Another sticky toast is showing; it waits for the next start.
+            _ => app.restart_toast = Some(toast.clone()),
+        }
+        app.ask_about_login();
+        assert_ne!(
+            app.restart_toast.as_ref().and_then(|t| t.action),
+            Some(ToastAction::StartAtLogin),
+            "{case}"
+        );
+        assert_eq!(app.settings.login_asked, case == 0, "{case}");
+    }
+}
+
+#[test]
+fn movement_stops_when_asked_here_or_by_the_desktop() {
+    let mut app = app();
+    assert!(!app.reduce_motion());
+    app.settings.reduce_motion = true;
+    assert!(app.reduce_motion());
+    app.settings.reduce_motion = false;
+    app.platform.set_system_motion(true);
+    assert!(app.reduce_motion());
+    // The setting itself is left as it was.
+    assert!(!app.settings.reduce_motion);
+}
+
+#[test]
+fn automatic_cleaning_is_remembered_and_told_once() {
+    let mut app = app();
+    app.settings.auto_clean = true;
+    app.apply_settings();
+    assert!(app.c().auto_clean());
+    let cleaned = |at: u64, cleaned: Value| {
+        json!({"available": 0, "cleaned_at": at, "cleaned": cleaned}).to_string()
+    };
+    app.c().set_background_state(
+        cleaned(
+            500,
+            json!({"tasks": 2, "failed": 0, "bytes": 4_200_000_000u64}),
+        )
+        .into(),
+    );
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 500);
+    assert_eq!(
+        app.platform.recorded(),
+        [("PkgDeck cleanup".to_owned(), "Freed 4.2 GB".to_owned())]
+    );
+    // The same run seen again, a later check without it, and a run that
+    // found nothing say nothing more.
+    app.c()
+        .set_background_state(cleaned(500, json!({"tasks": 2, "failed": 0, "bytes": 1})).into());
+    app.react();
+    app.c()
+        .set_background_state(json!({"available": 0}).to_string().into());
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 500);
+    app.c()
+        .set_background_state(cleaned(900, json!({"tasks": 0})).into());
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 900);
+    assert_eq!(app.platform.recorded().len(), 1);
+}
+
+#[test]
 fn background_state_saves_badges_and_notifies() {
     let mut app = app();
     app.c().set_background_state("".into());
@@ -485,6 +619,31 @@ fn flatpak_copies_switch_scope_and_reselect_when_one_goes() {
 }
 
 #[test]
+fn the_selection_is_found_again_after_the_list_changes() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(
+        &mut app,
+        json!([
+            row("a", json!({})),
+            row("b", json!({})),
+            row("c", json!({}))
+        ]),
+    );
+    app.choose(1, false);
+    assert_eq!(app.selected_index(), Some(1));
+    assert_eq!(app.selected_row().map(|row| row.name.as_str()), Some("b"));
+    // The list moves under it.
+    rows(&mut app, json!([row("b", json!({})), row("c", json!({}))]));
+    assert_eq!(app.selected_index(), Some(0));
+    assert_eq!(app.selected_index(), Some(0));
+    // Rows cleared mid-frame find nothing, without a crash.
+    app.rows.clear();
+    assert_eq!(app.selected_index(), None);
+    assert!(app.selected_item().is_none());
+}
+
+#[test]
 fn selections_survive_reloads_or_clear() {
     let mut app = app();
     app.page = Page::Search;
@@ -516,12 +675,15 @@ fn selections_survive_reloads_or_clear() {
 #[test]
 fn row_actions_need_a_row_an_action_and_a_free_controller() {
     let mut app = app();
-    app.page = Page::Sources;
+    app.page = Page::Installed;
     rows(
         &mut app,
-        json!([{"kind": "source", "name": "apt", "source": "apt", "available": true}]),
+        // A Mac app this computer can neither adopt nor remove.
+        json!([row("m", json!({"source": "macos-apps", "installed": "1"}))]),
     );
+    assert_eq!(app.items.len(), 1);
     app.run_row_action(0);
+    assert!(app.confirmation.is_none() && app.active_rows.is_empty());
     app.run_row_action(7);
     app.run_adopt(7);
     app.run_adopt(0);
@@ -544,7 +706,6 @@ fn row_actions_need_a_row_an_action_and_a_free_controller() {
     app.propose("adopt-all");
     app.propose("clean-all");
     app.choose(0, false);
-    app.propose("refresh");
     // Updates with nothing checked do nothing.
     app.page = Page::Updates;
     app.invalidate();
@@ -571,7 +732,6 @@ fn pages_load_what_they_show() {
         .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
     assert_eq!(app.source_summary(Page::Installed), "APT");
     assert_eq!(app.sources_csv(Page::Installed), "apt");
-    assert_eq!(app.sources_csv(Page::Sources), "");
     app.enabled = HashSet::from(["apt".to_owned(), "snap".to_owned()]);
     assert_eq!(app.sources_csv(Page::Updates), "apt,snap");
     app.change_repository(
@@ -605,6 +765,8 @@ fn failures_come_from_the_report_or_failure_rows() {
     );
     let failures = app.read_failures();
     assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].source, "apt");
+    assert_eq!(failures[0].detail.as_deref(), Some("apt is broken"));
     assert_eq!(app.failure_reason("apt"), "apt is broken");
     app.c().set_report_state(json!({"phase": "partial", "failures": [{"source": "apt", "kind": "failed", "detail": "d"}, {"source": "apt", "kind": "cancelled"}]}).to_string().into());
     app.react();
@@ -898,4 +1060,41 @@ fn the_window_sleeps_until_something_is_due() {
     // a worker stops without a reply.
     assert!(*app.ctl.needs_poll());
     assert_eq!(wait, Duration::from_secs(1));
+}
+
+#[test]
+fn settings_wait_for_a_drag_to_end_before_they_are_written() {
+    let dir = std::env::temp_dir().join(format!("pkgdeck-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (store, settings) = Store::open(Some(dir.clone()), None);
+    let mut app = App::with_controller(
+        create_synthetic_controller(empty),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    app.tick(Instant::now());
+    app.dragging = true;
+    app.settings.name_column = 0.4;
+    app.tick(Instant::now());
+    assert_eq!(app.store.saved().name_column, 0.0);
+    app.dragging = false;
+    app.tick(Instant::now());
+    assert_eq!(app.store.saved().name_column, 0.4);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn sources_can_be_checked_again() {
+    let mut app = app();
+    // The first check, from the start, ends first.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while *app.ctl.needs_poll() && Instant::now() < deadline {
+        app.tick(Instant::now() + Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!*app.ctl.needs_poll());
+    app.c().recheck_sources();
+    assert!(*app.ctl.needs_poll());
 }

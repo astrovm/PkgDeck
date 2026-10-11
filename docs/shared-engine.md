@@ -94,7 +94,7 @@ Without chosen sources, `native_engine` registers every source without
 checking it first. Each source checks itself in its own query worker, so a
 slow check only delays that source. A source found missing is left out
 quietly, as if it was never registered. Chosen sources (`--from`) and the
-Sources view check every source first, and report missing ones.
+app's list of sources check every source first, and report missing ones.
 
 The engine remembers successful detection results, so the next query on it
 doesn't detect again. Failed detections aren't remembered and are retried.

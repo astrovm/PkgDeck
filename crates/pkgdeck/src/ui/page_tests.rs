@@ -1,6 +1,11 @@
 //! Exercise the page headers with the real widgets and synthetic controller.
 use super::*;
-use crate::{app::Launch, model::Source, platform::Platform, settings::Store};
+use crate::{
+    app::Launch,
+    model::{Page, Source},
+    platform::Platform,
+    settings::Store,
+};
 use egui_kittest::{
     kittest::{NodeT, Queryable},
     Harness,
@@ -39,7 +44,6 @@ fn app(row: &Row, page: Page) -> App {
         .to_vec();
     app.rows = vec![row.clone()];
     app.page = page;
-    app.show_unavailable = true;
     app.invalidate();
     app.refresh_items();
     if !app.items.is_empty() {
@@ -143,58 +147,6 @@ fn cleanup_waits_for_busy_or_retained_state_and_only_cleans_a_selection() {
     }
     harness.state_mut().1.selected = None;
     harness.run_steps(2);
-    assert!(harness.query_by_label("Clean").is_none());
-}
-
-#[test]
-fn source_header_switch_respects_availability_writing_and_the_last_source() {
-    for available in [None, Some(false), Some(true)] {
-        for writing in [false, true] {
-            for (sources, expected) in [
-                (vec!["apt"], false),
-                (vec!["apt", "flatpak"], true),
-                (vec!["flatpak"], true),
-            ] {
-                let mut row = row("source");
-                row.available = available;
-                let mut app = app(&row, Page::Sources);
-                app.enabled = sources.into_iter().map(String::from).collect();
-                app.writing = writing;
-                let harness = draw(app, row, 700.0, false, false);
-                assert_eq!(
-                    enabled(&harness, "Enabled"),
-                    expected && available == Some(true) && !writing
-                );
-                assert!(harness.query_by_label("Clean").is_none());
-            }
-        }
-    }
-}
-
-#[test]
-fn source_switch_changes_the_chosen_sources_and_other_panels_have_no_switch() {
-    let source_row = row("source");
-    let mut harness = draw(
-        app(&source_row, Page::Sources),
-        source_row,
-        700.0,
-        false,
-        false,
-    );
-    assert!(harness.query_by_label("On").is_some());
-    harness.get_by_label("Enabled").click();
-    harness.run_steps(2);
-    assert!(!harness.state().1.enabled_sources().contains("apt"));
-    assert!(harness.query_by_label("Off").is_some());
-    harness.get_by_label("Enabled").click();
-    harness.run_steps(2);
-    assert!(harness.state().1.enabled_sources().contains("apt"));
-    harness.state_mut().1.page = Page::Installed;
-    harness.run_steps(2);
-    assert!(harness.query_by_label("Enabled").is_none());
-    let row = row("failure");
-    let harness = draw(app(&row, Page::Sources), row, 700.0, false, false);
-    assert!(harness.query_by_label("Enabled").is_none());
     assert!(harness.query_by_label("Clean").is_none());
 }
 
@@ -359,7 +311,7 @@ fn header_geometry(harness: &Harness<'_, (bool, App)>) -> Value {
 #[test]
 fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
     let mut actual = serde_json::Map::new();
-    for kind in ["cleanup", "source", "package"] {
+    for kind in ["cleanup", "package"] {
         for (width, narrow) in [
             (440.0, true),
             (480.0, false),
@@ -374,7 +326,6 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
             row.display_name = "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions".into();
             let page = match kind {
                 "cleanup" => Page::Clean,
-                "source" => Page::Sources,
                 _ => Page::Installed,
             };
             for opened in [false, true]
@@ -383,10 +334,6 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
             {
                 if kind == "package" {
                     row.adopt_with = Some("apt".into());
-                }
-                if kind == "source" {
-                    row.source =
-                        "A long fixture source name that must leave room for its switch".into();
                 }
                 let harness = draw(app(&row, page), row.clone(), width, narrow, opened);
                 actual.insert(
@@ -430,39 +377,4 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
         }
     }
     compare(&actual, &expected, "headers");
-}
-
-#[test]
-fn source_capability_chips_wrap_whole_instead_of_squeezing_their_text() {
-    let capabilities = [
-        "search",
-        "details",
-        "installed",
-        "install",
-        "remove",
-        "refresh",
-        "upgrade",
-    ];
-    let mut row = row("source");
-    row.capabilities = capabilities.map(String::from).to_vec();
-    for width in [300.0, 420.0, 700.0] {
-        let harness = draw(app(&row, Page::Sources), row.clone(), width, false, false);
-        let heights: Vec<_> = capabilities
-            .iter()
-            .map(|label| harness.get_by_label(label).rect())
-            .inspect(|chip| assert!(chip.right() <= width, "{width}: {chip:?}"))
-            .map(|chip| chip.height())
-            .collect();
-        assert!(
-            heights
-                .iter()
-                .all(|height| (height - heights[0]).abs() < 0.5),
-            "{width}: {heights:?}"
-        );
-        let rows: std::collections::BTreeSet<_> = capabilities
-            .iter()
-            .map(|label| harness.get_by_label(label).rect().top() as i32)
-            .collect();
-        assert!(width < 500.0 || rows.len() == 1, "{width}: {rows:?}");
-    }
 }

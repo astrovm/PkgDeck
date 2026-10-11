@@ -15,16 +15,14 @@ pub enum Page {
     Installed,
     Updates,
     Clean,
-    Sources,
     Settings,
 }
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 5] = [
         Page::Search,
         Page::Installed,
         Page::Updates,
         Page::Clean,
-        Page::Sources,
         Page::Settings,
     ];
     /// The name the controller and the sidebar use.
@@ -34,7 +32,6 @@ impl Page {
             Page::Installed => "Installed",
             Page::Updates => "Updates",
             Page::Clean => "Clean",
-            Page::Sources => "Sources",
             Page::Settings => "Settings",
         }
     }
@@ -44,7 +41,6 @@ impl Page {
             Page::Installed => "installed",
             Page::Updates => "updates",
             Page::Clean => "remove",
-            Page::Sources => "sources",
             Page::Settings => "settings",
         }
     }
@@ -95,6 +91,8 @@ pub struct Row {
     pub cleanup_key: String,
     pub cleanup_kind: String,
     pub preview: String,
+    /// About how much disk space a cleanup task frees, when it can tell.
+    pub bytes: Option<u64>,
     pub available: Option<bool>,
     pub availability_kind: String,
     pub check_failed: bool,
@@ -127,9 +125,6 @@ impl Row {
     }
     /// The name people know it by.
     pub fn title(&self) -> &str {
-        if self.kind == "source" {
-            return backends::display_name(&self.source);
-        }
         if self.display_name.trim().is_empty() {
             &self.name
         } else {
@@ -139,7 +134,20 @@ impl Row {
     /// What identifies a row across loads, as the controller reads it back
     /// in `propose_checked`.
     pub fn identity(&self) -> String {
-        identity_of(&self.identity_value())
+        // The same text as `identity_of(&self.identity_value())`, without
+        // building a JSON value first: lists ask for it often.
+        fn text(text: &Option<String>) -> Option<&str> {
+            text.as_deref().filter(|text| !text.is_empty())
+        }
+        let parts = (
+            &self.source,
+            &self.name,
+            &self.architecture,
+            text(&self.remote),
+            &self.scope,
+            text(&self.reference),
+        );
+        serde_json::to_string(&parts).unwrap_or_default()
     }
     pub fn identity_value(&self) -> Value {
         json!([
@@ -535,6 +543,15 @@ impl Activity {
     pub fn running(&self) -> bool {
         matches!(self.state.as_str(), "running" | "authorizing")
     }
+    /// Whether [`Self::log_text`] has anything, without building it.
+    pub fn has_log(&self) -> bool {
+        let some = |value: &Value| match value {
+            Value::String(text) => !text.is_empty(),
+            Value::Array(lines) => !lines.is_empty(),
+            _ => false,
+        };
+        some(&self.log) || some(&self.output)
+    }
     pub fn log_text(&self) -> String {
         let text = |value: &Value| match value {
             Value::String(text) => text.clone(),
@@ -672,6 +689,42 @@ pub struct BackgroundState {
     pub notify: bool,
     /// What automatic updates wait for, "battery" or "build".
     pub waiting: Option<String>,
+    /// When automatic cleaning last ran, and what it did.
+    pub cleaned_at: Option<u64>,
+    pub cleaned: Option<AutoCleaned>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AutoCleaned {
+    pub tasks: u64,
+    pub failed: u64,
+    pub bytes: u64,
+}
+impl AutoCleaned {
+    /// The notification, or nothing when there was nothing to tell.
+    pub fn message(&self) -> Option<String> {
+        let cleaned = match (self.tasks, self.bytes) {
+            (0, _) => None,
+            (_, 0) => Some("Cleaned up caches and build files".to_owned()),
+            (_, bytes) => Some(format!("Freed {}", size(bytes))),
+        };
+        match (cleaned, self.failed) {
+            (None, 0) => None,
+            (None, failed) => Some(format!("{failed} cleanup {} failed", tasks(failed))),
+            (Some(cleaned), 0) => Some(cleaned),
+            (Some(cleaned), failed) => {
+                Some(format!("{cleaned}, {failed} {} failed", tasks(failed)))
+            }
+        }
+    }
+}
+fn tasks(count: u64) -> &'static str {
+    if count == 1 {
+        "task"
+    } else {
+        "tasks"
+    }
 }
 impl BackgroundState {
     /// What automatic updates wait for, as the Settings page says it.
@@ -749,6 +802,16 @@ pub fn source_name(id: &str) -> &str {
     backends::display_name(id)
 }
 
+/// The source as a row names it. Docker and Podman clean more than images:
+/// their cleanup tasks say the tool's name alone.
+pub fn row_source_name(row: &Row) -> &str {
+    match (row.kind.as_str(), row.source.as_str()) {
+        ("cleanup", "docker") => "Docker",
+        ("cleanup", "podman") => "Podman",
+        _ => source_name(&row.source),
+    }
+}
+
 fn simplified(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
@@ -820,8 +883,8 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
         parts.push(row.name.clone());
     }
     // A standalone tool's row is named after its source already.
-    if source_name(&row.source) != row.title() {
-        parts.push(source_name(&row.source).to_owned());
+    if row_source_name(row) != row.title() {
+        parts.push(row_source_name(row).to_owned());
     }
     if let Some(remote) = row.remote.as_deref().filter(|r| !r.is_empty()) {
         parts.push(remote.to_owned());
@@ -870,10 +933,35 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     parts.join(", ")
 }
 
+/// A cleanup preview split into what it says and what it lists: backends
+/// write a sentence ending in `.` or `:` and then one item per line.
+pub fn cleanup_preview(preview: &str) -> (&str, Vec<&str>) {
+    let mut lines = preview
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or("");
+    if first.ends_with(['.', ':']) {
+        (first, lines.collect())
+    } else {
+        (
+            "",
+            std::iter::once(first)
+                .chain(lines)
+                .filter(|line| !line.is_empty())
+                .collect(),
+        )
+    }
+}
+
 pub fn cleanup_type(kind: &str) -> &'static str {
     match kind {
         "orphan_dependencies" => "Dependencies",
         "duplicate_copy" => "Extra copy",
+        "unused" => "Unused",
+        "build_files" => "Build files",
+        "worktree" => "Worktree",
+        "data" => "Data",
         _ => "Cache",
     }
 }
@@ -882,16 +970,13 @@ pub fn cleanup_type(kind: &str) -> &'static str {
 pub fn version_text(row: &Row) -> String {
     let known = |value: &Option<String>| value.clone().filter(|v| !v.is_empty());
     match row.kind.as_str() {
-        "cleanup" => cleanup_type(&row.cleanup_kind).into(),
+        "cleanup" => match row.bytes.filter(|bytes| *bytes > 0) {
+            Some(bytes) => size(bytes),
+            None => cleanup_type(&row.cleanup_kind).into(),
+        },
         "failure" => "Failed".into(),
-        "source" => if row.available.unwrap_or(false) {
-            "Available"
-        } else {
-            "Unavailable"
-        }
-        .into(),
         _ if row.has_update() => match (known(&row.installed), known(&row.candidate)) {
-            (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
+            (Some(old), Some(new)) if old != new => format!("{new} from {old}"),
             (_, Some(new)) => new,
             (Some(old), None) => old,
             _ => "Unknown".into(),
@@ -1088,7 +1173,6 @@ pub struct ViewOptions<'a> {
     pub sources: Option<&'a HashSet<String>>,
     pub filter: &'a str,
     pub duplicates_only: bool,
-    pub show_unavailable: bool,
     pub sort: Option<(Column, bool)>,
     pub scope_choices: Option<&'a HashMap<String, String>>,
 }
@@ -1135,6 +1219,8 @@ fn filter_matches(row: &Row, filter: &str) -> bool {
 fn sort_key(row: &Row, column: Column) -> String {
     match column {
         Column::Name => row.title().to_lowercase(),
+        // Cleanup tasks by how much they free.
+        Column::Version if row.kind == "cleanup" => format!("{:020}", row.bytes.unwrap_or(0)),
         Column::Version => row
             .installed
             .clone()
@@ -1142,13 +1228,7 @@ fn sort_key(row: &Row, column: Column) -> String {
             .or_else(|| row.candidate.clone())
             .unwrap_or_default()
             .to_lowercase(),
-        Column::Summary => {
-            if row.kind == "source" {
-                row.available.unwrap_or(false).to_string()
-            } else {
-                row.summary.to_lowercase()
-            }
-        }
+        Column::Summary => row.summary.to_lowercase(),
     }
 }
 
@@ -1166,6 +1246,31 @@ pub fn flatpak_group(row: &Row) -> Option<String> {
     })
 }
 
+/// Sorts `kept` by `key`, then by name and source. Each key is worked out
+/// once, not on every comparison: long lists sort as people type.
+fn sort_rows<K: Ord>(
+    kept: &mut Vec<usize>,
+    rows: &[Row],
+    ascending: bool,
+    key: impl Fn(&Row) -> K,
+) {
+    let mut keyed: Vec<_> = kept
+        .iter()
+        .map(|&index| {
+            let row = &rows[index];
+            ((key(row), row.title().to_lowercase(), &row.source), index)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        if ascending {
+            a.0.cmp(&b.0)
+        } else {
+            b.0.cmp(&a.0)
+        }
+    });
+    *kept = keyed.into_iter().map(|(_, index)| index).collect();
+}
+
 /// The rows the list shows, in order.
 pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
     let page = options.page;
@@ -1178,18 +1283,13 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
             match page {
                 Some(Page::Search) => !row.fabricated(),
                 Some(Page::Clean) => row.kind == "cleanup",
-                Some(Page::Sources) => {
-                    row.kind == "source"
-                        && (options.show_unavailable || row.available.unwrap_or(false))
-                }
                 _ => true,
             }
         })
         .filter(|&index| {
-            page == Some(Page::Sources)
-                || options
-                    .sources
-                    .is_none_or(|sources| sources.contains(&rows[index].source))
+            options
+                .sources
+                .is_none_or(|sources| sources.contains(&rows[index].source))
         })
         .collect();
     if page == Some(Page::Installed) {
@@ -1215,40 +1315,13 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
                 && (!options.duplicates_only || !row.same_app_from.is_empty())
         });
     }
-    let by_name = |a: &Row, b: &Row| {
-        a.title()
-            .to_lowercase()
-            .cmp(&b.title().to_lowercase())
-            .then_with(|| a.source.cmp(&b.source))
-    };
     if let Some((column, ascending)) = options.sort {
-        kept.sort_by(|&a, &b| {
-            let (a, b) = (&rows[a], &rows[b]);
-            let order = sort_key(a, column)
-                .cmp(&sort_key(b, column))
-                .then_with(|| by_name(a, b));
-            if ascending {
-                order
-            } else {
-                order.reverse()
-            }
-        });
-    } else if page == Some(Page::Sources) {
-        // Enabled managers first, so the ones in use are easy to find.
-        let disabled = |row: &Row| options.sources.is_some_and(|s| !s.contains(&row.source));
-        kept.sort_by(|&a, &b| {
-            let (a, b) = (&rows[a], &rows[b]);
-            disabled(a).cmp(&disabled(b)).then_with(|| by_name(a, b))
-        });
+        sort_rows(&mut kept, rows, ascending, |row| sort_key(row, column));
     } else if page == Some(Page::Installed) {
         // A to Z across sources, so a package is where its name says.
-        kept.sort_by(|&a, &b| by_name(&rows[a], &rows[b]));
+        sort_rows(&mut kept, rows, true, |_| ());
     } else if page == Some(Page::Search) && !options.query.trim().is_empty() {
-        kept.sort_by(|&a, &b| {
-            relevance(&rows[a], options.query)
-                .cmp(&relevance(&rows[b], options.query))
-                .then_with(|| by_name(&rows[a], &rows[b]))
-        });
+        sort_rows(&mut kept, rows, true, |row| relevance(row, options.query));
     }
     let mut items: Vec<Item> = kept
         .into_iter()
@@ -1462,7 +1535,7 @@ pub fn search_hint(catalog: &[Source], enabled: &HashSet<String>, saved: &str) -
         })
         .collect();
     match searchable.as_slice() {
-        [] => "No enabled source can search. Turn one on in Sources.".into(),
+        [] => "No enabled source can search. Turn one on in Settings.".into(),
         [one] => format!("Searches {} as you type.", source_name(&one.source)),
         many => format!("Searches {} sources as you type.", many.len()),
     }
@@ -1543,26 +1616,7 @@ pub fn duration(seconds: i64) -> String {
     }
 }
 
-/// Bytes in base 1000: "820 bytes", "4.2 MB", "31 MB".
-pub fn size(bytes: u64) -> String {
-    if bytes < 1000 {
-        return format!("{bytes} bytes");
-    }
-    let mut value = bytes as f64;
-    let mut unit = "bytes";
-    for next in ["KB", "MB", "GB", "TB"] {
-        if value < 1000.0 {
-            break;
-        }
-        value /= 1000.0;
-        unit = next;
-    }
-    if value < 10.0 {
-        format!("{value:.1} {unit}")
-    } else {
-        format!("{value:.0} {unit}")
-    }
-}
+pub use pkgdeck_core::disk::size;
 
 /// How often background checks run, and how each is said.
 pub const INTERVALS: [(i32, &str); 10] = [

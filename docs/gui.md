@@ -1,7 +1,7 @@
 # Using the app
 
-Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
-**Search**, **Installed**, **Updates**, **Clean**, **Sources**, and **Settings**.
+Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has five pages:
+**Search**, **Installed**, **Updates**, **Clean**, and **Settings**.
 The **Updates** badge counts the updates found.
 
 The **Activity** button in the header opens a drawer from the right, with
@@ -80,7 +80,7 @@ computer can handle.
 ## Installed
 
 Packages from every source are listed A to Z. Filter the list by name, or
-tick **Only duplicates** in **Filter sources** to see apps installed from more
+tick **Only duplicates** in the sources filter (**All sources**) to see apps installed from more
 than one source. It's only there while some app is installed twice. Grouping
 is only visual. Each copy stays a separate package.
 
@@ -91,9 +91,10 @@ These controls work on every package page:
   for the default width.
 - A source that fails to check is tried once more before its warning shows.
   Homebrew waits for a `brew update` that is already running elsewhere.
-- **Filter sources** filters the current page. Each source shows its icon.
+- The sources filter, **All sources** until you pick some, filters the
+  current page. Each source shows its icon.
   It also lists sources you can't use, with the reason.
-- Each tick in **Filter sources** applies right away.
+- Each tick in the sources filter applies right away.
 - While a filter is on, the **×** at the end of its button clears it.
 - **Reload** gets fresh package data.
 
@@ -141,7 +142,8 @@ Cargo and Bun have no command that lists outdated tools, so PkgDeck asks
 crates.io and the npm registry about each installed tool when it lists them.
 Tools Cargo installed from Git or a local folder aren't checked.
 
-Versions appear as `installed → new` when the source provides both. Some
+An update shows the new version first, then the one it replaces, when the
+source provides both. Some
 Flatpak runtimes only report a branch or commit. PkgDeck shows what the
 source reports and never makes up a version.
 
@@ -180,28 +182,67 @@ a standalone tool or an app from macOS Applications, has no Undo.
 
 ## Clean
 
-Clean lists maintenance tasks, such as removing unused dependencies or cached
-downloads. Open a task to see exactly what it will remove, or click
-**Clean all**. Every task asks for confirmation, and PkgDeck checks the task
-again right before running it. Sources that can't clean are not listed, and
-checks that failed are shown separately.
+Clean lists maintenance tasks, biggest first, with how much space each one
+frees. **Clean all** shows the total. Open a task to see how much it frees
+and each folder or item it will remove. Every task asks for confirmation, and PkgDeck checks the task again
+right before running it. Sources that can't clean are not listed, and checks
+that failed are shown separately.
 
-APT finds unused dependencies without a password. It only counts cached
-downloads at this stage. APT picks which cached downloads to delete when the
-cleanup runs, and asks for your password then.
+| Source | What it cleans |
+| --- | --- |
+| APT, Homebrew | Unused dependencies and old downloads |
+| Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
+| Docker Buildx | Unused build cache |
+| npm, pip, uv | Download caches |
+| Developer caches | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
+| Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while |
+
+- Unused volumes hold data. **Clean all** leaves them alone, and their row
+  says **Not in Clean all**. Clean them on their own.
+- A worktree counts as finished when its branch was merged or deleted on the
+  remote, and it has no changes. Removing it keeps the branch.
+- Old project build files wait while something is being built.
+- APT finds unused dependencies without a password. It only counts cached
+  downloads at this stage. APT picks which cached downloads to delete when
+  the cleanup runs, and asks for your password then.
+
+### Clean settings
+
+- **Old projects**: how long a project must stay untouched. A week by default.
+- **Look for projects in**: the folders PkgDeck searches. Your home folder by
+  default, without hidden folders and, on macOS, without Library. **Add
+  folder** adds another one.
+
+### Clean automatically
+
+Turn on **Clean automatically** in Settings. It needs **Background checks**.
+
+- At most once a day, after a background check.
+- Only what comes back on its own: download caches, unused images, build
+  caches, and build files of old projects.
+- Never unused dependencies, extra copies, worktrees, stopped containers or
+  volumes. Those stay in **Clean** for you to review.
+- Only sources that run as you, so it never asks for a password.
+- Like automatic updates, it waits for the charger, for builds, and for other
+  changes to finish.
+- A notification says how much space it freed.
 
 ## Sources
 
-Turn package managers on or off. PkgDeck remembers your choice.
+**Settings** → **Sources** lists the package managers found on this
+computer. Turn one off and PkgDeck stops checking it. A source whose check
+failed shows why in red, with **Try again** under it.
 
-**Filter sources** filters one page. The Sources page chooses which package
-managers PkgDeck checks at all. Neither one turns repositories on or off.
-**Refresh sources** downloads the latest package lists for the selected
-package managers.
+The sources filter only filters one page. Neither one turns repositories on
+or off.
+
+**Refresh sources** on **Updates** downloads the latest package lists of
+the sources that page shows, after one review. Some ask for your password.
 
 ### Repositories
 
-Open **Sources → Repositories** to see and manage repositories.
+Open **Settings** → **Sources** → **Repositories** to see and manage
+repositories.
 
 ![Repository management in PkgDeck](screenshots/repositories.png)
 
@@ -370,13 +411,15 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 is running. Turn them off in Settings.
 
 - The first check runs about 30 seconds after launch, then at most once per
-  **Check every** interval: 15 minutes to a week, 30 minutes by default. The
+  **Check every** interval: 15 minutes to a week, 6 hours by default. The
   Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
-  `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
+  `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
+  default. The first time the window opens, PkgDeck asks once with a
+  **Start at login** button.
 - While background checks are on, PkgDeck shows a tray icon (a menu bar
   icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
 - On Linux, clicking the tray icon also shows or hides the window.
@@ -483,24 +526,32 @@ out of date, and each page refreshes when you open it.
   red, orange, green, teal or graphite.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
-- **Animations**: turn motion on or off.
+- **Animations**: turn motion on or off. When the system turns motion off
+  (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
+  and reads **Off in system settings**.
 - **Background checks**, **Check every**, **Install updates automatically**,
   **Allow updates that remove packages**, **Allow automatic updates without
   a password** and **Start in background at login**: see
   [Update notifications](#update-notifications).
+- **Sources**: which package managers PkgDeck uses, and **Repositories**.
+  See [Sources](#sources).
+- **Clean automatically**: see [Clean automatically](#clean-automatically).
+- **Old projects** and **Look for projects in**: see
+  [Clean settings](#clean-settings).
 - **Last check** shows when PkgDeck last checked and what it found.
 - **Test notification** sends a sample notification.
 - **About** shows the version and a link to GitHub.
-- **Keyboard shortcuts** lists the shortcuts below.
+- **Keyboard shortcuts**: **Show shortcuts** lists the main ones. The full
+  list is below.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+1 to Ctrl+5 | Go to Search, Installed, Updates, Clean, or Sources |
-| Ctrl+, or Ctrl+6 | Open Settings |
+| Ctrl+1 to Ctrl+4 | Go to Search, Installed, Updates, or Clean |
+| Ctrl+, or Ctrl+5 | Open Settings |
 | Ctrl+J | Show or hide Activity |
-| Ctrl+F | Focus the search field or package filter, or open **Filter sources** |
+| Ctrl+F | Focus the search field or package filter, or open the sources filter |
 | Ctrl+L | Move to the results list |
 | Up, Down, Page Up, Page Down, Home, End | Move through the list |
 | Space | Open the selected row's app page |
@@ -508,7 +559,7 @@ out of date, and each page refreshes when you open it.
 | Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+R | Reload the page |
-| Ctrl+M | Refresh the source's package lists |
+| Ctrl+M | Refresh sources: download the latest package lists |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
 | Alt+C | Cancel the open confirmation |
 | Esc | Close Activity, clear the search, close the details, or go back from an app page |

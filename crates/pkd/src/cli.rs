@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "macos-updates", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "macos-updates", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry", "dev-caches", "projects"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -928,8 +928,10 @@ fn dispatch_command(
                 let operations: Vec<_> = report
                     .items
                     .into_iter()
+                    // Data, such as container volumes, only goes by name.
                     .filter(|item| {
-                        all || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
+                        (all && item.kind.in_clean_all())
+                            || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
                     })
                     .map(|item| Operation::Clean(item.id))
                     .collect();
@@ -1744,16 +1746,30 @@ mod tests {
             if let Some(error) = &self.read_failure {
                 return Err(error.clone());
             }
-            Ok(vec![CleanupItem {
-                id: CleanupId {
-                    backend: self.backend.clone(),
-                    key: "orphans".into(),
+            Ok(vec![
+                CleanupItem {
+                    id: CleanupId {
+                        backend: self.backend.clone(),
+                        key: "orphans".into(),
+                    },
+                    kind: CleanupKind::OrphanDependencies,
+                    title: "Synthetic cleanup".into(),
+                    summary: "One synthetic dependency".into(),
+                    preview: "synthetic-runtime".into(),
+                    bytes: None,
                 },
-                kind: CleanupKind::OrphanDependencies,
-                title: "Synthetic cleanup".into(),
-                summary: "One synthetic dependency".into(),
-                preview: "synthetic-runtime".into(),
-            }])
+                CleanupItem {
+                    id: CleanupId {
+                        backend: self.backend.clone(),
+                        key: "volumes".into(),
+                    },
+                    kind: CleanupKind::Data,
+                    title: "Unused volumes".into(),
+                    summary: "Data nothing uses".into(),
+                    preview: "synthetic-volume".into(),
+                    bytes: Some(1),
+                },
+            ])
         }
         fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
             Ok(AptUpgradePlan {
@@ -2105,6 +2121,14 @@ mod tests {
         assert_eq!(
             cleaned.0["operations"][0]["operation"],
             json!({"clean":{"backend":"apt","key":"orphans"}})
+        );
+        // Data goes only when named.
+        assert_eq!(cleaned.0["operations"].as_array().unwrap().len(), 1);
+        let volumes = call(&mut engine, &["clean", "apt:volumes"], true);
+        assert_eq!(volumes.1, 0);
+        assert_eq!(
+            volumes.0["operations"][0]["operation"],
+            json!({"clean":{"backend":"apt","key":"volumes"}})
         );
         assert_eq!(call(&mut engine, &["--scope", "user", "clean"], true).1, 2);
         assert_eq!(
