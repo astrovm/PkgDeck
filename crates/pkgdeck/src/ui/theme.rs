@@ -18,6 +18,11 @@ pub struct Palette {
     pub muted: Color32,
     pub accent: Color32,
     pub accent_ink: Color32,
+    /// The accent deep enough for white text on it, as the older styles
+    /// fill title bars and selections whatever the appearance.
+    pub deep: Color32,
+    /// The accent bright enough to read on black.
+    pub bright: Color32,
     pub line: Color32,
     pub strong_line: Color32,
     pub hover: Color32,
@@ -127,8 +132,10 @@ impl Skin {
     /// How round the style draws corners, before the person's choice.
     fn style_roundness(self) -> f32 {
         match self.style {
-            Style::Modern | Style::Gel => 1.0,
+            Style::Modern => 1.0,
             Style::Luna => 0.45,
+            // Aqua's panels are nearly square; its buttons are pills.
+            Style::Gel => 0.35,
             Style::Glass => 0.4,
             Style::Platinum => 0.3,
             Style::Retro => 0.0,
@@ -262,8 +269,8 @@ impl Palette {
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             },
-            // High contrast, as the old desktops shipped for the dark.
-            (Style::Retro, true) => (0x000000, 0x0c0c0c, 0xffffff, 0xc0c0c0),
+            // The grey of the old desktops, turned down.
+            (Style::Retro, true) => (0x3a3a3a, 0x1e1e1e, 0xf2f2f2, 0xbdbdbd),
             (Style::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
             (Style::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
             (Style::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
@@ -276,9 +283,19 @@ impl Palette {
         };
         let (on_light, on_dark) = accent_colors(scheme.accent);
         let (canvas, ink) = (rgb(canvas), rgb(ink));
-        let accent = match scheme.custom_accent {
-            Some(color) if scheme.accent == Accent::Custom => readable_accent(color, canvas, dark),
+        let custom = scheme
+            .custom_accent
+            .filter(|_| scheme.accent == Accent::Custom);
+        let accent = match custom {
+            Some(color) => readable_accent(color, canvas, dark),
             _ => rgb(if dark { on_dark } else { on_light }),
+        };
+        let (deep, bright) = match custom {
+            Some(color) => (
+                readable_accent(color, Color32::WHITE, false),
+                readable_accent(color, Color32::BLACK, true),
+            ),
+            None => (rgb(on_light), rgb(on_dark)),
         };
         Self {
             canvas,
@@ -299,6 +316,8 @@ impl Palette {
             } else {
                 rgb(0xffffff)
             },
+            deep,
+            bright,
             line: tint(ink, if dark { 0.12 } else { 0.13 }),
             strong_line: tint(ink, if dark { 0.3 } else { 0.32 }),
             hover: tint(ink, if dark { 0.06 } else { 0.05 }),
@@ -317,6 +336,17 @@ impl Palette {
     /// The strong line laid over the surface, as one opaque colour.
     pub fn strong_line_solid(&self) -> Color32 {
         over(self.surface, self.ink, if self.dark { 0.28 } else { 0.24 })
+    }
+    /// A rail that reads on the card and on the window behind it, since
+    /// group boxes leave controls on the window's own colour.
+    pub fn rail(&self) -> Color32 {
+        let (card, window) = (luminance(self.surface), luminance(self.canvas));
+        let base = if (window < card) != self.dark {
+            self.canvas
+        } else {
+            self.surface
+        };
+        over(base, self.ink, if self.dark { 0.28 } else { 0.24 })
     }
     /// The palette of what `ctx` shows now.
     pub fn current(ctx: &egui::Context) -> Self {
@@ -450,6 +480,42 @@ const LUCIDA: &[(&str, &str)] = &[
         "usr/share/fonts/truetype/lucida/LucidaSansRegular.ttf",
         "usr/share/fonts/truetype/lucida/LucidaSansDemiBold.ttf",
     ),
+    // As wide and open, and on nearly every Linux desktop.
+    (
+        "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/TTF/DejaVuSans.ttf",
+        "usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ),
+];
+const SEGOE: &[(&str, &str)] = &[
+    (
+        "usr/share/fonts/truetype/selawik/selawk.ttf",
+        "usr/share/fonts/truetype/selawik/selawkb.ttf",
+    ),
+    (
+        "usr/share/fonts/selawik/selawk.ttf",
+        "usr/share/fonts/selawik/selawkb.ttf",
+    ),
+    // Noto Sans is drawn much like it.
+    (
+        "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/noto/NotoSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+    ),
 ];
 
 /// Which faces draw text.
@@ -469,7 +535,8 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
         Typeface::Style => match style {
             Style::Retro | Style::Luna => Face::Style(TAHOMA),
             Style::Gel | Style::Platinum => Face::Style(LUCIDA),
-            Style::Modern | Style::Glass => Face::Inter,
+            Style::Glass => Face::Style(SEGOE),
+            Style::Modern => Face::Inter,
         },
     }
 }
@@ -613,8 +680,51 @@ pub fn apply(ctx: &egui::Context) {
                 widget.corner_radius = round(CONTROL_RADIUS);
                 widget.expansion = 0.0;
             }
+            // The older styles' scroll bars are always there, wide and solid.
+            if let Some((width, handle)) = scroll_bar(scheme.style, &palette) {
+                style.spacing.scroll = egui::style::ScrollStyle {
+                    bar_width: width,
+                    bar_inner_margin: 0.0,
+                    handle_min_length: 20.0,
+                    dormant_background_opacity: 1.0,
+                    active_background_opacity: 1.0,
+                    interact_background_opacity: 1.0,
+                    dormant_handle_opacity: 1.0,
+                    active_handle_opacity: 1.0,
+                    interact_handle_opacity: 1.0,
+                    ..egui::style::ScrollStyle::solid()
+                };
+                let visuals = &mut style.visuals;
+                visuals.extreme_bg_color = over(palette.surface, palette.canvas, 0.6);
+                visuals.widgets.inactive.bg_fill = handle;
+                visuals.widgets.hovered.bg_fill = over(handle, palette.ink, 0.08);
+                visuals.widgets.active.bg_fill = over(handle, palette.ink, 0.16);
+            }
         });
     }
+}
+
+/// How wide a style's scroll bars are and the colour of their handle;
+/// none for Modern's, which float over the content.
+pub fn scroll_bar(style: Style, palette: &Palette) -> Option<(f32, Color32)> {
+    let handle = match style {
+        Style::Modern => return None,
+        Style::Retro => palette.canvas,
+        Style::Luna => over(
+            palette.surface,
+            palette.deep,
+            if palette.dark { 0.45 } else { 0.28 },
+        ),
+        Style::Glass => over(palette.canvas, palette.ink, 0.12),
+        Style::Gel => over(palette.surface, palette.deep, 0.6),
+        Style::Platinum => over(palette.surface, palette.deep, 0.4),
+    };
+    let width = match style {
+        Style::Gel => 15.0,
+        Style::Luna | Style::Glass => 17.0,
+        _ => 16.0,
+    };
+    Some((width, handle))
 }
 
 /// Draw a source's mark into `rect`: its icon, or its monogram when it has
@@ -896,7 +1006,7 @@ mod tests {
             .round(radius)
         };
         assert_eq!(round(Style::Modern, 1.0, 12), CornerRadius::same(12));
-        assert_eq!(round(Style::Gel, 1.0, 9), CornerRadius::same(9));
+        assert_eq!(round(Style::Gel, 1.0, 12), CornerRadius::same(4));
         assert_eq!(round(Style::Retro, 2.0, 12), CornerRadius::ZERO);
         assert_eq!(round(Style::Luna, 1.0, 12), CornerRadius::same(5));
         assert_eq!(round(Style::Glass, 1.0, 10), CornerRadius::same(4));
@@ -921,7 +1031,7 @@ mod tests {
     #[test]
     fn styles_choose_their_faces_unless_the_person_does() {
         assert_eq!(face(Style::Modern, Typeface::Style), Face::Inter);
-        assert_eq!(face(Style::Glass, Typeface::Style), Face::Inter);
+        assert_eq!(face(Style::Glass, Typeface::Style), Face::Style(SEGOE));
         assert_eq!(face(Style::Retro, Typeface::Style), Face::Style(TAHOMA));
         assert_eq!(face(Style::Luna, Typeface::Style), Face::Style(TAHOMA));
         assert_eq!(face(Style::Gel, Typeface::Style), Face::Style(LUCIDA));

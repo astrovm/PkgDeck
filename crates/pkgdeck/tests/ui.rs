@@ -419,6 +419,65 @@ fn styles_and_their_choices_change_the_look() {
     assert!(harness.query_by_label("Charcoal").is_some());
 }
 
+#[test]
+fn every_style_mixes_with_every_other_look_option() {
+    use pkgdeck::settings::{Density, Style, Typeface};
+    let mut harness = show(Page::Installed);
+    let colours = ["", "#ffe14d", "#202020", "#f4f4f4"];
+    let sizes = [
+        TextSize::Small,
+        TextSize::Normal,
+        TextSize::Large,
+        TextSize::Larger,
+    ];
+    let densities = [Density::Compact, Density::Normal, Density::Roomy];
+    let faces = [Typeface::Style, Typeface::Inter, Typeface::System];
+    let mut turn = 0;
+    for style in Style::ALL {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for roundness in [0.0, 1.0, 2.0] {
+                turn += 1;
+                let colour = colours[turn % colours.len()];
+                {
+                    let settings = &mut harness.state_mut().1.settings;
+                    settings.style = style;
+                    settings.appearance = appearance;
+                    settings.roundness = roundness;
+                    settings.custom_accent = colour.to_owned();
+                    settings.accent = if colour.is_empty() {
+                        style.accent()
+                    } else {
+                        Accent::Custom
+                    };
+                    settings.text_size = sizes[turn % sizes.len()];
+                    settings.density = densities[turn % densities.len()];
+                    settings.typeface = faces[turn % faces.len()];
+                }
+                let at = format!("{style:?} {appearance:?} round={roundness} {colour}");
+                for page in [Page::Installed, Page::Settings] {
+                    harness.state_mut().1.page = page;
+                    harness.state_mut().1.invalidate();
+                    harness.run_steps(3);
+                }
+                // Switches stay switches to a screen reader, drawn as a
+                // check box or not.
+                assert!(
+                    harness
+                        .query_by_role_and_label(Role::CheckBox, "Animations")
+                        .is_some(),
+                    "{at}"
+                );
+                // Only styles with corners offer to change them.
+                assert_eq!(
+                    harness.query_by_label("Roundness").is_some(),
+                    style != Style::Retro,
+                    "{at}"
+                );
+            }
+        }
+    }
+}
+
 /// A catalog with two package managers, one whose check failed and one
 /// that isn't on this computer.
 fn with_sources(mut app: App) -> App {

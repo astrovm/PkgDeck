@@ -43,38 +43,62 @@ const SWITCH: Vec2 = vec2(40.0, 24.0);
 fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
     let margin = egui::Margin::symmetric(18, 16);
-    show_card(ui, card(&palette).inner_margin(margin), |ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        ui.set_width(ui.available_width());
-        // Older styles put the title in a strip across the top, like a
-        // window's title bar.
-        let top = ui.max_rect();
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(top.left() - 18.0, top.top() - 16.0),
-            egui::pos2(top.right() + 18.0, top.top() + 14.0),
+    // The older styles frame settings in their group boxes.
+    let Some(group) = skin::group(&palette) else {
+        show_card(ui, card(&palette).inner_margin(margin), |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.set_width(ui.available_width());
+            caption(ui, title);
+            ui.add_space(4.0);
+            content(ui);
+        });
+        return;
+    };
+    let font = if group.bold {
+        theme::bold(group.size)
+    } else {
+        theme::font(group.size)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), font, group.ink);
+    let title_height = galley.size().y;
+    if group.on_line {
+        ui.add_space(title_height / 2.0);
+    }
+    let shown = egui::Frame::new()
+        .fill(group.fill)
+        .stroke(group.stroke)
+        .corner_radius(group.radius)
+        .shadow(group.shadow)
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.set_width(ui.available_width());
+            // Room for the title, drawn once the box's size is known.
+            ui.add_space(if group.on_line {
+                4.0
+            } else {
+                title_height + 8.0
+            });
+            content(ui);
+        });
+    let rect = shown.response.rect;
+    skin::paint_group(ui.painter(), rect, &palette);
+    let at = if group.on_line {
+        egui::pos2(rect.left() + 12.0, rect.top() - title_height / 2.0)
+    } else {
+        egui::pos2(rect.left() + 18.0, rect.top() + 14.0)
+    };
+    if group.on_line {
+        // The title breaks the line it sits on.
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(at, galley.size()).expand2(vec2(5.0, 0.0)),
+            egui::CornerRadius::ZERO,
+            palette.canvas,
         );
-        match skin::paint_title_strip(ui.painter(), strip.shrink(1.0), &palette) {
-            Some(ink) => {
-                let galley = ui
-                    .painter()
-                    .layout_no_wrap(title.to_owned(), theme::bold(13.0), ink);
-                let at = egui::pos2(top.left(), strip.center().y - galley.size().y / 2.0);
-                if skin::title_needs_backing() {
-                    let behind =
-                        egui::Rect::from_min_size(at, galley.size()).expand2(vec2(6.0, 0.0));
-                    ui.painter()
-                        .rect_filled(behind, egui::CornerRadius::ZERO, palette.canvas);
-                }
-                ui.painter().galley(at, galley, ink);
-                ui.add_space(22.0);
-            }
-            None => {
-                caption(ui, title);
-                ui.add_space(4.0);
-            }
-        }
-        content(ui);
-    });
+    }
+    ui.painter().galley(at, galley, group.ink);
 }
 
 /// A label with an optional line under it, and a control `size` big: on
@@ -332,8 +356,11 @@ fn styles(app: &mut App, ui: &mut Ui) {
 fn preview(painter: &egui::Painter, rect: egui::Rect, palette: &Palette) {
     skin::paint_canvas(painter, rect, palette);
     let sidebar = egui::Rect::from_min_size(rect.min, vec2(30.0, rect.height()));
-    skin::paint_sidebar(painter, sidebar, palette);
     let pill = egui::Rect::from_min_size(sidebar.min + vec2(5.0, 16.0), vec2(20.0, 9.0));
+    let logo = egui::Rect::from_min_size(sidebar.min + vec2(5.0, 6.0), vec2(20.0, 4.0));
+    let entries =
+        egui::Rect::from_min_max(pill.min, egui::pos2(pill.right(), rect.bottom() - 10.0));
+    skin::paint_sidebar(painter, sidebar, logo, entries, palette);
     skin::paint_selection(painter, pill, palette);
     for row in 1..4 {
         let line = egui::Rect::from_min_size(
@@ -583,6 +610,7 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     );
     let knob =
         egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(part, rect.height())).shrink(3.0);
+    let mut chosen_ink = palette.ink;
     if modern {
         ui.painter().rect(
             knob,
@@ -592,19 +620,27 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
             egui::StrokeKind::Inside,
         );
     } else {
-        skin::paint_button(
+        // Aqua's chosen segment is blue gel; Windows 98's is pressed in.
+        let style = theme::skin().style;
+        if let Some(ink) = skin::paint_button(
             ui.painter(),
             knob,
-            skin::Weight::Normal,
+            if style == Style::Gel {
+                skin::Weight::Strong
+            } else {
+                skin::Weight::Normal
+            },
             palette.surface,
             Stroke::new(1.0, palette.line),
             skin::State {
                 hover: 0.0,
-                press: 0.0,
+                press: if style == Style::Retro { 1.0 } else { 0.0 },
                 opacity: 1.0,
             },
             &palette,
-        );
+        ) {
+            chosen_ink = ink;
+        }
     }
     let mut chosen = None;
     for (index, label) in labels.iter().enumerate() {
@@ -624,7 +660,7 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
             )
         });
         let color = if index == current {
-            palette.ink
+            chosen_ink
         } else {
             palette.muted
         };

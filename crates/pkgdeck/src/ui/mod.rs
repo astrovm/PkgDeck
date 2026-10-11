@@ -250,9 +250,22 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
     let painter = ui.painter_at(rect);
-    skin::paint_sidebar(&painter, rect, &palette);
     let margin = if rail { 12.0 } else { 16.0 };
     let inner = rect.shrink2(vec2(margin, 0.0));
+    let entry_height = 40.0;
+    let top = rect.top() + 84.0;
+    let entries = Rect::from_min_size(
+        pos2(inner.left(), top),
+        vec2(
+            inner.width(),
+            Page::ALL.len() as f32 * (entry_height + 4.0) - 4.0,
+        ),
+    );
+    let logo_row = Rect::from_min_max(
+        pos2(inner.left(), rect.top() + 24.0),
+        pos2(inner.right(), rect.top() + 54.0),
+    );
+    let ink = skin::paint_sidebar(&painter, rect, logo_row, entries, &palette);
     // The logo and name, level with the page's heading.
     let logo = Rect::from_min_size(
         pos2(
@@ -276,12 +289,10 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             Align2::LEFT_CENTER,
             "PkgDeck",
             theme::bold(19.0),
-            alpha(palette.ink, name_shown),
+            alpha(ink.name.unwrap_or(palette.ink), name_shown),
         );
     }
     // The sections.
-    let entry_height = 40.0;
-    let top = rect.top() + 84.0;
     let current = Page::ALL.iter().position(|p| *p == app.page).unwrap_or(0);
     let pill_y = glide(
         &ctx,
@@ -331,6 +342,8 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
         let is_current = page == app.page;
         let color = if is_current {
             pill_ink.unwrap_or(palette.accent)
+        } else if let Some(link) = ink.entries {
+            link
         } else {
             mix(palette.muted, palette.ink, hover)
         };
@@ -358,6 +371,8 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
                 alpha(
                     if is_current {
                         pill_ink.unwrap_or(palette.ink)
+                    } else if let Some(link) = ink.entries {
+                        link
                     } else {
                         mix(palette.muted, palette.ink, 0.55 + hover * 0.45)
                     },
@@ -499,14 +514,38 @@ fn header(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
     let compact = width < 600.0;
+    // The older styles put the heading in a window's title bar.
+    let bar = Rect::from_min_size(ui.cursor().min, vec2(width, 46.0));
+    let title_ink = skin::paint_title_strip(ui.painter(), bar, &palette);
     ui.horizontal(|ui| {
-        ui.set_min_height(38.0);
-        ui.label(
-            egui::RichText::new(app.page.name())
-                .font(theme::bold(26.0))
-                .color(palette.ink),
-        );
+        ui.set_min_height(if title_ink.is_some() { 46.0 } else { 38.0 });
+        match title_ink {
+            Some(ink) => {
+                ui.add_space(12.0);
+                let font = theme::bold(20.0);
+                // Read out as before, drawn by the style.
+                let label = ui.label(
+                    egui::RichText::new(app.page.name())
+                        .font(font.clone())
+                        .color(Color32::TRANSPARENT),
+                );
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(app.page.name().to_owned(), font, ink);
+                skin::paint_title_text(ui.painter(), label.rect.min, galley, ink, &palette);
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(app.page.name())
+                        .font(theme::bold(26.0))
+                        .color(palette.ink),
+                );
+            }
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if title_ink.is_some() {
+                ui.add_space(8.0);
+            }
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
                 let duplicates = app.page == Page::Installed && app.duplicates_only;

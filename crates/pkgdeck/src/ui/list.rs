@@ -374,7 +374,10 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             }
         }
     }
-    for (column, title, area) in titles {
+    // The older styles draw each heading as a cell of a header bar.
+    let band = skin::paint_column_band(ui.painter(), rect.shrink2(vec2(2.0, 0.0)), &palette);
+    let starts: Vec<f32> = titles.iter().map(|(_, _, area)| area.left()).collect();
+    for (index, (column, title, area)) in titles.into_iter().enumerate() {
         let response = ui
             .interact(
                 Rect::from_min_max(
@@ -386,21 +389,46 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             )
             .on_hover_cursor(CursorIcon::PointingHand);
         let sorted = app.sort.filter(|(c, _)| *c == column);
-        let color = if sorted.is_some() || response.hovered() {
+        let mut color = if sorted.is_some() || response.hovered() || band {
             palette.ink
         } else {
             palette.muted
         };
+        if band {
+            let left = if index == 0 {
+                rect.left() + 2.0
+            } else {
+                area.left() - 8.0
+            };
+            let right = starts
+                .get(index + 1)
+                .map_or(rect.right() - 2.0, |next| next - 8.0);
+            let cell = Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom()));
+            if let Some(ink) = skin::paint_column_cell(
+                ui.painter(),
+                cell,
+                &palette,
+                sorted.is_some(),
+                response.hovered(),
+            ) {
+                color = ink;
+            }
+        }
+        let title = skin::column_title(title);
         let text = match sorted {
             Some((_, true)) => format!("{title}  ▲"),
             Some((_, false)) => format!("{title}  ▼"),
-            None => title.to_owned(),
+            None => title,
         };
         ui.painter().text(
             pos2(area.left(), rect.center().y),
             Align2::LEFT_CENTER,
             text,
-            theme::bold(11.0),
+            if band {
+                theme::font(13.0)
+            } else {
+                theme::bold(11.0)
+            },
             color,
         );
         if response.clicked() {
@@ -412,13 +440,15 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         }
     }
     column_dividers(app, ui, rect, &cols);
-    ui.painter().line_segment(
-        [
-            pos2(rect.left() + 12.0, rect.bottom()),
-            pos2(rect.right() - 12.0, rect.bottom()),
-        ],
-        Stroke::new(1.0, alpha(palette.line, 0.7)),
-    );
+    if !band {
+        ui.painter().line_segment(
+            [
+                pos2(rect.left() + 12.0, rect.bottom()),
+                pos2(rect.right() - 12.0, rect.bottom()),
+            ],
+            Stroke::new(1.0, alpha(palette.line, 0.7)),
+        );
+    }
 }
 
 /// Drag the line after a column heading to resize it; double-click it for
@@ -711,8 +741,7 @@ fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin:
         pos2(ui.max_rect().right(), origin + bottom),
     )
     .shrink2(vec2(6.0, 2.0));
-    ui.painter()
-        .rect_filled(rect, theme::round(10), alpha(palette.selection, shown));
+    skin::paint_row_selection(ui.painter(), rect, &palette, shown);
     // The keyboard's outline moves with it.
     if selected.is_some() && app.ui.keyboard_nav && app.ui.list_focused {
         ui.painter().rect_stroke(
@@ -794,6 +823,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         FEEDBACK,
     );
     let chosen = ease(&ctx, id.with("selected"), selected, REVEAL);
+    // On a solid selection, everything in the row takes its ink.
+    let palette = match skin::row_selection_ink(&palette) {
+        Some(ink) if selected => skin::on_fill(&palette, ink),
+        _ => palette,
+    };
     let surface = rect.shrink2(vec2(6.0, 2.0));
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)

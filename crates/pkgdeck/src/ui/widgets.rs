@@ -333,7 +333,7 @@ impl<'a> Button<'a> {
                 Look::Secondary | Look::Soft(_) => skin::Weight::Normal,
                 Look::Flat => skin::Weight::Flat,
             };
-            skin::paint_button(
+            let styled = skin::paint_button(
                 painter,
                 rect,
                 weight,
@@ -346,6 +346,17 @@ impl<'a> Button<'a> {
                 },
                 &palette,
             );
+            // The older styles pick the label's colour, as their buttons
+            // aren't filled with the accent; a button that's off keeps its
+            // grey.
+            let ink = match styled {
+                Some(styled) if self.enabled => match self.look {
+                    // Coloured buttons keep their colour on the label.
+                    Look::Soft(_) => ink,
+                    _ => styled,
+                },
+                _ => ink,
+            };
             let ink = alpha(ink, opacity);
             let content = icon_size
                 + galley.as_ref().map_or(0.0, |g| {
@@ -444,7 +455,21 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
     let value = *on;
     let text = label.to_owned();
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, value, &text));
-    if ui.is_rect_visible(rect) {
+    if ui.is_rect_visible(rect) && skin::switch_as_check() {
+        // The older desktops had check boxes, not switches.
+        let tick = Rect::from_center_size(
+            Pos2::new(rect.right() - 11.0, rect.center().y),
+            Vec2::splat(22.0),
+        );
+        paint_tick(
+            ui,
+            tick,
+            response.id,
+            *on,
+            enabled,
+            response.hovered() && enabled,
+        );
+    } else if ui.is_rect_visible(rect) {
         let palette = Palette::current(ui.ctx());
         let t = ease(ui.ctx(), response.id, *on, REVEAL);
         let hover = ease(
@@ -462,13 +487,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
         );
         let radius = 9.0 + hover * 0.6;
         let x = egui::lerp((rect.left() + 12.0)..=(rect.right() - 12.0), t);
-        skin::paint_knob(
-            ui.painter(),
-            Pos2::new(x, rect.center().y),
-            radius,
-            &palette,
-            opacity,
-        );
+        skin::paint_knob(ui.painter(), Pos2::new(x, rect.center().y), radius, opacity);
     }
     if enabled {
         response.on_hover_cursor(CursorIcon::PointingHand)
@@ -510,14 +529,16 @@ pub fn paint_tick(ui: &Ui, rect: Rect, id: Id, checked: bool, enabled: bool, hov
     );
     let opacity = if enabled { 1.0 } else { 0.42 };
     let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-    let ink = skin::paint_check(
+    let Some(ink) = skin::paint_check(
         ui.painter(),
         box_rect,
         &palette,
         t,
         hovered && enabled,
         opacity,
-    );
+    ) else {
+        return;
+    };
     if t > 0.01 {
         let scale = t.max(0.0);
         let check = Rect::from_center_size(box_rect.center(), Vec2::splat(14.0 * scale));
@@ -873,11 +894,7 @@ pub fn steps(
     let opacity = if enabled { 1.0 } else { 0.42 };
     let x = glide(ui.ctx(), id, at(*index), REVEAL);
     let painter = ui.painter();
-    painter.rect_filled(
-        track,
-        theme::round(2),
-        alpha(palette.strong_line_solid(), opacity),
-    );
+    painter.rect_filled(track, theme::round(2), alpha(palette.rail(), opacity));
     painter.rect_filled(
         Rect::from_min_max(track.min, Pos2::new(x, track.max.y)),
         theme::round(2),
@@ -887,7 +904,7 @@ pub fn steps(
         let color = if at(i) <= x {
             palette.accent
         } else {
-            palette.strong_line_solid()
+            palette.rail()
         };
         painter.circle_filled(
             Pos2::new(at(i), track.center().y),
