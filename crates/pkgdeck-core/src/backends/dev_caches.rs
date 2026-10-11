@@ -337,6 +337,8 @@ mod tests {
             backend.cleanup_plan(&cargo_item.id, &cancel).unwrap(),
             *cargo_item
         );
+        // A folder gone since the review is skipped.
+        fs::remove_dir_all(cargo.join("git")).unwrap();
         let mut said = vec![];
         backend
             .execute(
@@ -349,7 +351,7 @@ mod tests {
             said,
             [Progress::Message("Emptying the Cargo downloads".into())]
         );
-        assert!(cargo.join("registry").is_dir() && cargo.join("git").is_dir());
+        assert!(cargo.join("registry").is_dir() && !cargo.join("git").exists());
         assert_eq!(fs::read_dir(cargo.join("registry")).unwrap().count(), 0);
         assert!(cargo.exists());
         // Emptied, it isn't offered any more.
@@ -435,6 +437,7 @@ mod tests {
         fill(&root.join(".m2/repository"), 2 * 1024 * 1024);
         let mut backend = caches_in(&root, &[]);
         let cancel = Cancellation::default();
+        let mut ignore = |_: Progress| {};
         for id in [
             CleanupId {
                 backend: "dev-caches".into(),
@@ -446,7 +449,7 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                backend.execute(&Operation::Clean(id.clone()), &cancel, &mut |_| {}),
+                backend.execute(&Operation::Clean(id.clone()), &cancel, &mut ignore),
                 Err(EngineError::NotFound)
             ));
             assert!(matches!(
@@ -460,7 +463,7 @@ mod tests {
                     backend: "dev-caches".into()
                 },
                 &cancel,
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::Unsupported { .. })
         ));
@@ -471,7 +474,7 @@ mod tests {
         let cancelled = Cancellation::default();
         cancelled.cancel();
         assert!(matches!(
-            backend.execute(&Operation::Clean(maven.clone()), &cancelled, &mut |_| {}),
+            backend.execute(&Operation::Clean(maven.clone()), &cancelled, &mut ignore),
             Err(EngineError::Cancelled)
         ));
         assert!(matches!(
@@ -481,25 +484,22 @@ mod tests {
         assert!(root.join(".m2/repository/blob").exists());
         // A folder that can't be emptied says which one. Root may change
         // anything, so this only shows for everyone else.
-        if rustix::process::geteuid().is_root() {
-            fs::remove_dir_all(&root).unwrap();
-            return;
-        }
         let repository = root.join(".m2/repository");
         fs::set_permissions(
             &repository,
             std::os::unix::fs::PermissionsExt::from_mode(0o500),
         )
         .unwrap();
-        let error = backend
-            .execute(&Operation::Clean(maven), &cancel, &mut |_| {})
-            .unwrap_err();
+        let result = backend.execute(&Operation::Clean(maven), &cancel, &mut ignore);
         fs::set_permissions(
             &repository,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
         .unwrap();
-        assert!(error.to_string().contains("~/.m2/repository"), "{error}");
+        let root_user = rustix::process::geteuid().is_root();
+        assert!(
+            root_user || result.is_err_and(|error| error.to_string().contains("~/.m2/repository")),
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

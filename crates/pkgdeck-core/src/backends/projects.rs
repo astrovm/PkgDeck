@@ -429,17 +429,19 @@ impl Projects {
                 });
                 continue;
             }
-            let Some(head) = head.filter(|head| head.bytes().all(|b| b.is_ascii_hexdigit())) else {
-                continue;
-            };
-            let merged = default.as_deref().is_some_and(|default| {
-                self.git(
-                    repository,
-                    &["merge-base", "--is-ancestor", &head, default],
-                    cancel,
-                )
-                .is_some()
-            });
+            // Only a commit ID reaches Git's arguments.
+            let head = head.filter(|head| head.bytes().all(|b| b.is_ascii_hexdigit()));
+            let merged = head
+                .as_deref()
+                .zip(default.as_deref())
+                .is_some_and(|(head, default)| {
+                    self.git(
+                        repository,
+                        &["merge-base", "--is-ancestor", head, default],
+                        cancel,
+                    )
+                    .is_some()
+                });
             let gone = branch.as_deref().is_some_and(|branch| {
                 self.git(
                     repository,
@@ -624,7 +626,6 @@ impl Backend for Projects {
         // What is removed is what a fresh look finds, never the key itself.
         let plan = self.cleanup_plan(id, cancel)?;
         not_while_building(&self.host)?;
-        progress(Progress::Message(format!("Cleaning {}", plan.title)));
         let failed = |what: &Path, error: String| {
             EngineError::Execution(ExecutionError::Io(format!(
                 "Couldn't remove {}: {error}",
@@ -636,6 +637,7 @@ impl Backend for Projects {
                 .into_iter()
                 .find(|project| project.root == root)
                 .ok_or(EngineError::NotFound)?;
+            progress(Progress::Message(format!("Cleaning {}", plan.title)));
             for folder in &project.folders {
                 if cancel.requested() {
                     return Err(EngineError::Cancelled);
@@ -646,6 +648,7 @@ impl Backend for Projects {
             }
         } else if let Some(repository) = id.key.strip_prefix("worktrees:").map(Path::new) {
             let worktrees = self.worktrees(repository, self.cutoff(), cancel);
+            progress(Progress::Message(format!("Cleaning {}", plan.title)));
             if worktrees.iter().any(|worktree| worktree.missing) {
                 self.git(repository, &["worktree", "prune"], cancel)
                     .ok_or_else(|| failed(repository, "git worktree prune failed".into()))?;
@@ -858,7 +861,14 @@ mod tests {
         assert!(project.join("target/x").exists());
         // Only folders the settings name, written plainly.
         let bin = tools(&home, "");
-        let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
+        // A folder in the settings that is gone is skipped.
+        let mut backend = projects(
+            &home,
+            &bin,
+            vec![home.join("missing"), home.join("code")],
+            7,
+        );
+        assert_eq!(backend.cleanup(&cancel).unwrap().len(), 1);
         for key in [
             format!("build:{}", home.display()),
             format!("build:{}/code/../code/app", home.display()),
@@ -879,15 +889,11 @@ mod tests {
             ..id.clone()
         };
         assert!(backend.cleanup_plan(&wrong_backend, &cancel).is_err());
-        assert!(backend
-            .execute(
-                &Operation::Refresh {
-                    backend: "projects".into()
-                },
-                &cancel,
-                &mut |_| {}
-            )
-            .is_err());
+        let mut ignore = |_: Progress| {};
+        let refresh = Operation::Refresh {
+            backend: "projects".into(),
+        };
+        assert!(backend.execute(&refresh, &cancel, &mut ignore).is_err());
         // A longer wait leaves the project for now.
         let mut patient = projects(&home, &bin, vec![home.join("code")], 60);
         assert!(patient.cleanup(&cancel).unwrap().is_empty());
@@ -911,6 +917,107 @@ mod tests {
         fs::remove_dir_all(&home).unwrap();
     }
 
+    #[test]
+    fn cleaning_stops_when_cancelled_and_says_what_it_could_not_remove() {
+        let home = scratch("stop");
+        let code = home.join("code");
+        write(&code.join("web/package.json"), "{}");
+        write(&code.join("web/node_modules/x"), "dep");
+        write(&code.join("web/.next/cache"), "built");
+        // Not a repository after all, and a folder nobody may read.
+        fs::create_dir_all(code.join("broken/.git")).unwrap();
+        write(&code.join("broken/Cargo.toml"), "");
+        fs::create_dir_all(code.join("private/app")).unwrap();
+        age_files(&home, 30);
+        let mode = |path: &Path, mode: u32| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let bin = tools(&home, "");
+        let mut backend = projects(&home, &bin, vec![code.clone()], 7);
+        let cancel = Cancellation::default();
+        let mut ignore = |_: Progress| {};
+        mode(&code.join("private"), 0o000);
+        let items = backend.cleanup(&cancel).unwrap();
+        mode(&code.join("private"), 0o755);
+        assert_eq!(
+            keys(&items),
+            [format!("build:{}", code.join("web").display())]
+        );
+        let web = Operation::Clean(items[0].id.clone());
+        // Cancelled once the clean begins: nothing goes.
+        let stopping = Cancellation::default();
+        assert!(matches!(
+            backend.execute(&web, &stopping, &mut |_| stopping.cancel()),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(code.join("web/node_modules/x").exists());
+        // A folder that can't go says which one. Root may change anything,
+        // so this only shows for everyone else.
+        mode(&code.join("web"), 0o555);
+        let result = backend.execute(&web, &cancel, &mut ignore);
+        mode(&code.join("web"), 0o755);
+        let root_user = rustix::process::geteuid().is_root();
+        assert!(
+            root_user
+                || result
+                    .is_err_and(|error| error.to_string().contains("Couldn't remove ~/code/web/"))
+        );
+
+        // A detached worktree shows its folder alone.
+        let repo = home.join("repo");
+        write(&repo.join("README"), "hi");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "first"]);
+        let detached = home.join(".trees/detached");
+        let path = detached.display().to_string();
+        git(&repo, &["worktree", "add", "--quiet", "--detach", &path]);
+        age_files(&home, 30);
+        let mut backend = projects(&home, &bin, vec![repo.clone()], 7);
+        let items = backend.cleanup(&cancel).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            items[0].preview.ends_with("\n~/.trees/detached"),
+            "{items:?}"
+        );
+        let clean = Operation::Clean(items[0].id.clone());
+        let stopping = Cancellation::default();
+        assert!(matches!(
+            backend.execute(&clean, &stopping, &mut |_| stopping.cancel()),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(detached.exists());
+        // Git refusing to remove or prune one says so.
+        let refusing = home.join("refusing");
+        fs::create_dir_all(&refusing).unwrap();
+        let real = Host::current().resolve("git").unwrap().expect("git");
+        fs::write(
+            refusing.join("git"),
+            format!(
+                "#!/bin/sh\ncase \"$3 $4\" in 'worktree remove'|'worktree prune') exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        mode(&refusing.join("git"), 0o755);
+        fs::copy(bin.join("ps"), refusing.join("ps")).unwrap();
+        let mut refused = projects(&home, &refusing, vec![repo.clone()], 7);
+        let error = refused.execute(&clean, &cancel, &mut ignore).unwrap_err();
+        assert!(
+            error.to_string().contains("~/.trees/detached: Git kept it"),
+            "{error}"
+        );
+        // A folder deleted by hand needs a prune first.
+        fs::remove_dir_all(&detached).unwrap();
+        let error = refused.execute(&clean, &cancel, &mut ignore).unwrap_err();
+        assert!(
+            error.to_string().contains("git worktree prune failed"),
+            "{error}"
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let done = Command::new("git")
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
@@ -926,11 +1033,7 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
-        assert!(
-            done.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&done.stderr)
-        );
+        assert!(done.status.success(), "{args:?}: {done:?}");
     }
 
     #[test]

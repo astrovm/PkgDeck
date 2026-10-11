@@ -221,9 +221,6 @@ impl<T: Transport> Container<T> {
     /// The sum of the byte counts `args` followed by `ids` prints, one per
     /// line, such as image or container sizes. Unknown when any is missing.
     fn total(&self, args: &[&str], ids: &[String], cancel: &Cancellation) -> Option<u64> {
-        if ids.is_empty() {
-            return Some(0);
-        }
         let mut args = args.to_vec();
         args.extend(ids.iter().map(String::as_str));
         self.text(&args, cancel)
@@ -1018,6 +1015,8 @@ mod tests {
         /// Answers to reads by how their arguments start. Container,
         /// volume and size reads answer nothing unless set here.
         answers: Vec<(String, String)>,
+        /// Replaces the answer to reads starting this way, failures too.
+        replies: Vec<(String, Result<Completion, ExecutionError>)>,
     }
     impl Fixture {
         fn new(output: &str) -> Self {
@@ -1034,6 +1033,7 @@ mod tests {
                 write_failure: None,
                 write_code: None,
                 answers: vec![],
+                replies: vec![],
             }
         }
         fn answer(mut self, args: &str, output: &str) -> Self {
@@ -1123,6 +1123,13 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             if !write {
+                if let Some((_, reply)) = self
+                    .replies
+                    .iter()
+                    .find(|(prefix, _)| joined.starts_with(prefix.as_str()))
+                {
+                    return reply.clone();
+                }
                 if let Some((_, output)) = self
                     .answers
                     .iter()
@@ -1638,9 +1645,7 @@ mod tests {
             keys,
             ["stopped-containers", "unused-images", "unused-volumes"]
         );
-        let [containers, images, volumes] = &plans[..] else {
-            unreachable!()
-        };
+        let (containers, images, volumes) = (&plans[0], &plans[1], &plans[2]);
         assert_eq!(containers.kind, CleanupKind::Unused);
         assert!(
             containers.preview.ends_with("\nweb (nginx:1)"),
@@ -1790,6 +1795,69 @@ mod tests {
         assert!(plans[1]
             .preview
             .ends_with("\nnginx:1\nredis:7\nredis:latest"));
+        // A list that can't be read, or isn't text, leaves the other tasks.
+        for (prefix, reply, left) in [
+            (
+                "container ls --all --no-trunc --filter",
+                completed(b"", Some(1)),
+                ["unused-images", "unused-volumes"],
+            ),
+            (
+                "container ls --all --no-trunc --quiet",
+                completed(b"", Some(1)),
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "container inspect --format",
+                completed(b"", Some(1)),
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "image ls --no-trunc --format",
+                Completion {
+                    truncated: true,
+                    ..completed(b"", Some(0))
+                },
+                ["stopped-containers", "unused-volumes"],
+            ),
+            (
+                "volume ls",
+                completed(&[0xff, 0xfe], Some(0)),
+                ["stopped-containers", "unused-images"],
+            ),
+        ] {
+            let mut backend = Container::docker(busy_store());
+            backend.transport.replies.push((prefix.into(), Ok(reply)));
+            let plans = backend.cleanup(&cancel).unwrap();
+            let keys: Vec<_> = plans.iter().map(|plan| plan.id.key.as_str()).collect();
+            assert_eq!(keys, left, "{prefix}");
+        }
+        // A stopped container shows its name alone without an image, and
+        // its short ID without a name.
+        let mut backend = Container::docker(busy_store());
+        backend.transport.answers.insert(
+            0,
+            (
+                "container ls --all --no-trunc --filter".into(),
+                format!("{STOPPED}\tweb\t\n{RUNNING}\t\t\n"),
+            ),
+        );
+        let plans = backend.cleanup(&cancel).unwrap();
+        assert!(
+            plans[0].preview.ends_with("\nweb\n222222222222"),
+            "{}",
+            plans[0].preview
+        );
+        // Cancelling during an extra task stops them all.
+        let mut backend = Container::docker(busy_store());
+        backend
+            .transport
+            .replies
+            .push(("volume ls".into(), Err(ExecutionError::Cancelled)));
+        assert!(matches!(
+            backend.cleanup(&cancel),
+            Err(EngineError::Cancelled)
+        ));
         // Cancelling stops every task.
         let cancelled = Cancellation::default();
         cancelled.cancel();

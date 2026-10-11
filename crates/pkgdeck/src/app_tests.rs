@@ -329,6 +329,7 @@ fn automatic_cleaning_is_remembered_and_told_once() {
     let mut app = app();
     app.settings.auto_clean = true;
     app.apply_settings();
+    assert!(app.c().auto_clean());
     let cleaned = |at: u64, cleaned: Value| {
         json!({"available": 0, "cleaned_at": at, "cleaned": cleaned}).to_string()
     };
@@ -600,7 +601,6 @@ fn row_actions_need_a_row_an_action_and_a_free_controller() {
     app.propose("adopt-all");
     app.propose("clean-all");
     app.choose(0, false);
-    app.propose("refresh");
     // Updates with nothing checked do nothing.
     app.page = Page::Updates;
     app.invalidate();
@@ -660,6 +660,8 @@ fn failures_come_from_the_report_or_failure_rows() {
     );
     let failures = app.read_failures();
     assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].source, "apt");
+    assert_eq!(failures[0].detail.as_deref(), Some("apt is broken"));
     assert_eq!(app.failure_reason("apt"), "apt is broken");
     app.c().set_report_state(json!({"phase": "partial", "failures": [{"source": "apt", "kind": "failed", "detail": "d"}, {"source": "apt", "kind": "cancelled"}]}).to_string().into());
     app.react();

@@ -922,10 +922,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 .collect();
             let outcomes = match operations.is_empty() {
                 true => vec![],
-                false => match run_batch(engine, &operations, Vec::new(), cancel, send) {
-                    Payload::Batch(_, outcomes) => outcomes,
-                    _ => vec![],
-                },
+                false => batch(engine, &operations, Vec::new(), cancel, send).1,
             };
             let finished = |outcome: &&Outcome| **outcome == Outcome::Finished;
             Ok(Payload::AutoCleaned {
@@ -1006,6 +1003,18 @@ fn run_batch(
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Payload {
+    let (status, outcomes) = batch(engine, operations, held, cancel, send);
+    Payload::Batch(status, outcomes)
+}
+/// Run `operations` in order, skipping `held` ones with their reason: the
+/// status line and each one's outcome.
+fn batch(
+    engine: &mut Engine,
+    operations: &[Operation],
+    held: Vec<(Operation, String)>,
+    cancel: &Cancellation,
+    send: &mut dyn FnMut(Reply),
+) -> (String, Vec<Outcome>) {
     let runnable: Vec<_> = operations
         .iter()
         .filter(|op| !held.iter().any(|(held, _)| held == *op))
@@ -1049,6 +1058,11 @@ fn run_batch(
         .all(|op| matches!(op, Operation::Clean(_)))
     {
         "cleanup tasks"
+    } else if operations
+        .iter()
+        .all(|op| matches!(op, Operation::Refresh { .. }))
+    {
+        "source refreshes"
     } else {
         "updates"
     };
@@ -1096,7 +1110,7 @@ fn run_batch(
     if !failure_output.is_empty() {
         send(Reply::FailureOutput(failure_output.join("\n\n")));
     }
-    Payload::Batch(status, outcomes)
+    (status, outcomes)
 }
 
 /// The upgrade-only helper mode the saved approval covers, for automatic
@@ -3953,6 +3967,9 @@ impl ffi::PackageController {
     pub fn set_auto_clean(mut self: Pin<&mut Self>, enabled: bool, cleaned_at: u64) {
         self.as_mut().rust_mut().auto_clean = enabled;
         self.as_mut().rust_mut().auto_cleaned_at = cleaned_at;
+    }
+    pub fn auto_clean(&self) -> bool {
+        self.rust().auto_clean
     }
     /// Clean after this check when it's been a day, nothing else is
     /// waiting to run, and the computer is plugged in and not building.
@@ -11080,11 +11097,11 @@ mod tests {
             .as_mut()
             .begin_catalog_check(|_| unreachable!("the check is single-flight"));
         for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(1));
             controller.as_mut().poll();
             if controller.rust().catalog_checked {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(1));
         }
         assert!(controller.rust().catalog_checked);
         let catalog: Value =
@@ -16303,6 +16320,29 @@ mod tests {
             ))
         )
         .is_none());
+        // Its status line counts refreshes.
+        let ran = std::sync::Arc::default();
+        let mut engine = Engine::default();
+        engine
+            .register(Cleaner {
+                items: vec![],
+                ran: std::sync::Arc::clone(&ran),
+            })
+            .unwrap();
+        let (status, outcomes) = batch(
+            &mut engine,
+            &[refresh("fixture")],
+            vec![],
+            &Cancellation::default(),
+            &mut |_| {},
+        );
+        // The fixture only cleans, so its refresh fails.
+        assert!(
+            status.starts_with("Completed 0 of 1 source refreshes."),
+            "{status}"
+        );
+        assert_eq!(outcomes, [Outcome::Failed]);
+        assert!(ran.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -16369,11 +16409,10 @@ mod tests {
         controller.as_mut().confirm(false);
         // Clean all: everything but the volumes, with what each frees.
         controller.as_mut().propose("clean-all".into(), 0);
-        let Some(Job::CleanAll(operations)) = controller.rust().pending.clone() else {
-            panic!("no clean all");
-        };
+        let pending = controller.rust().pending.as_ref();
+        assert!(matches!(pending, Some(Job::CleanAll(_))));
         assert_eq!(
-            operations,
+            pending.map(Job::operations).unwrap_or_default(),
             [&cargo, &build, &unknown].map(|item| Operation::Clean(item.id.clone()))
         );
         let data: Value =
@@ -16453,11 +16492,15 @@ mod tests {
             _: &Cancellation,
             _: &mut dyn FnMut(Progress),
         ) -> Result<OperationOutcome, EngineError> {
-            let Operation::Clean(id) = operation else {
-                unreachable!()
-            };
-            self.ran.lock().unwrap().push(id.key.clone());
-            if id.key == "broken" {
+            // "Clean KEY (Source)": only cleanups reach this source.
+            let label = operation_label(operation);
+            let key = label
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            self.ran.lock().unwrap().push(key.clone());
+            if key == "broken" {
                 return Err(EngineError::Execution(ExecutionError::Io(
                     "disk full".into(),
                 )));

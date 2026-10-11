@@ -73,12 +73,13 @@ pub fn empty(dir: &Path) -> io::Result<()> {
 fn writable(path: &Path) {
     let mut pending = vec![path.to_owned()];
     while let Some(path) = pending.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        // Files, links and what is already gone need nothing.
+        let Some(metadata) = fs::symlink_metadata(&path)
+            .ok()
+            .filter(fs::Metadata::is_dir)
+        else {
             continue;
         };
-        if !metadata.is_dir() {
-            continue;
-        }
         let mode = metadata.permissions().mode();
         if mode & 0o700 != 0o700 {
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o700));

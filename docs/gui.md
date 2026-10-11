@@ -552,7 +552,7 @@ out of date, and each page refreshes when you open it.
 | Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+R | Reload the page |
-| Ctrl+M | Refresh the source's package lists |
+| Ctrl+M | Refresh sources: download the latest package lists |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
 | Alt+C | Cancel the open confirmation |
 | Esc | Close Activity, clear the search, close the details, or go back from an app page |

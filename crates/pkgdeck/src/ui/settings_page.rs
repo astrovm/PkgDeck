@@ -775,7 +775,7 @@ fn shortcuts(ui: &mut Ui) {
             "Ctrl+M"
         };
         let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
-        all.insert(17, ("Refresh the source's package lists", refresh));
+        all.insert(17, ("Refresh sources", refresh));
         let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
         let per = all.len().div_ceil(columns);
         ui.columns(columns, |cols| {

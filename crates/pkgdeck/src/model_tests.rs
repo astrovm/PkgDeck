@@ -18,7 +18,7 @@ fn row(value: Value) -> Row {
 fn pages_name_their_icons_capabilities_and_filters() {
     for page in Page::ALL {
         assert!(!page.name().is_empty());
-        assert!(!page.icon().is_empty());
+        assert!(crate::ui::icons::drawn(page.icon()), "{page:?}");
         assert_eq!(page.lists(), page != Page::Settings);
         assert_eq!(page.filters_sources(), page.capability().is_some());
     }

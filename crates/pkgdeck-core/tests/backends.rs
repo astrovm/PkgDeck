@@ -180,7 +180,7 @@ impl Transport for Fixture {
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
             }
             "autoremove" => Ok(output("unused-formula\n")),
-            "cleanup" => Ok(output("Would remove: /tmp/synthetic-cache (1MB)\n")),
+            "cleanup" => Ok(output("Would remove: /tmp/synthetic-cache (1MB)\n==> This operation would free approximately 1MB of disk space.\n")),
             _ => panic!("unexpected metadata query"),
         }
     }
@@ -532,7 +532,9 @@ fn homebrew_cleanup_uses_native_dry_run_plans() {
     let items = brew.cleanup(&cancel).unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().any(|item| item.id.key == "autoremove"));
-    assert!(items.iter().any(|item| item.id.key == "cleanup"));
+    let cleanup = items.iter().find(|item| item.id.key == "cleanup");
+    // Sized from what brew says it would free.
+    assert_eq!(cleanup.and_then(|item| item.bytes), Some(1_000_000));
     for item in items {
         brew.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();

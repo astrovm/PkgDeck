@@ -332,11 +332,8 @@ impl Desktop {
             "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
-        if op == "refresh" {
-            self.key("ctrl+5");
-            self.key("ctrl+l");
-            self.key("Home");
-        } else {
+        // Refreshing reviews every source the Updates page shows.
+        if op != "refresh" {
             self.search(name);
         }
         let started = || {

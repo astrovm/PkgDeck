@@ -169,6 +169,12 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::L) && !app.items.is_empty() {
         app.ui.focus_list = true;
     }
+    // Before Cmd+R, which would take Shift+Cmd+R too.
+    let refresh = if cfg!(target_os = "macos") {
+        ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
+    } else {
+        command(Key::M)
+    };
     if command(Key::R) && app.page.lists() {
         app.reload(true, true);
     }
@@ -193,13 +199,8 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::U) && can_change {
         app.propose("upgrade");
     }
-    let refresh = if cfg!(target_os = "macos") {
-        ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
-    } else {
-        command(Key::M)
-    };
     if refresh && can_change {
-        app.propose("refresh");
+        app.refresh_sources();
     }
     let back = ctx.input_mut(|i| {
         i.consume_key(Modifiers::ALT, Key::ArrowLeft)

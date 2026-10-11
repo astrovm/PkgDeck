@@ -1443,10 +1443,7 @@ impl App {
         if self.retained.is_some() {
             return;
         }
-        let whole_page = matches!(
-            action,
-            "upgrade-all" | "adopt-all" | "refresh" | "clean-all"
-        );
+        let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "clean-all");
         let selected = self.selected_item().cloned();
         if whole_page {
             self.review_on = ReviewOn::Dialog;

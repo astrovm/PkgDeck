@@ -456,6 +456,26 @@ fn updates_refresh_the_package_lists_it_shows() {
         .is_some());
     harness.get_by_label("Cancel").click();
     harness.run_steps(3);
+    assert!(harness
+        .query_by_label_contains("Refresh 1 source")
+        .is_none());
+    // The shortcut reviews the same list, from any page.
+    harness.state_mut().1.page = Page::Installed;
+    if cfg!(target_os = "macos") {
+        harness.key_press_modifiers(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::R,
+        );
+    } else {
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    }
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_label_contains("Refresh 1 source")
+        .is_some());
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(3);
+    harness.state_mut().1.page = Page::Updates;
     // Without a source that can refresh there's no button.
     harness.state_mut().1.set_source_enabled("flatpak", true);
     harness.state_mut().1.set_source_enabled("apt", false);
