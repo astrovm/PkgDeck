@@ -50,6 +50,13 @@ fn the_window_opens_on_a_real_display() {
         .env("DISPLAY", &display)
         .env_remove("WAYLAND_DISPLAY")
         .env("XDG_RUNTIME_DIR", &dir)
+        // Never the real home: it would read and save the real settings,
+        // and check the real tools for updates.
+        .env("HOME", &dir)
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_DATA_HOME", dir.join("data"))
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .env("XDG_STATE_HOME", dir.join("state"))
         .env("LIBGL_ALWAYS_SOFTWARE", "1")
         .output()
         .unwrap();

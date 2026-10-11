@@ -1343,17 +1343,33 @@ struct ActivityWorker {
     receiver: mpsc::Receiver<std::io::Result<Vec<pkgdeck_core::activity::Entry>>>,
 }
 impl Drop for Controller {
+    /// Stops every thread that runs commands and waits for them, so their
+    /// commands get SIGTERM before PkgDeck exits. Left running, they lose
+    /// their pipe when it does, and some tools (grok) crash on that. All are
+    /// told first, so their grace periods run together.
     fn drop(&mut self) {
-        if let Some(worker) = self.activity_worker.take() {
-            let _ = worker.handle.join();
+        let worker = self.worker.take();
+        let prefetch = self.prefetch_worker.take();
+        let details = self.details_worker.take();
+        let catalog = self.catalog_worker.take();
+        let cancels = [
+            worker.as_ref().map(|w| &w.cancel),
+            prefetch.as_ref().map(|w| &w.cancel),
+            details.as_ref().map(|w| &w.cancel),
+            catalog.as_ref().map(|w| &w.cancel),
+        ];
+        for cancel in cancels.into_iter().flatten() {
+            cancel.cancel();
         }
-        if let Some(worker) = self.worker.take() {
-            worker.cancel.cancel();
-            let _ = worker.handle.join();
-        }
-        if let Some(worker) = self.catalog_worker.take() {
-            worker.cancel.cancel();
-            let _ = worker.handle.join();
+        let handles = [
+            self.activity_worker.take().map(|w| w.handle),
+            worker.map(|w| w.handle),
+            prefetch.map(|w| w.handle),
+            details.map(|w| w.handle),
+            catalog.map(|w| w.handle),
+        ];
+        for handle in handles.into_iter().flatten() {
+            let _ = handle.join();
         }
     }
 }
@@ -11167,6 +11183,42 @@ mod tests {
         let catalog: Value =
             serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
         assert_eq!(catalog[0]["check_failed"], true);
+    }
+
+    #[test]
+    fn dropping_controller_stops_preloads_and_details_too() {
+        // A preload still checking for updates would otherwise outlive
+        // PkgDeck, and its command would lose its pipe.
+        let prefetch = fake_prefetch("updates", "key".into(), Vec::new(), false);
+        let preload = prefetch.cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        let details = Cancellation::default();
+        let mut controller = Controller::default();
+        controller.prefetch_worker = Some(prefetch);
+        controller.details_worker = Some(DetailsWorker {
+            handle: std::thread::spawn(move || drop(sender)),
+            receiver,
+            cancel: details.clone(),
+            id: synthetic_package("synthetic", "Synthetic").id,
+        });
+        drop(controller);
+        assert!(preload.requested());
+        assert!(details.requested());
+    }
+
+    #[test]
+    fn dropping_controller_waits_for_its_threads() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = finished.clone();
+        let mut prefetch = fake_prefetch("updates", "key".into(), Vec::new(), false);
+        prefetch.handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut controller = Controller::default();
+        controller.prefetch_worker = Some(prefetch);
+        drop(controller);
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
