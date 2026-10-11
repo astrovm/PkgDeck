@@ -164,6 +164,7 @@ pub struct Button<'a> {
     icon_only: bool,
     small: bool,
     min_width: f32,
+    trailing: f32,
     id_salt: Option<Id>,
 }
 
@@ -178,6 +179,7 @@ impl<'a> Button<'a> {
             icon_only: false,
             small: false,
             min_width: 0.0,
+            trailing: 0.0,
             id_salt: None,
         }
     }
@@ -204,6 +206,12 @@ impl<'a> Button<'a> {
     }
     pub fn min_width(mut self, width: f32) -> Self {
         self.min_width = width;
+        self
+    }
+    /// Room at the right end for a control drawn over it, such as the
+    /// filter's clear button.
+    pub fn trailing(mut self, width: f32) -> Self {
+        self.trailing = width;
         self
     }
     pub fn id_salt(mut self, salt: impl std::hash::Hash + std::fmt::Debug) -> Self {
@@ -247,7 +255,7 @@ impl<'a> Button<'a> {
                 width += 8.0;
             }
         }
-        let width = width.max(self.min_width).max(height);
+        let width = width.max(self.min_width).max(height) + self.trailing;
         let sense = if self.enabled {
             Sense::click()
         } else {
@@ -332,7 +340,8 @@ impl<'a> Button<'a> {
                 + galley.as_ref().map_or(0.0, |g| {
                     g.size().x + if self.icon.is_some() { 8.0 } else { 0.0 }
                 });
-            let mut x = rect.center().x - content / 2.0;
+            let center = rect.center().x - self.trailing / 2.0;
+            let mut x = center - content / 2.0;
             if let Some(icon) = self.icon {
                 let icon_rect = Rect::from_min_size(
                     Pos2::new(x, rect.center().y - icon_size / 2.0),
@@ -341,7 +350,7 @@ impl<'a> Button<'a> {
                 theme::paint_icon(painter, icon_rect, icon, ink);
                 x += icon_size + 8.0;
             } else if let Some(galley) = &galley {
-                x = rect.center().x - galley.size().x / 2.0;
+                x = center - galley.size().x / 2.0;
             }
             if let Some(galley) = galley {
                 let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
