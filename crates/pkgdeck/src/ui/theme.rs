@@ -1,8 +1,8 @@
-//! PkgDeck's look: the colours of the chosen theme and accent, the
-//! system's fonts, and its line icons.
+//! PkgDeck's look: the colours of the chosen style, theme and accent, the
+//! style's shapes, the fonts, and its line icons.
 
 use super::icons;
-use crate::settings::{Accent, DarkTheme, LightTheme, TextSize};
+use crate::settings::{Accent, DarkTheme, Density, LightTheme, Style, TextSize, Typeface};
 use eframe::egui::{
     self, epaint::PathStroke, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
     Painter, Pos2, Rect, Shape, Stroke, TextStyle, Vec2,
@@ -44,13 +44,119 @@ fn over(base: Color32, top: Color32, amount: f32) -> Color32 {
         lerp(base.b(), top.b()),
     )
 }
-/// The person's choice of colours and size, for either appearance.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// The person's choice of style, colours and size, for either appearance.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scheme {
     pub dark: DarkTheme,
     pub light: LightTheme,
     pub accent: Accent,
+    /// The colour [`Accent::Custom`] stands for.
+    pub custom_accent: Option<Color32>,
     pub text_size: TextSize,
+    pub style: Style,
+    /// Times the style's own corner roundness, from 0 to 2.
+    pub roundness: f32,
+    pub density: Density,
+    pub typeface: Typeface,
+}
+impl Default for Scheme {
+    fn default() -> Self {
+        Self {
+            dark: DarkTheme::default(),
+            light: LightTheme::default(),
+            accent: Accent::default(),
+            custom_accent: None,
+            text_size: TextSize::default(),
+            style: Style::default(),
+            roundness: 1.0,
+            density: Density::default(),
+            typeface: Typeface::default(),
+        }
+    }
+}
+
+impl Scheme {
+    /// What `settings` chose.
+    pub fn of(settings: &crate::settings::Settings) -> Self {
+        Self {
+            dark: settings.dark_theme,
+            light: settings.light_theme,
+            accent: settings.accent,
+            custom_accent: parse_hex(&settings.custom_accent),
+            text_size: settings.text_size,
+            style: settings.style,
+            roundness: settings.roundness,
+            density: settings.density,
+            typeface: settings.typeface,
+        }
+    }
+}
+
+/// `#rrggbb` as a colour; anything else is none.
+pub fn parse_hex(text: &str) -> Option<Color32> {
+    let hex = text.trim().strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok().map(rgb)
+}
+/// `color` as `#rrggbb`.
+pub fn hex(color: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+/// The shapes of the style on screen, for painters that have no context
+/// at hand. Each thread draws its own window, so tests don't mix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Skin {
+    pub style: Style,
+    /// Times the style's own corner roundness.
+    pub roundness: f32,
+    pub density: Density,
+}
+impl Default for Skin {
+    fn default() -> Self {
+        Self {
+            style: Style::Modern,
+            roundness: 1.0,
+            density: Density::Normal,
+        }
+    }
+}
+impl Skin {
+    /// How round the style draws corners, before the person's choice.
+    fn style_roundness(self) -> f32 {
+        match self.style {
+            Style::Modern | Style::Gel => 1.0,
+            Style::Luna => 0.45,
+            Style::Glass => 0.4,
+            Style::Platinum => 0.3,
+            Style::Retro => 0.0,
+        }
+    }
+    /// A corner of `radius` at Modern's roundness, in this style.
+    pub fn round(self, radius: u8) -> CornerRadius {
+        let scale = self.style_roundness() * self.roundness.clamp(0.0, 2.0);
+        CornerRadius::same((radius as f32 * scale).round().min(255.0) as u8)
+    }
+}
+thread_local! {
+    static SKIN: std::cell::Cell<Skin> = std::cell::Cell::new(Skin::default());
+}
+/// The style this thread's window shows.
+pub fn skin() -> Skin {
+    SKIN.with(std::cell::Cell::get)
+}
+/// Runs `paint` as if `skin` were on screen, for previews of a style.
+pub fn with_skin<R>(skin: Skin, paint: impl FnOnce() -> R) -> R {
+    let before = SKIN.with(|cell| cell.replace(skin));
+    let result = paint();
+    SKIN.with(|cell| cell.set(before));
+    result
+}
+/// A corner of `radius` at Modern's roundness, in the style on screen.
+pub fn round(radius: u8) -> CornerRadius {
+    skin().round(radius)
 }
 
 fn scheme_id() -> egui::Id {
@@ -59,8 +165,18 @@ fn scheme_id() -> egui::Id {
 fn scheme(ctx: &egui::Context) -> Scheme {
     ctx.data(|data| data.get_temp(scheme_id()).unwrap_or_default())
 }
+fn font_root_id() -> egui::Id {
+    egui::Id::new("pkgdeck-font-root")
+}
 /// Shows `scheme` from now on, restyling only when it changed.
 pub fn set_scheme(ctx: &egui::Context, scheme: Scheme) {
+    SKIN.with(|skin| {
+        skin.set(Skin {
+            style: scheme.style,
+            roundness: scheme.roundness,
+            density: scheme.density,
+        })
+    });
     let before: Option<Scheme> = ctx.data(|data| data.get_temp(scheme_id()));
     if before == Some(scheme) {
         return;
@@ -68,6 +184,16 @@ pub fn set_scheme(ctx: &egui::Context, scheme: Scheme) {
     ctx.data_mut(|data| data.insert_temp(scheme_id(), scheme));
     if before.is_none_or(|before| before.text_size != scheme.text_size) {
         ctx.set_zoom_factor(scheme.text_size.zoom());
+    }
+    let face_of = |scheme: Scheme| face(scheme.style, scheme.typeface);
+    // The window starts with Inter; a style's own face loads once chosen.
+    if before.map_or(face_of(scheme), face_of) != face_of(scheme)
+        || before.is_none() && face_of(scheme) != Face::Inter
+    {
+        let root: Option<std::path::PathBuf> = ctx.data(|data| data.get_temp(font_root_id()));
+        if let Some(root) = root {
+            ctx.set_fonts(fonts_with(&root, face_of(scheme)));
+        }
     }
     apply(ctx);
 }
@@ -87,35 +213,92 @@ fn accent_colors(accent: Accent) -> (u32, u32) {
         Accent::Green => (0x1d7a46, 0x72d39b),
         Accent::Teal => (0x0b7580, 0x5ccfd6),
         Accent::Graphite => (0x3d3d3d, 0xd4d4d4),
+        Accent::Navy => (0x000080, 0x7f9cff),
+        Accent::Lavender => (0x5b5bb5, 0xb7b7ff),
+        // Drawn from `custom_accent`; blue stands in until one is picked.
+        Accent::Custom => (0x2f68d8, 0x7aa7ff),
     }
+}
+
+/// How bright `color` looks, from 0 to 1.
+fn luminance(color: Color32) -> f32 {
+    let channel = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+}
+/// How far apart two colours' brightness is, from 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+/// A picked accent, lightened or darkened until links and buttons in it
+/// read on the canvas.
+fn readable_accent(color: Color32, canvas: Color32, dark: bool) -> Color32 {
+    let toward = if dark { Color32::WHITE } else { Color32::BLACK };
+    (0..=10)
+        .map(|step| over(color, toward, step as f32 * 0.08))
+        .find(|candidate| contrast(*candidate, canvas) >= 3.0)
+        .unwrap_or(toward)
 }
 
 impl Palette {
     pub fn of(scheme: Scheme, dark: bool) -> Self {
-        // Canvas, surface, ink and muted text of the chosen theme.
-        let (canvas, surface, ink, muted) = if dark {
-            match scheme.dark {
+        // Canvas, surface, ink and muted text: Modern's come from the chosen
+        // theme, the other styles bring their own.
+        let (canvas, surface, ink, muted) = match (scheme.style, dark) {
+            (Style::Modern, true) => match scheme.dark {
                 DarkTheme::Charcoal => (0x121212, 0x1d1d1d, 0xececec, 0xa3a3a3),
                 DarkTheme::Black => (0x000000, 0x111111, 0xe6e6e6, 0x9a9a9a),
                 DarkTheme::Slate => (0x0e1015, 0x161a21, 0xe9edf3, 0x98a3b3),
-            }
-        } else {
-            match scheme.light {
+            },
+            (Style::Modern, false) => match scheme.light {
                 LightTheme::Classic => (0xe8edf5, 0xf7f9fd, 0x152135, 0x4e5c72),
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
-            }
+            },
+            // High contrast, as the old desktops shipped for the dark.
+            (Style::Retro, true) => (0x000000, 0x0c0c0c, 0xffffff, 0xc0c0c0),
+            (Style::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
+            (Style::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
+            (Style::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
+            (Style::Glass, true) => (0x0b1017, 0x151d28, 0xe8eef5, 0x95a3b5),
+            (Style::Glass, false) => (0xd8e3f0, 0xfbfcfe, 0x1e1e1e, 0x56606c),
+            (Style::Gel, true) => (0x262626, 0x313131, 0xeeeeee, 0xa3a3a3),
+            (Style::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
+            (Style::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
+            (Style::Platinum, false) => (0xdddddd, 0xeeeeee, 0x000000, 0x4a4a4a),
         };
         let (on_light, on_dark) = accent_colors(scheme.accent);
         let (canvas, ink) = (rgb(canvas), rgb(ink));
-        let accent = rgb(if dark { on_dark } else { on_light });
+        let accent = match scheme.custom_accent {
+            Some(color) if scheme.accent == Accent::Custom => readable_accent(color, canvas, dark),
+            _ => rgb(if dark { on_dark } else { on_light }),
+        };
         Self {
             canvas,
             surface: rgb(surface),
             ink,
             muted: rgb(muted),
             accent,
-            accent_ink: if dark { canvas } else { rgb(0xffffff) },
+            accent_ink: if scheme.accent == Accent::Custom {
+                // Whichever reads better on a colour picked by hand.
+                let dark_ink = if dark { canvas } else { rgb(0x000000) };
+                if contrast(Color32::WHITE, accent) >= contrast(dark_ink, accent) {
+                    Color32::WHITE
+                } else {
+                    dark_ink
+                }
+            } else if dark {
+                canvas
+            } else {
+                rgb(0xffffff)
+            },
             line: tint(ink, if dark { 0.12 } else { 0.13 }),
             strong_line: tint(ink, if dark { 0.3 } else { 0.32 }),
             hover: tint(ink, if dark { 0.06 } else { 0.05 }),
@@ -230,9 +413,80 @@ fn mapped(path: &Path) -> Option<&'static [u8]> {
     Some(bytes)
 }
 
+/// Regular and bold faces a style was drawn with, in the order they're
+/// tried: the font, or a close one, where systems keep them.
+const TAHOMA: &[(&str, &str)] = &[
+    (
+        "usr/share/wine/fonts/tahoma.ttf",
+        "usr/share/wine/fonts/tahomabd.ttf",
+    ),
+    (
+        "usr/share/fonts/truetype/wine/tahoma.ttf",
+        "usr/share/fonts/truetype/wine/tahomabd.ttf",
+    ),
+    (
+        "System/Library/Fonts/Supplemental/Tahoma.ttf",
+        "System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/truetype/msttcorefonts/Verdana.ttf",
+        "usr/share/fonts/truetype/msttcorefonts/Verdana_Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/msttcore/verdana.ttf",
+        "usr/share/fonts/msttcore/verdanab.ttf",
+    ),
+    (
+        "System/Library/Fonts/Supplemental/Verdana.ttf",
+        "System/Library/Fonts/Supplemental/Verdana Bold.ttf",
+    ),
+];
+const LUCIDA: &[(&str, &str)] = &[
+    (
+        "System/Library/Fonts/LucidaGrande.ttc",
+        "System/Library/Fonts/LucidaGrande.ttc",
+    ),
+    (
+        "usr/share/fonts/truetype/lucida/LucidaSansRegular.ttf",
+        "usr/share/fonts/truetype/lucida/LucidaSansDemiBold.ttf",
+    ),
+];
+
+/// Which faces draw text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Face {
+    Inter,
+    System,
+    /// One of a style's own, from the list given, else Inter.
+    Style(&'static [(&'static str, &'static str)]),
+}
+
+/// The face `typeface` stands for in `style`.
+pub fn face(style: Style, typeface: Typeface) -> Face {
+    match typeface {
+        Typeface::Inter => Face::Inter,
+        Typeface::System => Face::System,
+        Typeface::Style => match style {
+            Style::Retro | Style::Luna => Face::Style(TAHOMA),
+            Style::Gel | Style::Platinum => Face::Style(LUCIDA),
+            Style::Modern | Style::Glass => Face::Inter,
+        },
+    }
+}
+
 /// Inter for text, the system's monospace face, and the system's faces
 /// behind them for scripts Inter lacks, found under `root`.
 pub fn fonts(root: &Path) -> FontDefinitions {
+    fonts_with(root, Face::Inter)
+}
+
+/// Remembers where fonts are looked for, so a style can load its own.
+pub fn set_font_root(ctx: &egui::Context, root: &Path) {
+    ctx.data_mut(|data| data.insert_temp(font_root_id(), root.to_path_buf()));
+}
+
+/// [`fonts`], with `face` first.
+pub fn fonts_with(root: &Path, face: Face) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let read = |path: &str| mapped(&root.join(path));
     let defaults = fonts.families[&FontFamily::Proportional].clone();
@@ -250,6 +504,25 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     );
     let mut regular = vec!["inter".to_owned()];
     let mut bold = vec!["inter-semibold".to_owned()];
+    // A style's own face goes first, when the system has it. Collections
+    // keep the bold face second.
+    if let Face::Style(candidates) = face {
+        if let Some((style, style_bold, same)) = candidates
+            .iter()
+            .find_map(|(regular, bold)| Some((read(regular)?, read(bold)?, regular == bold)))
+        {
+            fonts
+                .font_data
+                .insert("style".into(), Arc::new(FontData::from_static(style)));
+            let mut heavy = FontData::from_static(style_bold);
+            if same {
+                heavy.index = 1;
+            }
+            fonts.font_data.insert("style-bold".into(), Arc::new(heavy));
+            regular.insert(0, "style".into());
+            bold.insert(0, "style-bold".into());
+        }
+    }
     // The system's faces cover what Inter doesn't: other scripts, symbols.
     if let Some((system, system_bold)) = SANS
         .iter()
@@ -262,8 +535,13 @@ pub fn fonts(root: &Path) -> FontDefinitions {
             "system-bold".into(),
             Arc::new(FontData::from_static(system_bold)),
         );
-        regular.push("system".into());
-        bold.push("system-bold".into());
+        if face == Face::System {
+            regular.insert(0, "system".into());
+            bold.insert(0, "system-bold".into());
+        } else {
+            regular.push("system".into());
+            bold.push("system-bold".into());
+        }
     }
     if let Some(bytes) = OTHER_SCRIPTS.iter().find_map(|path| read(path)) {
         fonts.font_data.insert(
@@ -332,7 +610,7 @@ pub fn apply(ctx: &egui::Context) {
                 widget.weak_bg_fill = fill;
                 widget.bg_stroke = Stroke::new(1.0, palette.line);
                 widget.fg_stroke = Stroke::new(1.0, palette.ink);
-                widget.corner_radius = CornerRadius::same(CONTROL_RADIUS);
+                widget.corner_radius = round(CONTROL_RADIUS);
                 widget.expansion = 0.0;
             }
         });

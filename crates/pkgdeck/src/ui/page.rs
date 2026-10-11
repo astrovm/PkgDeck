@@ -2,15 +2,14 @@
 //! page for a file or link that was opened. Sources, cleanup tasks and
 //! failures get a smaller panel with their text.
 
-use super::{list::package_icon, widgets::*};
+use super::{list::package_icon, skin, widgets::*};
 use crate::{
     app::App,
     model::{self, Details, Row, Tone, Variable},
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CornerRadius, CursorIcon, Id, Rect, Sense, Stroke, StrokeKind, Ui,
-    UiBuilder, Vec2,
+    self, pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
 };
 use std::time::Instant;
 
@@ -90,7 +89,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             let reserve = if narrow { 0.0 } else { 40.0 } + if cleanup { 110.0 } else { 0.0 };
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
             ui.painter()
-                .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
+                .rect_filled(icon, theme::round(10), alpha(palette.accent, 0.1));
             if row.kind == "failure" {
                 theme::paint_icon(ui.painter(), icon.shrink(11.0), "warning", palette.accent);
             } else {
@@ -199,7 +198,7 @@ fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &
         egui::Frame::new()
             .fill(palette.canvas)
             .stroke(Stroke::new(1.0, palette.line))
-            .corner_radius(CornerRadius::same(8))
+            .corner_radius(theme::round(8))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -217,21 +216,12 @@ fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &
 }
 
 fn paint_card(ui: &Ui, rect: Rect, palette: &Palette) {
-    ui.painter().add(
-        egui::epaint::Shadow {
-            offset: [0, 1],
-            blur: 6,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(if palette.dark { 40 } else { 10 }),
-        }
-        .as_shape(rect, CornerRadius::same(12)),
-    );
-    ui.painter().rect(
+    skin::paint_panel(
+        ui.painter(),
         rect,
-        CornerRadius::same(12),
-        palette.surface,
-        Stroke::new(1.0, palette.line),
-        StrokeKind::Inside,
+        palette,
+        false,
+        skin::panel_stroke(palette),
     );
 }
 
@@ -253,7 +243,7 @@ fn chips(ui: &mut Ui, items: &[String], palette: &Palette) {
             });
             if ui.is_rect_visible(rect) {
                 ui.painter()
-                    .rect_filled(rect, CornerRadius::same(8), palette.hover_solid());
+                    .rect_filled(rect, theme::round(8), palette.hover_solid());
                 ui.painter().galley(rect.min + padding, galley, palette.ink);
             }
         }
@@ -506,7 +496,7 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
         .unwrap_or(0);
     let (rect, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(9), palette.hover_solid());
+        .rect_filled(rect, theme::round(9), palette.hover_solid());
     let half = rect.width() / 2.0;
     let x = glide(
         ui.ctx(),
@@ -516,7 +506,7 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
     );
     ui.painter().rect(
         Rect::from_min_size(pos2(x, rect.top()), vec2(half, rect.height())).shrink(3.0),
-        CornerRadius::same(7),
+        theme::round(7),
         palette.surface,
         Stroke::new(1.0, palette.line),
         StrokeKind::Inside,
@@ -586,7 +576,7 @@ fn review_card(app: &mut App, ui: &mut Ui) {
     egui::Frame::new()
         .fill(alpha(color, 0.09 * entered))
         .stroke(Stroke::new(1.0, alpha(color, 0.35 * entered)))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(theme::round(12))
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -672,12 +662,12 @@ fn body(
                         let hover = ease(ui.ctx(), response.id, response.hovered(), FEEDBACK);
                         let image = egui::Image::new(shot.url.clone())
                             .fit_to_exact_size(size)
-                            .corner_radius(CornerRadius::same(10));
+                            .corner_radius(theme::round(10));
                         match image.load_for_size(ui.ctx(), size) {
                             Ok(egui::load::TexturePoll::Ready { texture }) => {
                                 ui.painter().rect_filled(
                                     rect,
-                                    CornerRadius::same(10),
+                                    theme::round(10),
                                     palette.hover_solid(),
                                 );
                                 let fit = egui::Image::new(egui::load::SizedTexture::new(
@@ -685,12 +675,12 @@ fn body(
                                     texture.size,
                                 ))
                                 .fit_to_exact_size(size)
-                                .corner_radius(CornerRadius::same(10));
+                                .corner_radius(theme::round(10));
                                 let shown = fit.calc_size(size, Some(texture.size));
                                 fit.paint_at(ui, Rect::from_center_size(rect.center(), shown));
                                 ui.painter().rect_stroke(
                                     rect,
-                                    CornerRadius::same(10),
+                                    theme::round(10),
                                     Stroke::new(
                                         1.0 + hover,
                                         mix(palette.line, palette.accent, hover),

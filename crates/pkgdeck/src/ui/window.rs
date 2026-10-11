@@ -23,6 +23,7 @@ pub fn wake() {
 /// Fonts, colours and image loaders for a new window.
 pub fn setup(ctx: &egui::Context, root: &Path, media: Option<std::path::PathBuf>) {
     ctx.set_fonts(theme::fonts(root));
+    theme::set_font_root(ctx, root);
     theme::apply(ctx);
     egui_extras::install_image_loaders(ctx);
     ctx.add_bytes_loader(std::sync::Arc::new(media::WebLoader::new(media)));

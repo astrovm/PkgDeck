@@ -55,10 +55,17 @@ pub enum Accent {
     Green,
     Teal,
     Graphite,
+    /// The deep blue of old title bars.
+    Navy,
+    /// The soft purple of Mac OS 9's highlight.
+    Lavender,
+    /// The colour in `custom_accent`.
+    Custom,
 }
 
 impl Accent {
-    pub const ALL: [Self; 8] = [
+    /// The swatches Settings shows; [`Accent::Custom`] has its own picker.
+    pub const ALL: [Self; 10] = [
         Self::Blue,
         Self::Purple,
         Self::Pink,
@@ -67,6 +74,8 @@ impl Accent {
         Self::Green,
         Self::Teal,
         Self::Graphite,
+        Self::Navy,
+        Self::Lavender,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -78,8 +87,94 @@ impl Accent {
             Self::Green => "Green",
             Self::Teal => "Teal",
             Self::Graphite => "Graphite",
+            Self::Navy => "Navy",
+            Self::Lavender => "Lavender",
+            Self::Custom => "Custom",
         }
     }
+}
+
+/// The shape of everything: corners, borders, depth and shine, after a
+/// desktop from the past or today's flat look.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Style {
+    /// Flat and rounded.
+    #[default]
+    Modern,
+    /// Grey 3D bevels and square corners, after the 1990s desktops.
+    Retro,
+    /// Glossy blue bars and rounded buttons, after Windows XP.
+    Luna,
+    /// Shiny, glassy gradients, after Windows Vista and 7.
+    Glass,
+    /// Gel buttons on pinstripes, after the first Mac OS X.
+    Gel,
+    /// Light grey, fine bevels, after Mac OS 8 and 9.
+    Platinum,
+}
+
+impl Style {
+    pub const ALL: [Self; 6] = [
+        Self::Modern,
+        Self::Retro,
+        Self::Luna,
+        Self::Glass,
+        Self::Gel,
+        Self::Platinum,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Modern => "Modern",
+            Self::Retro => "Retro",
+            Self::Luna => "Luna",
+            Self::Glass => "Glass",
+            Self::Gel => "Gel",
+            Self::Platinum => "Platinum",
+        }
+    }
+    /// The accent the style was made with, picked when it's chosen.
+    pub fn accent(self) -> Accent {
+        match self {
+            Self::Modern | Self::Luna | Self::Glass | Self::Gel => Accent::Blue,
+            Self::Retro => Accent::Navy,
+            Self::Platinum => Accent::Lavender,
+        }
+    }
+}
+
+/// How much room rows and controls get.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    Compact,
+    #[default]
+    Normal,
+    Roomy,
+}
+
+impl Density {
+    /// How much taller than normal rows are.
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Compact => 0.84,
+            Self::Normal => 1.0,
+            Self::Roomy => 1.18,
+        }
+    }
+}
+
+/// The typeface for text.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Typeface {
+    /// The style's own face when it's installed, else PkgDeck's.
+    #[default]
+    Style,
+    /// Inter, which PkgDeck ships.
+    Inter,
+    /// The system's sans-serif face.
+    System,
 }
 
 /// How big everything is drawn.
@@ -115,6 +210,16 @@ where
     Ok(T::deserialize(Value::deserialize(deserializer)?).unwrap_or_default())
 }
 
+/// A roundness from 0 to 2; anything else reads as the style's own, 1.
+fn roundness<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = Value::deserialize(deserializer)?.as_f64().unwrap_or(1.0) as f32;
+    Ok(if value.is_finite() {
+        value.clamp(0.0, 2.0)
+    } else {
+        1.0
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -127,6 +232,17 @@ pub struct Settings {
     pub accent: Accent,
     #[serde(deserialize_with = "or_default")]
     pub text_size: TextSize,
+    #[serde(deserialize_with = "or_default")]
+    pub style: Style,
+    /// The accent picked by hand, as `#rrggbb`, for [`Accent::Custom`].
+    pub custom_accent: String,
+    /// How round corners are, from 0 (square) to 2, times the style's own.
+    #[serde(deserialize_with = "roundness")]
+    pub roundness: f32,
+    #[serde(deserialize_with = "or_default")]
+    pub density: Density,
+    #[serde(deserialize_with = "or_default")]
+    pub typeface: Typeface,
     pub reduce_motion: bool,
     /// The sources the list reads, as the controller's comma list; empty is
     /// all of them.
@@ -168,6 +284,11 @@ impl Default for Settings {
             light_theme: LightTheme::Classic,
             accent: Accent::Blue,
             text_size: TextSize::Normal,
+            style: Style::Modern,
+            custom_accent: String::new(),
+            roundness: 1.0,
+            density: Density::Normal,
+            typeface: Typeface::Style,
             reduce_motion: false,
             source_list: String::new(),
             sort_column: String::new(),
@@ -191,6 +312,144 @@ impl Default for Settings {
             search_hint: String::new(),
         }
     }
+}
+
+/// A look to share as a `.toml` file: what **Appearance** sets, except
+/// light or dark, text size and animations, which suit a person rather
+/// than a look.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Theme {
+    #[serde(deserialize_with = "or_default")]
+    pub style: Style,
+    #[serde(deserialize_with = "or_default")]
+    pub accent: Accent,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub custom_accent: String,
+    #[serde(deserialize_with = "roundness")]
+    pub roundness: f32,
+    #[serde(deserialize_with = "or_default")]
+    pub density: Density,
+    #[serde(deserialize_with = "or_default")]
+    pub typeface: Typeface,
+    #[serde(deserialize_with = "or_default")]
+    pub dark_colours: DarkTheme,
+    #[serde(deserialize_with = "or_default")]
+    pub light_colours: LightTheme,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::of(&Settings::default())
+    }
+}
+
+/// Why a theme file didn't load.
+#[derive(Debug, PartialEq)]
+pub enum ThemeError {
+    /// Bigger than any theme could be.
+    TooBig,
+    /// Not TOML, or TOML without any of a theme's keys.
+    NotATheme,
+    Unreadable(String),
+}
+
+impl std::fmt::Display for ThemeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooBig => f.write_str("That file is too big to be a theme"),
+            Self::NotATheme => f.write_str("That file isn't a PkgDeck theme"),
+            Self::Unreadable(error) => write!(f, "Couldn't read the theme: {error}"),
+        }
+    }
+}
+
+impl Theme {
+    /// The most a theme file can weigh; themes are a few lines.
+    pub const MAX_BYTES: u64 = 64 * 1024;
+
+    /// The look `settings` shows.
+    pub fn of(settings: &Settings) -> Self {
+        Self {
+            style: settings.style,
+            accent: settings.accent,
+            custom_accent: if settings.accent == Accent::Custom {
+                settings.custom_accent.clone()
+            } else {
+                String::new()
+            },
+            roundness: settings.roundness,
+            density: settings.density,
+            typeface: settings.typeface,
+            dark_colours: settings.dark_theme,
+            light_colours: settings.light_theme,
+        }
+    }
+
+    /// Shows this look from now on.
+    pub fn apply(&self, settings: &mut Settings) {
+        settings.style = self.style;
+        settings.accent = self.accent;
+        if self.accent == Accent::Custom {
+            settings.custom_accent = self.custom_accent.clone();
+        }
+        settings.roundness = self.roundness;
+        settings.density = self.density;
+        settings.typeface = self.typeface;
+        settings.dark_theme = self.dark_colours;
+        settings.light_theme = self.light_colours;
+    }
+
+    pub fn to_toml(&self) -> String {
+        toml::to_string(self).unwrap_or_default()
+    }
+
+    /// A theme from a file's text. Keys from newer versions are skipped
+    /// and values this version doesn't know read as the defaults, but a
+    /// file with none of a theme's keys is turned away.
+    pub fn from_toml(text: &str) -> Result<Self, ThemeError> {
+        let table: toml::Table = text.parse().map_err(|_| ThemeError::NotATheme)?;
+        let known = [
+            "style",
+            "accent",
+            "custom-accent",
+            "roundness",
+            "density",
+            "typeface",
+            "dark-colours",
+            "light-colours",
+        ];
+        if !known.iter().any(|key| table.contains_key(*key)) {
+            return Err(ThemeError::NotATheme);
+        }
+        let mut theme: Self = table.try_into().map_err(|_| ThemeError::NotATheme)?;
+        // A custom accent that isn't a colour falls back to the style's.
+        if theme.accent == Accent::Custom && !is_hex_colour(&theme.custom_accent) {
+            theme.accent = theme.style.accent();
+            theme.custom_accent.clear();
+        }
+        Ok(theme)
+    }
+
+    pub fn read(path: &Path) -> Result<Self, ThemeError> {
+        let unreadable = |error: std::io::Error| ThemeError::Unreadable(error.to_string());
+        if std::fs::metadata(path).map_err(unreadable)?.len() > Self::MAX_BYTES {
+            return Err(ThemeError::TooBig);
+        }
+        let bytes = std::fs::read(path).map_err(unreadable)?;
+        let text = String::from_utf8(bytes).map_err(|_| ThemeError::NotATheme)?;
+        Self::from_toml(&text)
+    }
+
+    pub fn write(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::write(path, self.to_toml())
+    }
+}
+
+/// Whether `text` is a `#rrggbb` colour.
+pub fn is_hex_colour(text: &str) -> bool {
+    text.strip_prefix('#')
+        .is_some_and(|hex| hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Where the settings live: `$XDG_CONFIG_HOME/pkgdeck`, else

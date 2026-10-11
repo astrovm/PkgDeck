@@ -3,14 +3,14 @@
 //! animate the same way. Every animation goes through [`secs`], which is
 //! zero when the person turned animations off.
 
+use super::skin;
 use crate::{
     model::Tone,
     theme::{self, Palette, CARD_RADIUS, CONTROL_RADIUS, SMALL_RADIUS},
 };
 use eframe::egui::{
-    self, emath::easing, vec2, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id,
-    Margin, Pos2, Rect, Response, Sense, Shadow, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
-    WidgetType,
+    self, emath::easing, vec2, Align2, Color32, CursorIcon, FontId, Frame, Id, Margin, Pos2, Rect,
+    Response, Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 
 pub const CONTROL_HEIGHT: f32 = 36.0;
@@ -328,12 +328,23 @@ impl<'a> Button<'a> {
             };
             let opacity = if self.enabled || filled { 1.0 } else { 0.42 };
             let painter = ui.painter();
-            painter.rect(
+            let weight = match self.look {
+                Look::Primary | Look::Solid(_) => skin::Weight::Strong,
+                Look::Secondary | Look::Soft(_) => skin::Weight::Normal,
+                Look::Flat => skin::Weight::Flat,
+            };
+            skin::paint_button(
+                painter,
                 rect,
-                CornerRadius::same(CONTROL_RADIUS),
-                alpha(fill, opacity),
-                Stroke::new(stroke.width, alpha(stroke.color, opacity)),
-                StrokeKind::Inside,
+                weight,
+                fill,
+                stroke,
+                skin::State {
+                    hover,
+                    press,
+                    opacity,
+                },
+                &palette,
             );
             let ink = alpha(ink, opacity);
             let content = icon_size
@@ -395,7 +406,7 @@ pub fn icon_button(
         let opacity = if enabled { 1.0 } else { 0.42 };
         ui.painter().rect_filled(
             rect,
-            CornerRadius::same(CONTROL_RADIUS),
+            theme::round(CONTROL_RADIUS),
             alpha(color, hover * 0.12),
         );
         theme::paint_icon(
@@ -446,20 +457,17 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
         let track = mix(palette.strong_line_solid(), palette.accent, t);
         ui.painter().rect_filled(
             rect,
-            CornerRadius::same(12),
+            theme::round(12),
             alpha(mix(track, palette.ink, hover * 0.06), opacity),
         );
         let radius = 9.0 + hover * 0.6;
         let x = egui::lerp((rect.left() + 12.0)..=(rect.right() - 12.0), t);
-        ui.painter().add(egui::Shape::circle_filled(
-            Pos2::new(x, rect.center().y + 0.6),
-            radius,
-            alpha(Color32::BLACK, 0.18 * opacity),
-        ));
-        ui.painter().circle_filled(
+        skin::paint_knob(
+            ui.painter(),
             Pos2::new(x, rect.center().y),
             radius,
-            alpha(Color32::WHITE, opacity),
+            &palette,
+            opacity,
         );
     }
     if enabled {
@@ -502,30 +510,18 @@ pub fn paint_tick(ui: &Ui, rect: Rect, id: Id, checked: bool, enabled: bool, hov
     );
     let opacity = if enabled { 1.0 } else { 0.42 };
     let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-    let border = if hovered && enabled {
-        palette.accent
-    } else {
-        palette.strong_line
-    };
-    ui.painter().rect(
+    let ink = skin::paint_check(
+        ui.painter(),
         box_rect,
-        CornerRadius::same(SMALL_RADIUS),
-        alpha(palette.accent, t.clamp(0.0, 1.0) * opacity),
-        Stroke::new(
-            1.5,
-            alpha(mix(border, palette.accent, t.clamp(0.0, 1.0)), opacity),
-        ),
-        StrokeKind::Inside,
+        &palette,
+        t,
+        hovered && enabled,
+        opacity,
     );
     if t > 0.01 {
         let scale = t.max(0.0);
         let check = Rect::from_center_size(box_rect.center(), Vec2::splat(14.0 * scale));
-        theme::paint_icon(
-            ui.painter(),
-            check,
-            "installed",
-            alpha(palette.accent_ink, opacity),
-        );
+        theme::paint_icon(ui.painter(), check, "installed", ink);
     }
 }
 
@@ -584,21 +580,13 @@ impl<'a> Field<'a> {
         let focused = ui.ctx().memory(|m| m.has_focus(self.id));
         let focus = ease(ui.ctx(), self.id.with("focus"), focused, REVEAL);
         let painter = ui.painter().clone();
-        painter.rect(
+        skin::paint_field(
+            &painter,
             rect,
-            CornerRadius::same(CONTROL_RADIUS + if self.large { 3 } else { 0 }),
-            palette.surface,
-            Stroke::new(1.0 + focus, mix(palette.line, palette.accent, focus)),
-            StrokeKind::Inside,
+            theme::round(CONTROL_RADIUS + if self.large { 3 } else { 0 }),
+            &palette,
+            focus,
         );
-        if focus > 0.0 {
-            painter.rect_stroke(
-                rect.expand(3.0),
-                CornerRadius::same(CONTROL_RADIUS + 3),
-                Stroke::new(3.0, alpha(palette.accent, 0.18 * focus)),
-                StrokeKind::Inside,
-            );
-        }
         let mut left = rect.left() + 12.0;
         if let Some(icon) = self.icon {
             let icon_rect =
@@ -710,7 +698,7 @@ pub fn paint_spinner(ui: &Ui, rect: Rect, color: Color32) {
 
 /// A thin bar: filled to `fraction`, or a sweeping segment when unknown.
 pub fn paint_bar(ui: &Ui, rect: Rect, fraction: Option<f32>, color: Color32, id: Id) {
-    let radius = CornerRadius::same((rect.height() / 2.0).round() as u8);
+    let radius = theme::round((rect.height() / 2.0).round() as u8);
     ui.painter().rect_filled(rect, radius, alpha(color, 0.18));
     // Nothing done yet sweeps too: an empty bar looks stuck.
     match fraction.filter(|fraction| *fraction > 0.0) {
@@ -753,22 +741,29 @@ pub fn paint_skeleton(ui: &Ui, rect: Rect, color: Color32) {
         0.55 + 0.45 * (0.5 + 0.5 * (clock(ui.ctx()) * std::f32::consts::TAU / 1.6).sin())
     };
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(SMALL_RADIUS), alpha(color, pulse));
+        .rect_filled(rect, theme::round(SMALL_RADIUS), alpha(color, pulse));
 }
 
 /// A rounded panel on the surface colour.
 pub fn card(palette: &Palette) -> Frame {
     Frame::new()
         .fill(palette.surface)
-        .stroke(Stroke::new(1.0, palette.line))
-        .corner_radius(CornerRadius::same(CARD_RADIUS))
+        .stroke(skin::panel_stroke(palette))
+        .corner_radius(theme::round(CARD_RADIUS))
         .inner_margin(Margin::same(16))
-        .shadow(Shadow {
-            offset: [0, 1],
-            blur: 6,
-            spread: 0,
-            color: Color32::from_black_alpha(if palette.dark { 40 } else { 10 }),
-        })
+        .shadow(skin::shadow(palette))
+}
+
+/// Shows `frame`, a [`card`], with the style's edges around it.
+pub fn show_card<R>(
+    ui: &mut Ui,
+    frame: Frame,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let palette = Palette::current(ui.ctx());
+    let shown = frame.show(ui, add);
+    skin::edge(ui.painter(), shown.response.rect, &palette, false);
+    shown
 }
 
 /// A small pill with a count, e.g. updates waiting.
@@ -784,7 +779,7 @@ pub fn paint_badge(ui: &Ui, center: Pos2, text: &str, fill: Color32, ink: Color3
         20.0 * scale,
     );
     let rect = Rect::from_center_size(center, size);
-    ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+    ui.painter().rect_filled(rect, theme::round(10), fill);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, ink);
 }
@@ -880,12 +875,12 @@ pub fn steps(
     let painter = ui.painter();
     painter.rect_filled(
         track,
-        CornerRadius::same(2),
+        theme::round(2),
         alpha(palette.strong_line_solid(), opacity),
     );
     painter.rect_filled(
         Rect::from_min_max(track.min, Pos2::new(x, track.max.y)),
-        CornerRadius::same(2),
+        theme::round(2),
         alpha(palette.accent, opacity),
     );
     for i in 0..count {

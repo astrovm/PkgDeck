@@ -9,8 +9,7 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Color32, CornerRadius, Id, Key, Modifiers, Rect, Response, Sense, Stroke, Ui,
-    Vec2,
+    self, pos2, vec2, Color32, Id, Key, Modifiers, Rect, Response, Sense, Stroke, Ui, Vec2,
 };
 use serde_json::json;
 use std::collections::HashSet;
@@ -151,7 +150,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
         let mut lines = summary.lines();
         egui::Frame::new()
             .fill(palette.selection)
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(theme::round(10))
             .inner_margin(egui::Margin::same(14))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -165,7 +164,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                         ui.add(
                             egui::Image::new(uri)
                                 .fit_to_exact_size(Vec2::splat(44.0))
-                                .corner_radius(CornerRadius::same(8)),
+                                .corner_radius(theme::round(8)),
                         );
                     }
                     ui.vertical(|ui| {
@@ -211,7 +210,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                 egui::Frame::new()
                     .fill(palette.canvas)
                     .stroke(Stroke::new(1.0, palette.line))
-                    .corner_radius(CornerRadius::same(8))
+                    .corner_radius(theme::round(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -380,7 +379,7 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
                     for repo in chunk {
                         egui::Frame::new()
                             .fill(palette.canvas)
-                            .corner_radius(CornerRadius::same(10))
+                            .corner_radius(theme::round(10))
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
                                 // The card stacks its lines: the row's
@@ -702,7 +701,7 @@ fn screenshot(app: &mut App, ctx: &egui::Context) {
             let max = vec2(ui.available_width(), (screen.height() - 160.0).min(680.0));
             let image = egui::Image::new(url.clone())
                 .max_size(max)
-                .corner_radius(CornerRadius::same(8));
+                .corner_radius(theme::round(8));
             match image.load_for_size(ui.ctx(), max) {
                 Ok(egui::load::TexturePoll::Ready { .. }) => {
                     ui.vertical_centered(|ui| {
@@ -807,7 +806,7 @@ fn picker_row(
     });
     if enabled && response.hovered() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), palette.hover);
+            .rect_filled(rect, theme::round(6), palette.hover);
     }
     let tick = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), Vec2::splat(22.0));
     paint_tick(

@@ -1,18 +1,22 @@
 //! The results card: its heading, column titles, rows, and what it shows
 //! while loading or when there's nothing to list.
 
-use super::{widgets::*, COMPACT_BELOW, MEDIUM_BELOW};
+use super::{skin, widgets::*, COMPACT_BELOW, MEDIUM_BELOW};
 use crate::{
     app::App,
     model::{self, Column, Page, Row, Tone},
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CornerRadius, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind,
-    Ui, UiBuilder, Vec2,
+    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Vec2,
 };
 
 const ROW: f32 = 60.0;
+/// A wide row's height at the chosen density.
+fn wide_row() -> f32 {
+    (ROW * theme::skin().density.scale()).round()
+}
 const ROW_COMPACT: f32 = 78.0;
 const GROUP_HEADING: f32 = 36.0;
 
@@ -42,21 +46,14 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         focused && app.ui.keyboard_nav,
         REVEAL,
     );
-    ui.painter().add(
-        egui::epaint::Shadow {
-            offset: [0, 1],
-            blur: 6,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(if palette.dark { 40 } else { 10 }),
-        }
-        .as_shape(rect, CornerRadius::same(12)),
-    );
-    ui.painter().rect(
+    // A list box sits into the window in the styles with bevels.
+    let line = skin::panel_stroke(&palette).color;
+    skin::paint_panel(
+        ui.painter(),
         rect,
-        CornerRadius::same(12),
-        palette.surface,
-        Stroke::new(1.0, mix(palette.line, palette.accent, ring)),
-        StrokeKind::Inside,
+        &palette,
+        true,
+        Stroke::new(1.0, mix(line, palette.accent, ring)),
     );
     let width = if rect.width() < COMPACT_BELOW {
         Width::Compact
@@ -501,7 +498,7 @@ fn row_height(app: &App, index: usize, width: Width) -> f32 {
     let base = if width == Width::Compact {
         ROW_COMPACT
     } else {
-        ROW
+        wide_row()
     };
     base + if app.items[index].group.is_some() {
         GROUP_HEADING
@@ -714,16 +711,13 @@ fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin:
         pos2(ui.max_rect().right(), origin + bottom),
     )
     .shrink2(vec2(6.0, 2.0));
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(10),
-        alpha(palette.selection, shown),
-    );
+    ui.painter()
+        .rect_filled(rect, theme::round(10), alpha(palette.selection, shown));
     // The keyboard's outline moves with it.
     if selected.is_some() && app.ui.keyboard_nav && app.ui.list_focused {
         ui.painter().rect_stroke(
             rect,
-            CornerRadius::same(10),
+            theme::round(10),
             Stroke::new(1.5, alpha(palette.accent, shown)),
             StrokeKind::Inside,
         );
@@ -765,13 +759,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             vec2(rect.width() - 16.0, GROUP_HEADING - 6.0),
         );
         ui.painter()
-            .rect_filled(heading, CornerRadius::same(8), alpha(palette.accent, 0.08));
+            .rect_filled(heading, theme::round(8), alpha(palette.accent, 0.08));
         ui.painter().rect_filled(
             Rect::from_min_size(
                 heading.min + vec2(0.0, 6.0),
                 vec2(3.0, heading.height() - 12.0),
             ),
-            CornerRadius::same(2),
+            theme::round(2),
             palette.accent,
         );
         ui.painter().text(
@@ -811,8 +805,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         fill = mix(fill, alpha(palette.success, 0.2), flash);
         ctx.request_repaint();
     }
-    ui.painter()
-        .rect_filled(surface, CornerRadius::same(10), fill);
+    ui.painter().rect_filled(surface, theme::round(10), fill);
     let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
@@ -1134,7 +1127,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
     let palette = Palette::current(ui.ctx());
     let fallback = |ui: &mut Ui| {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(10), alpha(palette.accent, 0.1));
+            .rect_filled(rect, theme::round(10), alpha(palette.accent, 0.1));
         let mark = rect.shrink(rect.width() * 0.24);
         if row.kind == "failure" {
             theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
@@ -1157,7 +1150,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
         Some(uri) => {
             let image = egui::Image::new(uri.clone())
                 .fit_to_exact_size(rect.size())
-                .corner_radius(CornerRadius::same(8));
+                .corner_radius(theme::round(8));
             match image.load_for_size(ui.ctx(), rect.size()) {
                 Ok(egui::load::TexturePoll::Ready { .. }) => {
                     image.paint_at(ui, rect);
@@ -1194,13 +1187,14 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
 fn skeleton_rows(ui: &mut Ui, body: Rect, palette: &Palette) {
     let color = palette.hover_solid();
     for i in 0..8 {
-        let top = body.top() + 8.0 + i as f32 * ROW;
-        if top + ROW > body.bottom() {
+        let row = wide_row();
+        let top = body.top() + 8.0 + i as f32 * row;
+        if top + row > body.bottom() {
             break;
         }
         let row = Rect::from_min_size(
             pos2(body.left() + 20.0, top),
-            vec2(body.width() - 40.0, ROW),
+            vec2(body.width() - 40.0, row),
         );
         paint_skeleton(
             ui,
