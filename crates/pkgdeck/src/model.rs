@@ -670,6 +670,18 @@ pub struct BackgroundState {
     pub available: u64,
     pub failures: Vec<Failure>,
     pub notify: bool,
+    /// What automatic updates wait for, "battery" or "build".
+    pub waiting: Option<String>,
+}
+impl BackgroundState {
+    /// What automatic updates wait for, as the Settings page says it.
+    pub fn waiting_text(&self) -> Option<&'static str> {
+        match self.waiting.as_deref()? {
+            "battery" => Some("Updates wait for the charger"),
+            "build" => Some("Updates wait for builds to finish"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

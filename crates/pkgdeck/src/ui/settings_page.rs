@@ -444,6 +444,17 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 response.on_hover_text(warning);
             }
         });
+        if let Some(waiting) = app
+            .background
+            .waiting_text()
+            .filter(|_| background && app.settings.auto_update)
+        {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                theme::paint_icon(ui.painter(), rect, "clock", palette.muted);
+                ui.label(egui::RichText::new(waiting).color(palette.muted));
+            });
+        }
         ui.horizontal(|ui| {
             if app.platform.permission_needed()
                 && Button::new(Look::Secondary, "Notification settings")

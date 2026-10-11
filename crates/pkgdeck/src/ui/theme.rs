@@ -391,7 +391,7 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     };
     match name {
         "search" => arc((10.0, 10.0), 7.0, 0.0, 360.0),
-        "info" | "help" => arc((12.0, 12.0), 10.0, 0.0, 360.0),
+        "info" | "help" | "clock" => arc((12.0, 12.0), 10.0, 0.0, 360.0),
         "spinner" => arc((12.0, 12.0), 9.0, -90.0, 180.0),
         "system-image" => {
             arc((12.0, 12.0), 9.5, 0.0, 360.0);

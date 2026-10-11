@@ -4,6 +4,7 @@ use crate::qt::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
+use pkgdeck_core::hold::Hold;
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{
@@ -1098,6 +1099,12 @@ struct Natives {
     metadata: crate::metadata::Sources,
     /// Load the local app catalog in the background when sections load.
     warm_catalog: bool,
+    /// Why automatic updates should wait right now, if they should.
+    hold: fn(&pkgdeck_core::host::Host) -> Option<Hold>,
+}
+/// Never on battery and never building.
+fn never_hold(_: &pkgdeck_core::host::Host) -> Option<Hold> {
+    None
 }
 /// Builds an engine for some sources, as `native_engine` does.
 pub type EngineMaker =
@@ -1135,6 +1142,7 @@ fn synthetic_natives(engine: EngineMaker) -> Natives {
             fetch: offline,
         },
         warm_catalog: false,
+        hold: never_hold,
     }
 }
 const NATIVES: Natives = Natives {
@@ -1144,6 +1152,7 @@ const NATIVES: Natives = Natives {
     root: "/",
     metadata: crate::metadata::SYSTEM,
     warm_catalog: true,
+    hold: pkgdeck_core::hold::current,
 };
 /// Unit tests never detect the machine's own package managers.
 #[cfg(not(test))]
@@ -1399,6 +1408,8 @@ pub struct Controller {
     approval_worker: Option<ApprovalWorker>,
     /// Install updates that background checks find.
     auto_update: bool,
+    /// Why the updates the last background check found wait, if they do.
+    auto_held: Option<Hold>,
     /// Let Update all remove packages when APT's plan does.
     allow_removals: bool,
     source_filter: Vec<String>,
@@ -1528,6 +1539,7 @@ impl Default for Controller {
             catalog_worker: None,
             approval_worker: None,
             auto_update: false,
+            auto_held: None,
             allow_removals: true,
             source_filter: Vec::new(),
             sudo: false,
@@ -3791,12 +3803,20 @@ impl ffi::PackageController {
         let busy = self.rust().worker.is_some()
             || !self.rust().confirmed_queue.is_empty()
             || self.rust().pending.is_some();
-        if !self
-            .as_mut()
-            .rust_mut()
-            .background_schedule
-            .ready(now, enabled, offline, metered, busy, force)
-        {
+        // Updates waiting for power or for a build: check again as soon as
+        // that's over, instead of a whole interval later.
+        let retry = self.rust().auto_update
+            && self.rust().auto_held.is_some()
+            && !busy
+            && self.as_mut().still_held().is_none();
+        if !self.as_mut().rust_mut().background_schedule.ready(
+            now,
+            enabled,
+            offline,
+            metered,
+            busy,
+            force || retry,
+        ) {
             return;
         }
         let sources: Vec<String> = sources
@@ -3816,6 +3836,24 @@ impl ffi::PackageController {
     }
     pub fn set_auto_update(mut self: Pin<&mut Self>, enabled: bool) {
         self.as_mut().rust_mut().auto_update = enabled;
+        if !enabled {
+            self.as_mut().rust_mut().auto_held = None;
+        }
+    }
+    /// Why automatic updates wait now, if they still do. A new reason
+    /// replaces the old one in the background state.
+    fn still_held(mut self: Pin<&mut Self>) -> Option<Hold> {
+        let natives = self.rust().natives;
+        let hold = (natives.hold)(&(natives.host)());
+        if hold.is_some() && hold != self.rust().auto_held {
+            self.as_mut().rust_mut().auto_held = hold;
+            let mut state: Value =
+                serde_json::from_str(&self.background_state().to_string()).unwrap_or_default();
+            state["waiting"] = json!(hold.map(Hold::key));
+            state["notify"] = json!(false);
+            self.as_mut().set_background_state(encoded(state));
+        }
+        hold
     }
     pub fn set_allow_removals(mut self: Pin<&mut Self>, allowed: bool) {
         self.as_mut().rust_mut().allow_removals = allowed;
@@ -3886,6 +3924,7 @@ impl ffi::PackageController {
     /// whether a run was queued.
     fn schedule_auto_update(mut self: Pin<&mut Self>, report: &PackageReport) -> bool {
         use pkgdeck_core::unattended::{unattended, Unattended};
+        self.as_mut().rust_mut().auto_held = None;
         let rust = self.rust();
         if !rust.auto_update
             || rust.worker.is_some()
@@ -3928,6 +3967,14 @@ impl ffi::PackageController {
             &self.rust().failed_updates,
         );
         if operations.is_empty() {
+            return false;
+        }
+        // On battery or during a build, wait: check_updates tries again
+        // once that's over.
+        let natives = self.rust().natives;
+        let hold = (natives.hold)(&(natives.host)());
+        if hold.is_some() {
+            self.as_mut().rust_mut().auto_held = hold;
             return false;
         }
         let versions = packages
@@ -4142,7 +4189,8 @@ impl ffi::PackageController {
         let saved = self.rust().background_schedule.notification_history();
         self.as_mut()
             .set_notification_history(saved.as_str().into());
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && !automatic})));
+        let waiting = self.rust().auto_held.map(Hold::key);
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && !automatic, "waiting": waiting})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -12345,6 +12393,98 @@ mod tests {
         controller.as_mut().finish_background_check(report);
         assert!(controller.rust().validated_confirmed.is_none());
     }
+    fn on_battery(_: &pkgdeck_core::host::Host) -> Option<Hold> {
+        Some(Hold::Battery)
+    }
+    fn building(_: &pkgdeck_core::host::Host) -> Option<Hold> {
+        Some(Hold::Build)
+    }
+    #[test]
+    fn automatic_updates_wait_for_power_and_builds_then_check_again() {
+        let mut wget = synthetic_package("wget", "wget");
+        wget.id.backend = "homebrew".into();
+        wget.update = UpdateAvailability::Available;
+        wget.candidate_version = Some("2".into());
+        let report = PackageReport {
+            packages: vec![wget],
+            failures: vec![],
+            successful_sources: vec!["homebrew".into()],
+        };
+        let state = |controller: &ffi::PackageController| -> Value {
+            serde_json::from_str(&controller.background_state().to_string()).unwrap()
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().set_auto_update(true);
+        // The last check just started, so the next isn't due for a while.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(controller
+            .as_mut()
+            .rust_mut()
+            .background_schedule
+            .ready(now, true, false, false, false, false));
+
+        // On battery, the updates wait and the check tells about them instead.
+        controller.as_mut().rust_mut().natives.hold = on_battery;
+        controller.as_mut().finish_background_check(report.clone());
+        assert!(controller.rust().validated_confirmed.is_none());
+        assert_eq!(state(&controller)["notify"], true);
+        assert_eq!(state(&controller)["waiting"], "battery");
+
+        // Plugged in during a build: still waiting, now for the build.
+        controller.as_mut().rust_mut().natives.hold = building;
+        controller
+            .as_mut()
+            .check_updates("homebrew".into(), true, false, false, false);
+        assert!(controller.rust().worker.is_none());
+        assert_eq!(state(&controller)["waiting"], "build");
+        assert_eq!(state(&controller)["notify"], false);
+        // Asking again with the same answer changes nothing.
+        controller
+            .as_mut()
+            .check_updates("homebrew".into(), true, false, false, false);
+        assert!(controller.rust().worker.is_none());
+        assert_eq!(state(&controller)["waiting"], "build");
+
+        // Once the build ends, PkgDeck checks again right away.
+        controller.as_mut().rust_mut().natives.hold = never_hold;
+        controller
+            .as_mut()
+            .check_updates("homebrew".into(), true, false, false, false);
+        assert!(matches!(
+            controller.rust().worker.as_ref().map(|worker| &worker.job),
+            Some(Job::BackgroundUpdates(sources)) if sources == &["homebrew"]
+        ));
+        settle(&mut controller);
+        controller.as_mut().finish_background_check(report.clone());
+        assert!(controller.rust().validated_confirmed.is_some());
+        assert_eq!(state(&controller)["waiting"], Value::Null);
+
+        // Turning automatic updates off forgets the wait, so nothing checks
+        // before the interval.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_auto_update(true);
+        controller.as_mut().rust_mut().natives.hold = building;
+        assert!(controller
+            .as_mut()
+            .rust_mut()
+            .background_schedule
+            .ready(now, true, false, false, false, false));
+        controller.as_mut().finish_background_check(report);
+        assert_eq!(controller.rust().auto_held, Some(Hold::Build));
+        controller.as_mut().set_auto_update(false);
+        assert_eq!(controller.rust().auto_held, None);
+        controller.as_mut().rust_mut().natives.hold = never_hold;
+        controller
+            .as_mut()
+            .check_updates("homebrew".into(), true, false, false, false);
+        assert!(controller.rust().worker.is_none());
+    }
     fn run_job(engine: &mut Engine, job: Job, cancel: &Cancellation) -> Vec<Reply> {
         let mut replies = Vec::new();
         execute(engine, job, cancel, &mut |reply| replies.push(reply));
@@ -15356,6 +15496,7 @@ mod tests {
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
         warm_catalog: false,
+        hold: super::never_hold,
     };
     #[test]
     fn synthetic_controllers_stay_off_the_system() {
@@ -15400,6 +15541,7 @@ mod tests {
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
         warm_catalog: false,
+        hold: super::never_hold,
     };
     fn synthetic_controller() -> crate::qt::UniquePtr<ffi::PackageController> {
         let mut controller = idle_controller();
