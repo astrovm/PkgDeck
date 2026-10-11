@@ -3068,6 +3068,7 @@ dependencies = [
  "hex",
  "image",
  "ksni",
+ "memmap2",
  "notify-rust",
  "pkgdeck-app",
  "pkgdeck-core",

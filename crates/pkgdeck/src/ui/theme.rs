@@ -207,11 +207,34 @@ const OTHER_SCRIPTS: &[&str] = &[
     "System/Library/Fonts/Hiragino Sans GB.ttc",
 ];
 
+/// The font file at `path`, mapped from disk rather than read into memory:
+/// the system shares those pages with every program using the font and
+/// can drop them when short of memory. Mapped once per run.
+#[allow(unsafe_code)]
+fn mapped(path: &Path) -> Option<&'static [u8]> {
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+    };
+    static MAPPED: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
+    let mut mapped = MAPPED.get_or_init(Default::default).lock().ok()?;
+    if let Some(bytes) = mapped.get(path) {
+        return Some(bytes);
+    }
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: system font files are only replaced, not changed in place,
+    // by package managers; a replaced file keeps the mapped one alive.
+    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let bytes: &'static [u8] = &Box::leak(Box::new(map))[..];
+    mapped.insert(path.to_owned(), bytes);
+    Some(bytes)
+}
+
 /// Inter for text, the system's monospace face, and the system's faces
 /// behind them for scripts Inter lacks, found under `root`.
 pub fn fonts(root: &Path) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-    let read = |path: &str| std::fs::read(root.join(path)).ok();
+    let read = |path: &str| mapped(&root.join(path));
     let defaults = fonts.families[&FontFamily::Proportional].clone();
     fonts.font_data.insert(
         "inter".into(),
@@ -234,10 +257,10 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     {
         fonts
             .font_data
-            .insert("system".into(), Arc::new(FontData::from_owned(system)));
+            .insert("system".into(), Arc::new(FontData::from_static(system)));
         fonts.font_data.insert(
             "system-bold".into(),
-            Arc::new(FontData::from_owned(system_bold)),
+            Arc::new(FontData::from_static(system_bold)),
         );
         regular.push("system".into());
         bold.push("system-bold".into());
@@ -245,7 +268,7 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     if let Some(bytes) = OTHER_SCRIPTS.iter().find_map(|path| read(path)) {
         fonts.font_data.insert(
             "other-scripts".into(),
-            Arc::new(FontData::from_owned(bytes)),
+            Arc::new(FontData::from_static(bytes)),
         );
         regular.push("other-scripts".into());
         bold.push("other-scripts".into());
@@ -257,7 +280,7 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     if let Some(bytes) = MONO.iter().find_map(|path| read(path)) {
         fonts
             .font_data
-            .insert("system-mono".into(), Arc::new(FontData::from_owned(bytes)));
+            .insert("system-mono".into(), Arc::new(FontData::from_static(bytes)));
         fonts
             .families
             .entry(FontFamily::Monospace)

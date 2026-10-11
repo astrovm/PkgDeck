@@ -54,6 +54,13 @@ impl Schedule {
         })
         .expect("notification history is serializable")
     }
+    /// Carry the last check over from a copy that ran before, so starting
+    /// again doesn't check before the interval is up.
+    pub fn resume(&mut self, last_started: u64) {
+        if last_started > 0 {
+            self.last_started = Some(last_started);
+        }
+    }
     pub fn acknowledge_notification(&mut self) {
         for (source, updates) in std::mem::take(&mut self.pending) {
             self.notified.insert(source, updates);

@@ -42,6 +42,7 @@ impl<'a> Window<'a> {
             *guard = Some(ctx.clone());
         }
         app.window_visible = true;
+        app.c().set_window_open(true);
         let smoke_test = app.launch.smoke_test.then_some(0);
         Self {
             app,
@@ -99,6 +100,7 @@ impl<'a> Window<'a> {
 impl Drop for Window<'_> {
     fn drop(&mut self) {
         self.app.window_visible = false;
+        self.app.c().set_window_open(false);
         if let Ok(mut guard) = CONTEXT.lock() {
             *guard = None;
         }
