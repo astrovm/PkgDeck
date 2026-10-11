@@ -8892,7 +8892,10 @@ mod tests {
         assert!(write_view(&path, view, 1, &written));
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        controller.as_mut().rust_mut().open_view_store(Some(path.clone()));
+        controller
+            .as_mut()
+            .rust_mut()
+            .open_view_store(Some(path.clone()));
         assert!(controller.rust().view_cache.get(&key).is_some());
         assert!(!controller.rust().prefetch.is_empty());
 

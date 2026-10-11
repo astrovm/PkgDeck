@@ -1906,10 +1906,7 @@ mod tests {
             ..Contents::default()
         };
         backend.remember_contents(&other, key, &remembered);
-        assert_eq!(
-            backend.contents(&other).name.as_deref(),
-            Some("Remembered")
-        );
+        assert_eq!(backend.contents(&other).name.as_deref(), Some("Remembered"));
         // Changed since: read again, and garbage reads as nothing.
         let changed = base.join("changed.AppImage");
         fs::write(&changed, b"not an image either").unwrap();
