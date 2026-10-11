@@ -168,18 +168,19 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.text_size = all[choice];
             }
         });
-        setting_row(
-            ui,
-            "Animations",
-            "Movement when things open, close and change",
-            SWITCH,
-            |ui| {
-                let mut on = !app.settings.reduce_motion;
-                if switch(ui, &mut on, true, "Animations").changed() {
-                    app.settings.reduce_motion = !on;
-                }
-            },
-        );
+        // The desktop can turn movement off for every app; then it stays off.
+        let system = app.platform.reduce_motion();
+        let hint = if system {
+            "Off in system settings"
+        } else {
+            "Movement when things open, close and change"
+        };
+        setting_row(ui, "Animations", hint, SWITCH, |ui| {
+            let mut on = !app.reduce_motion();
+            if switch(ui, &mut on, !system, "Animations").changed() {
+                app.settings.reduce_motion = !on;
+            }
+        });
     });
 }
 

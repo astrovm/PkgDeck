@@ -47,6 +47,7 @@ pub struct Toast {
 pub enum ToastAction {
     Undo,
     Restart,
+    StartAtLogin,
 }
 
 /// How the window asked to be launched.
@@ -850,7 +851,40 @@ impl App {
                 self.restart_toast = None;
                 self.restart();
             }
+            ToastAction::StartAtLogin => {
+                self.restart_toast = None;
+                if self.c().set_autostart(true) {
+                    self.settings.autostart = true;
+                }
+            }
         }
+    }
+
+    /// Offers once to start at login, so updates are checked without
+    /// opening PkgDeck first. Only when it can keep running in the tray.
+    pub fn ask_about_login(&mut self) {
+        if self.settings.login_asked
+            || self.settings.autostart
+            || !self.settings.background_mode
+            || !self.platform.tray_available()
+            || self.restart_toast.is_some()
+        {
+            return;
+        }
+        self.settings.login_asked = true;
+        self.restart_toast = Some(Toast {
+            text: "Check for updates in the background after you log in?".into(),
+            tone: Tone::Accent,
+            action: Some(ToastAction::StartAtLogin),
+            shown: Instant::now(),
+            lasts: Duration::from_secs(24 * 60 * 60),
+            from_notice: false,
+        });
+    }
+
+    /// Whether to keep movement down: asked here, or by the desktop.
+    pub fn reduce_motion(&self) -> bool {
+        self.settings.reduce_motion || self.platform.reduce_motion()
     }
 
     pub fn restart(&mut self) {

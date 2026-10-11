@@ -74,7 +74,7 @@ pub fn filter_id() -> Id {
 /// One frame of the window.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
-    set_reduce_motion(&ctx, app.settings.reduce_motion);
+    set_reduce_motion(&ctx, app.reduce_motion());
     ctx.set_theme(match app.settings.appearance {
         Appearance::System => egui::ThemePreference::System,
         Appearance::Light => egui::ThemePreference::Light,
@@ -1221,6 +1221,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                     let label = match action {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
+                        crate::app::ToastAction::StartAtLogin => "Start at login",
                     };
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()

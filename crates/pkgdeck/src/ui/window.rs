@@ -64,6 +64,8 @@ impl<'a> Window<'a> {
         ui::show(self.app, ui);
         if self.shown {
             self.app.sync_tray();
+        } else {
+            self.app.ask_about_login();
         }
         self.shown = true;
         match ui::window_request(self.app) {

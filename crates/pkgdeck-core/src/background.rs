@@ -17,7 +17,7 @@ use std::{
 };
 
 /// Default time between background checks.
-pub const CHECK_INTERVAL_SECONDS: u64 = 30 * 60;
+pub const CHECK_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
 /// The shortest interval a user may pick. Each check can run `brew update`
 /// and query every source, so more often than this mostly adds load.
 pub const MIN_CHECK_INTERVAL_SECONDS: u64 = 15 * 60;

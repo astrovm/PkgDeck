@@ -3877,6 +3877,12 @@ impl ffi::PackageController {
             None,
         )));
     }
+    /// Where the login item goes, for tests of the window.
+    #[doc(hidden)]
+    pub fn use_autostart_path(self: Pin<&mut Self>, path: PathBuf) {
+        self.rust_mut().autostart_path = Some(path);
+    }
+
     pub fn set_autostart(mut self: Pin<&mut Self>, enabled: bool) -> bool {
         let result = self
             .rust()

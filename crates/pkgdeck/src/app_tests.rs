@@ -325,6 +325,81 @@ fn self_updates_restart_now_or_ask() {
 }
 
 #[test]
+fn starting_at_login_is_offered_once() {
+    let mut app = app();
+    app.ask_about_login();
+    let toast = app.restart_toast.clone().unwrap();
+    assert_eq!(toast.action, Some(ToastAction::StartAtLogin));
+    assert_eq!(toast.tone, Tone::Accent);
+    assert!(app.settings.login_asked);
+    // Once asked, never again, even after the toast goes.
+    app.restart_toast = None;
+    app.ask_about_login();
+    assert!(app.restart_toast.is_none());
+    // Saying yes writes the login item and remembers it.
+    let dir = std::env::temp_dir().join(format!("pkgdeck-login-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.c()
+        .use_autostart_path(dir.join("autostart/app.desktop"));
+    app.restart_toast = Some(toast.clone());
+    app.toast_action(ToastAction::StartAtLogin);
+    assert!(app.restart_toast.is_none());
+    assert!(app.settings.autostart);
+    assert!(dir.join("autostart/app.desktop").exists());
+    // When the login item can't be written, it stays off.
+    std::fs::write(dir.join("blocked"), "").unwrap();
+    app.c().use_autostart_path(dir.join("blocked/app.desktop"));
+    app.settings.autostart = false;
+    app.restart_toast = Some(toast);
+    app.toast_action(ToastAction::StartAtLogin);
+    assert!(app.restart_toast.is_none());
+    assert!(!app.settings.autostart);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn starting_at_login_is_not_offered_when_it_makes_no_sense() {
+    let toast = Toast {
+        text: "PkgDeck was updated.".into(),
+        tone: Tone::Success,
+        action: Some(ToastAction::Restart),
+        shown: Instant::now(),
+        lasts: Duration::from_secs(60),
+        from_notice: false,
+    };
+    for case in 0..4 {
+        let mut app = app();
+        match case {
+            0 => app.settings.login_asked = true,
+            1 => app.settings.autostart = true,
+            2 => app.settings.background_mode = false,
+            // Another sticky toast is showing; it waits for the next start.
+            _ => app.restart_toast = Some(toast.clone()),
+        }
+        app.ask_about_login();
+        assert_ne!(
+            app.restart_toast.as_ref().and_then(|t| t.action),
+            Some(ToastAction::StartAtLogin),
+            "{case}"
+        );
+        assert_eq!(app.settings.login_asked, case == 0, "{case}");
+    }
+}
+
+#[test]
+fn movement_stops_when_asked_here_or_by_the_desktop() {
+    let mut app = app();
+    assert!(!app.reduce_motion());
+    app.settings.reduce_motion = true;
+    assert!(app.reduce_motion());
+    app.settings.reduce_motion = false;
+    app.platform.set_system_motion(true);
+    assert!(app.reduce_motion());
+    // The setting itself is left as it was.
+    assert!(!app.settings.reduce_motion);
+}
+
+#[test]
 fn automatic_cleaning_is_remembered_and_told_once() {
     let mut app = app();
     app.settings.auto_clean = true;

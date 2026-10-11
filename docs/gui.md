@@ -411,13 +411,15 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 is running. Turn them off in Settings.
 
 - The first check runs about 30 seconds after launch, then at most once per
-  **Check every** interval: 15 minutes to a week, 30 minutes by default. The
+  **Check every** interval: 15 minutes to a week, 6 hours by default. The
   Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
-  `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
+  `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
+  default. The first time the window opens, PkgDeck asks once with a
+  **Start at login** button.
 - While background checks are on, PkgDeck shows a tray icon (a menu bar
   icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
 - On Linux, clicking the tray icon also shows or hides the window.
@@ -524,7 +526,9 @@ out of date, and each page refreshes when you open it.
   red, orange, green, teal or graphite.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
-- **Animations**: turn motion on or off.
+- **Animations**: turn motion on or off. When the system turns motion off
+  (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
+  and reads **Off in system settings**.
 - **Background checks**, **Check every**, **Install updates automatically**,
   **Allow updates that remove packages**, **Allow automatic updates without
   a password** and **Start in background at login**: see
