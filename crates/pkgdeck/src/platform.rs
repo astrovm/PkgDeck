@@ -612,7 +612,7 @@ mod tests {
                 break;
             }
         }
-        let (mut platform, woke_for) = claimed.expect("the events never arrived");
+        let (platform, woke_for) = claimed.expect("the events never arrived");
         assert_eq!(woke_for, 2);
         assert!(platform.tray_available());
         platform.set_badge("");

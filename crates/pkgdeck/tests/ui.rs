@@ -74,6 +74,23 @@ fn harness_with(app: App, size: egui::Vec2, step: f32) -> Harness<'static, (bool
         )
 }
 
+/// Scrolls the control into view first, as a person would, then clicks it.
+/// `role` tells it apart from text with the same label.
+fn click_in_view(harness: &mut Harness<'static, (bool, App)>, role: Option<Role>, label: &str) {
+    for scroll in [true, false] {
+        let node = match role {
+            Some(role) => harness.get_by_role_and_label(role, label),
+            None => harness.get_by_label(label),
+        };
+        if scroll {
+            node.scroll_to_me();
+        } else {
+            node.click();
+        }
+        harness.run_steps(3);
+    }
+}
+
 fn show(page: Page) -> Harness<'static, (bool, App)> {
     let mut app = app();
     app.page = page;
@@ -338,29 +355,25 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
 fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
     let before = harness.state().1.settings.auto_update;
-    harness
-        .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
-        .click();
-    harness.run_steps(3);
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Update apps and packages automatically",
+    );
     assert_ne!(harness.state().1.settings.auto_update, before);
-    harness.get_by_label("Light").click();
-    harness.run_steps(3);
+    click_in_view(&mut harness, None, "Light");
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
     // Only the colours of the mode on screen are offered.
     assert!(harness.query_by_label("Black").is_none());
     for choice in ["Paper", "Dark", "Black", "Teal", "Large"] {
-        harness.get_by_label(choice).click();
-        harness.run_steps(3);
+        click_in_view(&mut harness, None, choice);
     }
     let settings = &harness.state().1.settings;
     assert_eq!(settings.dark_theme, DarkTheme::Black);
     assert_eq!(settings.light_theme, LightTheme::Paper);
     assert_eq!(settings.accent, Accent::Teal);
     assert_eq!(settings.text_size, TextSize::Large);
-    harness
-        .get_by_role_and_label(Role::CheckBox, "Animations")
-        .click();
-    harness.run_steps(3);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Animations");
     assert!(!harness.state().1.settings.reduce_motion);
 }
 
@@ -546,10 +559,11 @@ fn settings_say_what_automatic_updates_wait_for() {
         harness.run_steps(4);
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
-        harness
-            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
-            .click();
-        harness.run_steps(3);
+        click_in_view(
+            &mut harness,
+            Some(Role::CheckBox),
+            "Update apps and packages automatically",
+        );
         assert!(harness.query_by_label(text).is_none(), "{text}");
     }
     // A reason this version doesn't know shows nothing.
