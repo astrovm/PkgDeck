@@ -365,6 +365,39 @@ fn settings_switches_change_settings() {
 }
 
 #[test]
+fn settings_say_what_automatic_updates_wait_for() {
+    for (waiting, text) in [
+        ("battery", "Updates wait for the charger"),
+        ("build", "Updates wait for builds to finish"),
+    ] {
+        let mut app = app();
+        app.settings.background_mode = true;
+        app.settings.auto_update = true;
+        app.c().set_background_state(
+            json!({"last_check": 100, "available": 1, "notify": false, "waiting": waiting})
+                .to_string()
+                .into(),
+        );
+        app.react();
+        app.page = Page::Settings;
+        app.invalidate();
+        let mut harness = harness(app);
+        harness.run_steps(4);
+        assert!(harness.query_by_label(text).is_some(), "{text}");
+        // With automatic updates off, nothing waits.
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Install updates automatically")
+            .click();
+        harness.run_steps(3);
+        assert!(harness.query_by_label(text).is_none(), "{text}");
+    }
+    // A reason this version doesn't know shows nothing.
+    let state: pkgdeck::model::BackgroundState =
+        serde_json::from_value(json!({"waiting": "lunch"})).unwrap();
+    assert_eq!(state.waiting_text(), None);
+}
+
+#[test]
 fn the_activity_drawer_opens_and_closes() {
     let mut harness = show(Page::Installed);
     harness.get_by_label("Activity").click();

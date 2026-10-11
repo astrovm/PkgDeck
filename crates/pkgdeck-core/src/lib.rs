@@ -20,6 +20,7 @@ pub mod background;
 pub mod engine;
 pub mod failed_updates;
 pub mod flatpak_ref;
+pub mod hold;
 pub mod local_deb;
 pub mod manifest;
 pub mod needs_password;

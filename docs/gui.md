@@ -402,6 +402,12 @@ updates, PkgDeck installs them and sends one notification.
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
   failed.
+- It waits while the computer runs on battery, and while something is
+  being built: Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake,
+  Xcode, Gradle, Maven, Bazel, `go build` or `go test`, `dotnet build`.
+  The check still tells you about the updates, and Settings shows what
+  they wait for. Within 5 minutes of plugging in or the build ending,
+  PkgDeck checks again and installs them.
 - Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and other
   developer tools) update right away.
 - Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox
