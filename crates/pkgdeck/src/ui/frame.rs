@@ -7,7 +7,7 @@ use super::skin::{
     top_corners,
 };
 use super::theme::{self, Palette};
-use crate::settings::Style;
+use crate::settings::{Family, Style};
 use eframe::egui::{
     self, epaint::RectShape, pos2, vec2, viewport::ResizeDirection, Color32, CornerRadius,
     CursorIcon, Id, Painter, Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
@@ -52,18 +52,18 @@ pub struct Metrics {
 
 /// The frame `style` draws, or None when it keeps the system's.
 pub fn metrics(style: Style) -> Option<Metrics> {
-    let (side, top, title, below) = match style {
-        Style::Modern => return None,
+    let (side, top, title, below) = match style.family() {
+        Family::Modern => return None,
         // Windows 98: a raised edge all round, the title bar inside it.
-        Style::Retro => (4.0, 4.0, 22.0, 2.0),
+        Family::Retro => (4.0, 4.0, 22.0, 2.0),
         // XP: a blue border, the title bar up to the top.
-        Style::Luna => (4.0, 0.0, 30.0, 0.0),
+        Family::Luna => (4.0, 0.0, 30.0, 0.0),
         // Vista: thick glass all round, the title on the glass.
-        Style::Glass => (7.0, 0.0, 30.0, 0.0),
+        Family::Glass => (7.0, 0.0, 30.0, 0.0),
         // Aqua: a hairline and the striped title bar.
-        Style::Gel => (1.0, 1.0, 23.0, 0.0),
+        Family::Gel => (1.0, 1.0, 23.0, 0.0),
         // Mac OS 8: a grey drag frame and the striped title bar.
-        Style::Platinum => (5.0, 1.0, 21.0, 0.0),
+        Family::Platinum => (5.0, 1.0, 21.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -242,9 +242,9 @@ fn decorate(ctx: &egui::Context, on: bool) {
 pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     let square = |center: egui::Pos2, size: egui::Vec2| Rect::from_center_size(center, size);
     let y = bar.center().y;
-    match style {
-        Style::Modern => vec![],
-        Style::Retro => {
+    match style.family() {
+        Family::Modern => vec![],
+        Family::Retro => {
             // Minimize and maximize side by side, close apart.
             let size = vec2(18.0, 16.0);
             let close = square(pos2(bar.right() - 3.0 - size.x / 2.0, y), size);
@@ -256,7 +256,7 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Close, close),
             ]
         }
-        Style::Luna => {
+        Family::Luna => {
             let size = vec2(22.0, 22.0);
             let close = square(pos2(bar.right() - 5.0 - size.x / 2.0, y + 1.0), size);
             let maximize = close.translate(vec2(-size.x - 2.0, 0.0));
@@ -267,19 +267,30 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Close, close),
             ]
         }
-        Style::Glass => {
-            // Hung from the top edge, close the widest.
+        Family::Glass => {
+            // Hung from the top edge, close the widest; 7's are a little
+            // bigger than Vista's.
             let top = bar.top() + 1.0;
-            let close = Rect::from_min_size(pos2(bar.right() - 4.0 - 46.0, top), vec2(46.0, 20.0));
-            let maximize = Rect::from_min_size(pos2(close.left() - 26.0, top), vec2(26.0, 20.0));
-            let minimize = Rect::from_min_size(pos2(maximize.left() - 27.0, top), vec2(27.0, 20.0));
+            let ((min_w, max_w, close_w), height) = if style == Style::Vista {
+                ((25.0, 25.0, 43.0), 19.0)
+            } else {
+                ((28.0, 27.0, 46.0), 20.0)
+            };
+            let close = Rect::from_min_size(
+                pos2(bar.right() - 4.0 - close_w, top),
+                vec2(close_w, height),
+            );
+            let maximize =
+                Rect::from_min_size(pos2(close.left() - max_w, top), vec2(max_w, height));
+            let minimize =
+                Rect::from_min_size(pos2(maximize.left() - min_w, top), vec2(min_w, height));
             vec![
                 (Caption::Minimize, minimize),
                 (Caption::Maximize, maximize),
                 (Caption::Close, close),
             ]
         }
-        Style::Gel => {
+        Family::Gel => {
             // Close, minimize and zoom at the left.
             let size = vec2(14.0, 14.0);
             let at = |i: f32| square(pos2(bar.left() + 15.0 + i * 21.0, y), size);
@@ -289,7 +300,7 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Maximize, at(2.0)),
             ]
         }
-        Style::Platinum => {
+        Family::Platinum => {
             // The close box at the left; zoom and collapse at the right.
             let size = vec2(13.0, 13.0);
             let close = square(pos2(bar.left() + 8.0 + size.x / 2.0, y), size);
@@ -316,8 +327,14 @@ pub struct Press {
 /// The title bar's colour where the style takes it from the accent.
 fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
     let deep = palette.deep;
-    match theme::skin().style {
-        Style::Retro if active => {
+    match theme::skin().family() {
+        // Windows 95's title bar is one solid colour.
+        Family::Retro if active && theme::skin().style == Style::Win95 => (deep, deep),
+        Family::Retro if theme::skin().style == Style::Win95 => {
+            let dim = lerp(palette.canvas, palette.ink, 0.35);
+            (dim, dim)
+        }
+        Family::Retro if active => {
             // Windows 98's navy fades to its light blue; another colour
             // fades to a lighter self.
             let end = if deep == rgb(0x000080) {
@@ -327,7 +344,7 @@ fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
             };
             (deep, end)
         }
-        Style::Retro => {
+        Family::Retro => {
             let dim = lerp(palette.canvas, palette.ink, 0.35);
             (dim, lerp(dim, palette.canvas, 0.6))
         }
@@ -350,9 +367,9 @@ pub fn paint_frame(
 ) {
     let dark = palette.dark;
     let open = !state.maximized;
-    match theme::skin().style {
-        Style::Modern => {}
-        Style::Retro => {
+    match theme::skin().family() {
+        Family::Modern => {}
+        Family::Retro => {
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
             if open {
                 retro_edge(painter, full, palette.canvas, false, 1.0);
@@ -360,7 +377,7 @@ pub fn paint_frame(
             let (from, to) = title_colors(palette, state.active);
             gradient(painter, bar, CornerRadius::ZERO, from, to, true);
         }
-        Style::Luna => {
+        Family::Luna => {
             let (blue, _) = title_colors(palette, state.active);
             // The sides fade from the title bar's blue to a deeper one.
             painter.rect_filled(full, CornerRadius::ZERO, darker(blue, 0.12));
@@ -386,13 +403,17 @@ pub fn paint_frame(
                 ],
             );
         }
-        Style::Glass => {
+        Family::Glass => {
             // Glass over a blue-grey desktop: tinted, with streaks of light.
-            let tint = lerp(
-                if dark { rgb(0x16222f) } else { rgb(0xa8c3e2) },
-                palette.deep,
-                if state.active { 0.18 } else { 0.06 },
-            );
+            // Vista's glass is deep and smoky; 7's is light sky blue.
+            let vista = theme::skin().style == Style::Vista;
+            let base = match (vista, dark) {
+                (true, true) => rgb(0x0f1822),
+                (true, false) => rgb(0x4f7fc4),
+                (false, true) => rgb(0x1a2a3c),
+                (false, false) => rgb(0xb4d3ef),
+            };
+            let tint = lerp(base, palette.deep, if state.active { 0.14 } else { 0.04 });
             bands(
                 painter,
                 full,
@@ -403,7 +424,13 @@ pub fn paint_frame(
                     (1.0, darker(tint, 0.06)),
                 ],
             );
-            super::skin::glass_streaks(painter, full, if dark { 10 } else { 46 });
+            let shine = match (vista, dark) {
+                (true, true) => 16,
+                (true, false) => 64,
+                (false, true) => 10,
+                (false, false) => 46,
+            };
+            super::skin::glass_streaks(painter, full, shine);
             if open {
                 painter.rect_stroke(
                     full,
@@ -426,7 +453,52 @@ pub fn paint_frame(
                 StrokeKind::Inside,
             );
         }
-        Style::Gel => {
+        Family::Gel if theme::skin().style == Style::Panther => {
+            // Brushed metal from the title bar down, in one piece.
+            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
+            gradient(
+                painter,
+                bar,
+                CornerRadius::ZERO,
+                Color32::from_white_alpha(if dark { 10 } else { 70 }),
+                Color32::TRANSPARENT,
+                false,
+            );
+            super::skin::brushed_metal(painter, full, dark);
+            if open {
+                painter.rect_stroke(
+                    full,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x6c) }),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        Family::Gel if theme::skin().style == Style::Tiger => {
+            // A plain grey title bar, lit along its top edge.
+            let (top, bottom, line) = match (dark, state.active) {
+                (true, _) => (gray(0x4a), gray(0x2e), Color32::BLACK),
+                (false, true) => (gray(0xe8), gray(0xc0), gray(0x86)),
+                (false, false) => (gray(0xf2), gray(0xe0), gray(0xa8)),
+            };
+            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
+            gradient(painter, bar, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(
+                bar.x_range(),
+                bar.top() + 0.5,
+                Stroke::new(1.0, Color32::from_white_alpha(if dark { 30 } else { 200 })),
+            );
+            painter.hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line));
+            if open {
+                painter.rect_stroke(
+                    full,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x7c) }),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        Family::Gel => {
             let (top, bottom) = if dark {
                 (gray(0x4a), gray(0x30))
             } else if state.active {
@@ -461,7 +533,7 @@ pub fn paint_frame(
                 );
             }
         }
-        Style::Platinum => {
+        Family::Platinum => {
             let face = palette.canvas;
             painter.rect_filled(full, CornerRadius::ZERO, face);
             if open {
@@ -514,9 +586,9 @@ pub fn paint_caption(
     state: WindowState,
 ) {
     let dark = palette.dark;
-    match theme::skin().style {
-        Style::Modern => {}
-        Style::Retro => {
+    match theme::skin().family() {
+        Family::Modern => {}
+        Family::Retro => {
             let face = palette.canvas;
             painter.rect_filled(rect, CornerRadius::ZERO, face);
             retro_edge(painter, rect, face, press.pressed, 1.0);
@@ -534,7 +606,7 @@ pub fn paint_caption(
                 1.6,
             );
         }
-        Style::Luna => {
+        Family::Luna => {
             let close = caption == Caption::Close;
             let base = if close {
                 rgb(0xd8462a)
@@ -559,7 +631,7 @@ pub fn paint_caption(
             );
             glyph(painter, rect, caption, state.maximized, Color32::WHITE, 2.0);
         }
-        Style::Glass => {
+        Family::Glass => {
             let close = caption == Caption::Close;
             let radius = match caption {
                 Caption::Minimize => CornerRadius {
@@ -618,7 +690,7 @@ pub fn paint_caption(
             );
             glyph(painter, rect, caption, state.maximized, Color32::WHITE, 1.6);
         }
-        Style::Gel => {
+        Family::Gel => {
             let color = if !state.active && !press.group {
                 gray(0xc4)
             } else {
@@ -676,7 +748,7 @@ pub fn paint_caption(
                 }
             }
         }
-        Style::Platinum => {
+        Family::Platinum => {
             if !state.active {
                 return;
             }
@@ -780,11 +852,11 @@ fn glyph(
 /// The window's icon and title in the title bar.
 fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: WindowState) {
     let painter = ui.painter();
-    let style = theme::skin().style;
+    let style = theme::skin().family();
     let (from, _) = title_colors(palette, state.active);
     let (font, ink, centered) = match style {
-        Style::Modern => return,
-        Style::Retro => (
+        Family::Modern => return,
+        Family::Retro => (
             theme::bold(13.0),
             if state.active {
                 ink_on(from)
@@ -793,8 +865,8 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             },
             false,
         ),
-        Style::Luna => (theme::title(15.0), Color32::WHITE, false),
-        Style::Glass => (
+        Family::Luna => (theme::title(15.0), Color32::WHITE, false),
+        Family::Glass => (
             theme::font(14.0),
             if palette.dark {
                 Color32::WHITE
@@ -803,7 +875,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             },
             false,
         ),
-        Style::Gel => (
+        Family::Gel => (
             theme::font(13.0),
             if state.active {
                 palette.ink
@@ -812,7 +884,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             },
             true,
         ),
-        Style::Platinum => (
+        Family::Platinum => (
             theme::bold(13.0),
             if state.active {
                 palette.ink
@@ -831,7 +903,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         );
         (None, text)
     } else {
-        let left = bar.left() + if style == Style::Glass { 8.0 } else { 4.0 };
+        let left = bar.left() + if style == Family::Glass { 8.0 } else { 4.0 };
         let icon_rect =
             Rect::from_center_size(pos2(left + icon / 2.0, bar.center().y), vec2(icon, icon));
         (
@@ -844,14 +916,14 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
     };
     let area = Rect::from_min_size(text_at, galley.size());
     match style {
-        Style::Luna => {
+        Family::Luna => {
             painter.galley_with_override_text_color(
                 text_at + vec2(1.0, 1.0),
                 galley.clone(),
                 faded(darker(from, 0.6), 0.85),
             );
         }
-        Style::Glass => {
+        Family::Glass => {
             let glow = if palette.dark {
                 Color32::from_black_alpha(150)
             } else {
@@ -862,14 +934,14 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                     .with_blur_width(14.0),
             );
         }
-        Style::Gel if !palette.dark => {
+        Family::Gel if !palette.dark => {
             painter.galley_with_override_text_color(
                 text_at + vec2(0.0, 1.0),
                 galley.clone(),
                 Color32::from_white_alpha(160),
             );
         }
-        Style::Platinum if state.active => {
+        Family::Platinum if state.active => {
             painter.rect_filled(
                 area.expand2(vec2(6.0, 0.0)),
                 CornerRadius::ZERO,
@@ -892,12 +964,18 @@ mod tests {
 
     use eframe::egui::Shape;
 
-    const FRAMED: [Style; 5] = [
+    /// Every style but Modern draws its frame.
+    const FRAMED: [Style; 10] = [
+        Style::Win95,
         Style::Retro,
         Style::Luna,
+        Style::Vista,
         Style::Glass,
-        Style::Gel,
+        Style::MacOs8,
         Style::Platinum,
+        Style::Gel,
+        Style::Panther,
+        Style::Tiger,
     ];
 
     fn in_style<R>(style: Style, run: impl FnOnce() -> R) -> R {
@@ -1007,9 +1085,9 @@ mod tests {
             }
             let at = |kind| buttons.iter().find(|(c, _)| *c == kind).unwrap().1;
             let close = at(Caption::Close);
-            match style {
+            match style.family() {
                 // Windows closes at the far right.
-                Style::Retro | Style::Luna | Style::Glass => {
+                Family::Retro | Family::Luna | Family::Glass => {
                     assert!(close.right() > bar.right() - 8.0, "{style:?}");
                     assert!(close.left() > at(Caption::Maximize).right() - 0.5);
                 }
@@ -1067,6 +1145,74 @@ mod tests {
     }
 
     #[test]
+    fn windows_95_keeps_its_title_bar_one_solid_colour() {
+        let navy = palette(Style::Win95, false);
+        let (active, behind) = in_style(Style::Win95, || {
+            (title_colors(&navy, true), title_colors(&navy, false))
+        });
+        assert_eq!(active, (rgb(0x000080), rgb(0x000080)));
+        assert_eq!(behind.0, behind.1);
+        assert_ne!(behind, active);
+        // 98 fades the same navy.
+        let (from, to) = in_style(Style::Retro, || title_colors(&navy, true));
+        assert_ne!(from, to);
+    }
+
+    #[test]
+    fn windows_7_hangs_bigger_buttons_than_vista() {
+        let (bar, _) = layout(metrics(Style::Glass).unwrap(), window(), false);
+        let size = |style| {
+            captions(style, bar)
+                .iter()
+                .map(|(caption, rect)| (*caption, rect.size()))
+                .collect::<Vec<_>>()
+        };
+        for ((caption, seven), (_, vista)) in size(Style::Glass).into_iter().zip(size(Style::Vista))
+        {
+            assert!(seven.x > vista.x, "{caption:?}");
+            assert!(seven.y > vista.y, "{caption:?}");
+        }
+    }
+
+    #[test]
+    fn versions_of_one_desktop_draw_their_own_frame() {
+        let frame = |style: Style, dark: bool| {
+            let palette = palette(style, dark);
+            let metrics = metrics(style).unwrap();
+            let (bar, inner) = layout(metrics, window(), false);
+            let state = WindowState {
+                maximized: false,
+                active: true,
+            };
+            in_style(style, || {
+                theme::painted(|ui| {
+                    paint_frame(ui.painter(), window(), bar, inner, &palette, state);
+                })
+            })
+        };
+        let text = |style, dark| format!("{:?}", frame(style, dark));
+        for dark in [false, true] {
+            assert_ne!(text(Style::Vista, dark), text(Style::Glass, dark));
+            let macs = [Style::Gel, Style::Panther, Style::Tiger].map(|s| text(s, dark));
+            assert_ne!(macs[0], macs[1]);
+            assert_ne!(macs[0], macs[2]);
+            assert_ne!(macs[1], macs[2]);
+            // Panther's metal is a row of grain per pixel down the window.
+            let rows = |style| {
+                frame(style, dark)
+                    .iter()
+                    .map(|shape| match shape {
+                        Shape::Mesh(mesh) => mesh.vertices.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            };
+            assert!(rows(Style::Panther) >= 4 * 400, "dark={dark}");
+            assert!(rows(Style::Tiger) < 400, "dark={dark}");
+        }
+    }
+
+    #[test]
     fn every_frame_draws_inside_the_window_in_every_state() {
         for style in FRAMED {
             for dark in [false, true] {
@@ -1106,8 +1252,8 @@ mod tests {
                             "{at}: {shape:?}"
                         );
                     }
-                    // Retro is square through and through.
-                    if style == Style::Retro {
+                    // Windows 95 and 98 are square through and through.
+                    if style.family() == Family::Retro {
                         assert!(
                             shapes.iter().all(|shape| !matches!(shape,
                                 Shape::Rect(rect) if rect.corner_radius != CornerRadius::ZERO)),

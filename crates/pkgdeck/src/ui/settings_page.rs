@@ -7,7 +7,8 @@ use crate::{
     app::App,
     model::{self, Tone},
     settings::{
-        Accent, Appearance, DarkTheme, Density, LightTheme, Style, TextSize, Theme, Typeface,
+        Accent, Appearance, DarkTheme, Density, Family, LightTheme, Style, TextSize, Theme,
+        Typeface,
     },
     theme::{self, Palette},
 };
@@ -206,8 +207,8 @@ fn appearance(app: &mut App, ui: &mut Ui) {
             }
             custom_swatch(ui, &mut app.settings);
         });
-        // Retro is square whatever the roundness.
-        if app.settings.style != Style::Retro {
+        // Windows 95 and 98 are square whatever the roundness.
+        if app.settings.style.family() != Family::Retro {
             // Quarter steps from square to twice the style's own.
             let mut step = (app.settings.roundness * 4.0).round().clamp(0.0, 8.0) as usize;
             let hint = match step {
@@ -621,11 +622,11 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
         );
     } else {
         // Aqua's chosen segment is blue gel; Windows 98's is pressed in.
-        let style = theme::skin().style;
+        let family = theme::skin().family();
         if let Some(ink) = skin::paint_button(
             ui.painter(),
             knob,
-            if style == Style::Gel {
+            if family == Family::Gel {
                 skin::Weight::Strong
             } else {
                 skin::Weight::Normal
@@ -634,7 +635,7 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
             Stroke::new(1.0, palette.line),
             skin::State {
                 hover: 0.0,
-                press: if style == Style::Retro { 1.0 } else { 0.0 },
+                press: if family == Family::Retro { 1.0 } else { 0.0 },
                 opacity: 1.0,
             },
             &palette,

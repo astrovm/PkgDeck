@@ -94,51 +94,99 @@ impl Accent {
     }
 }
 
-/// The shape of everything: corners, borders, depth and shine, after a
-/// desktop from the past or today's flat look.
+/// The shape of everything: corners, borders, depth and shine, after one
+/// version of a desktop from the past, or today's flat look.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Style {
     /// Flat and rounded.
     #[default]
     Modern,
-    /// Grey 3D bevels and square corners, after the 1990s desktops.
+    /// Windows 95: grey bevels and a solid navy title bar.
+    Win95,
+    /// Windows 98: grey bevels and a navy title bar fading to blue.
     Retro,
-    /// Glossy blue bars and rounded buttons, after Windows XP.
+    /// Windows XP's blue Luna.
     Luna,
-    /// Shiny, glassy gradients, after Windows Vista and 7.
+    /// Windows Vista: dark, smoky glass.
+    Vista,
+    /// Windows 7: light, sky-blue glass.
     Glass,
-    /// Gel buttons on pinstripes, after the first Mac OS X.
+    /// Mac OS 8's Platinum.
+    MacOs8,
+    /// Mac OS 9's Platinum.
+    Platinum,
+    /// Mac OS X 10.2 Jaguar: Aqua on pinstripes.
     Gel,
-    /// Light grey, fine bevels, after Mac OS 8 and 9.
+    /// Mac OS X 10.3 Panther: Aqua on brushed metal.
+    Panther,
+    /// Mac OS X 10.4 Tiger: Aqua with plain grey title bars.
+    Tiger,
+}
+
+/// The desktop a style is a version of. Versions of one desktop share how
+/// they draw and differ in the details.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Family {
+    Modern,
+    /// Windows 95 and 98.
+    Retro,
+    /// Windows XP.
+    Luna,
+    /// Windows Vista and 7.
+    Glass,
+    /// Mac OS X.
+    Gel,
+    /// Mac OS 8 and 9.
     Platinum,
 }
 
 impl Style {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 11] = [
         Self::Modern,
+        Self::Win95,
         Self::Retro,
         Self::Luna,
+        Self::Vista,
         Self::Glass,
-        Self::Gel,
+        Self::MacOs8,
         Self::Platinum,
+        Self::Gel,
+        Self::Panther,
+        Self::Tiger,
     ];
     pub fn name(self) -> &'static str {
         match self {
             Self::Modern => "Modern",
-            Self::Retro => "Retro",
-            Self::Luna => "Luna",
-            Self::Glass => "Glass",
-            Self::Gel => "Gel",
-            Self::Platinum => "Platinum",
+            Self::Win95 => "Windows 95",
+            Self::Retro => "Windows 98",
+            Self::Luna => "Windows XP",
+            Self::Vista => "Vista",
+            Self::Glass => "Windows 7",
+            Self::MacOs8 => "Mac OS 8",
+            Self::Platinum => "Mac OS 9",
+            Self::Gel => "Jaguar",
+            Self::Panther => "Panther",
+            Self::Tiger => "Tiger",
+        }
+    }
+    /// The desktop this style is a version of.
+    pub fn family(self) -> Family {
+        match self {
+            Self::Modern => Family::Modern,
+            Self::Win95 | Self::Retro => Family::Retro,
+            Self::Luna => Family::Luna,
+            Self::Vista | Self::Glass => Family::Glass,
+            Self::MacOs8 | Self::Platinum => Family::Platinum,
+            Self::Gel | Self::Panther | Self::Tiger => Family::Gel,
         }
     }
     /// The accent the style was made with, picked when it's chosen.
     pub fn accent(self) -> Accent {
-        match self {
-            Self::Modern | Self::Luna | Self::Glass | Self::Gel => Accent::Blue,
-            Self::Retro => Accent::Navy,
-            Self::Platinum => Accent::Lavender,
+        match self.family() {
+            Family::Modern | Family::Luna | Family::Glass | Family::Gel => Accent::Blue,
+            Family::Retro => Accent::Navy,
+            Family::Platinum => Accent::Lavender,
         }
     }
 }
@@ -881,6 +929,51 @@ mod tests {
         assert_eq!(Style::Platinum.accent(), Accent::Lavender);
         for style in Style::ALL {
             assert!(Accent::ALL.contains(&style.accent()));
+            // Versions of one desktop share its accent.
+            assert_eq!(
+                style.accent(),
+                Style::ALL
+                    .into_iter()
+                    .find(|s| s.family() == style.family())
+                    .unwrap()
+                    .accent()
+            );
+        }
+        // Each style is one version of one desktop.
+        let families = Style::ALL.map(Style::family);
+        assert_eq!(
+            families,
+            [
+                Family::Modern,
+                Family::Retro,
+                Family::Retro,
+                Family::Luna,
+                Family::Glass,
+                Family::Glass,
+                Family::Platinum,
+                Family::Platinum,
+                Family::Gel,
+                Family::Gel,
+                Family::Gel,
+            ]
+        );
+        // Every style is saved under a name of its own and read back.
+        let saved: std::collections::HashSet<_> = Style::ALL
+            .map(|style| {
+                let text = serde_json::to_string(&style).unwrap();
+                assert_eq!(serde_json::from_str::<Style>(&text).unwrap(), style);
+                text
+            })
+            .into();
+        assert_eq!(saved.len(), Style::ALL.len());
+        for (text, style) in [
+            ("\"win95\"", Style::Win95),
+            ("\"vista\"", Style::Vista),
+            ("\"macos8\"", Style::MacOs8),
+            ("\"panther\"", Style::Panther),
+            ("\"tiger\"", Style::Tiger),
+        ] {
+            assert_eq!(serde_json::from_str::<Style>(text).unwrap(), style);
         }
         assert!(!Accent::ALL.contains(&Accent::Custom));
         assert_eq!(Accent::Custom.name(), "Custom");

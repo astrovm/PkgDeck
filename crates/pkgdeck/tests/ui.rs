@@ -386,15 +386,19 @@ fn styles_and_their_choices_change_the_look() {
         assert!(harness.query_by_label(style.name()).is_some(), "{style:?}");
     }
     assert!(harness.query_by_label("Charcoal").is_some());
-    harness.get_by_label("Retro").click();
+    harness.get_by_label("Windows 98").click();
     harness.run_steps(3);
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Retro);
     assert_eq!(settings.accent, Accent::Navy);
-    // Retro has its own colours and is always square.
+    // Windows 98 has its own colours and is always square, like 95.
     assert!(harness.query_by_label("Charcoal").is_none());
     assert!(harness.query_by_label("Roundness").is_none());
-    harness.get_by_label("Luna").click();
+    harness.get_by_label("Windows 95").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.style, Style::Win95);
+    assert!(harness.query_by_label("Roundness").is_none());
+    harness.get_by_label("Windows XP").click();
     harness.run_steps(3);
     assert!(harness.query_by_label("Roundness").is_some());
     for choice in ["Roomy", "Inter", "Teal"] {
@@ -407,7 +411,7 @@ fn styles_and_their_choices_change_the_look() {
     assert_eq!(settings.typeface, Typeface::Inter);
     assert_eq!(settings.accent, Accent::Teal);
     // Choosing the style on screen again keeps the accent picked since.
-    harness.get_by_label("Luna").click();
+    harness.get_by_label("Windows XP").click();
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.accent, Accent::Teal);
     assert!(harness.query_by_label("Custom accent").is_some());
@@ -421,7 +425,7 @@ fn styles_and_their_choices_change_the_look() {
 
 #[test]
 fn every_style_mixes_with_every_other_look_option() {
-    use pkgdeck::settings::{Density, Style, Typeface};
+    use pkgdeck::settings::{Density, Family, Style, Typeface};
     let mut harness = show(Page::Installed);
     let colours = ["", "#ffe14d", "#202020", "#f4f4f4"];
     let sizes = [
@@ -470,7 +474,7 @@ fn every_style_mixes_with_every_other_look_option() {
                 // Only styles with corners offer to change them.
                 assert_eq!(
                     harness.query_by_label("Roundness").is_some(),
-                    style != Style::Retro,
+                    style.family() != Family::Retro,
                     "{at}"
                 );
                 // The older styles bring their own title bar and buttons.
@@ -491,13 +495,7 @@ fn every_style_mixes_with_every_other_look_option() {
 #[test]
 fn the_older_styles_title_bar_buttons_answer_clicks() {
     use pkgdeck::settings::Style;
-    for style in [
-        Style::Retro,
-        Style::Luna,
-        Style::Glass,
-        Style::Gel,
-        Style::Platinum,
-    ] {
+    for style in Style::ALL.into_iter().filter(|s| *s != Style::Modern) {
         let mut harness = show(Page::Installed);
         harness.state_mut().1.settings.style = style;
         harness.state_mut().1.invalidate();

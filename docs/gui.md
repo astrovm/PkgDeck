@@ -534,11 +534,18 @@ out of date, and each page refreshes when you open it.
 - **Style**: the shape of everything, shown as small previews. Each comes in
   light and dark.
   - **Modern**: flat and rounded, the default.
-  - **Retro**: grey 3D bevels and square corners, after the 1990s desktops.
-  - **Luna**: glossy blue bars and rounded buttons, after Windows XP.
-  - **Glass**: shiny, glassy gradients, after Windows Vista and 7.
-  - **Gel**: gel buttons on pinstripes, after the first Mac OS X.
-  - **Platinum**: light grey with fine bevels, after Mac OS 8 and 9.
+  - **Windows 95**: grey 3D bevels, square corners and a solid navy title
+    bar.
+  - **Windows 98**: like 95, with a title bar fading from navy to blue.
+  - **Windows XP**: glossy blue bars and rounded buttons.
+  - **Vista**: dark, smoky glass and a blue to green side pane.
+  - **Windows 7**: light, sky-blue glass.
+  - **Mac OS 8** and **Mac OS 9**: light grey with fine bevels and a striped
+    title bar.
+  - **Jaguar**: gel buttons on pinstripes, after Mac OS X 10.2.
+  - **Panther**: gel buttons on brushed metal, after Mac OS X 10.3.
+  - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
+  - Every style but **Modern** draws its own title bar and window buttons.
   - Picking a style also picks the accent it was made with.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
@@ -548,7 +555,8 @@ out of date, and each page refreshes when you open it.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well.
-- **Roundness** (all but Retro): from square corners to twice the style's own.
+- **Roundness** (all but Windows 95 and 98): from square corners to twice the
+  style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style** (the style's own font when it's installed, such as
   Tahoma or Lucida Grande, else Inter), **Inter** or **System**.

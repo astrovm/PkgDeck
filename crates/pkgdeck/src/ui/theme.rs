@@ -2,7 +2,7 @@
 //! style's shapes, the fonts, and its line icons.
 
 use super::icons;
-use crate::settings::{Accent, DarkTheme, Density, LightTheme, Style, TextSize, Typeface};
+use crate::settings::{Accent, DarkTheme, Density, Family, LightTheme, Style, TextSize, Typeface};
 use eframe::egui::{
     self, epaint::PathStroke, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
     Painter, Pos2, Rect, Shape, Stroke, TextStyle, Vec2,
@@ -129,16 +129,20 @@ impl Default for Skin {
     }
 }
 impl Skin {
+    /// The desktop the style on screen is a version of.
+    pub fn family(self) -> Family {
+        self.style.family()
+    }
     /// How round the style draws corners, before the person's choice.
     fn style_roundness(self) -> f32 {
-        match self.style {
-            Style::Modern => 1.0,
-            Style::Luna => 0.45,
+        match self.family() {
+            Family::Modern => 1.0,
+            Family::Luna => 0.45,
             // Aqua's panels are nearly square; its buttons are pills.
-            Style::Gel => 0.35,
-            Style::Glass => 0.4,
-            Style::Platinum => 0.3,
-            Style::Retro => 0.0,
+            Family::Gel => 0.35,
+            Family::Glass => 0.4,
+            Family::Platinum => 0.3,
+            Family::Retro => 0.0,
         }
     }
     /// A corner of `radius` at Modern's roundness, in this style.
@@ -255,31 +259,47 @@ fn readable_accent(color: Color32, canvas: Color32, dark: bool) -> Color32 {
 }
 
 impl Palette {
-    pub fn of(scheme: Scheme, dark: bool) -> Self {
-        // Canvas, surface, ink and muted text: Modern's come from the chosen
-        // theme, the other styles bring their own.
-        let (canvas, surface, ink, muted) = match (scheme.style, dark) {
-            (Style::Modern, true) => match scheme.dark {
+    /// Canvas, surface, ink and muted text as the style's desktop draws
+    /// them in every version.
+    fn family_colors(scheme: Scheme, dark: bool) -> (u32, u32, u32, u32) {
+        match (scheme.style.family(), dark) {
+            (Family::Modern, true) => match scheme.dark {
                 DarkTheme::Charcoal => (0x121212, 0x1d1d1d, 0xececec, 0xa3a3a3),
                 DarkTheme::Black => (0x000000, 0x111111, 0xe6e6e6, 0x9a9a9a),
                 DarkTheme::Slate => (0x0e1015, 0x161a21, 0xe9edf3, 0x98a3b3),
             },
-            (Style::Modern, false) => match scheme.light {
+            (Family::Modern, false) => match scheme.light {
                 LightTheme::Classic => (0xe8edf5, 0xf7f9fd, 0x152135, 0x4e5c72),
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             },
             // The grey of the old desktops, turned down.
-            (Style::Retro, true) => (0x3a3a3a, 0x1e1e1e, 0xf2f2f2, 0xbdbdbd),
-            (Style::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
-            (Style::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
-            (Style::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
-            (Style::Glass, true) => (0x0b1017, 0x151d28, 0xe8eef5, 0x95a3b5),
-            (Style::Glass, false) => (0xd8e3f0, 0xfbfcfe, 0x1e1e1e, 0x56606c),
-            (Style::Gel, true) => (0x262626, 0x313131, 0xeeeeee, 0xa3a3a3),
-            (Style::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
-            (Style::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
-            (Style::Platinum, false) => (0xdddddd, 0xeeeeee, 0x000000, 0x4a4a4a),
+            (Family::Retro, true) => (0x3a3a3a, 0x1e1e1e, 0xf2f2f2, 0xbdbdbd),
+            (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
+            (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
+            (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
+            (Family::Glass, true) => (0x0b1017, 0x151d28, 0xe8eef5, 0x95a3b5),
+            (Family::Glass, false) => (0xd8e3f0, 0xfbfcfe, 0x1e1e1e, 0x56606c),
+            (Family::Gel, true) => (0x262626, 0x313131, 0xeeeeee, 0xa3a3a3),
+            (Family::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
+            (Family::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
+            (Family::Platinum, false) => (0xdddddd, 0xeeeeee, 0x000000, 0x4a4a4a),
+        }
+    }
+
+    pub fn of(scheme: Scheme, dark: bool) -> Self {
+        // Canvas, surface, ink and muted text: Modern's come from the chosen
+        // theme, the other styles bring their own.
+        let (canvas, surface, ink, muted) = match (scheme.style, dark) {
+            // Vista's glass is deeper; Panther's brushed metal and Tiger's
+            // plain grey replace Jaguar's pinstriped white.
+            (Style::Vista, true) => (0x080c12, 0x141b25, 0xe8eef5, 0x95a3b5),
+            (Style::Vista, false) => (0xbfd1e8, 0xfbfcfe, 0x1e1e1e, 0x4f5966),
+            (Style::Panther, true) => (0x3a3a3a, 0x2b2b2b, 0xeeeeee, 0xa8a8a8),
+            (Style::Panther, false) => (0xc4c4c4, 0xffffff, 0x000000, 0x474747),
+            (Style::Tiger, true) => (0x2c2c2c, 0x343434, 0xeeeeee, 0xa3a3a3),
+            (Style::Tiger, false) => (0xececec, 0xffffff, 0x000000, 0x555555),
+            _ => Self::family_colors(scheme, dark),
         };
         let (on_light, on_dark) = accent_colors(scheme.accent);
         let (canvas, ink) = (rgb(canvas), rgb(ink));
@@ -573,12 +593,12 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
     match typeface {
         Typeface::Inter => Face::Inter,
         Typeface::System => Face::System,
-        Typeface::Style => match style {
-            Style::Retro => Face::Style(MS_SANS),
-            Style::Luna => Face::Style(TAHOMA),
-            Style::Gel | Style::Platinum => Face::Style(LUCIDA),
-            Style::Glass => Face::Style(SEGOE),
-            Style::Modern => Face::Inter,
+        Typeface::Style => match style.family() {
+            Family::Retro => Face::Style(MS_SANS),
+            Family::Luna => Face::Style(TAHOMA),
+            Family::Gel | Family::Platinum => Face::Style(LUCIDA),
+            Family::Glass => Face::Style(SEGOE),
+            Family::Modern => Face::Inter,
         },
     }
 }
@@ -760,21 +780,21 @@ pub fn apply(ctx: &egui::Context) {
 /// How wide a style's scroll bars are and the colour of their handle;
 /// none for Modern's, which float over the content.
 pub fn scroll_bar(style: Style, palette: &Palette) -> Option<(f32, Color32)> {
-    let handle = match style {
-        Style::Modern => return None,
-        Style::Retro => palette.canvas,
-        Style::Luna => over(
+    let handle = match style.family() {
+        Family::Modern => return None,
+        Family::Retro => palette.canvas,
+        Family::Luna => over(
             palette.surface,
             palette.deep,
             if palette.dark { 0.45 } else { 0.28 },
         ),
-        Style::Glass => over(palette.canvas, palette.ink, 0.12),
-        Style::Gel => over(palette.surface, palette.deep, 0.6),
-        Style::Platinum => over(palette.surface, palette.deep, 0.4),
+        Family::Glass => over(palette.canvas, palette.ink, 0.12),
+        Family::Gel => over(palette.surface, palette.deep, 0.6),
+        Family::Platinum => over(palette.surface, palette.deep, 0.4),
     };
-    let width = match style {
-        Style::Gel => 15.0,
-        Style::Luna | Style::Glass => 17.0,
+    let width = match style.family() {
+        Family::Gel => 15.0,
+        Family::Luna | Family::Glass => 17.0,
         _ => 16.0,
     };
     Some((width, handle))
@@ -943,21 +963,31 @@ mod tests {
                 "{at}"
             );
         }
-        // Each style looks its own.
+        // Each desktop looks its own. Versions of one desktop may share
+        // colours and differ in how they draw.
         for dark in [false, true] {
-            let canvases: std::collections::HashSet<_> = Style::ALL
-                .map(|style| {
-                    let palette = Palette::of(
-                        Scheme {
-                            style,
-                            ..Scheme::default()
-                        },
-                        dark,
-                    );
-                    (palette.canvas, palette.surface)
-                })
-                .into();
-            assert_eq!(canvases.len(), Style::ALL.len());
+            let colours = |style| {
+                let palette = Palette::of(
+                    Scheme {
+                        style,
+                        ..Scheme::default()
+                    },
+                    dark,
+                );
+                (palette.canvas, palette.surface)
+            };
+            for a in Style::ALL {
+                for b in Style::ALL {
+                    if a != b && colours(a) == colours(b) {
+                        assert_eq!(a.family(), b.family(), "{a:?} {b:?} dark={dark}");
+                    }
+                }
+            }
+            // Vista, Panther and Tiger bring their own colours.
+            assert_ne!(colours(Style::Vista), colours(Style::Glass));
+            assert_ne!(colours(Style::Panther), colours(Style::Gel));
+            assert_ne!(colours(Style::Tiger), colours(Style::Gel));
+            assert_ne!(colours(Style::Tiger), colours(Style::Panther));
         }
     }
 

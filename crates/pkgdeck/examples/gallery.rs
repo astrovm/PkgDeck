@@ -234,6 +234,51 @@ fn mixes() {
             Typeface::Style,
             TextSize::Larger,
         ),
+        (
+            Style::Win95,
+            false,
+            "#008080",
+            1.0,
+            Density::Normal,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Vista,
+            true,
+            "#c03030",
+            1.0,
+            Density::Compact,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::MacOs8,
+            false,
+            "#3a7d44",
+            0.0,
+            Density::Normal,
+            Typeface::System,
+            TextSize::Large,
+        ),
+        (
+            Style::Panther,
+            true,
+            "#7a5cff",
+            1.0,
+            Density::Roomy,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Tiger,
+            false,
+            "#ff8a00",
+            2.0,
+            Density::Compact,
+            Typeface::Inter,
+            TextSize::Small,
+        ),
     ];
     for (style, dark, color, roundness, density, typeface, size) in mixes {
         let set = |app: &mut App| {
@@ -245,7 +290,7 @@ fn mixes() {
             app.settings.typeface = typeface;
             app.settings.text_size = size;
         };
-        let name = style.name().to_lowercase();
+        let name = style.name().to_lowercase().replace(' ', "-");
         render(
             &format!("mix-{name}-installed"),
             [1180.0, 780.0],
@@ -276,7 +321,7 @@ fn main() {
     // Each style, light and dark, on a list and on Settings. Only these
     // with `--styles`.
     for style in pkgdeck::settings::Style::ALL {
-        let name = style.name().to_lowercase();
+        let name = style.name().to_lowercase().replace(' ', "-");
         for dark in [false, true] {
             let mode = if dark { "dark" } else { "light" };
             render(

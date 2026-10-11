@@ -1,13 +1,13 @@
-//! How each style draws the pieces everything is built from, after the
-//! desktops they're named for: Retro after Windows 98, Luna after Windows
-//! XP, Glass after Windows Vista and 7, Gel after Mac OS X's Aqua and
-//! Platinum after Mac OS 8 and 9. Buttons, fields, check boxes, panels,
-//! the canvas, the sidebar, selections, title bars, list headings and
-//! group boxes. Modern draws them flat. Only egui's own shapes, so a frame
+//! How each style draws the pieces everything is built from, after one
+//! version of the desktop it's named for: Windows 95 and 98, XP, Vista and
+//! 7, Mac OS 8 and 9, and Mac OS X Jaguar, Panther and Tiger. Versions of
+//! one desktop share their drawing and differ where the real ones did.
+//! Buttons, fields, check boxes, panels, the canvas, the sidebar,
+//! selections, title bars, list headings and group boxes. Modern draws them flat. Only egui's own shapes, so a frame
 //! costs the same in any style.
 
 use super::theme::{self, Palette};
-use crate::settings::Style;
+use crate::settings::{Family, Style};
 use eframe::egui::{
     self, epaint,
     epaint::{tessellator::path, Mesh, Shadow},
@@ -35,7 +35,13 @@ pub struct State {
     pub opacity: f32,
 }
 
-fn style() -> Style {
+/// The desktop the style on screen is a version of.
+fn style() -> Family {
+    theme::skin().family()
+}
+
+/// The exact version on screen, for what differs between versions.
+fn version() -> Style {
     theme::skin().style
 }
 
@@ -305,7 +311,7 @@ pub fn paint_button(
     let dark = palette.dark;
     let strong = weight == Weight::Strong;
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             painter.rect(
                 rect,
                 theme::round(9),
@@ -315,7 +321,7 @@ pub fn paint_button(
             );
             None
         }
-        Style::Retro => {
+        Family::Retro => {
             let face = palette.canvas;
             painter.rect_filled(rect, CornerRadius::ZERO, faded(face, alpha));
             let mut frame = rect;
@@ -345,7 +351,7 @@ pub fn paint_button(
             }
             Some(palette.ink)
         }
-        Style::Luna => {
+        Family::Luna => {
             let radius = theme::round(9);
             let stops = match (pressed, dark) {
                 (false, false) => [
@@ -417,7 +423,7 @@ pub fn paint_button(
             }
             Some(if dark { palette.ink } else { Color32::BLACK })
         }
-        Style::Glass => {
+        Family::Glass => {
             let radius = theme::round(9);
             let blue = palette.deep;
             let (calm, lit, held, calm_line, lit_line) = if dark {
@@ -484,7 +490,7 @@ pub fn paint_button(
             );
             Some(if dark { palette.ink } else { Color32::BLACK })
         }
-        Style::Gel => {
+        Family::Gel => {
             let radius = pill(rect);
             let blue = strong;
             let base = if blue {
@@ -544,7 +550,7 @@ pub fn paint_button(
                 Color32::BLACK
             })
         }
-        Style::Platinum => {
+        Family::Platinum => {
             let radius = theme::round(9);
             let outline = if dark {
                 lighter(palette.canvas, 0.55)
@@ -599,7 +605,7 @@ pub fn paint_field(
     focus: f32,
 ) {
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             let ring = lerp(palette.line, palette.accent, focus);
             painter.rect(
                 rect,
@@ -617,11 +623,11 @@ pub fn paint_field(
                 );
             }
         }
-        Style::Retro => {
+        Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
             retro_edge(painter, rect, palette.canvas, true, 1.0);
         }
-        Style::Luna => {
+        Family::Luna => {
             painter.rect(
                 rect,
                 CornerRadius::ZERO,
@@ -630,7 +636,7 @@ pub fn paint_field(
                 StrokeKind::Inside,
             );
         }
-        Style::Glass => {
+        Family::Glass => {
             let radius = theme::round(5);
             let line = if palette.dark {
                 lighter(palette.canvas, 0.3)
@@ -652,7 +658,7 @@ pub fn paint_field(
                 Stroke::new(1.0, darker(line, 0.15)),
             );
         }
-        Style::Gel => {
+        Family::Gel => {
             let radius = pill(rect);
             painter.rect_filled(rect, radius, palette.surface);
             // Fields sit a little into the window.
@@ -685,7 +691,7 @@ pub fn paint_field(
                 );
             }
         }
-        Style::Platinum => {
+        Family::Platinum => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
             bevel(
                 painter,
@@ -729,7 +735,7 @@ pub fn paint_check(
     let checked = checked.clamp(0.0, 1.0);
     let dark = palette.dark;
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             let border = if hovered {
                 palette.accent
             } else {
@@ -744,12 +750,12 @@ pub fn paint_check(
             );
             Some(faded(palette.accent_ink, opacity))
         }
-        Style::Retro => {
+        Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, faded(palette.surface, opacity));
             retro_edge(painter, rect, palette.canvas, true, opacity);
             Some(faded(palette.ink, opacity))
         }
-        Style::Luna => {
+        Family::Luna => {
             let (top, bottom) = if dark {
                 (darker(palette.surface, 0.15), palette.surface)
             } else {
@@ -788,7 +794,7 @@ pub fn paint_check(
                 opacity,
             ))
         }
-        Style::Glass => {
+        Family::Glass => {
             let radius = theme::round(4);
             let line = if dark {
                 lighter(palette.canvas, 0.4)
@@ -830,7 +836,7 @@ pub fn paint_check(
                 opacity,
             ))
         }
-        Style::Gel => {
+        Family::Gel => {
             let radius = CornerRadius::same(
                 (rect.height() * 0.22 * theme::skin().roundness.clamp(0.0, 2.0)).round() as u8,
             );
@@ -867,7 +873,7 @@ pub fn paint_check(
             );
             Some(faded(ink_on(lighter(blue, 0.2)), opacity))
         }
-        Style::Platinum => {
+        Family::Platinum => {
             let (top, bottom) = if dark {
                 (lighter(palette.canvas, 0.2), lighter(palette.canvas, 0.08))
             } else {
@@ -916,7 +922,7 @@ pub fn paint_check(
 /// Whether switches draw as check boxes: none of the older desktops had
 /// switches.
 pub fn switch_as_check() -> bool {
-    style() != Style::Modern
+    style() != Family::Modern
 }
 
 /// A switch's knob: white, with a soft shadow under it.
@@ -976,7 +982,7 @@ pub fn paint_steps(
     };
     let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 4.0));
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             painter.rect_filled(track, theme::round(2), shade(palette.rail()));
             painter.rect_filled(
                 Rect::from_min_max(track.min, pos2(x, track.max.y)),
@@ -994,7 +1000,7 @@ pub fn paint_steps(
             painter.circle_filled(pos2(x, y), 9.0 + hover * 1.5, shade(palette.accent));
             painter.circle_filled(pos2(x, y), 4.0, shade(palette.surface));
         }
-        Style::Retro => {
+        Family::Retro => {
             // A sunken slot, and a grey thumb raised out of it.
             painter.rect_filled(groove, CornerRadius::ZERO, shade(face));
             retro_edge(painter, groove, face, true, opacity);
@@ -1015,7 +1021,7 @@ pub fn paint_steps(
             ];
             outline(&inner, lighter(face, 0.45), darker(face, 0.33));
         }
-        Style::Luna | Style::Glass => {
+        Family::Luna | Family::Glass => {
             // A thin sunken line; XP's thumb is white with a green foot
             // that turns orange under the pointer, 7's a grey gradient
             // that turns blue.
@@ -1028,7 +1034,7 @@ pub fn paint_steps(
                 shade(lighter(face, 0.9)),
             );
             ticks(darker(face, 0.45));
-            let luna = style() == Style::Luna;
+            let luna = style() == Family::Luna;
             let rect = Rect::from_center_size(pos2(x.round(), y - 1.0), vec2(11.0, 20.0));
             let (top, bottom, border) = if luna {
                 (rgb(0xffffff), rgb(0xe6e6e0), rgb(0x76889f))
@@ -1065,7 +1071,7 @@ pub fn paint_steps(
                 );
             }
         }
-        Style::Gel => {
+        Family::Gel => {
             // A rounded groove and a blue gel bead on it.
             let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
             let round = CornerRadius::same(3);
@@ -1110,7 +1116,7 @@ pub fn paint_steps(
                 StrokeKind::Inside,
             );
         }
-        Style::Platinum => {
+        Family::Platinum => {
             // A dark-edged slot and a grey thumb with grip lines.
             let slot = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
             painter.rect_filled(slot, CornerRadius::ZERO, shade(darker(face, 0.12)));
@@ -1163,10 +1169,10 @@ pub fn paint_steps(
 /// The shadow a panel casts, if the style has one.
 pub fn shadow(palette: &Palette) -> Shadow {
     let (offset, blur, alpha) = match style() {
-        Style::Modern => (1, 6, if palette.dark { 40 } else { 10 }),
-        Style::Glass => (2, 10, if palette.dark { 80 } else { 26 }),
-        Style::Gel => (3, 12, if palette.dark { 90 } else { 40 }),
-        Style::Retro | Style::Luna | Style::Platinum => (0, 0, 0),
+        Family::Modern => (1, 6, if palette.dark { 40 } else { 10 }),
+        Family::Glass => (2, 10, if palette.dark { 80 } else { 26 }),
+        Family::Gel => (3, 12, if palette.dark { 90 } else { 40 }),
+        Family::Retro | Family::Luna | Family::Platinum => (0, 0, 0),
     };
     Shadow {
         offset: [0, offset],
@@ -1179,12 +1185,12 @@ pub fn shadow(palette: &Palette) -> Shadow {
 /// The line around a panel.
 pub fn panel_stroke(palette: &Palette) -> Stroke {
     let color = match style() {
-        Style::Modern => palette.line,
-        Style::Retro => darker(palette.canvas, 0.6),
-        Style::Luna => luna_line(palette),
-        Style::Glass if palette.dark => lighter(palette.canvas, 0.22),
-        Style::Glass | Style::Gel => lerp(palette.ink, palette.surface, 0.62),
-        Style::Platinum => lerp(palette.ink, palette.canvas, 0.3),
+        Family::Modern => palette.line,
+        Family::Retro => darker(palette.canvas, 0.6),
+        Family::Luna => luna_line(palette),
+        Family::Glass if palette.dark => lighter(palette.canvas, 0.22),
+        Family::Glass | Family::Gel => lerp(palette.ink, palette.surface, 0.62),
+        Family::Platinum => lerp(palette.ink, palette.canvas, 0.3),
     };
     Stroke::new(1.0, color)
 }
@@ -1192,8 +1198,8 @@ pub fn panel_stroke(palette: &Palette) -> Stroke {
 /// How round a panel is: lists sit square in the older styles.
 fn panel_radius(sunken: bool) -> CornerRadius {
     match style() {
-        Style::Retro => CornerRadius::ZERO,
-        Style::Luna | Style::Platinum if sunken => CornerRadius::ZERO,
+        Family::Retro => CornerRadius::ZERO,
+        Family::Luna | Family::Platinum if sunken => CornerRadius::ZERO,
         _ => theme::round(12),
     }
 }
@@ -1212,8 +1218,8 @@ pub fn paint_panel(painter: &Painter, rect: Rect, palette: &Palette, sunken: boo
 /// What a style adds around a panel already drawn: bevels and highlights.
 pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
     match style() {
-        Style::Retro => retro_edge(painter, rect, palette.canvas, sunken, 1.0),
-        Style::Platinum => {
+        Family::Retro => retro_edge(painter, rect, palette.canvas, sunken, 1.0),
+        Family::Platinum => {
             let (light, dark) = (lighter(palette.surface, 0.8), darker(palette.canvas, 0.3));
             if sunken {
                 bevel(painter, rect.shrink(1.0), dark, light);
@@ -1221,7 +1227,7 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
                 bevel(painter, rect.shrink(1.0), light, dark);
             }
         }
-        Style::Modern | Style::Luna | Style::Glass | Style::Gel => {}
+        Family::Modern | Family::Luna | Family::Glass | Family::Gel => {}
     }
 }
 
@@ -1230,7 +1236,10 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
 pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
     painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
     match style() {
-        Style::Gel => {
+        // Panther stands on brushed metal and Tiger on plain grey.
+        Family::Gel if version() == Style::Panther => brushed_metal(painter, rect, palette.dark),
+        Family::Gel if version() == Style::Tiger => {}
+        Family::Gel => {
             let stripe = if palette.dark {
                 Color32::from_white_alpha(7)
             } else {
@@ -1247,7 +1256,7 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
             }
             painter.add(mesh);
         }
-        Style::Glass => {
+        Family::Glass => {
             // Tinted glass, deepest at the top, with light caught in streaks.
             let (top, middle, bottom) = if palette.dark {
                 (
@@ -1269,10 +1278,49 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
                 CornerRadius::ZERO,
                 &[(0.0, top), (0.4 / reach.max(0.4), middle), (1.0, bottom)],
             );
-            glass_streaks(painter, rect, if palette.dark { 9 } else { 30 });
+            // Vista's streaks catch more light than 7's.
+            let shine = match (version(), palette.dark) {
+                (Style::Vista, true) => 14,
+                (Style::Vista, false) => 52,
+                (_, true) => 9,
+                (_, false) => 30,
+            };
+            glass_streaks(painter, rect, shine);
         }
         _ => {}
     }
+}
+
+/// Panther's brushed metal over `rect`: fine horizontal grain, keyed to
+/// the height on screen so pieces painted apart line up.
+pub(super) fn brushed_metal(painter: &Painter, rect: Rect, dark: bool) {
+    let strength = if dark { 9.0 } else { 26.0 };
+    let mut mesh = Mesh::default();
+    let mut y = rect.top().floor();
+    while y < rect.bottom() {
+        let row = Rect::from_min_max(
+            pos2(rect.left(), y.max(rect.top())),
+            pos2(rect.right(), (y + 1.0).min(rect.bottom())),
+        );
+        let grain = (grain(y as i32) - 0.5) * 2.0 * strength;
+        let color = if grain >= 0.0 {
+            Color32::from_white_alpha(grain as u8)
+        } else {
+            Color32::from_black_alpha((-grain * 0.6) as u8)
+        };
+        mesh.add_colored_rect(row, color);
+        y += 1.0;
+    }
+    painter.add(mesh);
+}
+
+/// Noise from 0 to 1 for row `y`, the same every frame.
+fn grain(y: i32) -> f32 {
+    let mut h = (y as u32).wrapping_mul(0x9e37_79b1);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    (h & 0xffff) as f32 / 65535.0
 }
 
 /// Vista's diagonal streaks of light across glass in `rect`, `shine` the
@@ -1360,11 +1408,11 @@ pub fn paint_sidebar(
         )
     };
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
             end(palette.line);
         }
-        Style::Retro => {
+        Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
             // The pages in a list box, as Explorer's folders.
             let list = entries.expand2(vec2(6.0, 8.0));
@@ -1377,7 +1425,7 @@ pub fn paint_sidebar(
                 darker(palette.canvas, 0.4),
             );
         }
-        Style::Luna => {
+        Family::Luna => {
             // The blue task pane, with the pages in a task box.
             let (top, bottom) = if dark {
                 (
@@ -1432,7 +1480,21 @@ pub fn paint_sidebar(
                 entries: Some(link),
             };
         }
-        Style::Glass => {
+        Family::Glass if version() == Style::Vista => {
+            // Vista's side pane fades from blue to green, with white links.
+            let (top, bottom) = if dark {
+                (rgb(0x1d3350), rgb(0x24452f))
+            } else {
+                (rgb(0x416fa5), rgb(0x73ba78))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            end(Color32::from_white_alpha(if dark { 24 } else { 90 }));
+            return SidebarInk {
+                name: Some(Color32::WHITE),
+                entries: Some(Color32::WHITE),
+            };
+        }
+        Family::Glass => {
             painter.rect_filled(
                 rect,
                 CornerRadius::ZERO,
@@ -1444,7 +1506,19 @@ pub fn paint_sidebar(
             );
             end(Color32::from_white_alpha(if dark { 24 } else { 120 }));
         }
-        Style::Gel => {
+        Family::Gel if version() == Style::Panther => {
+            // A light source list set into the metal.
+            let list = rect.shrink2(vec2(8.0, 10.0));
+            let fill = if dark { gray(0x2e) } else { gray(0xf0) };
+            painter.rect_filled(list, theme::round(10), fill);
+            painter.rect_stroke(
+                list,
+                theme::round(10),
+                Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x8c) }),
+                StrokeKind::Inside,
+            );
+        }
+        Family::Gel => {
             // The blue-grey source list.
             let list = if dark {
                 lerp(palette.canvas, palette.deep, 0.1)
@@ -1454,7 +1528,7 @@ pub fn paint_sidebar(
             painter.rect_filled(rect, CornerRadius::ZERO, list);
             end(if dark { Color32::BLACK } else { gray(0x9a) });
         }
-        Style::Platinum => {
+        Family::Platinum => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
             bevel(
                 painter,
@@ -1471,19 +1545,19 @@ pub fn paint_sidebar(
 /// icons on it take when the style fills it solid.
 pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Option<Color32> {
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             painter.rect_filled(rect, theme::round(10), palette.selection);
             None
         }
-        Style::Retro | Style::Luna => {
+        Family::Retro | Family::Luna => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.deep);
             Some(ink_on(palette.deep))
         }
-        Style::Glass => {
+        Family::Glass => {
             glass_selection(painter, rect, palette, 1.0);
             None
         }
-        Style::Gel => {
+        Family::Gel => {
             // A source list's selection: a blue band with a light top edge.
             gradient(
                 painter,
@@ -1500,7 +1574,7 @@ pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Opti
             );
             Some(Color32::WHITE)
         }
-        Style::Platinum => {
+        Family::Platinum => {
             painter.rect_filled(rect, CornerRadius::ZERO, platinum_highlight(palette));
             None
         }
@@ -1550,20 +1624,20 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
 
 /// Whether the style marks the chosen sidebar entry with Modern's bar.
 pub fn selection_bar() -> bool {
-    style() == Style::Modern
+    style() == Family::Modern
 }
 
 /// Whether app icons sit bare, as on the old desktops, rather than on tiles.
 pub fn bare_icons() -> bool {
-    style() != Style::Modern
+    style() != Family::Modern
 }
 
 /// The colour a selected list row's text takes, when the style fills the
 /// selection solid.
 pub fn row_selection_ink(palette: &Palette) -> Option<Color32> {
     match style() {
-        Style::Retro | Style::Luna | Style::Gel => Some(ink_on(palette.deep)),
-        Style::Modern | Style::Glass | Style::Platinum => None,
+        Family::Retro | Family::Luna | Family::Gel => Some(ink_on(palette.deep)),
+        Family::Modern | Family::Glass | Family::Platinum => None,
     }
 }
 
@@ -1583,14 +1657,14 @@ pub fn on_fill(palette: &Palette, ink: Color32) -> Palette {
 /// The selected list row's background, `shown` from 0 to 1.
 pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32) {
     match style() {
-        Style::Modern => {
+        Family::Modern => {
             painter.rect_filled(rect, theme::round(10), faded(palette.selection, shown));
         }
-        Style::Retro | Style::Luna | Style::Gel => {
+        Family::Retro | Family::Luna | Family::Gel => {
             painter.rect_filled(rect, CornerRadius::ZERO, faded(palette.deep, shown));
         }
-        Style::Glass => glass_selection(painter, rect, palette, shown),
-        Style::Platinum => {
+        Family::Glass => glass_selection(painter, rect, palette, shown),
+        Family::Platinum => {
             painter.rect_filled(
                 rect,
                 CornerRadius::ZERO,
@@ -1605,20 +1679,18 @@ pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, sho
 pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Option<Color32> {
     let dark = palette.dark;
     match style() {
-        Style::Modern => None,
-        Style::Retro => {
-            // Windows 98's navy fading to a lighter blue.
-            gradient(
-                painter,
-                rect,
-                CornerRadius::ZERO,
-                palette.deep,
-                lerp(palette.deep, palette.bright, 0.85),
-                true,
-            );
+        Family::Modern => None,
+        Family::Retro => {
+            // Windows 98's navy fading to a lighter blue; 95's stays solid.
+            let end = if version() == Style::Win95 {
+                palette.deep
+            } else {
+                lerp(palette.deep, palette.bright, 0.85)
+            };
+            gradient(painter, rect, CornerRadius::ZERO, palette.deep, end, true);
             Some(ink_on(palette.deep))
         }
-        Style::Luna => {
+        Family::Luna => {
             let radius = top_corners(theme::round(18));
             let blue = palette.deep;
             bands(
@@ -1635,11 +1707,11 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
             );
             Some(ink_on(blue))
         }
-        Style::Glass => {
+        Family::Glass => {
             // The page's title sits on the glass itself.
             Some(palette.ink)
         }
-        Style::Gel => {
+        Family::Gel => {
             let radius = top_corners(theme::round(14));
             let (top, bottom, line) = if dark {
                 (
@@ -1654,7 +1726,7 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
             painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, line));
             Some(palette.ink)
         }
-        Style::Platinum => {
+        Family::Platinum => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
             bevel(
                 painter,
@@ -1684,8 +1756,8 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
 /// The page's heading: Vista's light blue, the others' plain bold.
 pub fn heading(palette: &Palette) -> (FontId, Color32) {
     match style() {
-        Style::Modern => (theme::bold(26.0), palette.ink),
-        Style::Glass => (
+        Family::Modern => (theme::bold(26.0), palette.ink),
+        Family::Glass => (
             theme::font(24.0),
             if palette.dark {
                 rgb(0x8fb8ff)
@@ -1693,15 +1765,15 @@ pub fn heading(palette: &Palette) -> (FontId, Color32) {
                 rgb(0x1e3287)
             },
         ),
-        Style::Luna => (theme::bold(22.0), palette.ink),
-        Style::Retro | Style::Gel | Style::Platinum => (theme::bold(22.0), palette.ink),
+        Family::Luna => (theme::bold(22.0), palette.ink),
+        Family::Retro | Family::Gel | Family::Platinum => (theme::bold(22.0), palette.ink),
     }
 }
 
 /// A list's column headings as the style draws them: in title case in
 /// the older styles, capitals in Modern.
 pub fn column_title(title: &str) -> String {
-    if style() == Style::Modern {
+    if style() == Family::Modern {
         return title.to_owned();
     }
     let lower = title.to_lowercase();
@@ -1717,11 +1789,11 @@ pub fn column_title(title: &str) -> String {
 pub fn paint_column_band(painter: &Painter, rect: Rect, palette: &Palette) -> bool {
     let dark = palette.dark;
     match style() {
-        Style::Modern => return false,
-        Style::Retro | Style::Platinum => {
+        Family::Modern => return false,
+        Family::Retro | Family::Platinum => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
         }
-        Style::Luna => {
+        Family::Luna => {
             let (top, bottom) = if dark {
                 (lighter(palette.surface, 0.12), palette.surface)
             } else {
@@ -1746,7 +1818,7 @@ pub fn paint_column_band(painter: &Painter, rect: Rect, palette: &Palette) -> bo
                 );
             }
         }
-        Style::Glass => {
+        Family::Glass => {
             let (top, bottom) = if dark {
                 (lighter(palette.surface, 0.08), palette.surface)
             } else {
@@ -1759,7 +1831,7 @@ pub fn paint_column_band(painter: &Painter, rect: Rect, palette: &Palette) -> bo
                 Stroke::new(1.0, lerp(palette.ink, palette.surface, 0.82)),
             );
         }
-        Style::Gel => {
+        Family::Gel => {
             bands(painter, rect, CornerRadius::ZERO, &gel_band(palette, None));
             painter.hline(
                 rect.x_range(),
@@ -1819,12 +1891,12 @@ pub fn paint_column_cell(
         );
     };
     match style() {
-        Style::Modern => None,
-        Style::Retro => {
+        Family::Modern => None,
+        Family::Retro => {
             retro_edge(painter, cell, palette.canvas, false, 1.0);
             None
         }
-        Style::Platinum => {
+        Family::Platinum => {
             if sorted {
                 painter.rect_filled(cell, CornerRadius::ZERO, darker(palette.canvas, 0.12));
             }
@@ -1836,7 +1908,7 @@ pub fn paint_column_cell(
             );
             None
         }
-        Style::Luna => {
+        Family::Luna => {
             divider(if dark {
                 darker(palette.surface, 0.3)
             } else {
@@ -1851,7 +1923,7 @@ pub fn paint_column_cell(
             }
             None
         }
-        Style::Glass => {
+        Family::Glass => {
             if hovered {
                 let tint = |amount| lerp(palette.surface, palette.deep, amount);
                 gradient(
@@ -1873,7 +1945,7 @@ pub fn paint_column_cell(
             }
             None
         }
-        Style::Gel => {
+        Family::Gel => {
             if sorted {
                 let blue = lerp(palette.deep, Color32::WHITE, 0.2);
                 bands(
@@ -1922,11 +1994,11 @@ pub fn group(palette: &Palette) -> Option<Group> {
         size: 14.0,
     };
     Some(match style() {
-        Style::Modern => return None,
+        Family::Modern => return None,
         // Etched after the content, in `paint_group`.
-        Style::Retro => none,
-        Style::Platinum => Group { bold: true, ..none },
-        Style::Luna => Group {
+        Family::Retro => none,
+        Family::Platinum => Group { bold: true, ..none },
+        Family::Luna => Group {
             stroke: Stroke::new(1.0, darker(palette.canvas, 0.14)),
             radius: theme::round(8),
             ink: if dark {
@@ -1936,7 +2008,7 @@ pub fn group(palette: &Palette) -> Option<Group> {
             },
             ..none
         },
-        Style::Glass => Group {
+        Family::Glass => Group {
             fill: palette.surface,
             stroke: panel_stroke(palette),
             radius: theme::round(10),
@@ -1951,7 +2023,7 @@ pub fn group(palette: &Palette) -> Option<Group> {
             size: 16.0,
             ..none
         },
-        Style::Gel => Group {
+        Family::Gel => Group {
             fill: if dark {
                 Color32::from_white_alpha(8)
             } else {
@@ -1976,7 +2048,7 @@ pub fn group(palette: &Palette) -> Option<Group> {
 /// What a group box draws over its frame once its size is known: the
 /// etched lines of Windows 98 and Mac OS.
 pub fn paint_group(painter: &Painter, rect: Rect, palette: &Palette) {
-    if matches!(style(), Style::Retro | Style::Platinum) {
+    if matches!(style(), Family::Retro | Family::Platinum) {
         etched(painter, rect, palette.canvas);
     }
 }
@@ -2106,7 +2178,7 @@ mod tests {
                 let bare = weight == Weight::Flat && state == STILL;
                 assert_eq!(
                     ink.is_some(),
-                    style != Style::Modern && !bare,
+                    style != Family::Modern && !bare,
                     "{at} {weight:?}"
                 );
                 assert!(ink.is_none_or(|ink| ink.a() > 0), "{at}");
@@ -2119,7 +2191,7 @@ mod tests {
             let tick = paint_check(painter, rect(), palette, checked, true, 1.0);
             // Platinum draws its own cross; the rest leave the tick to the
             // caller.
-            assert_eq!(tick.is_none(), style == Style::Platinum, "{at}");
+            assert_eq!(tick.is_none(), style == Family::Platinum, "{at}");
         }
         paint_knob(painter, rect().center(), 9.0, 1.0);
         if let Some(ink) = paint_selection(painter, rect(), palette) {
@@ -2129,14 +2201,14 @@ mod tests {
             paint_row_selection(painter, rect(), palette, shown);
         }
         let strip = paint_title_strip(painter, rect(), palette);
-        assert_eq!(strip.is_some(), style != Style::Modern, "{at}");
+        assert_eq!(strip.is_some(), style != Family::Modern, "{at}");
         assert!(heading(palette).1.a() > 0, "{at}");
         let band = paint_column_band(painter, rect(), palette);
-        assert_eq!(band, style != Style::Modern, "{at}");
+        assert_eq!(band, style != Family::Modern, "{at}");
         for (sorted, hovered) in [(false, false), (true, true)] {
             let ink = paint_column_cell(painter, rect(), palette, sorted, hovered);
             // Only Aqua's sorted column turns blue and picks its own ink.
-            assert_eq!(ink.is_some(), style == Style::Gel && sorted, "{at}");
+            assert_eq!(ink.is_some(), style == Family::Gel && sorted, "{at}");
         }
         paint_group(painter, rect(), palette);
     }
@@ -2152,7 +2224,7 @@ mod tests {
                 assert!(shapes.len() > 20, "{at}");
                 assert!(inside(&shapes, rect()), "{at}");
                 // Retro is square through and through.
-                assert_eq!(rounded(&shapes), style != Style::Retro, "{at}");
+                assert_eq!(rounded(&shapes), style.family() != Family::Retro, "{at}");
             }
         }
     }
@@ -2312,12 +2384,15 @@ mod tests {
                 // Mac OS 8, and inside the box in the rest.
                 assert_eq!(
                     group.on_line,
-                    matches!(style, Style::Retro | Style::Platinum | Style::Luna),
+                    matches!(
+                        style.family(),
+                        Family::Retro | Family::Platinum | Family::Luna
+                    ),
                     "{style:?}"
                 );
                 assert_eq!(
                     row_selection_ink(&palette).is_some(),
-                    matches!(style, Style::Retro | Style::Luna | Style::Gel),
+                    matches!(style.family(), Family::Retro | Family::Luna | Family::Gel),
                     "{style:?}"
                 );
             });
@@ -2344,6 +2419,73 @@ mod tests {
             let shadow = in_style(style, || shadow(&palette));
             assert_eq!(shadow.color.a() > 0, shadowed, "{style:?}");
         }
+    }
+
+    #[test]
+    fn versions_of_one_desktop_differ_where_they_did() {
+        let colours = |shapes: &[Shape]| {
+            let mut colours = std::collections::BTreeSet::new();
+            for shape in shapes {
+                if let Shape::Mesh(mesh) = shape {
+                    colours.extend(mesh.vertices.iter().map(|v| v.color.to_array()));
+                }
+            }
+            colours
+        };
+        // Windows 95's title strip is solid, 98's fades.
+        let strip = |style| {
+            drawn(style, false, |painter, palette| {
+                paint_title_strip(painter, rect(), palette);
+            })
+        };
+        assert_eq!(colours(&strip(Style::Win95)).len(), 1);
+        assert!(colours(&strip(Style::Retro)).len() > 1);
+        // Vista's side pane is blue to green with white links; 7's isn't.
+        for dark in [false, true] {
+            let mut inks = Vec::new();
+            for style in [Style::Vista, Style::Glass] {
+                drawn(style, dark, |painter, palette| {
+                    inks.push(paint_sidebar(painter, rect(), rect(), rect(), palette));
+                });
+            }
+            assert_eq!(inks[0].name, Some(Color32::WHITE), "dark={dark}");
+            assert_eq!(inks[0].entries, Some(Color32::WHITE), "dark={dark}");
+            assert_ne!(inks[1].entries, Some(Color32::WHITE), "dark={dark}");
+        }
+        // Panther is brushed metal, a row of grain per pixel; Tiger is plain;
+        // Jaguar keeps its pinstripes.
+        let canvas = |style, dark| {
+            drawn(style, dark, |painter, palette| {
+                paint_canvas(painter, rect(), palette)
+            })
+        };
+        for dark in [false, true] {
+            let metal = canvas(Style::Panther, dark);
+            assert!(colours(&metal).len() > 4, "dark={dark}");
+            assert!(inside(&metal, rect()), "dark={dark}");
+            assert_eq!(meshes(&canvas(Style::Tiger, dark)), 0, "dark={dark}");
+            assert!(meshes(&canvas(Style::Gel, dark)) >= 1, "dark={dark}");
+        }
+        // The light catches metal more than the dark does.
+        let reach = |dark| {
+            colours(&canvas(Style::Panther, dark))
+                .iter()
+                .map(|[_, _, _, a]| *a)
+                .max()
+                .unwrap()
+        };
+        assert!(reach(false) > reach(true));
+    }
+
+    #[test]
+    fn grain_is_spread_between_zero_and_one_and_repeats() {
+        let rows: Vec<f32> = (0..400).map(grain).collect();
+        assert!(rows.iter().all(|g| (0.0..=1.0).contains(g)));
+        assert_eq!(grain(17), grain(17));
+        let low = rows.iter().filter(|g| **g < 0.5).count();
+        assert!((150..250).contains(&low), "{low}");
+        // Neighbouring rows differ, so it reads as streaks.
+        assert!(rows.windows(2).filter(|w| w[0] != w[1]).count() > 390);
     }
 
     #[test]
