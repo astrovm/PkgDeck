@@ -101,7 +101,7 @@ impl Palette {
             }
         } else {
             match scheme.light {
-                LightTheme::Classic => (0xf4f6f9, 0xffffff, 0x18212d, 0x5a6676),
+                LightTheme::Classic => (0xe8edf5, 0xf7f9fd, 0x152135, 0x4e5c72),
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             }

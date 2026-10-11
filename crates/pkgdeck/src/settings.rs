@@ -33,7 +33,7 @@ pub enum DarkTheme {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LightTheme {
-    /// Cool greys, as PkgDeck first shipped.
+    /// Blue-grey, the light match for Slate.
     #[default]
     Classic,
     /// Neutral greys, no tint.
