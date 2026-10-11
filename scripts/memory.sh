@@ -14,7 +14,10 @@ command -v busctl >/dev/null || { echo "busctl is needed to open and close the w
 profile=$(mktemp -d /tmp/pkgdeck-memory.XXXX)
 pid=
 cleanup() {
-  [[ -n $pid ]] && kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null
+  if [[ -n $pid ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
   rm -rf "$profile"
 }
 trap cleanup EXIT
@@ -26,9 +29,11 @@ echo '{"setupAsked":true}' >"$profile/config/pkgdeck/window.json"
 if [[ -n ${WAYLAND_DISPLAY:-} && $WAYLAND_DISPLAY != /* && -n ${XDG_RUNTIME_DIR:-} ]]; then
   export WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
 fi
+# Always run in a subshell (a pipe or `&`): it becomes PkgDeck, so `$!` is
+# PkgDeck's own process.
 run() {
   XDG_CONFIG_HOME=$profile/config XDG_CACHE_HOME=$profile/cache XDG_DATA_HOME=$profile/data \
-    XDG_RUNTIME_DIR=$profile/run "$bin" "$@"
+    XDG_RUNTIME_DIR=$profile/run exec "$bin" "$@"
 }
 pss() {
   awk '/^Pss:/{p=$2} /^Pss_Anon:/{a=$2} /^Pss_File:/{f=$2}
@@ -38,7 +43,7 @@ threads() { awk '/^Threads:/{print $2}' "/proc/$1/status"; }
 # Opens or closes the window, as a click on the tray icon does.
 toggle() {
   local service
-  service=$(busctl --user list --no-legend | awk -v p="StatusNotifierItem-$1-" 'index($1, p) {print $1; exit}')
+  service=$(busctl --user list --no-legend | awk -v p="StatusNotifierItem-$1-" 'index($1, p) && !found {print $1; found = 1}')
   [[ -n $service ]] || { echo "The tray icon isn't on D-Bus" >&2; exit 1; }
   busctl --user call "$service" /StatusNotifierItem org.kde.StatusNotifierItem Activate ii 0 0
 }
