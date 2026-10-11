@@ -120,17 +120,27 @@ impl HostProgram {
 /// The connection every host command shares; a lost one is made again.
 fn shared() -> io::Result<Arc<Bus>> {
     static SHARED: Mutex<Option<Arc<Bus>>> = Mutex::new(None);
+    share(&SHARED, Path::new("/.flatpak-info"), Connection::session)
+}
+
+/// The bus in `slot`, opened with `open` when there is none or it was lost.
+/// `info` is the file only a real sandbox has.
+fn share(
+    slot: &Mutex<Option<Arc<Bus>>>,
+    info: &Path,
+    open: impl Fn() -> zbus::Result<Connection>,
+) -> io::Result<Arc<Bus>> {
     // Held while connecting, so commands starting together share one try.
-    let mut slot = SHARED.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
     if let Some(bus) = slot.as_ref().filter(|bus| !bus.lost()) {
         return Ok(bus.clone());
     }
     // Outside a real sandbox the host's own portal would run commands for
     // a copy that only thinks it is a Flatpak.
-    if !Path::new("/.flatpak-info").exists() {
+    if !info.exists() {
         return Err(io::Error::new(io::ErrorKind::NotConnected, UNAVAILABLE));
     }
-    let bus = connect().and_then(Bus::open).map_err(|error| {
+    let bus = connect(open).and_then(Bus::open).map_err(|error| {
         io::Error::new(
             io::ErrorKind::NotConnected,
             format!("{UNAVAILABLE}: {error}"),
@@ -140,10 +150,10 @@ fn shared() -> io::Result<Arc<Bus>> {
     Ok(bus)
 }
 
-fn connect() -> zbus::Result<Connection> {
+fn connect(open: impl Fn() -> zbus::Result<Connection>) -> zbus::Result<Connection> {
     let mut attempt = 0;
     loop {
-        match Connection::session() {
+        match open() {
             Err(error) if attempt < 5 && transient(&error) => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(20 << attempt));
@@ -406,34 +416,32 @@ pub(crate) fn fake(bridge: &Path) -> Portal {
     if !bridge.is_file() {
         return Portal(Route::Fixed(None));
     }
-    let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-    let guid = zbus::Guid::generate();
-    let server = std::thread::spawn(move || {
-        zbus::blocking::connection::Builder::async_io_unix_stream(server)
-            .server(guid)
-            .unwrap()
-            .p2p()
-            .build()
-            .unwrap()
-    });
-    let client = zbus::blocking::connection::Builder::async_io_unix_stream(client)
-        .p2p()
-        .build()
-        .unwrap();
-    let server = server.join().unwrap();
-    // Listening before the first call: a message nobody listens for yet is
-    // dropped.
-    let calls = MessageIterator::from(&server);
-    let bridge = bridge.to_owned();
-    std::thread::spawn(move || fake::serve(&server, calls, &bridge));
-    Portal(Route::Fixed(Some(Bus::open(client).unwrap())))
+    let peer = fake::Peer::new(bridge, Vec::new());
+    Portal(Route::Fixed(Some(Bus::open(peer.client).unwrap())))
+}
+
+/// A fake host bridge in `dir` that runs the program here, dropping the
+/// `flatpak-spawn` options the fake portal adds.
+#[cfg(test)]
+pub(crate) fn fake_bridge(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bridge = dir.join("spawn");
+    std::fs::write(
+        &bridge,
+        "#!/bin/sh\nwhile [ \"${1#--}\" != \"$1\" ]; do\n  case \"$1\" in --env=*) export \"${1#--env=}\";; esac\n  shift\ndone\nexec \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bridge
 }
 
 #[cfg(test)]
 mod fake {
     use super::*;
+    use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    use zbus::blocking::connection::Builder;
 
     type HostCommand = (
         Vec<u8>,
@@ -443,46 +451,84 @@ mod fake {
         u32,
     );
 
-    pub(super) fn serve(connection: &Connection, calls: MessageIterator, bridge: &Path) {
+    /// A connection to a fake portal.
+    pub(super) struct Peer {
+        pub(super) client: Connection,
+        /// The sockets under each end, to break the connection.
+        pub(super) client_end: UnixStream,
+        pub(super) server_end: UnixStream,
+    }
+
+    impl Peer {
+        /// A portal that runs `bridge`, after turning the first commands
+        /// down with the errors in `refusals`.
+        pub(super) fn new(bridge: &Path, refusals: Vec<&'static str>) -> Self {
+            let (client, server) = UnixStream::pair().unwrap();
+            let client_end = client.try_clone().unwrap();
+            let server_end = server.try_clone().unwrap();
+            let guid = zbus::Guid::generate();
+            let server = std::thread::spawn(move || {
+                Builder::async_io_unix_stream(server)
+                    .server(guid)
+                    .unwrap()
+                    .p2p()
+                    .build()
+                    .unwrap()
+            });
+            let client = Builder::async_io_unix_stream(client).p2p().build().unwrap();
+            let server = server.join().unwrap();
+            // Listening before the first call: a message nobody listens for
+            // yet is dropped.
+            let calls = MessageIterator::from(&server);
+            let bridge = bridge.to_owned();
+            std::thread::spawn(move || serve(&server, calls, &bridge, refusals));
+            Self {
+                client,
+                client_end,
+                server_end,
+            }
+        }
+    }
+
+    fn serve(
+        connection: &Connection,
+        calls: MessageIterator,
+        bridge: &Path,
+        refusals: Vec<&'static str>,
+    ) {
+        let mut refusals = refusals.into_iter();
         for message in calls {
             let Ok(message) = message else { break };
             let header = message.header();
-            if header.message_type() != Type::MethodCall {
-                continue;
-            }
-            let replied = match header.member().map(|member| member.as_str()) {
-                Some("HostCommand") => {
-                    let call: HostCommand = message.body().deserialize().unwrap();
-                    match start(connection, bridge, call) {
+            // Only HostCommand and HostCommandSignal get called.
+            let _ = if header.member().map(|member| member.as_str()) == Some("HostCommand") {
+                let call: HostCommand = message.body().deserialize().unwrap();
+                match refusals.next() {
+                    Some(name) => connection.reply_error(&header, name, &"turned down"),
+                    None => match start(connection, bridge, call) {
                         Ok(pid) => connection.reply(&header, &pid),
                         Err(error) => connection.reply_error(
                             &header,
                             "org.freedesktop.DBus.Error.Failed",
                             &format!("Failed to start command: {error}"),
                         ),
-                    }
+                    },
                 }
-                Some("HostCommandSignal") => {
-                    let (pid, signal, _): (u32, u32, bool) = message.body().deserialize().unwrap();
-                    let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
-                    let signal = rustix::process::Signal::from_named_raw(signal as i32).unwrap();
-                    match rustix::process::kill_process_group(pid, signal) {
-                        Ok(()) => connection.reply(&header, &()),
-                        Err(error) => connection.reply_error(
-                            &header,
-                            "org.freedesktop.DBus.Error.Failed",
-                            &error.to_string(),
-                        ),
-                    }
+            } else {
+                let (pid, signal, _): (u32, u32, bool) = message.body().deserialize().unwrap();
+                let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
+                let signal = rustix::process::Signal::from_named_raw(signal as i32).unwrap();
+                match rustix::process::kill_process_group(pid, signal) {
+                    Ok(()) => connection.reply(&header, &()),
+                    Err(error) => connection.reply_error(
+                        &header,
+                        "org.freedesktop.DBus.Error.Failed",
+                        &error.to_string(),
+                    ),
                 }
-                _ => continue,
             };
-            if replied.is_err() {
-                break;
-            }
         }
     }
-
     fn start(connection: &Connection, bridge: &Path, call: HostCommand) -> io::Result<u32> {
         let (directory, argv, mut fds, env, flags) = call;
         let text = |mut bytes: Vec<u8>| {
@@ -529,5 +575,231 @@ mod fake {
             );
         });
         Ok(pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::net::Shutdown;
+    use std::path::PathBuf;
+
+    fn dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pkgdeck-portal-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn null() -> [OwnedFd; 3] {
+        std::array::from_fn(|_| std::fs::File::open("/dev/null").unwrap().into())
+    }
+
+    fn program(portal: &Portal, script: &str) -> HostProgram {
+        let argv = vec!["/bin/sh".into(), "-c".into(), script.into()];
+        portal.program(argv, None).unwrap()
+    }
+
+    fn portal(peer: fake::Peer) -> Portal {
+        Portal(Route::Fixed(Some(Bus::open(peer.client).unwrap())))
+    }
+
+    fn method_error(name: &str) -> zbus::Error {
+        let message = zbus::Message::method_call("/", "Call")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let name = zbus::names::ErrorName::try_from(name).unwrap();
+        zbus::Error::MethodError(name.into(), None, message)
+    }
+
+    fn broken() -> zbus::Error {
+        zbus::Error::InputOutput(Arc::new(io::Error::from(io::ErrorKind::WouldBlock)))
+    }
+
+    #[test]
+    fn portals_say_where_commands_go() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        assert_eq!(format!("{:?}", Portal::session()), "Portal(session)");
+        assert_eq!(format!("{:?}", fake(&bridge)), "Portal(fake)");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn turned_away_starts_are_tried_again_only_when_asked() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let busy = "org.freedesktop.DBus.Error.LimitsExceeded";
+
+        let again = portal(fake::Peer::new(&bridge, vec![busy, busy]));
+        let mut child = program(&again, "exit 3").start(null(), true).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+
+        let once = portal(fake::Peer::new(&bridge, vec![busy]));
+        let error = program(&once, "exit 0").start(null(), false).err().unwrap();
+        assert_eq!(error.to_string(), "turned down");
+        // Its next start works: the connection stays.
+        let mut child = program(&once, "exit 0").start(null(), false).unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let never = portal(fake::Peer::new(&bridge, vec![busy; 4]));
+        let error = program(&never, "exit 0").start(null(), true).err().unwrap();
+        assert_eq!(error.to_string(), "turned down");
+
+        let failed = "org.freedesktop.DBus.Error.Failed";
+        let final_answer = portal(fake::Peer::new(&bridge, vec![failed]));
+        let error = program(&final_answer, "exit 0")
+            .start(null(), true)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "turned down");
+        assert!(program(&final_answer, "exit 0").start(null(), true).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_broken_connection_is_given_up_not_retried_forever() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let peer = fake::Peer::new(&bridge, Vec::new());
+        let end = peer.client_end.try_clone().unwrap();
+        let broken = portal(peer);
+        let started = program(&broken, "exit 0");
+        end.shutdown(Shutdown::Write).unwrap();
+        let error = started.start(null(), true).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        assert!(broken.program(vec!["/bin/true".into()], None).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn commands_cant_be_followed_once_the_connection_ends() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let peer = fake::Peer::new(&bridge, Vec::new());
+        let end = peer.server_end.try_clone().unwrap();
+        let portal = portal(peer);
+        let mut child = program(&portal, "sleep 30").start(null(), false).unwrap();
+        end.shutdown(Shutdown::Both).unwrap();
+        let error = child.wait().err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            child.try_wait().err().unwrap().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert!(child.ended());
+        let pid = rustix::process::Pid::from_raw(child.pid as i32).unwrap();
+        rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).unwrap();
+        drop(child);
+        assert!(portal.program(vec!["/bin/true".into()], None).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_collected_command_answers_from_what_it_knows() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let portal = fake(&bridge);
+        let mut child = program(&portal, "exit 3").start(null(), false).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        child.signal(rustix::process::Signal::TERM).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_shared_connection_is_made_once_and_again_when_lost() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let info = dir.join("flatpak-info");
+        std::fs::write(&info, "").unwrap();
+        let slot = Mutex::new(None);
+        let tries = Cell::new(0);
+        let open = || {
+            tries.set(tries.get() + 1);
+            if tries.get() % 3 == 0 {
+                Ok(fake::Peer::new(&bridge, Vec::new()).client)
+            } else {
+                Err(broken())
+            }
+        };
+        // Turned away twice, then connected.
+        let bus = share(&slot, &info, open).unwrap();
+        assert_eq!(tries.get(), 3);
+        assert!(Arc::ptr_eq(&bus, &share(&slot, &info, open).unwrap()));
+        assert_eq!(tries.get(), 3);
+        bus.lose();
+        let again = share(&slot, &info, open).unwrap();
+        assert!(!Arc::ptr_eq(&bus, &again));
+        assert_eq!(tries.get(), 6);
+
+        // Not a sandbox: no host commands.
+        let error = share(&Mutex::new(None), &dir.join("missing"), open)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), UNAVAILABLE);
+        assert_eq!(tries.get(), 6);
+
+        let error = share(&Mutex::new(None), &info, || Err(zbus::Error::Unsupported))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        assert!(error.to_string().starts_with(UNAVAILABLE), "{error}");
+
+        let tries = Cell::new(0);
+        let error = connect(|| {
+            tries.set(tries.get() + 1);
+            Err(broken())
+        })
+        .err()
+        .unwrap();
+        assert!(transient(&error));
+        assert_eq!(tries.get(), 6);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_errors_that_could_pass_are_tried_again() {
+        for name in [
+            "NoReply",
+            "ServiceUnknown",
+            "NameHasNoOwner",
+            "LimitsExceeded",
+            "Disconnected",
+            "Timeout",
+            "TimedOut",
+        ] {
+            let error = method_error(&format!("org.freedesktop.DBus.Error.{name}"));
+            assert!(transient(&error), "{name}");
+        }
+        assert!(transient(&broken()));
+        assert!(!transient(&method_error(
+            "org.freedesktop.DBus.Error.Failed"
+        )));
+        assert!(!transient(&zbus::Error::Unsupported));
+    }
+
+    #[test]
+    fn errors_keep_what_went_wrong() {
+        assert_eq!(io_error(broken()).kind(), io::ErrorKind::WouldBlock);
+        let error = io_error(zbus::Error::Failure("synthetic".into()));
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("synthetic"), "{error}");
+        // A method error without a message keeps its name.
+        let error = io_error(method_error("org.freedesktop.DBus.Error.Failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("org.freedesktop.DBus.Error.Failed"),
+            "{error}"
+        );
     }
 }

@@ -369,8 +369,7 @@ mod tests {
         use std::path::Path;
         use std::time::{Duration, Instant};
 
-        /// A fake host that runs the program here, dropping the
-        /// `flatpak-spawn` options the fake portal adds.
+        /// A fake host that runs the program here.
         fn host() -> (portal::Portal, std::path::PathBuf) {
             let dir = std::env::temp_dir().join(format!(
                 "pkgdeck-portal-{}-{}",
@@ -381,14 +380,7 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let bridge = dir.join("spawn");
-            std::fs::write(
-                &bridge,
-                "#!/bin/sh\nwhile [ \"${1#--}\" != \"$1\" ]; do\n  case \"$1\" in --env=*) export \"${1#--env=}\";; esac\n  shift\ndone\nexec \"$@\"\n",
-            )
-            .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let bridge = portal::fake_bridge(&dir);
             (portal::fake(&bridge), dir)
         }
 
@@ -442,6 +434,29 @@ mod tests {
             let mut silent = launch(&portal, "echo hidden; echo hidden >&2");
             let status = silent.stdout(Io::Null).stderr(Io::Null).status();
             assert!(status.unwrap().success());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn host_programs_take_more_environment() {
+            let (portal, dir) = host();
+            let script = "printf %s \"$PKGDECK_SYNTHETIC $PKGDECK_MORE\"";
+            let mut more = launch(&portal, script);
+            more.envs([("PKGDECK_MORE", "extra")]);
+            assert_eq!(more.args(), ["-c", script]);
+            let mut child = more.stdout(Io::Piped).spawn().unwrap();
+            let mut output = String::new();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut output)
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+            assert_eq!(output, "fixture extra");
+            assert!(Launch::from(Command::new("/usr/bin/true"))
+                .host_program()
+                .is_none());
             std::fs::remove_dir_all(dir).unwrap();
         }
 
