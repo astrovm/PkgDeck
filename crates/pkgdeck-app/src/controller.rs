@@ -2701,9 +2701,18 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
         }
         Job::RefreshAll(operations) => {
             let retry = keep(operations);
-            (!retry.is_empty()).then_some(Job::RefreshAll(retry))
+            (!retry.is_empty()).then(|| refresh_job(retry))
         }
         _ => None,
+    }
+}
+
+/// Refreshing one source runs its own command, as any single change does.
+/// Several share one batch, so they ask for a password once.
+fn refresh_job(operations: Vec<Operation>) -> Job {
+    match <[Operation; 1]>::try_from(operations) {
+        Ok([operation]) => Job::Write(operation, None),
+        Err(operations) => Job::RefreshAll(operations),
     }
 }
 /// An automatic run whose only failures are casks that need the password:
@@ -5585,7 +5594,7 @@ impl ffi::PackageController {
         })));
         self.as_mut()
             .set_confirmation(format!("Refresh {count} {noun}?\n\n{body}").as_str().into());
-        self.rust_mut().pending = Some(Job::RefreshAll(operations));
+        self.rust_mut().pending = Some(refresh_job(operations));
     }
     pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
         let plan = plan_checked_upgrade(
@@ -16299,6 +16308,10 @@ mod tests {
         let data: Value =
             serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
         assert_eq!(data["summary"], "Refresh 1 source");
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(operation, None)) if *operation == refresh("homebrew")
+        ));
         // A refresh batch writes, and Retry runs only the sources that failed.
         let job = Job::RefreshAll(vec![refresh("apt"), refresh("flatpak")]);
         assert!(job.writes());
@@ -16310,7 +16323,18 @@ mod tests {
             )),
         );
         assert!(
-            matches!(retry, Some(Job::RefreshAll(operations)) if operations == [refresh("flatpak")])
+            matches!(retry, Some(Job::Write(operation, None)) if operation == refresh("flatpak"))
+        );
+        let three = Job::RefreshAll(vec![refresh("apt"), refresh("flatpak"), refresh("snap")]);
+        let retry = retry_job(
+            &three,
+            &Ok(Payload::Batch(
+                String::new(),
+                vec![Outcome::Finished, Outcome::Failed, Outcome::Failed],
+            )),
+        );
+        assert!(
+            matches!(retry, Some(Job::RefreshAll(operations)) if operations == [refresh("flatpak"), refresh("snap")])
         );
         assert!(retry_job(
             &job,
