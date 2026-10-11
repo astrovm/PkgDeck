@@ -326,11 +326,17 @@ mod tests {
             .unwrap()
             .read_to_string(&mut error)
             .unwrap();
-        // It ends, and it is still there to collect.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !child.ended() && std::time::Instant::now() < deadline {
+        // It ends, and it is still there to collect. Each check waits
+        // first, so the coverage of these lines doesn't depend on timing.
+        let mut ended = false;
+        for _ in 0..2000 {
             std::thread::sleep(std::time::Duration::from_millis(5));
+            ended = child.ended();
+            if ended {
+                break;
+            }
         }
+        assert!(ended);
         assert_eq!(child.wait().unwrap().code(), Some(3));
         assert_eq!((output.as_str(), error.as_str()), ("got hi\n", "oops\n"));
     }
