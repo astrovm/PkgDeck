@@ -9,7 +9,10 @@ pub mod batch;
 pub mod cache;
 pub mod host;
 pub mod inspection;
+#[cfg(target_os = "linux")]
+mod portal;
 pub mod process;
+mod spawn;
 
 pub mod activity;
 pub mod artifact;

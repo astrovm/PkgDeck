@@ -16,7 +16,7 @@ when PkgDeck itself is packaged.
 | --- | --- | --- |
 | Native | Directly | Fake-process tests; real sudo/polkit and APT on a throwaway GitHub-hosted Ubuntu runner |
 | AppImage | Directly, ignoring tools inside the AppImage | `pkd doctor` in the extracted AppImage, GUI and terminal tests, environment tests |
-| Flatpak | Through `flatpak-spawn --host` | Real APT reads, a test Homebrew, and Flatpak install/remove |
+| Flatpak | Through the Flatpak portal's host commands | Real APT reads, a test Homebrew, and Flatpak install/remove |
 | Snap (classic) | Directly, ignoring tools inside `$SNAP` | Isolation tests and installed-package tests in CI |
 
 The same rules apply to reads, finding programs, and changes. If both Snap or
@@ -24,11 +24,18 @@ Flatpak and AppImage markers are present, Snap or Flatpak wins.
 
 ### Flatpak
 
-The Flatpak runs host commands with `flatpak-spawn --host`, which needs access
-to `org.freedesktop.Flatpak` on the session bus. It reads your environment
-once, keeps only the allowed variables, and starts each command with a clean
-environment. If host access is missing, commands fail instead of falling back
-to something else. APT data comes from the bundled APT reader, as in native
+The Flatpak runs host commands the way `flatpak-spawn --host` does, through
+`org.freedesktop.Flatpak` on the session bus. Unlike `flatpak-spawn`, which
+opens a new bus connection for every command, PkgDeck sends every command over
+one shared connection. The sandbox's bus proxy turns connections away when too
+many arrive at once, which checking every source together used to trigger
+("Can't find bus: Resource temporarily unavailable"). A read whose start gets
+lost on a dropped connection reconnects and tries again. A change never does,
+since it might have started.
+
+It reads your environment once, keeps only the allowed variables, and starts
+each command with a clean environment. If host access is missing, commands
+fail instead of falling back to something else. APT data comes from the bundled APT reader, as in native
 builds. The Flatpak bundles APT's own library and runs the reader inside the
 sandbox: it reads the host's `/var` directly, and its APT settings from
 `/run/host/etc/apt`. APT changes still run the host's `apt-get`. Unused
@@ -83,8 +90,8 @@ User-level commands never go through the helper.
 - Native, classic Snap, and Linux Homebrew: next to the PkgDeck executables.
 - AppImage: started through AppRun, so the elevated process can mount the
   AppImage.
-- Flatpak (user or system): inside its own install, through
-  `flatpak-spawn --host`.
+- Flatpak (user or system): inside its own install, started through the
+  Flatpak portal.
 
 If the helper is missing, PkgDeck says so and authorizes each command
 separately, which may mean more than one prompt. For example, one APT change
