@@ -576,9 +576,12 @@ fn row_actions_need_a_row_an_action_and_a_free_controller() {
     app.page = Page::Installed;
     rows(
         &mut app,
-        json!([{"kind": "failure", "name": "apt", "source": "apt"}]),
+        // A Mac app this computer can neither adopt nor remove.
+        json!([row("m", json!({"source": "macos-apps", "installed": "1"}))]),
     );
+    assert_eq!(app.items.len(), 1);
     app.run_row_action(0);
+    assert!(app.confirmation.is_none() && app.active_rows.is_empty());
     app.run_row_action(7);
     app.run_adopt(7);
     app.run_adopt(0);

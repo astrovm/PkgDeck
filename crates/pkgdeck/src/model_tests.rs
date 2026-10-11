@@ -477,6 +477,11 @@ fn row_actions_follow_source_page_and_state() {
         row_action(&row(json!({"source": "macos-apps"})), Page::Installed, &[]),
         None
     );
+    // Failures and notes have nothing to do.
+    assert_eq!(
+        row_action(&row(json!({"kind": "failure"})), Page::Installed, &[]),
+        None
+    );
     for action in [
         Action::Install,
         Action::Remove,
