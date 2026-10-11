@@ -712,6 +712,13 @@ mod tests {
         assert_eq!(child.wait().unwrap().code(), Some(3));
         assert_eq!(child.wait().unwrap().code(), Some(3));
         child.signal(rustix::process::Signal::TERM).unwrap();
+
+        // Ended but not collected: the host has nothing left to signal.
+        let gone = program(&portal, "exit 0").start(null(), false).unwrap();
+        while !gone.ended() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(gone.signal(rustix::process::Signal::TERM).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
