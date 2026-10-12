@@ -52,7 +52,7 @@ pub fn metrics(style: Style) -> Option<Metrics> {
     let (side, top, title, below) = match style.family() {
         Family::Modern => return None,
         // Windows 98: a raised edge all round, the title bar inside it.
-        Family::Retro => (4.0, 4.0, 22.0, 2.0),
+        Family::Retro => (4.0, 4.0, 18.0, 2.0),
         // XP: a blue border, the title bar up to the top.
         Family::Luna => (4.0, 0.0, 30.0, 0.0),
         // Vista and 7: 8 pixels of glass and two lines round the content,
@@ -243,9 +243,11 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     match style.family() {
         Family::Modern => vec![],
         Family::Retro => {
-            // Minimize and maximize side by side, close apart.
-            let size = vec2(18.0, 16.0);
-            let close = square(pos2(bar.right() - 3.0 - size.x / 2.0, y), size);
+            // 16 by 14, 2 in from the bar: minimize and maximize side by
+            // side, close 2 apart.
+            let size = vec2(16.0, 14.0);
+            let close =
+                Rect::from_min_size(pos2(bar.right() - 2.0 - size.x, bar.top() + 2.0), size);
             let maximize = close.translate(vec2(-size.x - 2.0, 0.0));
             let minimize = maximize.translate(vec2(-size.x, 0.0));
             vec![
@@ -501,13 +503,13 @@ pub fn paint_caption(
             } else {
                 vec2(0.0, 0.0)
             };
-            glyph(
+            retro_glyph(
                 painter,
-                rect.translate(shift),
+                rect.min + shift,
                 caption,
                 state.maximized,
                 palette.ink,
-                1.6,
+                face,
             );
         }
         Family::Luna => {
@@ -575,60 +577,59 @@ pub fn paint_caption(
     }
 }
 
-/// Windows' caption symbols in `ink`, `weight` thick.
-fn glyph(
+/// Windows 95's and 98's caption symbols, pixel for pixel, in a 16 by
+/// 14 button whose top left is `at`.
+fn retro_glyph(
     painter: &Painter,
-    rect: Rect,
+    at: egui::Pos2,
     caption: Caption,
     maximized: bool,
     ink: Color32,
-    weight: f32,
+    face: Color32,
 ) {
-    let c = rect.center();
-    let stroke = Stroke::new(weight, ink);
-    let unit = (rect.height() / 16.0).max(0.8);
+    let px = |x: f32, y: f32, w: f32, h: f32| {
+        painter.rect_filled(
+            Rect::from_min_size(at + vec2(x, y), vec2(w, h)),
+            CornerRadius::ZERO,
+            ink,
+        );
+    };
+    // A window: its outline and a thick top.
+    let window = |x: f32, y: f32, w: f32, h: f32, top: f32| {
+        px(x, y, w, top);
+        px(x, y + h - 1.0, w, 1.0);
+        px(x, y, 1.0, h);
+        px(x + w - 1.0, y, 1.0, h);
+    };
     match caption {
-        Caption::Minimize => {
-            let y = c.y + 3.0 * unit;
-            painter.line_segment(
-                [pos2(c.x - 4.0 * unit, y), pos2(c.x + 2.0 * unit, y)],
-                stroke,
+        Caption::Minimize => px(4.0, 9.0, 6.0, 2.0),
+        Caption::Maximize if maximized => {
+            window(5.0, 2.0, 6.0, 6.0, 2.0);
+            // The front window hides the back one's corner.
+            painter.rect_filled(
+                Rect::from_min_size(at + vec2(3.0, 5.0), vec2(6.0, 6.0)),
+                CornerRadius::ZERO,
+                face,
             );
+            window(3.0, 5.0, 6.0, 6.0, 2.0);
         }
-        Caption::Maximize => {
-            let size = 8.0 * unit;
-            let box_at = |min: egui::Pos2| {
-                let r = Rect::from_min_size(min, vec2(size, size * 0.85));
-                painter.rect_stroke(
-                    r,
-                    CornerRadius::ZERO,
-                    Stroke::new(weight * 0.6, ink),
-                    StrokeKind::Inside,
-                );
-                painter.hline(r.x_range(), r.top() + weight * 0.6, stroke);
-            };
-            if maximized {
-                let small = size * 0.75;
-                let back = c + vec2(-small / 2.0 + 1.5 * unit, -small / 2.0 - 1.5 * unit);
-                let front = c + vec2(-small / 2.0 - 1.0 * unit, -small / 2.0 + 1.0 * unit);
-                for min in [back, front] {
-                    let r = Rect::from_min_size(min, vec2(small, small * 0.85));
-                    painter.rect_stroke(
-                        r,
-                        CornerRadius::ZERO,
-                        Stroke::new(weight * 0.6, ink),
-                        StrokeKind::Inside,
-                    );
-                    painter.hline(r.x_range(), r.top() + weight * 0.5, stroke);
-                }
-            } else {
-                box_at(c - vec2(size / 2.0, size * 0.85 / 2.0));
-            }
-        }
+        Caption::Maximize => window(3.0, 2.0, 9.0, 9.0, 2.0),
         Caption::Close => {
-            let arm = 3.5 * unit;
-            painter.line_segment([c - vec2(arm, arm), c + vec2(arm, arm)], stroke);
-            painter.line_segment([c + vec2(-arm, arm), c + vec2(arm, -arm)], stroke);
+            // Two pixels wide, crossing in the middle.
+            let rows: [&[(f32, f32)]; 7] = [
+                &[(0.0, 2.0), (6.0, 2.0)],
+                &[(1.0, 2.0), (5.0, 2.0)],
+                &[(2.0, 4.0)],
+                &[(3.0, 2.0)],
+                &[(2.0, 4.0)],
+                &[(1.0, 2.0), (5.0, 2.0)],
+                &[(0.0, 2.0), (6.0, 2.0)],
+            ];
+            for (y, spans) in rows.iter().enumerate() {
+                for &(x, w) in *spans {
+                    px(4.0 + x, 3.0 + y as f32, w, 1.0);
+                }
+            }
         }
     }
 }
@@ -641,7 +642,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
     let (font, ink, centered) = match style {
         Family::Modern => return,
         Family::Retro => (
-            theme::bold(13.0),
+            theme::bold(12.0),
             if state.active {
                 ink_on(from)
             } else {
@@ -814,7 +815,8 @@ mod tests {
         assert!(captions(Style::Modern, window()).is_empty());
         for style in FRAMED {
             let metrics = metrics(style).unwrap();
-            assert!(metrics.title >= 20.0, "{style:?}");
+            // Windows 98's 18 is the shortest.
+            assert!(metrics.title >= 18.0, "{style:?}");
             assert!(metrics.side >= 1.0, "{style:?}");
         }
     }
