@@ -178,6 +178,19 @@ void pkgdeck_mac_activate(void) {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+// What shows behind the window's content and the system's title bar. The
+// window is see-through for glass, and recent macOS leaves the title bar
+// unfilled, so a style with the system's frame fills it with its own
+// colour. `fill` 0 makes it see-through again. Light or dark comes from
+// the theme egui hands winit.
+void pkgdeck_mac_fill_window(void *view, int fill, unsigned char r, unsigned char g, unsigned char b) {
+    NSWindow *window = [(NSView *)view window];
+    if (!window) return;
+    window.backgroundColor = fill
+        ? [NSColor colorWithSRGBRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:1.0]
+        : [NSColor clearColor];
+}
+
 // Hide the Dock icon while only the menu bar icon is left, and bring it back.
 void pkgdeck_mac_set_dock_visible(int visible) {
     [NSApp setActivationPolicy:visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];

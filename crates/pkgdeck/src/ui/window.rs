@@ -37,6 +37,8 @@ pub struct Window<'a> {
     shown: bool,
     /// Whether the desktop was last asked to blur behind the window.
     blurred: Option<bool>,
+    /// What the window was last filled with behind its content.
+    filled: Option<Option<[u8; 3]>>,
 }
 
 impl<'a> Window<'a> {
@@ -55,6 +57,7 @@ impl<'a> Window<'a> {
             shown: false,
             // A new window starts without blur, so only glass asks.
             blurred: Some(false),
+            filled: None,
         }
     }
 
@@ -144,6 +147,40 @@ fn ask_blur(frame: &eframe::Frame, blur: bool) {
     }
 }
 
+/// What fills the window behind its content: the canvas's colour under
+/// the system's frame, or nothing, see-through, for glass and the frames
+/// styles draw themselves.
+fn backdrop(
+    style: crate::settings::Style,
+    blur: bool,
+    palette: &theme::Palette,
+) -> Option<[u8; 3]> {
+    let [r, g, b, _] = palette.canvas.to_array();
+    (!blur && crate::ui::frame::metrics(style).is_none()).then_some([r, g, b])
+}
+
+/// Fills the window behind its content with a colour, or makes it
+/// see-through. Only the Mac leaves the system's title bar unfilled in a
+/// see-through window. Returns whether the window could be reached.
+fn fill_window(frame: &eframe::Frame, fill: Option<[u8; 3]>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = frame.window_handle() {
+            if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+                crate::platform::fill_window(handle.ns_view, fill);
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (frame, fill);
+        true
+    }
+}
+
 impl Drop for Window<'_> {
     fn drop(&mut self) {
         self.app.window_visible = false;
@@ -163,9 +200,39 @@ impl eframe::App for Window<'_> {
             ask_blur(frame, blur);
         }
         theme::set_see_through(blur);
+        // The system's frame, which Modern keeps, needs the window filled
+        // behind it; the frames styles draw themselves need it see-through.
+        let fill = backdrop(
+            theme::skin().style,
+            blur,
+            &theme::Palette::current(ui.ctx()),
+        );
+        if self.filled != Some(fill) && fill_window(frame, fill) {
+            self.filled = Some(fill);
+        }
         self.frame(ui);
     }
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Style;
+    use theme::{Palette, Scheme};
+
+    #[test]
+    fn only_the_system_frame_is_filled_behind() {
+        for dark in [true, false] {
+            let palette = Palette::of(Scheme::default(), dark);
+            let [r, g, b, _] = palette.canvas.to_array();
+            assert_eq!(backdrop(Style::Modern, false, &palette), Some([r, g, b]));
+            assert_eq!(backdrop(Style::Modern, true, &palette), None);
+            for style in [Style::Luna, Style::Glass, Style::Platinum, Style::Win95] {
+                assert_eq!(backdrop(style, false, &palette), None, "{style:?}");
+            }
+        }
     }
 }
