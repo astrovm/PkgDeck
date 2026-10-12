@@ -1078,10 +1078,8 @@ pub fn paint_sidebar(
         Family::Luna => {
             // The blue task pane, with the pages in a task box.
             let (top, bottom) = if dark {
-                (
-                    lerp(palette.canvas, palette.deep, 0.35),
-                    lerp(palette.canvas, palette.deep, 0.18),
-                )
+                // Near black like the page; the blue stays on the frame.
+                (palette.surface, palette.canvas)
             } else {
                 // Measured on XP's Explorer, in the accent's shade.
                 let base = super::luna::base(palette.deep);
