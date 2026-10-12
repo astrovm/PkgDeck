@@ -253,7 +253,7 @@ fn mixes() {
             TextSize::Normal,
         ),
         (
-            Style::MacOs8,
+            Style::Platinum,
             false,
             "#3a7d44",
             0.0,

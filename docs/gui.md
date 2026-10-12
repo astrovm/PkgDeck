@@ -540,8 +540,7 @@ out of date, and each page refreshes when you open it.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Vista**: dark, smoky glass and a blue to green side pane.
   - **Windows 7**: light, sky-blue glass.
-  - **Mac OS 8** and **Mac OS 9**: light grey with fine bevels and a striped
-    title bar.
+  - **Mac OS 9**: light grey with fine bevels and a striped title bar.
   - **Jaguar**: gel buttons on pinstripes, after Mac OS X 10.2.
   - **Panther**: gel buttons on brushed metal, after Mac OS X 10.3.
   - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.

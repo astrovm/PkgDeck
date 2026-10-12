@@ -112,8 +112,6 @@ pub enum Style {
     Vista,
     /// Windows 7: light, sky-blue glass.
     Glass,
-    /// Mac OS 8's Platinum.
-    MacOs8,
     /// Mac OS 9's Platinum.
     Platinum,
     /// Mac OS X 10.2 Jaguar: Aqua on pinstripes.
@@ -137,19 +135,18 @@ pub enum Family {
     Glass,
     /// Mac OS X.
     Gel,
-    /// Mac OS 8 and 9.
+    /// Mac OS 9.
     Platinum,
 }
 
 impl Style {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::Modern,
         Self::Win95,
         Self::Retro,
         Self::Luna,
         Self::Vista,
         Self::Glass,
-        Self::MacOs8,
         Self::Platinum,
         Self::Gel,
         Self::Panther,
@@ -163,7 +160,6 @@ impl Style {
             Self::Luna => "Windows XP",
             Self::Vista => "Vista",
             Self::Glass => "Windows 7",
-            Self::MacOs8 => "Mac OS 8",
             Self::Platinum => "Mac OS 9",
             Self::Gel => "Jaguar",
             Self::Panther => "Panther",
@@ -177,7 +173,7 @@ impl Style {
             Self::Win95 | Self::Retro => Family::Retro,
             Self::Luna => Family::Luna,
             Self::Vista | Self::Glass => Family::Glass,
-            Self::MacOs8 | Self::Platinum => Family::Platinum,
+            Self::Platinum => Family::Platinum,
             Self::Gel | Self::Panther | Self::Tiger => Family::Gel,
         }
     }
@@ -951,7 +947,6 @@ mod tests {
                 Family::Glass,
                 Family::Glass,
                 Family::Platinum,
-                Family::Platinum,
                 Family::Gel,
                 Family::Gel,
                 Family::Gel,
@@ -969,7 +964,6 @@ mod tests {
         for (text, style) in [
             ("\"win95\"", Style::Win95),
             ("\"vista\"", Style::Vista),
-            ("\"macos8\"", Style::MacOs8),
             ("\"panther\"", Style::Panther),
             ("\"tiger\"", Style::Tiger),
         ] {

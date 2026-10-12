@@ -1,6 +1,6 @@
 //! How each style draws the pieces everything is built from, after one
 //! version of the desktop it's named for: Windows 95 and 98, XP, Vista and
-//! 7, Mac OS 8 and 9, and Mac OS X Jaguar, Panther and Tiger. Versions of
+//! 7, Mac OS 9, and Mac OS X Jaguar, Panther and Tiger. Versions of
 //! one desktop share their drawing and differ where the real ones did.
 //! Buttons, fields, check boxes, panels, the canvas, the sidebar,
 //! selections, title bars, list headings and group boxes. Modern draws them flat. Only egui's own shapes, so a frame
@@ -2381,7 +2381,7 @@ mod tests {
                 assert_eq!(column_title(""), "");
                 let group = group(&palette).expect("a group box");
                 // Group boxes sit their title on the line in Windows 98 and
-                // Mac OS 8, and inside the box in the rest.
+                // Mac OS 9, and inside the box in the rest.
                 assert_eq!(
                     group.on_line,
                     matches!(

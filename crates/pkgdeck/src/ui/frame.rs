@@ -62,7 +62,7 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         Family::Glass => (7.0, 0.0, 30.0, 0.0),
         // Aqua: a hairline and the striped title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
-        // Mac OS 8: a grey drag frame and the striped title bar.
+        // Mac OS 9: a grey drag frame and the striped title bar.
         Family::Platinum => (5.0, 1.0, 21.0, 0.0),
     };
     Some(Metrics {
@@ -558,7 +558,7 @@ pub fn paint_frame(
                 lighter(face, 0.8),
             );
             if state.active {
-                // Mac OS 8's lines, cleared where the boxes and title sit.
+                // Mac OS 9's lines, cleared where the boxes and title sit.
                 let mut y = bar.top() + 4.0;
                 while y < bar.bottom() - 4.0 {
                     let line = |at: f32| {
@@ -965,13 +965,12 @@ mod tests {
     use eframe::egui::Shape;
 
     /// Every style but Modern draws its frame.
-    const FRAMED: [Style; 10] = [
+    const FRAMED: [Style; 9] = [
         Style::Win95,
         Style::Retro,
         Style::Luna,
         Style::Vista,
         Style::Glass,
-        Style::MacOs8,
         Style::Platinum,
         Style::Gel,
         Style::Panther,
