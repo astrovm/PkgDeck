@@ -8,14 +8,14 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2,
+    self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui,
+    UiBuilder, Vec2,
 };
 
 const ROW: f32 = 60.0;
 /// A wide row's height at the chosen density.
 fn wide_row() -> f32 {
-    (ROW * theme::skin().density.scale()).round()
+    (ROW * skin::list_look().row_scale * theme::skin().density.scale()).round()
 }
 const ROW_COMPACT: f32 = 78.0;
 const GROUP_HEADING: f32 = 36.0;
@@ -63,10 +63,10 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         Width::Wide
     };
     let mut top = rect.top();
-    let heading_shown = !app.items.is_empty() || app.busy || app.writing;
-    if heading_shown {
+    let in_list = skin::page_chrome().status == skin::StatusAt::List;
+    if in_list && counted(app) {
         let heading = Rect::from_min_size(rect.min, vec2(rect.width(), 48.0));
-        heading_row(app, ui, heading);
+        heading_row(app, ui, heading, palette.muted);
         top = heading.bottom();
         ui.painter().line_segment(
             [pos2(rect.left(), top), pos2(rect.right(), top)],
@@ -91,6 +91,22 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         return;
     }
     rows(app, ui, body, width);
+}
+
+/// Whether the list has a count to show: rows, or rows on their way.
+fn counted(app: &App) -> bool {
+    !app.items.is_empty() || app.busy || app.writing
+}
+
+/// The status bar across `rect`, with the list's count and reload button
+/// on pages that list.
+pub fn status_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
+    let palette = Palette::current(ui.ctx());
+    let ink = skin::paint_status_bar(ui.painter(), rect, &palette);
+    let empty_search = app.page == Page::Search && app.query.trim().is_empty() && !app.busy;
+    if app.page.lists() && app.opened.is_none() && counted(app) && !empty_search {
+        heading_row(app, ui, rect.shrink2(vec2(0.0, 1.0)), ink);
+    }
 }
 
 fn search_prompt(app: &mut App, ui: &mut Ui, rect: Rect) {
@@ -162,9 +178,12 @@ fn waiting_text(names: &[String]) -> String {
     }
 }
 
-fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
+fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect, ink: Color32) {
     let ctx = ui.ctx().clone();
-    let palette = Palette::current(&ctx);
+    let palette = Palette {
+        muted: ink,
+        ..Palette::current(&ctx)
+    };
     let inner = rect.shrink2(vec2(16.0, 0.0));
     ui.scope_builder(
         UiBuilder::new()
@@ -267,7 +286,12 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         r
     });
     let icon = (row.width() >= 420.0).then(|| {
-        let size = if width == Width::Compact { 40.0 } else { 36.0 };
+        let look = skin::list_look();
+        let size = if width == Width::Compact {
+            look.compact_icon
+        } else {
+            look.icon
+        };
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(size, row.height()));
         x += size + 12.0;
         r
@@ -832,14 +856,21 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
     });
+    let look = skin::list_look();
+    if let Some(stripe) = skin::row_stripe(&palette, index).filter(|_| !selected) {
+        ui.painter()
+            .rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
+    }
     // The selected row's own background slides in `selection_highlight`.
-    let fill = alpha(palette.ink, hover * 0.045 * (1.0 - chosen));
-    let mut fill = fill;
+    skin::paint_row_hover(ui.painter(), surface, &palette, hover * (1.0 - chosen));
     if let Some(flash) = flash {
-        fill = mix(fill, alpha(palette.success, 0.2), flash);
+        ui.painter().rect_filled(
+            surface,
+            theme::round(10),
+            alpha(palette.success, 0.2 * flash),
+        );
         ctx.request_repaint();
     }
-    ui.painter().rect_filled(surface, theme::round(10), fill);
     let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
@@ -865,6 +896,23 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         painter.multiply_opacity(0.55);
     }
     let compact = width == Width::Compact;
+    // The column the list is sorted by, shaded where the style does.
+    if let (Some(tint), Some((column, _)), false) =
+        (skin::sorted_column_tint(&palette), app.sort, selected)
+    {
+        let area = match column {
+            Column::Name => Some(cols.name),
+            Column::Version => cols.version,
+            Column::Summary => cols.summary,
+        };
+        if let Some(area) = area {
+            let shade = Rect::from_min_max(
+                pos2(area.left() - 8.0, rect.top()),
+                pos2(area.right() + 4.0, rect.bottom()),
+            );
+            painter.rect_filled(shade, 0.0, tint);
+        }
+    }
 
     // Check box on Updates.
     if let Some(tick) = cols.tick {
@@ -902,7 +950,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let name = one_line(
         ui,
         &title,
-        theme::bold(14.5),
+        if look.bold_names {
+            theme::bold(14.5)
+        } else {
+            theme::font(14.5)
+        },
         palette.ink,
         cols.name.width(),
     );
@@ -971,7 +1023,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 held_mark(ui, held, mark, id);
                 left += 22.0;
             }
-            let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
+            let font = if look.fixed_versions {
+                theme::mono(13.0)
+            } else {
+                theme::font(13.0)
+            };
+            let galley = one_line(ui, &new, font, palette.accent, v.width());
             painter.galley(
                 pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
                 galley,
@@ -988,7 +1045,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
             }
         } else {
-            let font = if row.kind == "package" {
+            let font = if row.kind == "package" && look.fixed_versions {
                 theme::mono(13.0)
             } else {
                 theme::font(13.0)
@@ -1111,13 +1168,15 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     // Divider.
-    painter.line_segment(
-        [
-            pos2(rect.left() + 18.0, rect.bottom()),
-            pos2(rect.right() - 18.0, rect.bottom()),
-        ],
-        Stroke::new(1.0, alpha(palette.line, 0.55)),
-    );
+    if look.dividers {
+        painter.line_segment(
+            [
+                pos2(rect.left() + 18.0, rect.bottom()),
+                pos2(rect.right() - 18.0, rect.bottom()),
+            ],
+            Stroke::new(1.0, alpha(palette.line, 0.55)),
+        );
+    }
     let accessible = format!(
         "{}{}{title}, {line}, {}",
         held.as_ref()

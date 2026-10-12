@@ -1521,6 +1521,281 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
     );
 }
 
+/// Where a style shows a list's count and its reload button: a status
+/// bar along the window's foot, Mac OS 9's window header under its title
+/// bar, or Modern's line atop the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusAt {
+    List,
+    Top,
+    Bottom,
+}
+
+/// How a style frames each page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageChrome {
+    /// The page's name as a big heading. The older desktops put it in the
+    /// title bar instead and started the page with its buttons.
+    pub heading: bool,
+    pub status: StatusAt,
+}
+
+/// The status bar's height.
+pub const STATUS_HEIGHT: f32 = 32.0;
+/// The toolbar's height, round its row of buttons.
+pub const TOOLBAR_HEIGHT: f32 = 50.0;
+
+pub fn page_chrome() -> PageChrome {
+    match style() {
+        Family::Modern => PageChrome {
+            heading: true,
+            status: StatusAt::List,
+        },
+        // Control Panel's blue heading, and Explorer's details pane.
+        Family::Glass => PageChrome {
+            heading: true,
+            status: StatusAt::Bottom,
+        },
+        Family::Platinum => PageChrome {
+            heading: false,
+            status: StatusAt::Top,
+        },
+        Family::Retro | Family::Luna | Family::Gel => PageChrome {
+            heading: false,
+            status: StatusAt::Bottom,
+        },
+    }
+}
+
+/// The window's title on `page`: Windows put the document before the
+/// program, the Mac only the window's own name.
+pub fn window_title(page: &str) -> String {
+    match style() {
+        Family::Modern | Family::Glass => "PkgDeck".into(),
+        Family::Retro | Family::Luna => format!("{page} - PkgDeck"),
+        Family::Platinum | Family::Gel => page.into(),
+    }
+}
+
+/// The band behind the page's buttons where the style has a toolbar, as
+/// Windows' rebar and Aqua's unified toolbar. False where it has none.
+pub fn paint_toolbar(painter: &Painter, rect: Rect, palette: &Palette) -> bool {
+    let dark = palette.dark;
+    match style() {
+        Family::Modern | Family::Glass | Family::Platinum => return false,
+        Family::Retro => {
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            // A raised band with an etched line under it.
+            bevel(
+                painter,
+                rect.shrink2(vec2(2.0, 2.0)),
+                lighter(palette.canvas, 0.9),
+                darker(palette.canvas, 0.35),
+            );
+        }
+        Family::Luna => {
+            let (top, bottom) = if dark {
+                (lighter(palette.canvas, 0.08), palette.canvas)
+            } else {
+                (rgb(0xfbfaf6), rgb(0xebe8d7))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, if dark { Color32::BLACK } else { rgb(0xc5c2b2) }),
+            );
+        }
+        Family::Gel => {
+            // Carries on the title bar's grey, down to a dark line.
+            let (top, bottom, line) = if dark {
+                (
+                    lighter(palette.surface, 0.06),
+                    palette.canvas,
+                    Color32::BLACK,
+                )
+            } else {
+                (gray(0xd6), gray(0xb9), gray(0x7e))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, line));
+        }
+    }
+    true
+}
+
+/// The status bar or window header across `rect`. Returns the colour its
+/// text takes.
+pub fn paint_status_bar(painter: &Painter, rect: Rect, palette: &Palette) -> Color32 {
+    let dark = palette.dark;
+    match style() {
+        Family::Modern => palette.muted,
+        Family::Retro => {
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            // One sunken pane, a pixel in from the window's edge.
+            let pane = rect.shrink2(vec2(2.0, 3.0));
+            bevel(
+                painter,
+                pane,
+                darker(palette.canvas, 0.33),
+                lighter(palette.canvas, 0.9),
+            );
+            palette.ink
+        }
+        Family::Luna => {
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            painter.hline(
+                rect.x_range(),
+                rect.top() + 0.5,
+                Stroke::new(1.0, if dark { Color32::BLACK } else { Color32::WHITE }),
+            );
+            palette.ink
+        }
+        Family::Glass => {
+            // Explorer's details pane: pale blue, lit from above.
+            let (top, bottom, line) = if dark {
+                (
+                    lighter(palette.surface, 0.06),
+                    palette.surface,
+                    lerp(palette.surface, palette.bright, 0.3),
+                )
+            } else {
+                (rgb(0xf5f8fc), rgb(0xe3ebf5), rgb(0xc5d3e5))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, line));
+            if dark {
+                palette.muted
+            } else {
+                rgb(0x1e395b)
+            }
+        }
+        Family::Gel => {
+            let (top, bottom, line) = if dark {
+                (palette.surface, palette.canvas, Color32::BLACK)
+            } else {
+                (gray(0xe4), gray(0xc6), gray(0x8a))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, line));
+            palette.ink
+        }
+        Family::Platinum => {
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            bevel(
+                painter,
+                rect,
+                lighter(palette.canvas, 0.8),
+                darker(palette.canvas, 0.3),
+            );
+            palette.ink
+        }
+    }
+}
+
+/// How a style's lists lay out their rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListLook {
+    /// A wide row's height, against Modern's.
+    pub row_scale: f32,
+    /// The app icon's size, in wide and compact rows.
+    pub icon: f32,
+    pub compact_icon: f32,
+    /// Names in bold, as Modern sets them; the old lists kept them plain.
+    pub bold_names: bool,
+    /// Versions in a fixed-width face, as Modern sets them.
+    pub fixed_versions: bool,
+    /// A line between rows; the old lists had none.
+    pub dividers: bool,
+}
+
+/// How `style`'s lists look: the older desktops packed rows tight, with
+/// small icons and plain names, and no lines between them.
+pub fn list_look() -> ListLook {
+    match style() {
+        Family::Modern => ListLook {
+            row_scale: 1.0,
+            icon: 36.0,
+            compact_icon: 40.0,
+            bold_names: true,
+            fixed_versions: true,
+            dividers: true,
+        },
+        _ => ListLook {
+            row_scale: 0.74,
+            icon: 24.0,
+            compact_icon: 32.0,
+            bold_names: false,
+            fixed_versions: false,
+            dividers: false,
+        },
+    }
+}
+
+/// The background of list row `index`, where the style stripes them, as
+/// Aqua's lists did in pale blue.
+pub fn row_stripe(palette: &Palette, index: usize) -> Option<Color32> {
+    (style() == Family::Gel && index % 2 == 1).then(|| {
+        if palette.dark {
+            lighter(palette.surface, 0.05)
+        } else {
+            rgb(0xedf3fe)
+        }
+    })
+}
+
+/// A list row under the pointer, `hover` from 0 to 1: Modern's soft tint,
+/// Windows 7's pale blue box; the older lists didn't mark it.
+pub fn paint_row_hover(painter: &Painter, rect: Rect, palette: &Palette, hover: f32) {
+    if hover <= 0.0 {
+        return;
+    }
+    match style() {
+        Family::Modern => {
+            painter.rect_filled(rect, theme::round(10), faded(palette.ink, hover * 0.045));
+        }
+        Family::Glass => {
+            let radius = theme::round(10);
+            let (top, bottom, line) = if palette.dark {
+                (
+                    lerp(palette.surface, palette.bright, 0.14),
+                    lerp(palette.surface, palette.bright, 0.08),
+                    lerp(palette.surface, palette.bright, 0.35),
+                )
+            } else {
+                (rgb(0xfafbfd), rgb(0xebf3fd), rgb(0xb8d6fb))
+            };
+            gradient(
+                painter,
+                rect,
+                radius,
+                faded(top, hover),
+                faded(bottom, hover),
+                false,
+            );
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, faded(line, hover)),
+                StrokeKind::Inside,
+            );
+        }
+        Family::Retro | Family::Luna | Family::Gel | Family::Platinum => {}
+    }
+}
+
+/// The shade under the sorted column's rows, where the style marks it,
+/// as Mac OS 9's Finder did.
+pub fn sorted_column_tint(palette: &Palette) -> Option<Color32> {
+    (style() == Family::Platinum).then(|| {
+        if palette.dark {
+            lighter(palette.surface, 0.06)
+        } else {
+            gray(0xee)
+        }
+    })
+}
+
 /// Whether the style marks the chosen sidebar entry with Modern's bar.
 pub fn selection_bar() -> bool {
     style() == Family::Modern

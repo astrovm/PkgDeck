@@ -16,3 +16,16 @@ https://github.com/primer/octicons/blob/main/icons/mark-github-16.svg
 Both assets are redistributed under the accompanying `OCTICONS-LICENSE`.
 The icons and license are embedded through `resources.qrc`; release bundles also
 include the license in `usr/share/licenses/pkgdeck`.
+
+# Fonts
+
+The styles draw with fonts free to share, each with its license beside it:
+
+- `Inter-*.ttf`: Inter, for the Modern style (`Inter-LICENSE.txt`, SIL OFL 1.1).
+- `W95FA.otf`: W95FA by Alina Sava, after Windows 95's MS Sans Serif
+  (`W95FA-LICENSE.txt`, SIL OFL 1.1). `W95FA-Bold.ttf` is made from it,
+  each glyph a pixel thicker, as Windows drew its bold.
+- `Selawik-*.ttf`: Selawik by Microsoft, drawn to stand in for Segoe UI
+  (`Selawik-LICENSE.txt`, SIL OFL 1.1).
+- `ChicagoFLF.ttf`: ChicagoFLF by Robin Casady, after the Mac's Chicago, in
+  the public domain (`ChicagoFLF-LICENSE.txt`).

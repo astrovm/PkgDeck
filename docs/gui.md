@@ -546,9 +546,16 @@ out of date, and each page refreshes when you open it.
   - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop.
+  - The older styles also lay out the page as their desktops did: the
+    page's name in the title bar, its buttons on a toolbar, and the count
+    of what's listed in a status bar along the bottom (Mac OS 9: in a
+    header under the title bar). Lists pack their rows tighter, Aqua's
+    stripe in pale blue, and icons take a second, lighter tone.
   - In dark mode, the older styles take the dark look their maker shipped:
     High Contrast Black for Windows 95 and 98, Royale Noir for XP, Media
     Center for Windows 7, Graphite for Vista and Hi-Tech for Mac OS 9.
+    Jaguar, Panther and Tiger turn the matte grey and slate of Apple's dark
+    pro apps.
   - **Vista** and **Windows 7** blur what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
@@ -565,8 +572,11 @@ out of date, and each page refreshes when you open it.
 - **Roundness** (all but Windows 95 and 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
-- **Font**: **Style** (the style's own font when it's installed, such as
-  Tahoma or Lucida Grande, else Inter), **Inter** or **System**.
+- **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
+  font, or a free copy of it: MS Sans Serif's pixels for Windows 95 and 98,
+  Tahoma for XP, Segoe UI for Vista and 7, Chicago for Mac OS 9's titles
+  and Lucida Grande for Jaguar to Tiger. Where one isn't installed, the
+  closest font that is.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
 - **Animations**: turn motion on or off. When the system turns motion off
