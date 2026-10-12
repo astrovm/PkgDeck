@@ -423,21 +423,14 @@ pub fn paint_button(
                 gray(0xe6)
             };
             let base = darker(lighter(base, hover * 0.06), press * 0.15);
-            let stops = if blue {
-                [
-                    (0.0, lighter(base, 0.45)),
-                    (0.5, lighter(base, 0.2)),
-                    (0.505, base),
-                    (1.0, lighter(base, 0.6)),
-                ]
+            let measured = if dark {
+                None
+            } else if !blue {
+                Some(&TIGER_BUTTON[..])
+            } else if palette.deep == rgb(0x2f68d8) {
+                Some(&TIGER_DEFAULT[..])
             } else {
-                let sheen = gel_sheen(dark);
-                [
-                    (0.0, lighter(base, 0.75 * sheen)),
-                    (0.5, lighter(base, 0.45 * sheen)),
-                    (0.505, base),
-                    (1.0, lighter(base, 0.8 * sheen)),
-                ]
+                None
             };
             // Aqua's controls cast a soft shadow down.
             painter.rect_filled(
@@ -445,13 +438,48 @@ pub fn paint_button(
                 radius,
                 Color32::from_black_alpha((40.0 * alpha) as u8),
             );
-            bands(painter, rect, radius, &fade_all(stops, alpha));
-            gloss(
-                painter,
-                rect,
-                alpha * if blue { 1.0 } else { gel_sheen(dark) },
-            );
-            let line = if blue {
+            if let Some(rows) = measured {
+                // Tiger's own gel, row by row: no shine laid on top, the
+                // pale upper half is the light. Pressed, it darkens.
+                let stops: Vec<(f32, Color32)> = rows
+                    .iter()
+                    .map(|&(t, color)| {
+                        let color = darker(lighter(rgb(color), hover * 0.06), press * 0.15);
+                        (t, faded(color, alpha))
+                    })
+                    .collect();
+                bands(painter, rect, radius, &stops);
+            } else {
+                let stops = if blue {
+                    [
+                        (0.0, lighter(base, 0.45)),
+                        (0.5, lighter(base, 0.2)),
+                        (0.505, base),
+                        (1.0, lighter(base, 0.6)),
+                    ]
+                } else {
+                    let sheen = gel_sheen(dark);
+                    [
+                        (0.0, lighter(base, 0.75 * sheen)),
+                        (0.5, lighter(base, 0.45 * sheen)),
+                        (0.505, base),
+                        (1.0, lighter(base, 0.8 * sheen)),
+                    ]
+                };
+                bands(painter, rect, radius, &fade_all(stops, alpha));
+                gloss(
+                    painter,
+                    rect,
+                    alpha * if blue { 1.0 } else { gel_sheen(dark) },
+                );
+            }
+            let line = if measured.is_some() {
+                if blue {
+                    rgb(0x45457e)
+                } else {
+                    gray(0x60)
+                }
+            } else if blue {
                 darker(base, 0.45)
             } else if dark {
                 darker(palette.canvas, 0.5)
@@ -1751,6 +1779,38 @@ fn gel_band(palette: &Palette, blue: Option<Color32>) -> [(f32, Color32); 4] {
     ]
 }
 
+/// Tiger's white gel button, measured row by row: pale above a hard
+/// split, brightening to white below.
+const TIGER_BUTTON: [(f32, u32); 12] = [
+    (0.0, 0xf9f9f9),
+    (0.08, 0xf2f2f2),
+    (0.16, 0xeeeeee),
+    (0.21, 0xececec),
+    (0.42, 0xededed),
+    (0.42, 0xdadada),
+    (0.47, 0xdfdfdf),
+    (0.58, 0xe7e7e7),
+    (0.68, 0xf0f0f0),
+    (0.79, 0xf9f9f9),
+    (0.84, 0xffffff),
+    (1.0, 0xffffff),
+];
+
+/// Tiger's blue default button, measured the same way.
+const TIGER_DEFAULT: [(f32, u32); 11] = [
+    (0.0, 0xc7ceea),
+    (0.16, 0xa1bee5),
+    (0.26, 0x89b6e3),
+    (0.42, 0x82b4e7),
+    (0.42, 0x569de6),
+    (0.53, 0x67aef4),
+    (0.63, 0x74bafc),
+    (0.74, 0x85caff),
+    (0.84, 0x89d2ff),
+    (0.9, 0x8ddaff),
+    (1.0, 0x89dffc),
+];
+
 /// How much shine Aqua's clear gel keeps: a dark window turns it down so
 /// light text still reads on it.
 fn gel_sheen(dark: bool) -> f32 {
@@ -2317,6 +2377,52 @@ mod tests {
             let shadow = in_style(style, || shadow(&palette));
             assert_eq!(shadow.color.a() > 0, shadowed, "{style:?}");
         }
+    }
+
+    #[test]
+    fn tiger_buttons_wear_the_measured_gel() {
+        let colours = |shapes: &[Shape]| {
+            let mut colours = std::collections::BTreeSet::new();
+            for shape in shapes {
+                if let Shape::Mesh(mesh) = shape {
+                    colours.extend(mesh.vertices.iter().map(|v| v.color.to_array()));
+                }
+            }
+            colours
+        };
+        let button = |dark, weight, state| {
+            colours(&drawn(Style::Tiger, dark, |painter, palette| {
+                paint_button(
+                    painter,
+                    rect(),
+                    weight,
+                    palette.accent,
+                    Stroke::new(1.0, palette.line),
+                    state,
+                    palette,
+                );
+            }))
+        };
+        // The white button's split row and the blue one's, as measured.
+        let plain = button(false, Weight::Normal, STILL);
+        assert!(plain.contains(&rgb(0xdadada).to_array()), "{plain:?}");
+        let blue = button(false, Weight::Strong, STILL);
+        assert!(blue.contains(&rgb(0x569de6).to_array()), "{blue:?}");
+        // Hovered or pressed, it shifts off the measured rows.
+        for state in [
+            State {
+                hover: 1.0,
+                ..STILL
+            },
+            State {
+                press: 1.0,
+                ..STILL
+            },
+        ] {
+            assert!(!button(false, Weight::Normal, state).contains(&rgb(0xdadada).to_array()));
+        }
+        // The dark version has no Tiger to measure; it keeps its own gel.
+        assert!(!button(true, Weight::Normal, STILL).contains(&rgb(0xdadada).to_array()));
     }
 
     #[test]
