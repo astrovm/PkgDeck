@@ -14,10 +14,12 @@ static CAN_BLUR: AtomicU8 = AtomicU8::new(UNKNOWN);
 static REPAINT: std::sync::Mutex<Option<eframe::egui::Context>> = std::sync::Mutex::new(None);
 
 pub fn watch(ctx: &eframe::egui::Context) {
-    if let Ok(mut slot) = REPAINT.lock() {
-        if slot.as_ref() != Some(ctx) {
-            *slot = Some(ctx.clone());
-        }
+    // A panic elsewhere while holding it leaves the slot as it was.
+    let mut slot = REPAINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.as_ref() != Some(ctx) {
+        *slot = Some(ctx.clone());
     }
 }
 
@@ -426,6 +428,22 @@ mod tests {
         assert!(load_wallpaper(&picture, Some(&cache)).is_none());
         // Nothing at all to read.
         assert!(load_wallpaper(&dir.join("missing.png"), None).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_saved_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-keep-{}", std::process::id()));
+        // A folder where the copy should go: the rename into it fails.
+        let file = dir.join("backdrop-blocked.png");
+        std::fs::create_dir_all(file.join("inside")).unwrap();
+        let small = image::RgbaImage::new(4, 4);
+        assert!(keep(&dir, &file, &small).is_err());
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["backdrop-blocked.png"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
