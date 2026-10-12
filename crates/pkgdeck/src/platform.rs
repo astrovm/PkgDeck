@@ -620,9 +620,12 @@ impl Platform {
 #[cfg(target_os = "linux")]
 fn tray_icon(hue: Color32) -> Vec<ksni::Icon> {
     const SIZE: u32 = 64;
-    let data = theme::logo_rgba(hue, SIZE)
-        .chunks_exact(4)
-        .flat_map(|pixel| [pixel[3], pixel[0], pixel[1], pixel[2]])
+    let rgba = theme::logo_rgba(hue, SIZE);
+    let data = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|[r, g, b, a]| [*a, *r, *g, *b])
         .collect();
     vec![ksni::Icon {
         width: SIZE as i32,
