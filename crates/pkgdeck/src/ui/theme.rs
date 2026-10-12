@@ -905,14 +905,18 @@ pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32
     );
 }
 
-/// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 /// PkgDeck's cube in `rect`, its three faces in shades of the accent: the
 /// logo's own blues for blue.
 pub fn paint_logo(painter: &Painter, rect: Rect, palette: &Palette) {
     let (top, left, right) = if palette.tint == rgb(0x2f68d8) {
         (rgb(0x60a5fa), rgb(0x2563eb), rgb(0x3b82f6))
     } else {
-        let hue = palette.tint;
+        // A dark accent is lifted so the cube shows on a dark window.
+        let hue = if palette.dark {
+            readable_accent(palette.tint, palette.canvas, true)
+        } else {
+            palette.tint
+        };
         (
             over(hue, Color32::WHITE, 0.4),
             hue,
@@ -942,6 +946,7 @@ pub fn paint_logo(painter: &Painter, rect: Rect, palette: &Palette) {
     );
 }
 
+/// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     if skin().family() != Family::Modern && name != "heart" {
         icon_fills(painter, rect, name, color);
