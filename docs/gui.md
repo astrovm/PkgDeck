@@ -534,26 +534,20 @@ out of date, and each page refreshes when you open it.
 - **Style**: the shape of everything, shown as small previews. Each comes in
   light and dark.
   - **Modern**: flat and rounded, the default.
-  - **Windows 95**: grey 3D bevels, square corners and a solid navy title
-    bar.
-  - **Windows 98**: like 95, with a title bar fading from navy to blue.
+  - **Windows 98**: grey 3D bevels, square corners and a title bar fading
+    from navy to blue.
   - **Windows XP**: glossy blue bars and rounded buttons.
-  - **Vista**: glass, joined window buttons and a blue to green side pane.
   - **Windows 7**: sky-blue glass over Explorer's white.
-  - **Mac OS 9**: light grey with fine bevels and a striped title bar.
-  - **Jaguar**: gel buttons on pinstripes, after Mac OS X 10.2.
-  - **Panther**: gel buttons on brushed metal, after Mac OS X 10.3.
-  - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
+  - **Aqua**: gel buttons and plain grey title bars, after Mac OS X Tiger.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop.
   - Every style has the same layout. The older ones draw icons in colour,
     and Aqua stripes its lists in pale blue.
-  - In dark mode, the older styles take the dark look their maker shipped:
-    High Contrast Black for Windows 95 and 98, Royale Noir for XP, Media
-    Center for Windows 7, Graphite for Vista and Hi-Tech for Mac OS 9.
-    Jaguar, Panther and Tiger turn the matte grey and slate of Apple's dark
-    pro apps.
-  - **Vista** and **Windows 7** blur what's behind the window on KDE Plasma
+  - In dark mode, the older styles keep their shapes and their own title
+    bar and selection colours, and turn the rest dark: Windows 98's bevels
+    on dark grey, XP's blue frame around slate, Media Center's blue for
+    Windows 7, and Aqua's blue gel on charcoal.
+  - **Windows 7** blurs what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
     `PKGDECK_NO_BLUR=1` to never blur.
@@ -566,13 +560,12 @@ out of date, and each page refreshes when you open it.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well.
-- **Roundness** (all but Windows 95 and 98): from square corners to twice the
+- **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
-  font, or a free copy of it: MS Sans Serif's pixels for Windows 95 and 98,
-  Tahoma for XP, Segoe UI for Vista and 7, Chicago for Mac OS 9's titles
-  and Lucida Grande for Jaguar to Tiger. Where one isn't installed, the
+  font, or a free copy of it: MS Sans Serif's pixels for Windows 98, Tahoma
+  for XP, Segoe UI for Windows 7 and Lucida Grande for Aqua. Where one isn't installed, the
   closest font that is.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.

@@ -103,7 +103,6 @@ modules:
       - install -Dm644 crates/pkgdeck/assets/fonts/Inter-LICENSE.txt /app/share/licenses/pkgdeck/INTER-OFL
       - install -Dm644 crates/pkgdeck/assets/fonts/Selawik-LICENSE.txt /app/share/licenses/pkgdeck/SELAWIK-OFL
       - install -Dm644 crates/pkgdeck/assets/fonts/W95FA-LICENSE.txt /app/share/licenses/pkgdeck/W95FA-OFL
-      - install -Dm644 crates/pkgdeck/assets/fonts/ChicagoFLF-LICENSE.txt /app/share/licenses/pkgdeck/CHICAGOFLF
     sources:
       - type: dir
         path: ../..

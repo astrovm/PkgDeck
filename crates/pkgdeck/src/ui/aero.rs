@@ -1,4 +1,4 @@
-//! Windows Vista's and 7's glass frame, measured from screenshots of the
+//! Windows 7's glass frame, measured from screenshots of the
 //! real ones at 96 DPI: a dark outer edge and a white inner one, rounded
 //! at the top; 8 pixels of glass; a light and a dark line round the
 //! window's content; the title on the glass in a white glow; and the
@@ -42,20 +42,15 @@ const LIGHT: f32 = 0.6;
 /// The glass `glass` (alpha its intensity) laid over the desktop as a
 /// plain blend: a premultiplied colour whose alpha hides that much of
 /// what's behind. Windows 7 lit the colour by the brightness behind it; a
-/// blend can't, so it lights it as a fairly bright desktop would. Vista
-/// blended plainly. Windows behind others are clearer.
-pub fn mix(glass: Color32, vista: bool, active: bool) -> Color32 {
+/// blend can't, so it lights it as a fairly bright desktop would.
+/// Windows behind others are clearer.
+pub fn mix(glass: Color32, active: bool) -> Color32 {
     let [r, g, b, a] = glass.to_srgba_unmultiplied();
     let alpha = if active { a } else { (a as f32 * 0.6) as u8 };
     let rgb = [r, g, b].map(|c| c as f32 / 255.0);
-    let (cover, color) = if vista {
-        let a = alpha as f32 / 255.0;
-        (a, rgb.map(|c| c * a))
-    } else {
-        let (color, afterglow, blur) = balances(alpha);
-        let [color, afterglow, blur] = [color, afterglow, blur].map(|p| p as f32 / 100.0);
-        (1.0 - blur, rgb.map(|c| (color + afterglow * LIGHT) * c))
-    };
+    let (color, afterglow, blur) = balances(alpha);
+    let [color, afterglow, blur] = [color, afterglow, blur].map(|p| p as f32 / 100.0);
+    let (cover, color) = (1.0 - blur, rgb.map(|c| (color + afterglow * LIGHT) * c));
     let to = |v: f32| (v.clamp(0.0, cover) * 255.0).round() as u8;
     Color32::from_rgba_premultiplied(to(color[0]), to(color[1]), to(color[2]), to(cover))
 }
@@ -63,7 +58,7 @@ pub fn mix(glass: Color32, vista: bool, active: bool) -> Color32 {
 /// Where the caption buttons hang from the top of `bar`: one group, the
 /// close button widest. Each rect is the button's face, without the
 /// group's lines.
-pub fn captions(vista: bool, bar: Rect) -> Vec<(Caption, Rect)> {
+pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
     // The group's right edge, 9 pixels in from the window's; maximized,
     // where the bar is the whole width, 2.
     let right = if bar.left() <= 0.5 {
@@ -75,12 +70,8 @@ pub fn captions(vista: bool, bar: Rect) -> Vec<(Caption, Rect)> {
     let face = |left: f32, width: f32, height: f32| {
         Rect::from_min_size(pos2(left, top), vec2(width, height))
     };
-    // Both join them, a line apart; Vista's are a little smaller.
-    let ([minimize, maximize, close], height) = if vista {
-        ([26.0, 24.0, 41.0], 17.0)
-    } else {
-        ([27.0, 26.0, 46.0], 18.0)
-    };
+    // Joined, a line apart.
+    let ([minimize, maximize, close], height) = ([27.0, 26.0, 46.0], 18.0);
     let close = face(right - 1.0 - close, close, height);
     let maximize = face(close.left() - 1.0 - maximize, maximize, height);
     let minimize = face(maximize.left() - 1.0 - minimize, minimize, height);
@@ -173,7 +164,6 @@ pub fn paint_frame(
     inner: Rect,
     palette: &Palette,
     state: WindowState,
-    vista: bool,
 ) {
     let open = !state.maximized;
     let radius = if open {
@@ -186,7 +176,7 @@ pub fn paint_frame(
     } else {
         CornerRadius::ZERO
     };
-    let glass = mix(palette.glass, vista, state.active);
+    let glass = mix(palette.glass, state.active);
     if !theme::see_through() {
         match wallpaper_texture(painter.ctx()) {
             Some(texture) => {
@@ -262,7 +252,7 @@ struct Face {
     edge: Color32,
 }
 
-fn face_of(caption: Caption, press: Press, active: bool, vista: bool) -> Face {
+fn face_of(caption: Caption, press: Press, active: bool) -> Face {
     let white = Color32::from_white_alpha;
     let red = caption == Caption::Close && (active || press.hovered);
     match (red, press.pressed, press.hovered) {
@@ -288,20 +278,6 @@ fn face_of(caption: Caption, press: Press, active: bool, vista: bool) -> Face {
             glow: Some(Color32::from_rgba_unmultiplied(0xf4, 0xe6, 0x76, 200)),
             halo: Some(Color32::from_rgba_unmultiplied(0xe6, 0x8e, 0x75, 170)),
             edge: rgb(0x47100a),
-        },
-        (true, false, false) if vista => Face {
-            stops: vec![
-                (0.0, rgb(0xf4d3cc)),
-                (0.1, rgb(0xe9a99c)),
-                (0.45, rgb(0xde9284)),
-                (0.47, rgb(0xb7432c)),
-                (0.75, rgb(0xb8432c)),
-                (0.95, rgb(0xd58576)),
-                (1.0, rgb(0xecc6c0)),
-            ],
-            glow: None,
-            halo: None,
-            edge: rgb(0x431422),
         },
         (true, false, false) => Face {
             stops: vec![
@@ -363,9 +339,8 @@ pub fn paint_caption(
     caption: Caption,
     press: Press,
     state: WindowState,
-    vista: bool,
 ) {
-    let face = face_of(caption, press, state.active, vista);
+    let face = face_of(caption, press, state.active);
     let round = match caption {
         Caption::Minimize => CornerRadius {
             sw: 5,
@@ -563,8 +538,8 @@ mod tests {
     #[test]
     fn glass_shows_the_desktop_and_clears_behind_other_windows() {
         let sky = Color32::from_rgba_unmultiplied(0x74, 0xb8, 0xfc, 0x6b);
-        let front = mix(sky, false, true);
-        let behind = mix(sky, false, false);
+        let front = mix(sky, true);
+        let behind = mix(sky, false);
         // About half the desktop shows through, more behind other windows.
         assert!((90..=150).contains(&front.a()), "{front:?}");
         assert!(behind.a() < front.a());
@@ -573,15 +548,12 @@ mod tests {
             assert!(glass.r() <= glass.a() && glass.g() <= glass.a() && glass.b() <= glass.a());
             assert!(glass.b() > glass.r());
         }
-        // Vista blends plainly: Graphite is black smoke.
-        let graphite = mix(Color32::from_rgba_unmultiplied(0, 0, 0, 0xa3), true, true);
-        assert_eq!(graphite, Color32::from_rgba_premultiplied(0, 0, 0, 0xa3));
     }
 
     #[test]
-    fn both_join_their_buttons_with_the_close_widest() {
+    fn the_buttons_join_with_the_close_widest() {
         let bar = Rect::from_min_max(pos2(10.0, 0.0), pos2(667.0, 30.0));
-        let seven = captions(false, bar);
+        let seven = captions(bar);
         let widths: Vec<f32> = seven.iter().map(|(_, r)| r.width()).collect();
         assert_eq!(widths, [27.0, 26.0, 46.0]);
         // One line between neighbours; the group ends 9 pixels from the
@@ -592,12 +564,8 @@ mod tests {
         assert!(seven
             .iter()
             .all(|(_, r)| r.top() == 1.0 && r.height() == 18.0));
-        let vista = captions(true, bar);
-        assert!(vista[2].1.width() > vista[0].1.width());
-        assert_eq!(vista[1].1.left() - vista[0].1.right(), 1.0);
-        assert_eq!(vista[2].1.right(), 667.0);
         // Maximized, the group keeps clear of the screen's edge.
         let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 30.0));
-        assert_eq!(captions(false, full)[2].1.right(), 797.0);
+        assert_eq!(captions(full)[2].1.right(), 797.0);
     }
 }

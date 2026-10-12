@@ -55,13 +55,11 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         Family::Retro => (4.0, 4.0, 18.0, 2.0),
         // XP: a blue border, the title bar up to the top.
         Family::Luna => (4.0, 0.0, 30.0, 0.0),
-        // Vista and 7: 8 pixels of glass and two lines round the content,
+        // Windows 7: 8 pixels of glass and two lines round the content,
         // the title on the glass.
         Family::Glass => (10.0, 0.0, 30.0, 2.0),
-        // Aqua: a hairline and the striped title bar.
+        // Aqua: a hairline and the grey title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
-        // Mac OS 9: a grey drag frame and the striped title bar.
-        Family::Platinum => (6.0, 1.0, 21.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -132,7 +130,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     if drag.double_clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!state.maximized));
     }
-    let buttons = live_captions(style, bar, state);
+    let buttons = captions(style, bar);
     let hovered_group = buttons
         .iter()
         .any(|(_, rect)| ui.rect_contains_pointer(rect.expand(2.0)));
@@ -243,15 +241,6 @@ fn decorate(ctx: &egui::Context, on: bool) {
     }
 }
 
-/// The buttons that take clicks: Mac OS 9 hides a window's boxes when
-/// it's behind, so a click there only brings it forward.
-fn live_captions(style: Style, bar: Rect, state: WindowState) -> Vec<(Caption, Rect)> {
-    if style.family() == Family::Platinum && !state.active {
-        return Vec::new();
-    }
-    captions(style, bar)
-}
-
 /// Where each button of `style`'s title bar `bar` sits, left to right.
 pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     let square = |center: egui::Pos2, size: egui::Vec2| Rect::from_center_size(center, size);
@@ -273,15 +262,10 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
             ]
         }
         Family::Luna => super::luna::captions(bar),
-        Family::Glass => super::aero::captions(style == Style::Vista, bar),
+        Family::Glass => super::aero::captions(bar),
         Family::Gel => {
-            // Close, minimize and zoom at the left: Jaguar's a pixel
-            // narrower and further apart.
-            let (size, left, pitch) = if style == Style::Gel {
-                (vec2(13.0, 14.0), 9.0, 22.0)
-            } else {
-                (vec2(14.0, 14.0), 8.0, 21.0)
-            };
+            // Close, minimize and zoom at the left.
+            let (size, left, pitch) = (vec2(14.0, 14.0), 8.0, 21.0);
             let at = |i: f32| square(pos2(bar.left() + left + size.x / 2.0 + i * pitch, y), size);
             vec![
                 (Caption::Close, at(0.0)),
@@ -289,7 +273,6 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Maximize, at(2.0)),
             ]
         }
-        Family::Platinum => super::platinum::captions(bar),
     }
 }
 
@@ -306,20 +289,11 @@ pub struct Press {
 fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
     let deep = palette.deep;
     match theme::skin().family() {
-        // Windows 95's title bar is one solid colour.
-        Family::Retro if active && theme::skin().style == Style::Win95 => (deep, deep),
-        Family::Retro if theme::skin().style == Style::Win95 => {
-            let dim = lerp(palette.canvas, palette.ink, 0.35);
-            (dim, dim)
-        }
         Family::Retro if active => {
             // Windows 98's navy fades to its light blue; another colour
             // fades to a lighter self.
             let end = if deep == rgb(0x000080) {
                 rgb(0x1084d0)
-            } else if palette.dark && deep == rgb(0x800080) {
-                // High Contrast Black's purple doesn't fade.
-                deep
             } else {
                 lerp(deep, Color32::WHITE, 0.45)
             };
@@ -359,36 +333,8 @@ pub fn paint_frame(
             gradient(painter, bar, CornerRadius::ZERO, from, to, true);
         }
         Family::Luna => super::luna::paint_frame(painter, full, bar, palette.deep, state, dark),
-        Family::Glass => super::aero::paint_frame(
-            painter,
-            full,
-            inner,
-            palette,
-            state,
-            theme::skin().style == Style::Vista,
-        ),
-        Family::Gel if theme::skin().style == Style::Panther => {
-            // Brushed metal from the title bar down, in one piece.
-            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
-            gradient(
-                painter,
-                bar,
-                CornerRadius::ZERO,
-                Color32::from_white_alpha(if dark { 10 } else { 70 }),
-                Color32::TRANSPARENT,
-                false,
-            );
-            super::skin::brushed_metal(painter, full, dark);
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x6c) }),
-                    StrokeKind::Inside,
-                );
-            }
-        }
-        Family::Gel if theme::skin().style == Style::Tiger => {
+        Family::Glass => super::aero::paint_frame(painter, full, inner, palette, state),
+        Family::Gel => {
             // A plain grey title bar, lit along its top edge.
             let (top, bottom, line) = match (dark, state.active) {
                 (true, _) => (gray(0x4a), gray(0x2e), Color32::BLACK),
@@ -412,42 +358,6 @@ pub fn paint_frame(
                 );
             }
         }
-        Family::Gel => {
-            let (top, bottom) = if dark {
-                (gray(0x4a), gray(0x30))
-            } else if state.active {
-                (gray(0xf2), gray(0xcc))
-            } else {
-                (gray(0xf6), gray(0xe2))
-            };
-            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
-            gradient(painter, bar, CornerRadius::ZERO, top, bottom, false);
-            // Aqua's pinstripes run through the title bar.
-            let stripe = if dark {
-                Color32::from_white_alpha(8)
-            } else {
-                Color32::from_white_alpha(110)
-            };
-            let mut y = bar.top() + 1.0;
-            while y < bar.bottom() - 1.0 {
-                painter.hline(bar.x_range(), y + 0.5, Stroke::new(1.0, stripe));
-                y += 2.0;
-            }
-            painter.hline(
-                bar.x_range(),
-                bar.bottom() - 0.5,
-                Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x8a) }),
-            );
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x7c) }),
-                    StrokeKind::Inside,
-                );
-            }
-        }
-        Family::Platinum => super::platinum::paint_frame(painter, full, inner, state, dark),
     }
 }
 
@@ -484,14 +394,7 @@ pub fn paint_caption(
         Family::Luna => {
             super::luna::paint_caption(painter, rect, caption, press, state, palette.deep, dark)
         }
-        Family::Glass => super::aero::paint_caption(
-            painter,
-            rect,
-            caption,
-            press,
-            state,
-            theme::skin().style == Style::Vista,
-        ),
+        Family::Glass => super::aero::paint_caption(painter, rect, caption, press, state),
         Family::Gel => {
             let look = if !state.active && !press.group {
                 super::gel::Look::Asleep
@@ -500,16 +403,12 @@ pub fn paint_caption(
             } else {
                 super::gel::Look::Lit
             };
-            let jaguar = theme::skin().style == Style::Gel;
-            super::gel::paint_light(painter, rect, caption, jaguar, look, press.group);
-        }
-        Family::Platinum => {
-            super::platinum::paint_caption(painter, rect, caption, press, state, dark)
+            super::gel::paint_light(painter, rect, caption, look, press.group);
         }
     }
 }
 
-/// Windows 95's and 98's caption symbols, pixel for pixel, in a 16 by
+/// Windows 98's caption symbols, pixel for pixel, in a 16 by
 /// 14 button whose top left is `at`.
 fn retro_glyph(
     painter: &Painter,
@@ -601,15 +500,6 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             },
             true,
         ),
-        Family::Platinum => (
-            theme::bold(12.0),
-            if state.active {
-                palette.ink
-            } else {
-                palette.muted
-            },
-            true,
-        ),
     };
     let galley = painter.layout_no_wrap(title.to_owned(), font, ink);
     let icon = 16.0;
@@ -620,7 +510,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         );
         (None, text)
     } else {
-        // Vista's and 7's icon sits 8 pixels in from the window's edge,
+        // Windows 7's icon sits 8 pixels in from the window's edge,
         // or the screen's when maximized.
         let glass = style == Family::Glass && bar.left() > 0.5;
         let left = bar.left() + if glass { -2.0 } else { 4.0 };
@@ -655,11 +545,6 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 Color32::from_white_alpha(160),
             );
         }
-        Family::Platinum if state.active => {
-            for (from, to) in super::platinum::stripe_spans(bar, area) {
-                super::platinum::stripes(painter, bar, from, to, palette.dark);
-            }
-        }
         _ => {}
     }
     if let Some(icon_rect) = icon_at {
@@ -677,17 +562,7 @@ mod tests {
     use eframe::egui::Shape;
 
     /// Every style but Modern draws its frame.
-    const FRAMED: [Style; 9] = [
-        Style::Win95,
-        Style::Retro,
-        Style::Luna,
-        Style::Vista,
-        Style::Glass,
-        Style::Platinum,
-        Style::Gel,
-        Style::Panther,
-        Style::Tiger,
-    ];
+    const FRAMED: [Style; 4] = [Style::Retro, Style::Luna, Style::Glass, Style::Aqua];
 
     fn in_style<R>(style: Style, run: impl FnOnce() -> R) -> R {
         let skin = theme::Skin {
@@ -788,11 +663,7 @@ mod tests {
                 "{style:?}"
             );
             for (i, (caption, rect)) in buttons.iter().enumerate() {
-                // Mac OS 9's boxes reach a pixel into the frame.
-                assert!(
-                    bar.expand2(vec2(1.0, 0.0)).contains_rect(*rect),
-                    "{style:?} {caption:?}"
-                );
+                assert!(bar.contains_rect(*rect), "{style:?} {caption:?}");
                 assert!(rect.width() >= 11.0, "{style:?} {caption:?}");
                 // Left to right, without overlapping.
                 if let Some((_, next)) = buttons.get(i + 1) {
@@ -861,74 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn windows_95_keeps_its_title_bar_one_solid_colour() {
-        let navy = palette(Style::Win95, false);
-        let (active, behind) = in_style(Style::Win95, || {
-            (title_colors(&navy, true), title_colors(&navy, false))
-        });
-        assert_eq!(active, (rgb(0x000080), rgb(0x000080)));
-        assert_eq!(behind.0, behind.1);
-        assert_ne!(behind, active);
-        // 98 fades the same navy.
-        let (from, to) = in_style(Style::Retro, || title_colors(&navy, true));
-        assert_ne!(from, to);
-    }
-
-    #[test]
-    fn windows_7_hangs_bigger_buttons_than_vista() {
-        let (bar, _) = layout(metrics(Style::Glass).unwrap(), window(), false);
-        let size = |style| {
-            captions(style, bar)
-                .iter()
-                .map(|(caption, rect)| (*caption, rect.size()))
-                .collect::<Vec<_>>()
-        };
-        for ((caption, seven), (_, vista)) in size(Style::Glass).into_iter().zip(size(Style::Vista))
-        {
-            assert!(seven.x > vista.x, "{caption:?}");
-            assert!(seven.y > vista.y, "{caption:?}");
-        }
-    }
-
-    #[test]
-    fn versions_of_one_desktop_draw_their_own_frame() {
-        let frame = |style: Style, dark: bool| {
-            let palette = palette(style, dark);
-            let metrics = metrics(style).unwrap();
-            let (bar, inner) = layout(metrics, window(), false);
-            let state = WindowState {
-                maximized: false,
-                active: true,
-            };
-            in_style(style, || {
-                theme::painted(|ui| {
-                    paint_frame(ui.painter(), window(), bar, inner, &palette, state);
-                })
-            })
-        };
-        let text = |style, dark| format!("{:?}", frame(style, dark));
-        for dark in [false, true] {
-            assert_ne!(text(Style::Vista, dark), text(Style::Glass, dark));
-            let macs = [Style::Gel, Style::Panther, Style::Tiger].map(|s| text(s, dark));
-            assert_ne!(macs[0], macs[1]);
-            assert_ne!(macs[0], macs[2]);
-            assert_ne!(macs[1], macs[2]);
-            // Panther's metal is a row of grain per pixel down the window.
-            let rows = |style| {
-                frame(style, dark)
-                    .iter()
-                    .map(|shape| match shape {
-                        Shape::Mesh(mesh) => mesh.vertices.len(),
-                        _ => 0,
-                    })
-                    .sum::<usize>()
-            };
-            assert!(rows(Style::Panther) >= 4 * 400, "dark={dark}");
-            assert!(rows(Style::Tiger) < 400, "dark={dark}");
-        }
-    }
-
-    #[test]
     fn every_frame_draws_inside_the_window_in_every_state() {
         for style in FRAMED {
             for dark in [false, true] {
@@ -956,8 +759,6 @@ mod tests {
                             paint_title(ui, bar, "PkgDeck", &palette, state);
                         })
                     });
-                    // Mac OS 9 behind, filling the screen, is a plain grey bar
-                    // and its title.
                     assert!(shapes.len() >= 2, "{at}");
                     for shape in &shapes {
                         // Glows may spill out; they're clipped by the window.
@@ -970,7 +771,7 @@ mod tests {
                             "{at}: {shape:?}"
                         );
                     }
-                    // Windows 95 and 98 are square through and through.
+                    // Windows 98 is square through and through.
                     if style.family() == Family::Retro {
                         assert!(
                             shapes.iter().all(|shape| !matches!(shape,
@@ -1018,27 +819,8 @@ mod tests {
     }
 
     #[test]
-    fn hidden_boxes_take_no_clicks() {
-        let bar = Rect::from_min_max(pos2(6.0, 1.0), pos2(634.0, 22.0));
-        for active in [false, true] {
-            let state = WindowState {
-                maximized: false,
-                active,
-            };
-            for style in Style::ALL
-                .into_iter()
-                .filter(|&style| metrics(style).is_some())
-            {
-                let live = live_captions(style, bar, state).len();
-                let hidden = style.family() == Family::Platinum && !active;
-                assert_eq!(live == 0, hidden, "{style:?} {active}");
-            }
-        }
-    }
-
-    #[test]
     fn title_bar_buttons_in_the_edge_still_click() {
-        // Vista and 7 hang theirs from the top, inside the resize border.
+        // Windows 7 hangs its from the top, inside the resize border.
         for style in Style::ALL {
             let Some(metrics) = metrics(style) else {
                 continue;

@@ -871,23 +871,6 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         painter.multiply_opacity(0.55);
     }
     let compact = width == Width::Compact;
-    // The column the list is sorted by, shaded where the style does.
-    if let (Some(tint), Some((column, _)), false) =
-        (skin::sorted_column_tint(&palette), app.sort, selected)
-    {
-        let area = match column {
-            Column::Name => Some(cols.name),
-            Column::Version => cols.version,
-            Column::Summary => cols.summary,
-        };
-        if let Some(area) = area {
-            let shade = Rect::from_min_max(
-                pos2(area.left() - 8.0, rect.top()),
-                pos2(area.right() + 4.0, rect.bottom()),
-            );
-            painter.rect_filled(shade, 0.0, tint);
-        }
-    }
 
     // Check box on Updates.
     if let Some(tick) = cols.tick {

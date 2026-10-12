@@ -1,5 +1,5 @@
 //! Aqua's traffic lights, shaded pixel by pixel from columns measured on
-//! screenshots of Jaguar and Tiger: a dark rim, a white cap of light at
+//! screenshots of Tiger: a dark rim, a white cap of light at
 //! the top, a deep hue that glows brighter toward the bottom.
 
 use super::frame::Caption;
@@ -15,7 +15,7 @@ struct Light {
     side: u32,
 }
 
-/// Panther's and Tiger's lights, which are the same pixels.
+/// Tiger's lights.
 const TIGER: [Light; 3] = [
     Light {
         column: [
@@ -37,30 +37,6 @@ const TIGER: [Light; 3] = [
             0xb5eb6f, 0xc4fc7e, 0xd1ff8a, 0xdbfd95, 0xc2e282, 0x668138,
         ],
         side: 0x1b3d12,
-    },
-];
-
-const JAGUAR: [Light; 3] = [
-    Light {
-        column: [
-            0x090909, 0xd6cccc, 0xf3e6e6, 0xda9e9c, 0xc4554a, 0xd0574b, 0xe47264, 0xf8877c,
-            0xfe9b8e, 0xffa89c, 0xffb8ab, 0xfdbcaf, 0xe9836f, 0x424242,
-        ],
-        side: 0x7a1717,
-    },
-    Light {
-        column: [
-            0x2d0909, 0xe1cccc, 0xf6ebe6, 0xe9c79c, 0xe1a034, 0xf0aa34, 0xf8bf4d, 0xfbd365,
-            0xfee975, 0xfffa82, 0xffff92, 0xfdfd95, 0xe9e94d, 0x424242,
-        ],
-        side: 0xa54717,
-    },
-    Light {
-        column: [
-            0x090909, 0xcccdcc, 0xe6eee6, 0xadce9c, 0x6fae3a, 0x74b838, 0x8dcd52, 0xa3e069,
-            0xb8f67b, 0xc7ff89, 0xd6ff97, 0xd8fd9b, 0xaae955, 0x424242,
-        ],
-        side: 0x175917,
     },
 ];
 
@@ -171,12 +147,11 @@ fn image(light: &Light, size: [usize; 2], dim: f32) -> ColorImage {
     ColorImage::new(size, pixels)
 }
 
-fn light(caption: Caption, jaguar: bool, look: Look) -> &'static Light {
+fn light(caption: Caption, look: Look) -> &'static Light {
     if look == Look::Asleep {
         return &ASLEEP;
     }
-    let lights = if jaguar { &JAGUAR } else { &TIGER };
-    &lights[match caption {
+    &TIGER[match caption {
         Caption::Close => 0,
         Caption::Minimize => 1,
         Caption::Maximize => 2,
@@ -184,39 +159,26 @@ fn light(caption: Caption, jaguar: bool, look: Look) -> &'static Light {
 }
 
 /// The texture for one light at `size` pixels, made once.
-fn texture(
-    ctx: &Context,
-    caption: Caption,
-    jaguar: bool,
-    look: Look,
-    size: [usize; 2],
-) -> TextureHandle {
-    let id = Id::new(("pkgdeck-gel-light", caption, jaguar, look, size));
+fn texture(ctx: &Context, caption: Caption, look: Look, size: [usize; 2]) -> TextureHandle {
+    let id = Id::new(("pkgdeck-gel-light", caption, look, size));
     if let Some(texture) = ctx.data(|data| data.get_temp::<TextureHandle>(id)) {
         return texture;
     }
     let dim = if look == Look::Pressed { 0.72 } else { 1.0 };
-    let image = image(light(caption, jaguar, look), size, dim);
+    let image = image(light(caption, look), size, dim);
     let texture = ctx.load_texture("gel-light", image, TextureOptions::LINEAR);
     ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
     texture
 }
 
 /// One traffic light in `rect`, with its symbol when `marked`.
-pub fn paint_light(
-    painter: &Painter,
-    rect: Rect,
-    caption: Caption,
-    jaguar: bool,
-    look: Look,
-    marked: bool,
-) {
+pub fn paint_light(painter: &Painter, rect: Rect, caption: Caption, look: Look, marked: bool) {
     let scale = painter.ctx().pixels_per_point();
     let size = [
         (rect.width() * scale).round().max(1.0) as usize,
         (rect.height() * scale).round().max(1.0) as usize,
     ];
-    let texture = texture(painter.ctx(), caption, jaguar, look, size);
+    let texture = texture(painter.ctx(), caption, look, size);
     painter.image(
         texture.id(),
         rect,
@@ -269,7 +231,7 @@ mod tests {
 
     #[test]
     fn lights_follow_the_screenshots() {
-        for lights in [&TIGER, &JAGUAR] {
+        for lights in [&TIGER] {
             for light in lights {
                 // Round, and nothing outside.
                 assert!(shade(light, 0.75, 0.75).is_none());
@@ -319,16 +281,14 @@ mod tests {
     #[test]
     fn asleep_lights_are_grey_and_others_take_their_hue() {
         for caption in [Caption::Close, Caption::Minimize, Caption::Maximize] {
-            let grey = at(light(caption, false, Look::Asleep), 0.0, 0.0);
+            let grey = at(light(caption, Look::Asleep), 0.0, 0.0);
             assert!(grey[0].abs_diff(grey[1]) <= 2 && grey[1].abs_diff(grey[2]) <= 2);
-            for jaguar in [false, true] {
-                let hue = at(light(caption, jaguar, Look::Lit), 0.0, 0.0);
-                let spread = hue.iter().max().unwrap() - hue.iter().min().unwrap();
-                assert!(spread > 60, "{caption:?} {hue:?}");
-            }
+            let hue = at(light(caption, Look::Lit), 0.0, 0.0);
+            let spread = hue.iter().max().unwrap() - hue.iter().min().unwrap();
+            assert!(spread > 60, "{caption:?} {hue:?}");
         }
         // Red, then yellow, then green.
-        let lit = |caption| at(light(caption, false, Look::Lit), 0.0, 0.0);
+        let lit = |caption| at(light(caption, Look::Lit), 0.0, 0.0);
         assert!(lit(Caption::Close)[0] > lit(Caption::Close)[1]);
         assert!(lit(Caption::Minimize)[0] > 200 && lit(Caption::Minimize)[1] > 150);
         assert!(lit(Caption::Maximize)[1] > lit(Caption::Maximize)[0]);

@@ -701,8 +701,8 @@ To answer faster, PkgDeck keeps some answers in `$XDG_CACHE_HOME/pkgdeck`
   searches read
 - Pacman search results
 - Each standalone tool's version, such as OpenCode's
-- A small blurred copy of your wallpaper, for the glass of the **Vista** and
-  **Windows 7** styles (the app only)
+- A small blurred copy of your wallpaper, for the glass of the **Windows 7**
+  style (the app only)
 
 An entry is used only while what it depends on is exactly as it was when it
 was saved:

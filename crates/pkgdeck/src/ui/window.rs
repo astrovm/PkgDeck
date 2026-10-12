@@ -230,7 +230,7 @@ mod tests {
             let [r, g, b, _] = palette.canvas.to_array();
             assert_eq!(backdrop(Style::Modern, false, &palette), Some([r, g, b]));
             assert_eq!(backdrop(Style::Modern, true, &palette), None);
-            for style in [Style::Luna, Style::Glass, Style::Platinum, Style::Win95] {
+            for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
                 assert_eq!(backdrop(style, false, &palette), None, "{style:?}");
             }
         }
