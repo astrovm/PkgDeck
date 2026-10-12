@@ -2,7 +2,7 @@
 //! and the border, drawn the way each desktop drew its windows. Modern
 //! keeps the system's frame.
 
-use super::skin::{bevel, darker, faded, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb};
+use super::skin::{faded, gradient, gray, ink_on, lerp, retro_edge, rgb};
 use super::theme::{self, Palette};
 use crate::settings::{Family, Style};
 use eframe::egui::{
@@ -61,7 +61,7 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         // Aqua: a hairline and the striped title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
         // Mac OS 9: a grey drag frame and the striped title bar.
-        Family::Platinum => (5.0, 1.0, 21.0, 0.0),
+        Family::Platinum => (6.0, 1.0, 21.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -273,18 +273,7 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Maximize, at(2.0)),
             ]
         }
-        Family::Platinum => {
-            // The close box at the left; zoom and collapse at the right.
-            let size = vec2(13.0, 13.0);
-            let close = square(pos2(bar.left() + 8.0 + size.x / 2.0, y), size);
-            let minimize = square(pos2(bar.right() - 8.0 - size.x / 2.0, y), size);
-            let maximize = minimize.translate(vec2(-size.x - 6.0, 0.0));
-            vec![
-                (Caption::Close, close),
-                (Caption::Maximize, maximize),
-                (Caption::Minimize, minimize),
-            ]
-        }
+        Family::Platinum => super::platinum::captions(bar),
     }
 }
 
@@ -439,46 +428,7 @@ pub fn paint_frame(
                 );
             }
         }
-        Family::Platinum => {
-            let face = palette.canvas;
-            painter.rect_filled(full, CornerRadius::ZERO, face);
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, if dark { gray(0x0a) } else { Color32::BLACK }),
-                    StrokeKind::Inside,
-                );
-                bevel(
-                    painter,
-                    full.shrink(1.0),
-                    lighter(face, 0.8),
-                    darker(face, 0.3),
-                );
-            }
-            // The content sits sunk into the frame.
-            bevel(
-                painter,
-                inner.expand(1.0),
-                darker(face, 0.3),
-                lighter(face, 0.8),
-            );
-            if state.active {
-                // Mac OS 9's lines, cleared where the boxes and title sit.
-                let mut y = bar.top() + 4.0;
-                while y < bar.bottom() - 4.0 {
-                    let line = |at: f32| {
-                        Rect::from_min_max(
-                            pos2(bar.left() + 4.0, at),
-                            pos2(bar.right() - 4.0, at + 1.0),
-                        )
-                    };
-                    painter.rect_filled(line(y), CornerRadius::ZERO, darker(face, 0.28));
-                    painter.rect_filled(line(y + 1.0), CornerRadius::ZERO, lighter(face, 0.7));
-                    y += 3.0;
-                }
-            }
-        }
+        Family::Platinum => super::platinum::paint_frame(painter, full, inner, state, dark),
     }
 }
 
@@ -535,44 +485,7 @@ pub fn paint_caption(
             super::gel::paint_light(painter, rect, caption, jaguar, look, press.group);
         }
         Family::Platinum => {
-            if !state.active {
-                return;
-            }
-            let face = palette.canvas;
-            // Clear the lines around the box.
-            painter.rect_filled(rect.expand(3.0), CornerRadius::ZERO, face);
-            let outline = if dark { gray(0x10) } else { gray(0x40) };
-            let (top, bottom) = if press.pressed {
-                (darker(face, 0.35), darker(face, 0.15))
-            } else {
-                (lighter(face, 0.7), darker(face, 0.08))
-            };
-            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
-            bevel(
-                painter,
-                rect.shrink(1.0),
-                lighter(face, 0.85),
-                darker(face, 0.25),
-            );
-            painter.rect_stroke(
-                rect,
-                CornerRadius::ZERO,
-                Stroke::new(1.0, outline),
-                StrokeKind::Inside,
-            );
-            let mark = Stroke::new(1.0, outline);
-            match caption {
-                Caption::Close => {}
-                Caption::Maximize => {
-                    // A small box in the corner of the big one.
-                    let small = Rect::from_min_size(rect.min + vec2(1.5, 1.5), vec2(6.0, 6.0));
-                    painter.rect_stroke(small, CornerRadius::ZERO, mark, StrokeKind::Inside);
-                }
-                Caption::Minimize => {
-                    painter.hline(rect.x_range(), rect.center().y - 1.0, mark);
-                    painter.hline(rect.x_range(), rect.center().y + 1.0, mark);
-                }
-            }
+            super::platinum::paint_caption(painter, rect, caption, press, state, dark)
         }
     }
 }
@@ -670,7 +583,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             true,
         ),
         Family::Platinum => (
-            theme::bold(13.0),
+            theme::bold(12.0),
             if state.active {
                 palette.ink
             } else {
@@ -724,11 +637,9 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             );
         }
         Family::Platinum if state.active => {
-            painter.rect_filled(
-                area.expand2(vec2(6.0, 0.0)),
-                CornerRadius::ZERO,
-                palette.canvas,
-            );
+            for (from, to) in super::platinum::stripe_spans(bar, area) {
+                super::platinum::stripes(painter, bar, from, to, palette.dark);
+            }
         }
         _ => {}
     }
@@ -858,8 +769,12 @@ mod tests {
                 "{style:?}"
             );
             for (i, (caption, rect)) in buttons.iter().enumerate() {
-                assert!(bar.contains_rect(*rect), "{style:?} {caption:?}");
-                assert!(rect.width() >= 12.0, "{style:?} {caption:?}");
+                // Mac OS 9's boxes reach a pixel into the frame.
+                assert!(
+                    bar.expand2(vec2(1.0, 0.0)).contains_rect(*rect),
+                    "{style:?} {caption:?}"
+                );
+                assert!(rect.width() >= 11.0, "{style:?} {caption:?}");
                 // Left to right, without overlapping.
                 if let Some((_, next)) = buttons.get(i + 1) {
                     assert!(rect.right() <= next.left(), "{style:?} {caption:?}");
@@ -1022,7 +937,9 @@ mod tests {
                             paint_title(ui, bar, "PkgDeck", &palette, state);
                         })
                     });
-                    assert!(shapes.len() > 5, "{at}");
+                    // Mac OS 9 behind, filling the screen, is a plain grey bar
+                    // and its title.
+                    assert!(shapes.len() >= 2, "{at}");
                     for shape in &shapes {
                         // Glows may spill out; they're clipped by the window.
                         if matches!(shape, Shape::Rect(rect) if rect.blur_width > 0.0) {

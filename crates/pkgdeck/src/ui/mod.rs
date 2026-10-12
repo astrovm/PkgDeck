@@ -11,6 +11,7 @@ pub mod icons;
 mod list;
 mod luna;
 mod page;
+mod platinum;
 mod settings_page;
 mod shade;
 mod skin;
