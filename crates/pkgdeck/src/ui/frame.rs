@@ -2,10 +2,7 @@
 //! and the border, drawn the way each desktop drew its windows. Modern
 //! keeps the system's frame.
 
-use super::skin::{
-    bands, bevel, darker, faded, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb,
-    top_corners,
-};
+use super::skin::{bevel, darker, faded, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb};
 use super::theme::{self, Palette};
 use crate::settings::{Family, Style};
 use eframe::egui::{
@@ -257,17 +254,7 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Close, close),
             ]
         }
-        Family::Luna => {
-            let size = vec2(22.0, 22.0);
-            let close = square(pos2(bar.right() - 5.0 - size.x / 2.0, y + 1.0), size);
-            let maximize = close.translate(vec2(-size.x - 2.0, 0.0));
-            let minimize = maximize.translate(vec2(-size.x - 2.0, 0.0));
-            vec![
-                (Caption::Minimize, minimize),
-                (Caption::Maximize, maximize),
-                (Caption::Close, close),
-            ]
-        }
+        Family::Luna => super::luna::captions(bar),
         Family::Glass => super::aero::captions(style == Style::Vista, bar),
         Family::Gel => {
             // Close, minimize and zoom at the left: Jaguar's a pixel
@@ -361,32 +348,7 @@ pub fn paint_frame(
             let (from, to) = title_colors(palette, state.active);
             gradient(painter, bar, CornerRadius::ZERO, from, to, true);
         }
-        Family::Luna => {
-            let (blue, _) = title_colors(palette, state.active);
-            // The sides fade from the title bar's blue to a deeper one.
-            painter.rect_filled(full, CornerRadius::ZERO, darker(blue, 0.12));
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, darker(blue, 0.45)),
-                    StrokeKind::Inside,
-                );
-            }
-            bands(
-                painter,
-                bar.expand2(vec2(if open { 4.0 } else { 0.0 }, 0.0)),
-                top_corners(CornerRadius::same(if open { 8 } else { 0 })),
-                &[
-                    (0.0, lerp(blue, Color32::WHITE, 0.55)),
-                    (0.08, lighter(blue, 0.25)),
-                    (0.22, blue),
-                    (0.55, lighter(blue, 0.1)),
-                    (0.86, blue),
-                    (1.0, darker(blue, 0.22)),
-                ],
-            );
-        }
+        Family::Luna => super::luna::paint_frame(painter, full, bar, palette.deep, state, dark),
         Family::Glass => super::aero::paint_frame(
             painter,
             full,
@@ -549,29 +511,7 @@ pub fn paint_caption(
             );
         }
         Family::Luna => {
-            let close = caption == Caption::Close;
-            let base = if close {
-                rgb(0xd8462a)
-            } else {
-                let (blue, _) = title_colors(palette, state.active);
-                lighter(blue, 0.12)
-            };
-            let base = if press.pressed {
-                darker(base, 0.2)
-            } else if press.hovered {
-                lighter(base, 0.18)
-            } else {
-                base
-            };
-            let radius = CornerRadius::same(3);
-            gradient(painter, rect, radius, lighter(base, 0.35), base, false);
-            painter.rect_stroke(
-                rect,
-                radius,
-                Stroke::new(1.0, Color32::from_white_alpha(225)),
-                StrokeKind::Inside,
-            );
-            glyph(painter, rect, caption, state.maximized, Color32::WHITE, 2.0);
+            super::luna::paint_caption(painter, rect, caption, press, state, palette.deep, dark)
         }
         Family::Glass => super::aero::paint_caption(
             painter,
@@ -767,7 +707,11 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             painter.galley_with_override_text_color(
                 text_at + vec2(1.0, 1.0),
                 galley.clone(),
-                faded(darker(from, 0.6), 0.85),
+                if palette.dark {
+                    Color32::BLACK
+                } else {
+                    faded(rgb(0x0f1089), 0.85)
+                },
             );
         }
         Family::Glass => super::aero::paint_title_glow(painter, area, palette.dark),

@@ -1285,9 +1285,11 @@ pub fn paint_sidebar(
                     lerp(palette.canvas, palette.deep, 0.18),
                 )
             } else {
+                // Measured on XP's Explorer, in the accent's shade.
+                let base = super::luna::base(palette.deep);
                 (
-                    lerp(palette.deep, Color32::WHITE, 0.45),
-                    lerp(palette.deep, Color32::WHITE, 0.22),
+                    super::luna::recolor(0x7ba2e7, base),
+                    super::luna::recolor(0x6375d6, base),
                 )
             };
             gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
@@ -1308,12 +1310,14 @@ pub fn paint_sidebar(
                     darker(palette.surface, 0.12),
                 )
             } else {
+                let base = super::luna::base(palette.deep);
                 (
                     Color32::WHITE,
-                    lerp(palette.deep, Color32::WHITE, 0.78),
-                    lerp(palette.deep, Color32::WHITE, 0.84),
+                    super::luna::recolor(0xc6d3f7, base),
+                    super::luna::recolor(0xd6dff7, base),
                 )
             };
+            // The header fades across, white to pale blue.
             gradient(painter, header, radius, header_top, header_bottom, true);
             painter.rect_filled(body, CornerRadius::ZERO, inside);
             painter.rect_stroke(
@@ -1325,7 +1329,7 @@ pub fn paint_sidebar(
             let link = if dark {
                 palette.bright
             } else {
-                darker(palette.deep, 0.15)
+                super::luna::recolor(0x215dc6, super::luna::base(palette.deep))
             };
             return SidebarInk {
                 name: Some(link),
