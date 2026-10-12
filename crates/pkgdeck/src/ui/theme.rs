@@ -372,12 +372,12 @@ impl Palette {
             tone(canvas, 1.0)
         };
         let surface = tone(rgb(surface), 0.5);
-        // Media Center's blue belongs to its blue; another accent gets
-        // near black, the accent left to the frame and selection.
-        // XP's dark slate is blue too, so it goes neutral the same way.
-        let (canvas, surface) = if scheme.style.family() == Family::Glass && dark && !own {
+        // Media Center's navy and XP's slate are blue walls, so dark goes
+        // near black in every accent, its own blue included. The accent is
+        // left to the frame and selection.
+        let (canvas, surface) = if dark && scheme.style.family() == Family::Glass {
             (tone(rgb(0x0e0f11), 1.0), tone(rgb(0x17191c), 1.0))
-        } else if scheme.style.family() == Family::Luna && dark && !own {
+        } else if dark && scheme.style.family() == Family::Luna {
             (tone(rgb(0x1f2023), 1.0), tone(rgb(0x2a2b2f), 1.0))
         } else {
             (canvas, surface)
@@ -1474,7 +1474,8 @@ mod tests {
         };
         let green = glass(Accent::Green);
         assert!(luminance(green) < 0.01, "{green:?}");
-        assert_eq!(glass(Style::Glass.accent()), rgb(0x04142f));
+        // Its own blue too: near black, not Media Center's navy.
+        assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
     }
 
     #[test]

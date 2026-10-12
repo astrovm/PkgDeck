@@ -1011,21 +1011,17 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
     }
 }
 
-/// Behind everything: the canvas colour, or Media Center's blue.
+/// Behind everything: the canvas colour, or Media Center's glow in grey.
 pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
     painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
     match style() {
-        // Explorer's white, or in the dark Media Center's deep blue.
+        // Explorer's white, or in the dark a soft glow over near black.
         Family::Glass if palette.dark => {
             gradient(
                 painter,
                 rect,
                 CornerRadius::ZERO,
-                if palette.tint_amount > 0.0 {
-                    palette.tone(rgb(0x26292d))
-                } else {
-                    rgb(0x0b2d63)
-                },
+                palette.tone(rgb(0x26292d)),
                 palette.canvas,
                 false,
             );
