@@ -133,6 +133,13 @@ pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: b
     let shade = |color| faded(color, opacity);
     let (outer_light, outer_dark) = (shade(lighter(face, 0.9)), shade(darker(face, 0.85)));
     let (inner_light, inner_dark) = (shade(lighter(face, 0.45)), shade(darker(face, 0.33)));
+    // On High Contrast Black's black, shadows can't be darker: they're
+    // its greys.
+    let (outer_dark, inner_dark) = if face == Color32::BLACK {
+        (shade(gray(0xc0)), shade(gray(0x80)))
+    } else {
+        (outer_dark, inner_dark)
+    };
     if sunken {
         bevel(painter, rect, inner_dark, outer_light);
         bevel(painter, rect.shrink(1.0), outer_dark, inner_light);

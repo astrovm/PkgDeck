@@ -337,8 +337,8 @@ impl Palette {
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             },
-            // The grey of the old desktops, turned down.
-            (Family::Retro, true) => (0x3a3a3a, 0x1e1e1e, 0xf2f2f2, 0xbdbdbd),
+            // Windows' own dark: High Contrast Black.
+            (Family::Retro, true) => (0x000000, 0x000000, 0xffffff, 0xc0c0c0),
             (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
             (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
             (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
@@ -381,6 +381,19 @@ impl Palette {
                 readable_accent(color, Color32::BLACK, true),
             ),
             None => (rgb(on_light), rgb(on_dark)),
+        };
+        // The style's own accent in the dark takes what its dark scheme
+        // used: High Contrast Black's purple, Hi-Tech's blue.
+        let own = custom.is_none() && scheme.accent == scheme.style.accent();
+        let (deep, bright) = match (scheme.style.family(), dark && own) {
+            (Family::Retro, true) => (rgb(0x800080), rgb(0xff80ff)),
+            (Family::Platinum, true) => (rgb(0x0063ff), rgb(0x6aa5ff)),
+            _ => (deep, bright),
+        };
+        let accent = if dark && own && scheme.style.family() == Family::Platinum {
+            bright
+        } else {
+            accent
         };
         Self {
             canvas,
@@ -1010,6 +1023,32 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn old_desktops_go_dark_as_their_dark_schemes_did() {
+        let of = |style: Style, accent: Accent, dark| {
+            Palette::of(
+                Scheme {
+                    style,
+                    accent,
+                    ..Scheme::default()
+                },
+                dark,
+            )
+        };
+        // Windows 98 takes High Contrast Black, purple and all.
+        let black = of(Style::Retro, Accent::Navy, true);
+        assert_eq!((black.canvas, black.ink), (Color32::BLACK, Color32::WHITE));
+        assert_eq!(black.deep, rgb(0x800080));
+        // Mac OS 9 takes Hi-Tech's blue.
+        let hi_tech = of(Style::Platinum, Accent::Lavender, true);
+        assert_eq!(hi_tech.deep, rgb(0x0063ff));
+        assert_eq!(hi_tech.accent, hi_tech.bright);
+        // In the light, or with an accent picked by hand, they don't.
+        assert_eq!(of(Style::Retro, Accent::Navy, false).deep, rgb(0x000080));
+        assert_eq!(of(Style::Retro, Accent::Teal, true).deep, rgb(0x0b7580));
+        assert_ne!(of(Style::Platinum, Accent::Green, true).deep, rgb(0x0063ff));
     }
 
     #[test]
