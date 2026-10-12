@@ -357,12 +357,12 @@ impl Palette {
         let hue = custom.unwrap_or(rgb(on_light));
         let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
-            (Family::Modern, _) if dark => 0.07,
-            (Family::Modern, _) => 0.06,
+            (Family::Modern, _) if dark => 0.05,
+            (Family::Modern, _) => 0.04,
             _ if own => 0.0,
-            (Family::Glass, false) => 0.05,
-            (_, true) => 0.1,
-            (_, false) => 0.14,
+            (Family::Glass, false) => 0.03,
+            (_, true) => 0.06,
+            (_, false) => 0.08,
         };
         let tone = |color: Color32, share: f32| over(color, hue, tint_amount * share);
         // OLED black stays black.
@@ -372,13 +372,13 @@ impl Palette {
             tone(canvas, 1.0)
         };
         let surface = tone(rgb(surface), 0.5);
-        // Media Center's blue is the accent itself, so another accent
-        // swaps the whole blue, not just a tint over it.
+        // Media Center's blue belongs to its blue; another accent gets
+        // near black, the accent left to the frame and selection.
+        // XP's dark slate is blue too, so it goes neutral the same way.
         let (canvas, surface) = if scheme.style.family() == Family::Glass && dark && !own {
-            (
-                over(Color32::BLACK, hue, 0.13),
-                over(Color32::BLACK, hue, 0.24),
-            )
+            (tone(rgb(0x0e0f11), 1.0), tone(rgb(0x17191c), 1.0))
+        } else if scheme.style.family() == Family::Luna && dark && !own {
+            (tone(rgb(0x1f2023), 1.0), tone(rgb(0x2a2b2f), 1.0))
         } else {
             (canvas, surface)
         };
@@ -905,45 +905,91 @@ pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32
     );
 }
 
-/// PkgDeck's cube in `rect`, its three faces in shades of the accent: the
-/// logo's own blues for blue.
-pub fn paint_logo(painter: &Painter, rect: Rect, palette: &Palette) {
-    let (top, left, right) = if palette.tint == rgb(0x2f68d8) {
-        (rgb(0x60a5fa), rgb(0x2563eb), rgb(0x3b82f6))
+/// The logo's three faces in its 128-unit square: top, left and right.
+const LOGO: [[(f32, f32); 4]; 3] = [
+    [(64.0, 8.0), (112.0, 36.0), (64.0, 64.0), (16.0, 36.0)],
+    [(16.0, 36.0), (64.0, 64.0), (64.0, 120.0), (16.0, 92.0)],
+    [(64.0, 64.0), (112.0, 36.0), (112.0, 92.0), (64.0, 120.0)],
+];
+
+/// The colour the logo is drawn in for an accent.
+pub fn logo_tint(accent: Accent, custom: Option<Color32>) -> Color32 {
+    custom
+        .filter(|_| accent == Accent::Custom)
+        .unwrap_or(rgb(accent_colors(accent).0))
+}
+
+/// The faces' colours: the logo's own blues for blue, shades of `hue`
+/// otherwise.
+fn logo_colors(hue: Color32) -> [Color32; 3] {
+    if hue == rgb(accent_colors(Accent::Blue).0) {
+        [rgb(0x60a5fa), rgb(0x2563eb), rgb(0x3b82f6)]
     } else {
-        // A dark accent is lifted so the cube shows on a dark window.
-        let hue = if palette.dark {
-            readable_accent(palette.tint, palette.canvas, true)
-        } else {
-            palette.tint
-        };
-        (
+        [
             over(hue, Color32::WHITE, 0.4),
             hue,
             over(hue, Color32::WHITE, 0.18),
-        )
+        ]
+    }
+}
+
+/// PkgDeck's cube in `rect`, its three faces in shades of the accent.
+pub fn paint_logo(painter: &Painter, rect: Rect, palette: &Palette) {
+    // A dark accent is lifted so the cube shows on a dark window.
+    let hue = if palette.dark && palette.tint != rgb(accent_colors(Accent::Blue).0) {
+        readable_accent(palette.tint, palette.canvas, true)
+    } else {
+        palette.tint
     };
-    // The logo's 128-unit square, scaled into `rect`.
-    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * (rect.width() / 128.0);
-    let face = |points: [(f32, f32); 4], color| {
+    let at = |(x, y): (f32, f32)| rect.min + Vec2::new(x, y) * (rect.width() / 128.0);
+    for (face, color) in LOGO.iter().zip(logo_colors(hue)) {
         painter.add(Shape::convex_polygon(
-            points.iter().map(|&(x, y)| at(x, y)).collect(),
+            face.iter().copied().map(at).collect(),
             color,
             Stroke::NONE,
         ));
+    }
+}
+
+/// The cube as `size` by `size` RGBA pixels, for the Dock, tray and window
+/// icons. Each pixel averages 4 by 4 samples, so the edges are smooth.
+pub fn logo_rgba(hue: Color32, size: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let colors = logo_colors(hue);
+    let scale = 128.0 / size as f32;
+    let inside = |face: &[(f32, f32); 4], x: f32, y: f32| {
+        let sides = (0..4).map(|i| {
+            let ((ax, ay), (bx, by)) = (face[i], face[(i + 1) % 4]);
+            (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        });
+        let sides: Vec<f32> = sides.collect();
+        sides.iter().all(|&side| side >= 0.0) || sides.iter().all(|&side| side <= 0.0)
     };
-    face(
-        [(64.0, 8.0), (112.0, 36.0), (64.0, 64.0), (16.0, 36.0)],
-        top,
-    );
-    face(
-        [(16.0, 36.0), (64.0, 64.0), (64.0, 120.0), (16.0, 92.0)],
-        left,
-    );
-    face(
-        [(64.0, 64.0), (112.0, 36.0), (112.0, 92.0), (64.0, 120.0)],
-        right,
-    );
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let (mut sum, mut hits) = ([0u32; 3], 0u32);
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let px = (x as f32 + (sx as f32 + 0.5) / SAMPLES as f32) * scale;
+                    let py = (y as f32 + (sy as f32 + 0.5) / SAMPLES as f32) * scale;
+                    if let Some(face) = LOGO.iter().position(|face| inside(face, px, py)) {
+                        let [r, g, b, _] = colors[face].to_array();
+                        sum = [sum[0] + r as u32, sum[1] + g as u32, sum[2] + b as u32];
+                        hits += 1;
+                    }
+                }
+            }
+            if hits == 0 {
+                pixels.extend([0; 4]);
+            } else {
+                let alpha = hits * 255 / (SAMPLES * SAMPLES);
+                pixels.extend(sum.map(|channel| (channel / hits) as u8));
+                pixels.push(alpha as u8);
+            }
+        }
+    }
+    pixels
 }
 
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
@@ -1339,10 +1385,10 @@ mod tests {
         let modern = Palette::of(Scheme::default(), true);
         // Modern's greys, tinted with its blue.
         let blue = rgb(accent_colors(Accent::Blue).0);
-        assert_eq!(modern.canvas, over(rgb(0x121212), blue, 0.07));
+        assert_eq!(modern.canvas, over(rgb(0x121212), blue, 0.05));
         assert_eq!(modern.accent, rgb(0x7aa7ff));
         let light = Palette::of(Scheme::default(), false);
-        assert_eq!(light.canvas, over(rgb(0xe8edf5), blue, 0.06));
+        assert_eq!(light.canvas, over(rgb(0xe8edf5), blue, 0.04));
         assert_eq!(light.accent_ink, Color32::WHITE);
         let tuned = Scheme {
             roundness: 2.0,
@@ -1414,7 +1460,7 @@ mod tests {
             true,
         );
         assert_eq!(black.canvas, Color32::BLACK);
-        // Windows 7's dark blue becomes the accent's own dark shade.
+        // Windows 7's dark blue gives way to near black.
         let glass = |accent| {
             Palette::of(
                 Scheme {
@@ -1427,8 +1473,54 @@ mod tests {
             .canvas
         };
         let green = glass(Accent::Green);
-        assert!(green.g() > green.b(), "{green:?}");
+        assert!(luminance(green) < 0.01, "{green:?}");
         assert_eq!(glass(Style::Glass.accent()), rgb(0x04142f));
+    }
+
+    #[test]
+    fn the_drawn_logo_matches_the_shipped_one_and_follows_the_accent() {
+        // In blue, the drawn cube is the logo PkgDeck ships.
+        let shipped = image::load_from_memory(include_bytes!("../../assets/logo-64.png"))
+            .unwrap()
+            .to_rgba8()
+            .into_raw();
+        let blue = logo_tint(Accent::Blue, None);
+        let drawn = logo_rgba(blue, 64);
+        assert_eq!(drawn.len(), shipped.len());
+        let off = drawn
+            .iter()
+            .zip(&shipped)
+            .map(|(a, b)| a.abs_diff(*b) as u64)
+            .sum::<u64>()
+            / drawn.len() as u64;
+        assert!(off <= 2, "{off}");
+        // Corners stay clear; each face takes a shade of the accent.
+        let green = logo_tint(Accent::Green, None);
+        let pixels = logo_rgba(green, 128);
+        let at = |x: usize, y: usize| {
+            let i = (y * 128 + x) * 4;
+            Color32::from_rgba_unmultiplied(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])
+        };
+        assert_eq!(at(0, 0).a(), 0);
+        assert_eq!(at(127, 127).a(), 0);
+        assert_eq!(at(64, 36), logo_colors(green)[0]);
+        assert_eq!(at(40, 78), green);
+        assert_eq!(at(88, 78), logo_colors(green)[2]);
+        // A picked colour counts only once Custom is the accent.
+        let red = Some(Color32::RED);
+        assert_eq!(logo_tint(Accent::Custom, red), Color32::RED);
+        assert_eq!(logo_tint(Accent::Green, red), green);
+        assert_eq!(
+            Palette::of(
+                Scheme {
+                    accent: Accent::Green,
+                    ..Scheme::default()
+                },
+                false
+            )
+            .tint,
+            green
+        );
     }
 
     #[test]

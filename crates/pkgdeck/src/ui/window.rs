@@ -39,6 +39,9 @@ pub struct Window<'a> {
     blurred: Option<bool>,
     /// What the window was last filled with behind its content.
     filled: Option<Option<[u8; 3]>>,
+    /// The accent the window's icon was last drawn in.
+    #[cfg(not(target_os = "macos"))]
+    icon: Option<egui::Color32>,
 }
 
 impl<'a> Window<'a> {
@@ -58,6 +61,8 @@ impl<'a> Window<'a> {
             // A new window starts without blur, so only glass asks.
             blurred: Some(false),
             filled: None,
+            #[cfg(not(target_os = "macos"))]
+            icon: None,
         }
     }
 
@@ -209,6 +214,24 @@ impl eframe::App for Window<'_> {
         );
         if self.filled != Some(fill) && fill_window(frame, fill) {
             self.filled = Some(fill);
+        }
+        self.app.sync_icon();
+        // Elsewhere the window carries its own icon, which follows too.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let hue = theme::Palette::current(ui.ctx()).tint;
+            if self.icon != Some(hue) {
+                self.icon = Some(hue);
+                const SIZE: u32 = 64;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(
+                        egui::IconData {
+                            rgba: theme::logo_rgba(hue, SIZE),
+                            width: SIZE,
+                            height: SIZE,
+                        },
+                    ))));
+            }
         }
         self.frame(ui);
     }

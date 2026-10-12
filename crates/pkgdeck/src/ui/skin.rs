@@ -1022,7 +1022,7 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
                 rect,
                 CornerRadius::ZERO,
                 if palette.tint_amount > 0.0 {
-                    lerp(Color32::BLACK, palette.tint, 0.4)
+                    palette.tone(rgb(0x26292d))
                 } else {
                     rgb(0x0b2d63)
                 },
@@ -1404,6 +1404,8 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
 pub fn heading(palette: &Palette) -> (FontId, Color32) {
     match style() {
         Family::Modern => (theme::bold(26.0), palette.ink),
+        // Another accent than its blue: plain ink, not a clashing blue.
+        Family::Glass if palette.tint_amount > 0.0 => (theme::font(24.0), palette.ink),
         Family::Glass => (
             theme::font(24.0),
             if palette.dark {
@@ -1667,7 +1669,9 @@ pub fn group(palette: &Palette) -> Option<Group> {
         Family::Luna => Group {
             stroke: Stroke::new(1.0, darker(palette.canvas, 0.14)),
             radius: theme::round(8),
-            ink: if dark {
+            ink: if palette.tint_amount > 0.0 {
+                palette.ink
+            } else if dark {
                 palette.bright
             } else {
                 darker(palette.deep, 0.05)
@@ -1679,8 +1683,11 @@ pub fn group(palette: &Palette) -> Option<Group> {
             stroke: panel_stroke(palette),
             radius: theme::round(10),
             shadow: shadow(palette),
-            // Windows 7's dark blue main instruction.
-            ink: if dark {
+            // Windows 7's dark blue main instruction; plain in another
+            // accent.
+            ink: if palette.tint_amount > 0.0 {
+                palette.ink
+            } else if dark {
                 palette.bright
             } else {
                 darker(palette.deep, 0.3)
