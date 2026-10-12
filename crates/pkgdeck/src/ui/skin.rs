@@ -144,17 +144,23 @@ pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: b
 /// group boxes draw.
 fn etched(painter: &Painter, rect: Rect, face: Color32) {
     let stroke = |color| Stroke::new(1.0, color);
+    // A dark face lights its lines less, as its bevels do.
+    let (light, dark) = if theme::luminance(face) < 0.2 {
+        (0.38, 0.5)
+    } else {
+        (0.85, 0.33)
+    };
     let line = Rect::from_min_max(rect.min, rect.max - vec2(1.0, 1.0));
     painter.rect_stroke(
         line.translate(vec2(1.0, 1.0)),
         CornerRadius::ZERO,
-        stroke(lighter(face, 0.85)),
+        stroke(lighter(face, light)),
         StrokeKind::Inside,
     );
     painter.rect_stroke(
         line,
         CornerRadius::ZERO,
-        stroke(darker(face, 0.33)),
+        stroke(darker(face, dark)),
         StrokeKind::Inside,
     );
 }

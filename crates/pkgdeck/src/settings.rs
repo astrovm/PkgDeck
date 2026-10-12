@@ -57,7 +57,7 @@ pub enum Accent {
     Graphite,
     /// The deep blue of old title bars.
     Navy,
-    /// The soft purple of Mac OS 9's highlight.
+    /// A soft purple.
     Lavender,
     /// The colour in `custom_accent`.
     Custom,
