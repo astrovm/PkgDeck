@@ -1066,11 +1066,13 @@ pub fn paint_sidebar(
             let list = entries.expand2(vec2(6.0, 8.0));
             painter.rect_filled(list, CornerRadius::ZERO, palette.surface);
             retro_edge(painter, list, palette.canvas, true, 1.0);
+            // A dark face lights its edge less, as its bevels do.
+            let (light, shade) = if palette.dark { (0.3, 0.7) } else { (0.9, 0.4) };
             bevel(
                 painter,
                 Rect::from_min_max(pos2(rect.right() - 2.0, rect.top()), rect.max),
-                lighter(palette.canvas, 0.9),
-                darker(palette.canvas, 0.4),
+                lighter(palette.canvas, light),
+                darker(palette.canvas, shade),
             );
         }
         Family::Luna => {

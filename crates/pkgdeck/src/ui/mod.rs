@@ -67,6 +67,13 @@ pub struct State {
 
 /// Widths the layout switches at.
 pub const RAIL_BELOW: f32 = 820.0;
+/// The sidebar's width with icons only, by default, and as far as it drags.
+const RAIL_WIDTH: f32 = 68.0;
+const SIDEBAR_DEFAULT: f32 = 224.0;
+const SIDEBAR_FLOOR: f32 = 168.0;
+const SIDEBAR_MAX: f32 = 360.0;
+/// Dragged thinner than this, the sidebar drops to icons only.
+const RAIL_SNAP: f32 = 120.0;
 pub const MEDIUM_BELOW: f32 = 640.0;
 pub const COMPACT_BELOW: f32 = 560.0;
 pub const SPLIT_FROM: f32 = 600.0;
@@ -104,21 +111,63 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // The older styles draw the window's own frame around the app.
     let full = frame::show(ui, window, "PkgDeck", &palette);
     skin::paint_canvas(ui.painter(), full, &palette);
-    let rail = full.width() < RAIL_BELOW;
+    // A narrow window shows icons only; so does a sidebar dragged thin.
+    let narrow = full.width() < RAIL_BELOW;
+    let stored = app.settings.sidebar_width.clamp(RAIL_WIDTH, SIDEBAR_MAX);
+    let rail = narrow || stored < RAIL_SNAP;
+    let splitter = Id::new("sidebar-splitter");
+    let dragging = ctx.dragged_id() == Some(splitter);
     let sidebar_width = glide(
         &ctx,
         Id::new("sidebar-width"),
-        if rail { 68.0 } else { 224.0 },
-        LAYOUT,
+        if rail {
+            RAIL_WIDTH
+        } else {
+            stored.max(SIDEBAR_FLOOR)
+        },
+        if dragging { 0.0 } else { LAYOUT },
     );
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
+    if !narrow {
+        sidebar_splitter(app, ui, sidebar, splitter);
+    }
     content_ui(app, ui, content);
     activity::drawer(app, ui, full);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
     frame::edges(ui, window);
+}
+
+/// The edge between the sidebar and the page, to drag.
+fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) {
+    let ctx = ui.ctx().clone();
+    let handle = Rect::from_center_size(
+        pos2(sidebar.right(), sidebar.center().y),
+        vec2(8.0, sidebar.height()),
+    );
+    let response = ui
+        .interact(handle, id, Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::ResizeHorizontal);
+    let active = response.hovered() || response.dragged();
+    let shown = ease(&ctx, response.id.with("hover"), active, FEEDBACK);
+    if shown > 0.0 {
+        ui.painter().rect_filled(
+            Rect::from_center_size(pos2(sidebar.right(), sidebar.center().y), vec2(3.0, 44.0)),
+            theme::round(2),
+            alpha(Palette::current(&ctx).accent, shown),
+        );
+    }
+    if response.dragged() {
+        if let Some(pointer) = ctx.pointer_interact_pos() {
+            app.settings.sidebar_width =
+                (pointer.x - sidebar.left()).clamp(RAIL_WIDTH, SIDEBAR_MAX);
+        }
+    }
+    if response.double_clicked() {
+        app.settings.sidebar_width = SIDEBAR_DEFAULT;
+    }
 }
 
 fn keyboard(app: &mut App, ctx: &egui::Context) {

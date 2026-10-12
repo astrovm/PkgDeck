@@ -235,6 +235,46 @@ fn dragging_a_column_divider_resizes_and_double_click_resets() {
 }
 
 #[test]
+fn dragging_the_sidebar_edge_resizes_it_and_thin_shows_icons_only() {
+    let mut harness = harness_with(app(), egui::vec2(1200.0, 800.0), 1.0 / 60.0);
+    harness.run_steps(4);
+    let entry = |harness: &Harness<'static, (bool, App)>| {
+        harness
+            .get_by_role_and_label(Role::Button, "Settings")
+            .rect()
+            .width()
+    };
+    let wide = entry(&harness);
+    let drag_to = |harness: &mut Harness<'static, (bool, App)>, from: f32, to: f32| {
+        let start = egui::pos2(from, 500.0);
+        harness.hover_at(start);
+        harness.step();
+        harness.drag_at(start);
+        harness.step();
+        for step in 1..=6 {
+            let x = from + (to - from) * step as f32 / 6.0;
+            harness.hover_at(egui::pos2(x, 500.0));
+            harness.step();
+        }
+        harness.drop_at(egui::pos2(to, 500.0));
+        // Long enough for the sidebar to settle.
+        harness.run_steps(40);
+    };
+    // Wider.
+    drag_to(&mut harness, 224.0, 300.0);
+    let widened = harness.state().1.settings.sidebar_width;
+    assert!((widened - 300.0).abs() < 12.0, "{widened}");
+    assert!(entry(&harness) > wide + 60.0);
+    // Thin: icons only.
+    drag_to(&mut harness, 300.0, 40.0);
+    assert!(harness.state().1.settings.sidebar_width < 120.0);
+    assert!(entry(&harness) < wide - 100.0, "{}", entry(&harness));
+    // Back out again.
+    drag_to(&mut harness, 68.0, 260.0);
+    assert!(entry(&harness) > wide);
+}
+
+#[test]
 fn the_sidebar_switches_pages() {
     let mut harness = show(Page::Installed);
     harness
