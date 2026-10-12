@@ -135,6 +135,17 @@ fn title_stops(base: Option<Color32>, active: bool, dark: bool) -> Vec<(f32, Col
         .enumerate()
         .flat_map(|(row, &color)| {
             let color = recolor(color, base);
+            // Under the title, another accent darkens until white reads
+            // on it; Luna's blue already does.
+            let mut color = color;
+            if base.is_some() && (4..28).contains(&row) {
+                for _ in 0..20 {
+                    if super::theme::contrast(Color32::WHITE, color) >= 4.5 {
+                        break;
+                    }
+                    color = lerp(color, Color32::BLACK, 0.06);
+                }
+            }
             // Away from the front, the blue washes out to Luna's pale one.
             let color = if active {
                 color
@@ -407,6 +418,27 @@ mod tests {
         assert!(luma(recolor(0x0043cf, Some(green))) < luma(green));
         assert_eq!(base(rgb(0x2f68d8)), None);
         assert_eq!(base(green), Some(green));
+    }
+
+    #[test]
+    fn white_titles_read_on_every_accent() {
+        use crate::settings::{Accent, Style};
+        use crate::ui::theme::{contrast, Palette, Scheme};
+        for accent in Accent::ALL {
+            let palette = Palette::of(
+                Scheme {
+                    style: Style::Luna,
+                    accent,
+                    ..Scheme::default()
+                },
+                false,
+            );
+            // The rows the title's letters sit on.
+            for (_, color) in &title_stops(base(palette.deep), true, false)[14..44] {
+                let ratio = contrast(Color32::WHITE, *color);
+                assert!(ratio >= 4.5, "{accent:?} {color:?} {ratio}");
+            }
+        }
     }
 
     #[test]
