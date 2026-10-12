@@ -101,6 +101,8 @@ fn options(decorated: bool) -> eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("PkgDeck")
             .with_decorations(decorated)
+            // Glass styles let the desktop show through, blurred.
+            .with_transparent(true)
             .with_app_id("io.github.astrovm.PkgDeck")
             .with_inner_size(DEFAULT_SIZE)
             .with_min_inner_size([360.0, 400.0])

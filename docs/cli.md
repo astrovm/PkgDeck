@@ -701,6 +701,8 @@ To answer faster, PkgDeck keeps some answers in `$XDG_CACHE_HOME/pkgdeck`
   searches read
 - Pacman search results
 - Each standalone tool's version, such as OpenCode's
+- A small blurred copy of your wallpaper, for the glass of the **Vista** and
+  **Windows 7** styles (the app only)
 
 An entry is used only while what it depends on is exactly as it was when it
 was saved:
@@ -711,6 +713,7 @@ was saved:
   `brew update` fetched, and Homebrew itself
 - Pacman: the synced databases, the installed packages and `pacman.conf`
 - Standalone tools: the tool's program file
+- Wallpaper: the picture file
 
 Any change there, and any change PkgDeck makes, discards it. Only successful,
 complete answers are saved, readable only by you. Set `PKGDECK_NO_CACHE=1` to

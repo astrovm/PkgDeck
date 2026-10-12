@@ -415,8 +415,9 @@ fn styles_and_their_choices_change_the_look() {
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.accent, Accent::Teal);
     assert!(harness.query_by_label("Custom accent").is_some());
-    assert!(harness.query_by_label("Export").is_some());
-    assert!(harness.query_by_label("Import").is_some());
+    // Looks aren't saved to or loaded from files.
+    assert!(harness.query_by_label("Export").is_none());
+    assert!(harness.query_by_label("Import").is_none());
     harness.get_by_label("Modern").click();
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.accent, Accent::Blue);

@@ -22,13 +22,16 @@ hex.workspace = true
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 rfd = "=0.17.2"
 memmap2 = "=0.9.11"
-toml = { version = "=1.1.8", default-features = false, features = ["std", "serde", "parse", "display"] }
+# The window's handle, to ask the desktop to blur behind glass styles.
+raw-window-handle = "=0.6.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
 notify-rust = "=4.18.2"
 # Reads the desktop's reduce-motion setting through its settings portal.
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+# Asks KWin on X11 to blur behind glass styles; winit only does it on Wayland.
+x11rb = { version = "=0.13.2", default-features = false }
 
 [build-dependencies]
 cc = "=1.8.0"

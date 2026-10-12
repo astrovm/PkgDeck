@@ -5,6 +5,7 @@
 //! [`memory`] hands freed memory back.
 
 pub mod app;
+pub mod backdrop;
 pub mod media;
 pub mod memory;
 pub mod model;

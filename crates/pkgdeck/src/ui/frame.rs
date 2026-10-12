@@ -2,15 +2,12 @@
 //! and the border, drawn the way each desktop drew its windows. Modern
 //! keeps the system's frame.
 
-use super::skin::{
-    bands, bevel, darker, faded, gloss, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb,
-    top_corners,
-};
+use super::skin::{faded, gradient, gray, ink_on, lerp, retro_edge, rgb};
 use super::theme::{self, Palette};
 use crate::settings::{Family, Style};
 use eframe::egui::{
-    self, epaint::RectShape, pos2, vec2, viewport::ResizeDirection, Color32, CornerRadius,
-    CursorIcon, Id, Painter, Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
+    self, pos2, vec2, viewport::ResizeDirection, Color32, CornerRadius, CursorIcon, Id, Painter,
+    Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
 };
 
 /// A button in the title bar.
@@ -55,15 +52,16 @@ pub fn metrics(style: Style) -> Option<Metrics> {
     let (side, top, title, below) = match style.family() {
         Family::Modern => return None,
         // Windows 98: a raised edge all round, the title bar inside it.
-        Family::Retro => (4.0, 4.0, 22.0, 2.0),
+        Family::Retro => (4.0, 4.0, 18.0, 2.0),
         // XP: a blue border, the title bar up to the top.
         Family::Luna => (4.0, 0.0, 30.0, 0.0),
-        // Vista: thick glass all round, the title on the glass.
-        Family::Glass => (7.0, 0.0, 30.0, 0.0),
+        // Vista and 7: 8 pixels of glass and two lines round the content,
+        // the title on the glass.
+        Family::Glass => (10.0, 0.0, 30.0, 2.0),
         // Aqua: a hairline and the striped title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
         // Mac OS 9: a grey drag frame and the striped title bar.
-        Family::Platinum => (5.0, 1.0, 21.0, 0.0),
+        Family::Platinum => (6.0, 1.0, 21.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -134,7 +132,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     if drag.double_clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!state.maximized));
     }
-    let buttons = captions(style, bar);
+    let buttons = live_captions(style, bar, state);
     let hovered_group = buttons
         .iter()
         .any(|(_, rect)| ui.rect_contains_pointer(rect.expand(2.0)));
@@ -166,15 +164,13 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 /// title bar and its buttons next to the edge don't take the press.
 pub fn edges(ui: &mut Ui, full: Rect) {
     let ctx = ui.ctx().clone();
-    let Some(metrics) = metrics(theme::skin().style) else {
-        return;
-    };
-    if WindowState::of(&ctx).maximized {
+    let style = theme::skin().style;
+    if metrics(style).is_none() || WindowState::of(&ctx).maximized {
         return;
     }
     let Some(direction) = ctx
         .pointer_hover_pos()
-        .and_then(|pointer| edge_at(metrics, full, pointer))
+        .and_then(|pointer| edge_at(style, full, pointer))
     else {
         return;
     };
@@ -185,9 +181,18 @@ pub fn edges(ui: &mut Ui, full: Rect) {
 }
 
 /// Which way the window resizes from `pointer`: anywhere near the edge,
-/// and diagonally near a corner.
-pub fn edge_at(metrics: Metrics, full: Rect, pointer: egui::Pos2) -> Option<ResizeDirection> {
+/// and diagonally near a corner, but not on a title bar button that
+/// reaches into the edge.
+pub fn edge_at(style: Style, full: Rect, pointer: egui::Pos2) -> Option<ResizeDirection> {
+    let metrics = metrics(style)?;
     if !full.contains(pointer) {
+        return None;
+    }
+    let (bar, _) = layout(metrics, full, false);
+    if captions(style, bar)
+        .iter()
+        .any(|(_, rect)| rect.contains(pointer))
+    {
         return None;
     }
     let reach = metrics.side.max(5.0);
@@ -238,6 +243,15 @@ fn decorate(ctx: &egui::Context, on: bool) {
     }
 }
 
+/// The buttons that take clicks: Mac OS 9 hides a window's boxes when
+/// it's behind, so a click there only brings it forward.
+fn live_captions(style: Style, bar: Rect, state: WindowState) -> Vec<(Caption, Rect)> {
+    if style.family() == Family::Platinum && !state.active {
+        return Vec::new();
+    }
+    captions(style, bar)
+}
+
 /// Where each button of `style`'s title bar `bar` sits, left to right.
 pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     let square = |center: egui::Pos2, size: egui::Vec2| Rect::from_center_size(center, size);
@@ -245,9 +259,11 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     match style.family() {
         Family::Modern => vec![],
         Family::Retro => {
-            // Minimize and maximize side by side, close apart.
-            let size = vec2(18.0, 16.0);
-            let close = square(pos2(bar.right() - 3.0 - size.x / 2.0, y), size);
+            // 16 by 14, 2 in from the bar: minimize and maximize side by
+            // side, close 2 apart.
+            let size = vec2(16.0, 14.0);
+            let close =
+                Rect::from_min_size(pos2(bar.right() - 2.0 - size.x, bar.top() + 2.0), size);
             let maximize = close.translate(vec2(-size.x - 2.0, 0.0));
             let minimize = maximize.translate(vec2(-size.x, 0.0));
             vec![
@@ -256,62 +272,24 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Close, close),
             ]
         }
-        Family::Luna => {
-            let size = vec2(22.0, 22.0);
-            let close = square(pos2(bar.right() - 5.0 - size.x / 2.0, y + 1.0), size);
-            let maximize = close.translate(vec2(-size.x - 2.0, 0.0));
-            let minimize = maximize.translate(vec2(-size.x - 2.0, 0.0));
-            vec![
-                (Caption::Minimize, minimize),
-                (Caption::Maximize, maximize),
-                (Caption::Close, close),
-            ]
-        }
-        Family::Glass => {
-            // Hung from the top edge, close the widest; 7's are a little
-            // bigger than Vista's.
-            let top = bar.top() + 1.0;
-            let ((min_w, max_w, close_w), height) = if style == Style::Vista {
-                ((25.0, 25.0, 43.0), 19.0)
-            } else {
-                ((28.0, 27.0, 46.0), 20.0)
-            };
-            let close = Rect::from_min_size(
-                pos2(bar.right() - 4.0 - close_w, top),
-                vec2(close_w, height),
-            );
-            let maximize =
-                Rect::from_min_size(pos2(close.left() - max_w, top), vec2(max_w, height));
-            let minimize =
-                Rect::from_min_size(pos2(maximize.left() - min_w, top), vec2(min_w, height));
-            vec![
-                (Caption::Minimize, minimize),
-                (Caption::Maximize, maximize),
-                (Caption::Close, close),
-            ]
-        }
+        Family::Luna => super::luna::captions(bar),
+        Family::Glass => super::aero::captions(style == Style::Vista, bar),
         Family::Gel => {
-            // Close, minimize and zoom at the left.
-            let size = vec2(14.0, 14.0);
-            let at = |i: f32| square(pos2(bar.left() + 15.0 + i * 21.0, y), size);
+            // Close, minimize and zoom at the left: Jaguar's a pixel
+            // narrower and further apart.
+            let (size, left, pitch) = if style == Style::Gel {
+                (vec2(13.0, 14.0), 9.0, 22.0)
+            } else {
+                (vec2(14.0, 14.0), 8.0, 21.0)
+            };
+            let at = |i: f32| square(pos2(bar.left() + left + size.x / 2.0 + i * pitch, y), size);
             vec![
                 (Caption::Close, at(0.0)),
                 (Caption::Minimize, at(1.0)),
                 (Caption::Maximize, at(2.0)),
             ]
         }
-        Family::Platinum => {
-            // The close box at the left; zoom and collapse at the right.
-            let size = vec2(13.0, 13.0);
-            let close = square(pos2(bar.left() + 8.0 + size.x / 2.0, y), size);
-            let minimize = square(pos2(bar.right() - 8.0 - size.x / 2.0, y), size);
-            let maximize = minimize.translate(vec2(-size.x - 6.0, 0.0));
-            vec![
-                (Caption::Close, close),
-                (Caption::Maximize, maximize),
-                (Caption::Minimize, minimize),
-            ]
-        }
+        Family::Platinum => super::platinum::captions(bar),
     }
 }
 
@@ -339,6 +317,9 @@ fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
             // fades to a lighter self.
             let end = if deep == rgb(0x000080) {
                 rgb(0x1084d0)
+            } else if palette.dark && deep == rgb(0x800080) {
+                // High Contrast Black's purple doesn't fade.
+                deep
             } else {
                 lerp(deep, Color32::WHITE, 0.45)
             };
@@ -377,82 +358,15 @@ pub fn paint_frame(
             let (from, to) = title_colors(palette, state.active);
             gradient(painter, bar, CornerRadius::ZERO, from, to, true);
         }
-        Family::Luna => {
-            let (blue, _) = title_colors(palette, state.active);
-            // The sides fade from the title bar's blue to a deeper one.
-            painter.rect_filled(full, CornerRadius::ZERO, darker(blue, 0.12));
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, darker(blue, 0.45)),
-                    StrokeKind::Inside,
-                );
-            }
-            bands(
-                painter,
-                bar.expand2(vec2(if open { 4.0 } else { 0.0 }, 0.0)),
-                top_corners(CornerRadius::same(if open { 8 } else { 0 })),
-                &[
-                    (0.0, lerp(blue, Color32::WHITE, 0.55)),
-                    (0.08, lighter(blue, 0.25)),
-                    (0.22, blue),
-                    (0.55, lighter(blue, 0.1)),
-                    (0.86, blue),
-                    (1.0, darker(blue, 0.22)),
-                ],
-            );
-        }
-        Family::Glass => {
-            // Glass over a blue-grey desktop: tinted, with streaks of light.
-            // Vista's glass is deep and smoky; 7's is light sky blue.
-            let vista = theme::skin().style == Style::Vista;
-            let base = match (vista, dark) {
-                (true, true) => rgb(0x0f1822),
-                (true, false) => rgb(0x4f7fc4),
-                (false, true) => rgb(0x1a2a3c),
-                (false, false) => rgb(0xb4d3ef),
-            };
-            let tint = lerp(base, palette.deep, if state.active { 0.14 } else { 0.04 });
-            bands(
-                painter,
-                full,
-                CornerRadius::ZERO,
-                &[
-                    (0.0, lighter(tint, 0.25)),
-                    (0.06, tint),
-                    (1.0, darker(tint, 0.06)),
-                ],
-            );
-            let shine = match (vista, dark) {
-                (true, true) => 16,
-                (true, false) => 64,
-                (false, true) => 10,
-                (false, false) => 46,
-            };
-            super::skin::glass_streaks(painter, full, shine);
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::from_black_alpha(140)),
-                    StrokeKind::Inside,
-                );
-                painter.rect_stroke(
-                    full.shrink(1.0),
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::from_white_alpha(if dark { 30 } else { 120 })),
-                    StrokeKind::Inside,
-                );
-            }
-            // The edge where the glass meets the window's content.
-            painter.rect_stroke(
-                inner.expand(1.0),
-                CornerRadius::ZERO,
-                Stroke::new(1.0, Color32::from_black_alpha(if dark { 160 } else { 90 })),
-                StrokeKind::Inside,
-            );
-        }
+        Family::Luna => super::luna::paint_frame(painter, full, bar, palette.deep, state, dark),
+        Family::Glass => super::aero::paint_frame(
+            painter,
+            full,
+            inner,
+            palette,
+            state,
+            theme::skin().style == Style::Vista,
+        ),
         Family::Gel if theme::skin().style == Style::Panther => {
             // Brushed metal from the title bar down, in one piece.
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
@@ -533,46 +447,7 @@ pub fn paint_frame(
                 );
             }
         }
-        Family::Platinum => {
-            let face = palette.canvas;
-            painter.rect_filled(full, CornerRadius::ZERO, face);
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, if dark { gray(0x0a) } else { Color32::BLACK }),
-                    StrokeKind::Inside,
-                );
-                bevel(
-                    painter,
-                    full.shrink(1.0),
-                    lighter(face, 0.8),
-                    darker(face, 0.3),
-                );
-            }
-            // The content sits sunk into the frame.
-            bevel(
-                painter,
-                inner.expand(1.0),
-                darker(face, 0.3),
-                lighter(face, 0.8),
-            );
-            if state.active {
-                // Mac OS 9's lines, cleared where the boxes and title sit.
-                let mut y = bar.top() + 4.0;
-                while y < bar.bottom() - 4.0 {
-                    let line = |at: f32| {
-                        Rect::from_min_max(
-                            pos2(bar.left() + 4.0, at),
-                            pos2(bar.right() - 4.0, at + 1.0),
-                        )
-                    };
-                    painter.rect_filled(line(y), CornerRadius::ZERO, darker(face, 0.28));
-                    painter.rect_filled(line(y + 1.0), CornerRadius::ZERO, lighter(face, 0.7));
-                    y += 3.0;
-                }
-            }
-        }
+        Family::Platinum => super::platinum::paint_frame(painter, full, inner, state, dark),
     }
 }
 
@@ -597,254 +472,96 @@ pub fn paint_caption(
             } else {
                 vec2(0.0, 0.0)
             };
-            glyph(
+            retro_glyph(
                 painter,
-                rect.translate(shift),
+                rect.min + shift,
                 caption,
                 state.maximized,
                 palette.ink,
-                1.6,
+                face,
             );
         }
         Family::Luna => {
-            let close = caption == Caption::Close;
-            let base = if close {
-                rgb(0xd8462a)
-            } else {
-                let (blue, _) = title_colors(palette, state.active);
-                lighter(blue, 0.12)
-            };
-            let base = if press.pressed {
-                darker(base, 0.2)
-            } else if press.hovered {
-                lighter(base, 0.18)
-            } else {
-                base
-            };
-            let radius = CornerRadius::same(3);
-            gradient(painter, rect, radius, lighter(base, 0.35), base, false);
-            painter.rect_stroke(
-                rect,
-                radius,
-                Stroke::new(1.0, Color32::from_white_alpha(225)),
-                StrokeKind::Inside,
-            );
-            glyph(painter, rect, caption, state.maximized, Color32::WHITE, 2.0);
+            super::luna::paint_caption(painter, rect, caption, press, state, palette.deep, dark)
         }
-        Family::Glass => {
-            let close = caption == Caption::Close;
-            let radius = match caption {
-                Caption::Minimize => CornerRadius {
-                    sw: 4,
-                    ..CornerRadius::ZERO
-                },
-                Caption::Close => CornerRadius {
-                    se: 4,
-                    ..CornerRadius::ZERO
-                },
-                Caption::Maximize => CornerRadius::ZERO,
-            };
-            let (top, bottom) = if close && (state.active || press.hovered) {
-                let red = if press.hovered {
-                    rgb(0xe8513f)
-                } else {
-                    rgb(0xc4473a)
-                };
-                (lighter(red, 0.35), red)
-            } else if press.hovered {
-                (rgb(0xc6e1f8), rgb(0x5ea9e6))
-            } else {
-                let glass = if dark { rgb(0x2a3a4c) } else { rgb(0xd3e2f2) };
-                (lighter(glass, 0.4), glass)
-            };
-            let (top, bottom) = if press.pressed {
-                (darker(top, 0.2), darker(bottom, 0.2))
-            } else {
-                (top, bottom)
-            };
-            bands(
-                painter,
-                rect,
-                radius,
-                &[
-                    (0.0, top),
-                    (0.5, lerp(top, bottom, 0.4)),
-                    (0.51, bottom),
-                    (1.0, lighter(bottom, 0.15)),
-                ],
-            );
-            painter.rect_stroke(
-                rect,
-                radius,
-                Stroke::new(1.0, Color32::from_black_alpha(130)),
-                StrokeKind::Inside,
-            );
-            // White symbols with a dark edge, readable on any glass.
-            glyph(
-                painter,
-                rect.translate(vec2(0.0, 1.0)),
-                caption,
-                state.maximized,
-                Color32::from_black_alpha(150),
-                2.4,
-            );
-            glyph(painter, rect, caption, state.maximized, Color32::WHITE, 1.6);
-        }
+        Family::Glass => super::aero::paint_caption(
+            painter,
+            rect,
+            caption,
+            press,
+            state,
+            theme::skin().style == Style::Vista,
+        ),
         Family::Gel => {
-            let color = if !state.active && !press.group {
-                gray(0xc4)
+            let look = if !state.active && !press.group {
+                super::gel::Look::Asleep
+            } else if press.pressed {
+                super::gel::Look::Pressed
             } else {
-                match caption {
-                    Caption::Close => rgb(0xe0443e),
-                    Caption::Minimize => rgb(0xdea123),
-                    Caption::Maximize => rgb(0x1aab29),
-                }
+                super::gel::Look::Lit
             };
-            let color = if press.pressed {
-                darker(color, 0.25)
-            } else {
-                color
-            };
-            let round = CornerRadius::same((rect.height() / 2.0) as u8);
-            painter.add(
-                RectShape::filled(
-                    rect.translate(vec2(0.0, 1.0)),
-                    round,
-                    Color32::from_black_alpha(50),
-                )
-                .with_blur_width(2.0),
-            );
-            gradient(
-                painter,
-                rect,
-                round,
-                darker(color, 0.15),
-                lighter(color, 0.45),
-                false,
-            );
-            gloss(painter, rect, 0.9);
-            painter.rect_stroke(
-                rect,
-                round,
-                Stroke::new(1.0, darker(color, 0.4)),
-                StrokeKind::Inside,
-            );
-            if press.group {
-                let ink = darker(color, 0.65);
-                match caption {
-                    Caption::Close => glyph(painter, rect.shrink(1.5), caption, false, ink, 1.4),
-                    Caption::Minimize => {
-                        painter.hline(
-                            (rect.left() + 3.5)..=(rect.right() - 3.5),
-                            rect.center().y,
-                            Stroke::new(1.6, ink),
-                        );
-                    }
-                    Caption::Maximize => {
-                        let c = rect.center();
-                        painter.hline((c.x - 3.5)..=(c.x + 3.5), c.y, Stroke::new(1.6, ink));
-                        painter.vline(c.x, (c.y - 3.5)..=(c.y + 3.5), Stroke::new(1.6, ink));
-                    }
-                }
-            }
+            let jaguar = theme::skin().style == Style::Gel;
+            super::gel::paint_light(painter, rect, caption, jaguar, look, press.group);
         }
         Family::Platinum => {
-            if !state.active {
-                return;
-            }
-            let face = palette.canvas;
-            // Clear the lines around the box.
-            painter.rect_filled(rect.expand(3.0), CornerRadius::ZERO, face);
-            let outline = if dark { gray(0x10) } else { gray(0x40) };
-            let (top, bottom) = if press.pressed {
-                (darker(face, 0.35), darker(face, 0.15))
-            } else {
-                (lighter(face, 0.7), darker(face, 0.08))
-            };
-            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
-            bevel(
-                painter,
-                rect.shrink(1.0),
-                lighter(face, 0.85),
-                darker(face, 0.25),
-            );
-            painter.rect_stroke(
-                rect,
-                CornerRadius::ZERO,
-                Stroke::new(1.0, outline),
-                StrokeKind::Inside,
-            );
-            let mark = Stroke::new(1.0, outline);
-            match caption {
-                Caption::Close => {}
-                Caption::Maximize => {
-                    // A small box in the corner of the big one.
-                    let small = Rect::from_min_size(rect.min + vec2(1.5, 1.5), vec2(6.0, 6.0));
-                    painter.rect_stroke(small, CornerRadius::ZERO, mark, StrokeKind::Inside);
-                }
-                Caption::Minimize => {
-                    painter.hline(rect.x_range(), rect.center().y - 1.0, mark);
-                    painter.hline(rect.x_range(), rect.center().y + 1.0, mark);
-                }
-            }
+            super::platinum::paint_caption(painter, rect, caption, press, state, dark)
         }
     }
 }
 
-/// Windows' caption symbols in `ink`, `weight` thick.
-fn glyph(
+/// Windows 95's and 98's caption symbols, pixel for pixel, in a 16 by
+/// 14 button whose top left is `at`.
+fn retro_glyph(
     painter: &Painter,
-    rect: Rect,
+    at: egui::Pos2,
     caption: Caption,
     maximized: bool,
     ink: Color32,
-    weight: f32,
+    face: Color32,
 ) {
-    let c = rect.center();
-    let stroke = Stroke::new(weight, ink);
-    let unit = (rect.height() / 16.0).max(0.8);
+    let px = |x: f32, y: f32, w: f32, h: f32| {
+        painter.rect_filled(
+            Rect::from_min_size(at + vec2(x, y), vec2(w, h)),
+            CornerRadius::ZERO,
+            ink,
+        );
+    };
+    // A window: its outline and a thick top.
+    let window = |x: f32, y: f32, w: f32, h: f32, top: f32| {
+        px(x, y, w, top);
+        px(x, y + h - 1.0, w, 1.0);
+        px(x, y, 1.0, h);
+        px(x + w - 1.0, y, 1.0, h);
+    };
     match caption {
-        Caption::Minimize => {
-            let y = c.y + 3.0 * unit;
-            painter.line_segment(
-                [pos2(c.x - 4.0 * unit, y), pos2(c.x + 2.0 * unit, y)],
-                stroke,
+        Caption::Minimize => px(4.0, 9.0, 6.0, 2.0),
+        Caption::Maximize if maximized => {
+            window(5.0, 2.0, 6.0, 6.0, 2.0);
+            // The front window hides the back one's corner.
+            painter.rect_filled(
+                Rect::from_min_size(at + vec2(3.0, 5.0), vec2(6.0, 6.0)),
+                CornerRadius::ZERO,
+                face,
             );
+            window(3.0, 5.0, 6.0, 6.0, 2.0);
         }
-        Caption::Maximize => {
-            let size = 8.0 * unit;
-            let box_at = |min: egui::Pos2| {
-                let r = Rect::from_min_size(min, vec2(size, size * 0.85));
-                painter.rect_stroke(
-                    r,
-                    CornerRadius::ZERO,
-                    Stroke::new(weight * 0.6, ink),
-                    StrokeKind::Inside,
-                );
-                painter.hline(r.x_range(), r.top() + weight * 0.6, stroke);
-            };
-            if maximized {
-                let small = size * 0.75;
-                let back = c + vec2(-small / 2.0 + 1.5 * unit, -small / 2.0 - 1.5 * unit);
-                let front = c + vec2(-small / 2.0 - 1.0 * unit, -small / 2.0 + 1.0 * unit);
-                for min in [back, front] {
-                    let r = Rect::from_min_size(min, vec2(small, small * 0.85));
-                    painter.rect_stroke(
-                        r,
-                        CornerRadius::ZERO,
-                        Stroke::new(weight * 0.6, ink),
-                        StrokeKind::Inside,
-                    );
-                    painter.hline(r.x_range(), r.top() + weight * 0.5, stroke);
-                }
-            } else {
-                box_at(c - vec2(size / 2.0, size * 0.85 / 2.0));
-            }
-        }
+        Caption::Maximize => window(3.0, 2.0, 9.0, 9.0, 2.0),
         Caption::Close => {
-            let arm = 3.5 * unit;
-            painter.line_segment([c - vec2(arm, arm), c + vec2(arm, arm)], stroke);
-            painter.line_segment([c + vec2(-arm, arm), c + vec2(arm, -arm)], stroke);
+            // Two pixels wide, crossing in the middle.
+            let rows: [&[(f32, f32)]; 7] = [
+                &[(0.0, 2.0), (6.0, 2.0)],
+                &[(1.0, 2.0), (5.0, 2.0)],
+                &[(2.0, 4.0)],
+                &[(3.0, 2.0)],
+                &[(2.0, 4.0)],
+                &[(1.0, 2.0), (5.0, 2.0)],
+                &[(0.0, 2.0), (6.0, 2.0)],
+            ];
+            for (y, spans) in rows.iter().enumerate() {
+                for &(x, w) in *spans {
+                    px(4.0 + x, 3.0 + y as f32, w, 1.0);
+                }
+            }
         }
     }
 }
@@ -857,7 +574,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
     let (font, ink, centered) = match style {
         Family::Modern => return,
         Family::Retro => (
-            theme::bold(13.0),
+            theme::bold(12.0),
             if state.active {
                 ink_on(from)
             } else {
@@ -867,7 +584,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         ),
         Family::Luna => (theme::title(15.0), Color32::WHITE, false),
         Family::Glass => (
-            theme::font(14.0),
+            theme::font(12.5),
             if palette.dark {
                 Color32::WHITE
             } else {
@@ -885,7 +602,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             true,
         ),
         Family::Platinum => (
-            theme::bold(13.0),
+            theme::bold(12.0),
             if state.active {
                 palette.ink
             } else {
@@ -903,7 +620,10 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         );
         (None, text)
     } else {
-        let left = bar.left() + if style == Family::Glass { 8.0 } else { 4.0 };
+        // Vista's and 7's icon sits 8 pixels in from the window's edge,
+        // or the screen's when maximized.
+        let glass = style == Family::Glass && bar.left() > 0.5;
+        let left = bar.left() + if glass { -2.0 } else { 4.0 };
         let icon_rect =
             Rect::from_center_size(pos2(left + icon / 2.0, bar.center().y), vec2(icon, icon));
         (
@@ -920,20 +640,14 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             painter.galley_with_override_text_color(
                 text_at + vec2(1.0, 1.0),
                 galley.clone(),
-                faded(darker(from, 0.6), 0.85),
+                if palette.dark {
+                    Color32::BLACK
+                } else {
+                    faded(rgb(0x0f1089), 0.85)
+                },
             );
         }
-        Family::Glass => {
-            let glow = if palette.dark {
-                Color32::from_black_alpha(150)
-            } else {
-                Color32::from_white_alpha(200)
-            };
-            painter.add(
-                RectShape::filled(area.expand2(vec2(10.0, 3.0)), CornerRadius::same(10), glow)
-                    .with_blur_width(14.0),
-            );
-        }
+        Family::Glass => super::aero::paint_title_glow(painter, area, palette.dark),
         Family::Gel if !palette.dark => {
             painter.galley_with_override_text_color(
                 text_at + vec2(0.0, 1.0),
@@ -942,11 +656,9 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             );
         }
         Family::Platinum if state.active => {
-            painter.rect_filled(
-                area.expand2(vec2(6.0, 0.0)),
-                CornerRadius::ZERO,
-                palette.canvas,
-            );
+            for (from, to) in super::platinum::stripe_spans(bar, area) {
+                super::platinum::stripes(painter, bar, from, to, palette.dark);
+            }
         }
         _ => {}
     }
@@ -1033,7 +745,8 @@ mod tests {
         assert!(captions(Style::Modern, window()).is_empty());
         for style in FRAMED {
             let metrics = metrics(style).unwrap();
-            assert!(metrics.title >= 20.0, "{style:?}");
+            // Windows 98's 18 is the shortest.
+            assert!(metrics.title >= 18.0, "{style:?}");
             assert!(metrics.side >= 1.0, "{style:?}");
         }
     }
@@ -1075,8 +788,12 @@ mod tests {
                 "{style:?}"
             );
             for (i, (caption, rect)) in buttons.iter().enumerate() {
-                assert!(bar.contains_rect(*rect), "{style:?} {caption:?}");
-                assert!(rect.width() >= 12.0, "{style:?} {caption:?}");
+                // Mac OS 9's boxes reach a pixel into the frame.
+                assert!(
+                    bar.expand2(vec2(1.0, 0.0)).contains_rect(*rect),
+                    "{style:?} {caption:?}"
+                );
+                assert!(rect.width() >= 11.0, "{style:?} {caption:?}");
                 // Left to right, without overlapping.
                 if let Some((_, next)) = buttons.get(i + 1) {
                     assert!(rect.right() <= next.left(), "{style:?} {caption:?}");
@@ -1239,7 +956,9 @@ mod tests {
                             paint_title(ui, bar, "PkgDeck", &palette, state);
                         })
                     });
-                    assert!(shapes.len() > 5, "{at}");
+                    // Mac OS 9 behind, filling the screen, is a plain grey bar
+                    // and its title.
+                    assert!(shapes.len() >= 2, "{at}");
                     for shape in &shapes {
                         // Glows may spill out; they're clipped by the window.
                         if matches!(shape, Shape::Rect(rect) if rect.blur_width > 0.0) {
@@ -1266,8 +985,7 @@ mod tests {
 
     #[test]
     fn the_edges_resize_and_the_corners_resize_both_ways() {
-        let retro = metrics(Style::Retro).unwrap();
-        let at = |x, y| edge_at(retro, window(), pos2(x, y));
+        let at = |x, y| edge_at(Style::Retro, window(), pos2(x, y));
         assert_eq!(at(320.0, 1.0), Some(ResizeDirection::North));
         assert_eq!(at(320.0, 399.0), Some(ResizeDirection::South));
         assert_eq!(at(1.0, 200.0), Some(ResizeDirection::West));
@@ -1288,15 +1006,54 @@ mod tests {
         assert_eq!(at(-1.0, 200.0), None);
         assert_eq!(at(641.0, 1.0), None);
         // Glass's thick border reaches further in.
-        let glass = metrics(Style::Glass).unwrap();
         assert_eq!(
-            edge_at(glass, window(), pos2(6.0, 200.0)),
+            edge_at(Style::Glass, window(), pos2(6.0, 200.0)),
             Some(ResizeDirection::West)
         );
         assert_eq!(
-            edge_at(glass, window(), pos2(18.0, 1.0)),
+            edge_at(Style::Glass, window(), pos2(18.0, 1.0)),
             Some(ResizeDirection::NorthWest)
         );
+        assert_eq!(edge_at(Style::Modern, window(), pos2(1.0, 1.0)), None);
+    }
+
+    #[test]
+    fn hidden_boxes_take_no_clicks() {
+        let bar = Rect::from_min_max(pos2(6.0, 1.0), pos2(634.0, 22.0));
+        for active in [false, true] {
+            let state = WindowState {
+                maximized: false,
+                active,
+            };
+            for style in Style::ALL
+                .into_iter()
+                .filter(|&style| metrics(style).is_some())
+            {
+                let live = live_captions(style, bar, state).len();
+                let hidden = style.family() == Family::Platinum && !active;
+                assert_eq!(live == 0, hidden, "{style:?} {active}");
+            }
+        }
+    }
+
+    #[test]
+    fn title_bar_buttons_in_the_edge_still_click() {
+        // Vista and 7 hang theirs from the top, inside the resize border.
+        for style in Style::ALL {
+            let Some(metrics) = metrics(style) else {
+                continue;
+            };
+            let (bar, _) = layout(metrics, window(), false);
+            for (caption, rect) in captions(style, bar) {
+                for point in [rect.center(), rect.center_top() + vec2(0.0, 0.5)] {
+                    assert_eq!(
+                        edge_at(style, window(), point),
+                        None,
+                        "{style:?} {caption:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

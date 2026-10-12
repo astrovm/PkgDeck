@@ -3,12 +3,17 @@
 //! dialogs, toasts). Each part is its own module.
 
 mod activity;
+mod aero;
 mod dialogs;
 mod frame;
+mod gel;
 pub mod icons;
 mod list;
+mod luna;
 mod page;
+mod platinum;
 mod settings_page;
+mod shade;
 mod skin;
 pub mod theme;
 pub mod widgets;

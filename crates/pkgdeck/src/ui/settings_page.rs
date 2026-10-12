@@ -7,8 +7,7 @@ use crate::{
     app::App,
     model::{self, Tone},
     settings::{
-        Accent, Appearance, DarkTheme, Density, Family, LightTheme, Style, TextSize, Theme,
-        Typeface,
+        Accent, Appearance, DarkTheme, Density, Family, LightTheme, Style, TextSize, Typeface,
     },
     theme::{self, Palette},
 };
@@ -273,7 +272,6 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.reduce_motion = !on;
             }
         });
-        theme_files(app, ui);
     });
 }
 
@@ -463,63 +461,6 @@ fn paint_wheel(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
         mesh.add_triangle(0, step + 1, step + 2);
     }
     painter.add(mesh);
-}
-
-/// Saving the look to a file and loading one.
-fn theme_files(app: &mut App, ui: &mut Ui) {
-    let palette = Palette::current(ui.ctx());
-    let error_id = Id::new("theme-file-error");
-    setting_row(
-        ui,
-        "Theme file",
-        "Share a look, or use someone else's",
-        vec2(220.0, 34.0),
-        |ui| {
-            ui.horizontal(|ui| {
-                if Button::new(Look::Secondary, "Export")
-                    .icon("external")
-                    .small()
-                    .show(ui)
-                    .clicked()
-                {
-                    let dialog = rfd::FileDialog::new()
-                        .set_title("Export theme")
-                        .set_file_name(format!("{}.toml", app.settings.style.name()))
-                        .add_filter("Theme", &["toml"]);
-                    if let Some(path) = dialog.save_file() {
-                        let error = Theme::of(&app.settings)
-                            .write(&path)
-                            .err()
-                            .map(|error| format!("Couldn't save the theme: {error}"));
-                        ui.data_mut(|data| data.insert_temp(error_id, error));
-                    }
-                }
-                if Button::new(Look::Secondary, "Import")
-                    .icon("install")
-                    .small()
-                    .show(ui)
-                    .clicked()
-                {
-                    let dialog = rfd::FileDialog::new()
-                        .set_title("Import theme")
-                        .add_filter("Theme", &["toml"]);
-                    if let Some(path) = dialog.pick_file() {
-                        let error = match Theme::read(&path) {
-                            Ok(theme) => {
-                                theme.apply(&mut app.settings);
-                                None
-                            }
-                            Err(error) => Some(error.to_string()),
-                        };
-                        ui.data_mut(|data| data.insert_temp(error_id, error));
-                    }
-                }
-            });
-        },
-    );
-    if let Some(Some(error)) = ui.data(|data| data.get_temp::<Option<String>>(error_id)) {
-        ui.label(egui::RichText::new(error).color(palette.danger));
-    }
 }
 
 fn position<T: PartialEq>(all: &[T], current: T) -> usize {

@@ -388,9 +388,101 @@ pub fn monogram(id: &str) -> &str {
     }
 }
 
+/// Outlines, each a list of points.
+pub type Shapes = std::rc::Rc<[Vec<(f32, f32)>]>;
+
+/// The convex shapes icon `name` closes: each stroke that comes back to
+/// where it started, up to that point. Found once per icon, since every
+/// frame paints them.
+pub fn closed_shapes(name: &str) -> Shapes {
+    thread_local! {
+        static FOUND: std::cell::RefCell<std::collections::HashMap<String, Shapes>> = Default::default();
+    }
+    FOUND.with_borrow_mut(|found| {
+        if let Some(shapes) = found.get(name) {
+            return shapes.clone();
+        }
+        let shapes: Shapes = find_closed_shapes(name).into();
+        found.insert(name.to_owned(), shapes.clone());
+        shapes
+    })
+}
+
+fn find_closed_shapes(name: &str) -> Vec<Vec<(f32, f32)>> {
+    strokes(name)
+        .iter()
+        .filter_map(|line| {
+            let points: Vec<(f32, f32)> = line.chunks(2).map(|xy| (xy[0], xy[1])).collect();
+            let start = *points.first()?;
+            let end = points.iter().skip(3).position(|&p| p == start)? + 3;
+            let shape = points[..end].to_vec();
+            convex(&shape).then_some(shape)
+        })
+        .collect()
+}
+
+/// Whether `points` turn the same way at every corner.
+fn convex(points: &[(f32, f32)]) -> bool {
+    let n = points.len();
+    let turns: Vec<f32> = (0..n)
+        .map(|i| {
+            let (a, b, c) = (points[i], points[(i + 1) % n], points[(i + 2) % n]);
+            (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0)
+        })
+        .filter(|turn| turn.abs() > 1e-3)
+        .collect();
+    n >= 3 && (turns.iter().all(|t| *t > 0.0) || turns.iter().all(|t| *t < 0.0))
+}
+
+/// The whole circles icon `name` draws, as centre and radius: the lens of
+/// search, the faces of info and the clock.
+pub fn rings(name: &str) -> &'static [(f32, f32, f32)] {
+    match name {
+        "search" => &[(10.0, 10.0, 7.0)],
+        "info" | "help" | "clock" => &[(12.0, 12.0, 10.0)],
+        "system-image" => &[(12.0, 12.0, 9.5)],
+        "rustup" => &[(12.0, 12.0, 7.5)],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_convex_outlines_are_the_shapes_to_fill() {
+        // The package's hexagon, stopping where it closes.
+        assert_eq!(
+            closed_shapes("package").to_vec(),
+            [vec![
+                (3.0, 7.0),
+                (12.0, 2.0),
+                (21.0, 7.0),
+                (21.0, 17.0),
+                (12.0, 22.0),
+                (3.0, 17.0)
+            ]]
+        );
+        assert_eq!(closed_shapes("discover").len(), 4);
+        // Open strokes fill nothing.
+        assert!(closed_shapes("cancel").is_empty());
+        assert!(closed_shapes("installed").is_empty());
+        // Squares turn one way; an L doesn't, nor do too few points.
+        assert!(convex(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]));
+        assert!(convex(&[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]));
+        assert!(!convex(&[
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0)
+        ]));
+        assert!(!convex(&[(0.0, 0.0), (1.0, 1.0)]));
+        assert_eq!(rings("search"), [(10.0, 10.0, 7.0)]);
+        assert!(rings("package").is_empty());
+    }
     use std::collections::HashSet;
 
     #[test]

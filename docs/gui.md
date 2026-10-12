@@ -538,13 +538,25 @@ out of date, and each page refreshes when you open it.
     bar.
   - **Windows 98**: like 95, with a title bar fading from navy to blue.
   - **Windows XP**: glossy blue bars and rounded buttons.
-  - **Vista**: dark, smoky glass and a blue to green side pane.
-  - **Windows 7**: light, sky-blue glass.
+  - **Vista**: glass, joined window buttons and a blue to green side pane.
+  - **Windows 7**: sky-blue glass over Explorer's white.
   - **Mac OS 9**: light grey with fine bevels and a striped title bar.
   - **Jaguar**: gel buttons on pinstripes, after Mac OS X 10.2.
   - **Panther**: gel buttons on brushed metal, after Mac OS X 10.3.
   - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
-  - Every style but **Modern** draws its own title bar and window buttons.
+  - Every style but **Modern** draws its own title bar and window buttons,
+    measured from screenshots of the real desktop.
+  - Every style has the same layout. The older ones draw icons in colour,
+    and Aqua stripes its lists in pale blue.
+  - In dark mode, the older styles take the dark look their maker shipped:
+    High Contrast Black for Windows 95 and 98, Royale Noir for XP, Media
+    Center for Windows 7, Graphite for Vista and Hi-Tech for Mac OS 9.
+    Jaguar, Panther and Tiger turn the matte grey and slate of Apple's dark
+    pro apps.
+  - **Vista** and **Windows 7** blur what's behind the window on KDE Plasma
+    and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
+    copy of your wallpaper; other desktops get painted glass. Set
+    `PKGDECK_NO_BLUR=1` to never blur.
   - Picking a style also picks the accent it was made with.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
@@ -557,16 +569,16 @@ out of date, and each page refreshes when you open it.
 - **Roundness** (all but Windows 95 and 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
-- **Font**: **Style** (the style's own font when it's installed, such as
-  Tahoma or Lucida Grande, else Inter), **Inter** or **System**.
+- **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
+  font, or a free copy of it: MS Sans Serif's pixels for Windows 95 and 98,
+  Tahoma for XP, Segoe UI for Vista and 7, Chicago for Mac OS 9's titles
+  and Lucida Grande for Jaguar to Tiger. Where one isn't installed, the
+  closest font that is.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
-- **Theme file**: **Export** saves the style, colours, accent, roundness,
-  density and font as a `.toml` file. **Import** loads one. Light or dark,
-  text size and animations stay as you set them.
 - **Background checks**, **Check every**, **Update apps and packages
   automatically**, **Allow updates that remove packages**, **Update system
   packages without a password** and **Start in background at login**: see

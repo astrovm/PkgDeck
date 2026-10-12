@@ -832,14 +832,20 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
     });
+    if let Some(stripe) = skin::row_stripe(&palette, index).filter(|_| !selected) {
+        ui.painter()
+            .rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
+    }
     // The selected row's own background slides in `selection_highlight`.
-    let fill = alpha(palette.ink, hover * 0.045 * (1.0 - chosen));
-    let mut fill = fill;
+    skin::paint_row_hover(ui.painter(), surface, &palette, hover * (1.0 - chosen));
     if let Some(flash) = flash {
-        fill = mix(fill, alpha(palette.success, 0.2), flash);
+        ui.painter().rect_filled(
+            surface,
+            theme::round(10),
+            alpha(palette.success, 0.2 * flash),
+        );
         ctx.request_repaint();
     }
-    ui.painter().rect_filled(surface, theme::round(10), fill);
     let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
@@ -865,6 +871,23 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         painter.multiply_opacity(0.55);
     }
     let compact = width == Width::Compact;
+    // The column the list is sorted by, shaded where the style does.
+    if let (Some(tint), Some((column, _)), false) =
+        (skin::sorted_column_tint(&palette), app.sort, selected)
+    {
+        let area = match column {
+            Column::Name => Some(cols.name),
+            Column::Version => cols.version,
+            Column::Summary => cols.summary,
+        };
+        if let Some(area) = area {
+            let shade = Rect::from_min_max(
+                pos2(area.left() - 8.0, rect.top()),
+                pos2(area.right() + 4.0, rect.bottom()),
+            );
+            painter.rect_filled(shade, 0.0, tint);
+        }
+    }
 
     // Check box on Updates.
     if let Some(tick) = cols.tick {
@@ -1168,9 +1191,9 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
             rect.shrink(rect.width() * 0.24)
         };
         if row.kind == "failure" {
-            theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
+            theme::paint_colour_icon(ui.painter(), mark, "warning", palette.accent);
         } else {
-            theme::paint_source_icon(ui.painter(), mark, &row.source, palette.accent);
+            theme::paint_colour_source_icon(ui.painter(), mark, &row.source, palette.accent);
         }
     };
     let uri = row

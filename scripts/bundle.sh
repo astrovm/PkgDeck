@@ -46,6 +46,9 @@ done
 mkdir -p "$out/usr/share/licenses/pkgdeck"
 cp LICENSE "$out/usr/share/licenses/pkgdeck/"
 cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$out/usr/share/licenses/pkgdeck/INTER-OFL"
+cp crates/pkgdeck/assets/fonts/Selawik-LICENSE.txt "$out/usr/share/licenses/pkgdeck/SELAWIK-OFL"
+cp crates/pkgdeck/assets/fonts/W95FA-LICENSE.txt "$out/usr/share/licenses/pkgdeck/W95FA-OFL"
+cp crates/pkgdeck/assets/fonts/ChicagoFLF-LICENSE.txt "$out/usr/share/licenses/pkgdeck/CHICAGOFLF"
 cp native/COPYING "$out/usr/share/licenses/pkgdeck/APT-HELPER-GPL-2"
 apt_library=$(ldd "$out/usr/bin/pkgdeck-apt-query" | awk '/libapt-pkg/{print $1}')
 apt_package=$(dpkg-query -S "/usr/lib/$(gcc -dumpmachine)/$apt_library" | head -1 | cut -d: -f1)

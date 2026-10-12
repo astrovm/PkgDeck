@@ -31,7 +31,61 @@ pub struct Palette {
     pub success: Color32,
     pub warning: Color32,
     pub heart: Color32,
+    /// Vista's and 7's glass colour, its alpha the colour intensity, from
+    /// the swatches they shipped.
+    pub glass: Color32,
     pub dark: bool,
+}
+/// The glass colour Windows Vista or 7 shipped closest to `accent`, its
+/// alpha the colour intensity; dark windows take the deep swatches.
+fn glass_color(style: Style, accent: Accent, custom: Option<Color32>, dark: bool) -> Color32 {
+    let argb: u32 = if style == Style::Vista {
+        match accent {
+            // Graphite, Vista's smoky black glass.
+            Accent::Blue if dark => 0xA3000000,
+            // Default.
+            Accent::Blue => 0x45409EFE,
+            Accent::Graphite => 0xA3000000,
+            // Blue.
+            Accent::Navy => 0xA8004ADE,
+            // Teal.
+            Accent::Teal | Accent::Green => 0x82008CA5,
+            Accent::Red => 0x9CCE0C0F,
+            Accent::Orange => 0xA6FF7700,
+            // Pink.
+            Accent::Pink | Accent::Purple | Accent::Lavender => 0x49F93EE7,
+            Accent::Custom => 0x80000000,
+        }
+    } else {
+        match accent {
+            // Twilight.
+            Accent::Blue | Accent::Navy if dark => 0xA80046AD,
+            // Sky, 7's default.
+            Accent::Blue => 0x6B74B8FC,
+            Accent::Navy => 0xA80046AD,
+            // Sea.
+            Accent::Teal => 0x8032CDCD,
+            // Leaf.
+            Accent::Green => 0x6614A600,
+            // Ruby.
+            Accent::Red => 0xA8CE0F0F,
+            // Pumpkin.
+            Accent::Orange => 0x80FF9C00,
+            // Fuchsia.
+            Accent::Pink => 0x66FF0099,
+            // Violet.
+            Accent::Purple => 0x856E3BA1,
+            Accent::Lavender => 0x528D5A94,
+            // Slate.
+            Accent::Graphite => 0x80555555,
+            Accent::Custom => 0x80000000,
+        }
+    };
+    let [a, r, g, b] = argb.to_be_bytes();
+    match custom {
+        Some(color) => Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a),
+        None => Color32::from_rgba_unmultiplied(r, g, b, a),
+    }
 }
 fn tint(color: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -153,6 +207,16 @@ impl Skin {
 }
 thread_local! {
     static SKIN: std::cell::Cell<Skin> = std::cell::Cell::new(Skin::default());
+    static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Whether this thread's window lets the desktop show through its glass,
+/// blurred: the desktop blurs behind it and the style has glass.
+pub fn see_through() -> bool {
+    SEE_THROUGH.with(std::cell::Cell::get)
+}
+/// Sets [`see_through`] for this thread's window.
+pub fn set_see_through(see_through: bool) {
+    SEE_THROUGH.with(|cell| cell.set(see_through));
 }
 /// The style this thread's window shows.
 pub fn skin() -> Skin {
@@ -273,17 +337,18 @@ impl Palette {
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             },
-            // The grey of the old desktops, turned down.
-            (Family::Retro, true) => (0x3a3a3a, 0x1e1e1e, 0xf2f2f2, 0xbdbdbd),
+            // Windows' own dark: High Contrast Black.
+            (Family::Retro, true) => (0x000000, 0x000000, 0xffffff, 0xc0c0c0),
             (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
             (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
             (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
-            (Family::Glass, true) => (0x0b1017, 0x151d28, 0xe8eef5, 0x95a3b5),
-            (Family::Glass, false) => (0xd8e3f0, 0xfbfcfe, 0x1e1e1e, 0x56606c),
-            (Family::Gel, true) => (0x262626, 0x313131, 0xeeeeee, 0xa3a3a3),
+            // Explorer's white; in the dark, Media Center's blue.
+            (Family::Glass, true) => (0x04142f, 0x0b2148, 0xeef3fa, 0x9fb4d3),
+            (Family::Glass, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
+            (Family::Gel, true) => (0x1f1f1f, 0x2b2b2b, 0xe6e6e6, 0x9c9c9c),
             (Family::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
             (Family::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
-            (Family::Platinum, false) => (0xdddddd, 0xeeeeee, 0x000000, 0x4a4a4a),
+            (Family::Platinum, false) => (0xdddddd, 0xffffff, 0x000000, 0x4a4a4a),
         }
     }
 
@@ -291,10 +356,10 @@ impl Palette {
         // Canvas, surface, ink and muted text: Modern's come from the chosen
         // theme, the other styles bring their own.
         let (canvas, surface, ink, muted) = match (scheme.style, dark) {
-            // Vista's glass is deeper; Panther's brushed metal and Tiger's
-            // plain grey replace Jaguar's pinstriped white.
+            // Vista's dark is Graphite's near-black; Panther's brushed
+            // metal and Tiger's plain grey replace Jaguar's pinstriped white.
             (Style::Vista, true) => (0x080c12, 0x141b25, 0xe8eef5, 0x95a3b5),
-            (Style::Vista, false) => (0xbfd1e8, 0xfbfcfe, 0x1e1e1e, 0x4f5966),
+            (Style::Vista, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
             (Style::Panther, true) => (0x3a3a3a, 0x2b2b2b, 0xeeeeee, 0xa8a8a8),
             (Style::Panther, false) => (0xc4c4c4, 0xffffff, 0x000000, 0x474747),
             (Style::Tiger, true) => (0x2c2c2c, 0x343434, 0xeeeeee, 0xa3a3a3),
@@ -316,6 +381,21 @@ impl Palette {
                 readable_accent(color, Color32::BLACK, true),
             ),
             None => (rgb(on_light), rgb(on_dark)),
+        };
+        // The style's own accent in the dark takes what its dark scheme
+        // used: High Contrast Black's purple, Hi-Tech's blue.
+        let own = custom.is_none() && scheme.accent == scheme.style.accent();
+        let (deep, bright) = match (scheme.style.family(), dark && own) {
+            (Family::Retro, true) => (rgb(0x800080), rgb(0xff80ff)),
+            (Family::Platinum, true) => (rgb(0x0063ff), rgb(0x6aa5ff)),
+            // Aperture's and Logic's matte slate, not Aqua's bright gel.
+            (Family::Gel, true) => (rgb(0x3d5a80), rgb(0x8aaee0)),
+            _ => (deep, bright),
+        };
+        let accent = if dark && own && scheme.style.family() == Family::Platinum {
+            bright
+        } else {
+            accent
         };
         Self {
             canvas,
@@ -346,6 +426,7 @@ impl Palette {
             success: rgb(if dark { 0x6fd39a } else { 0x1b7a45 }),
             warning: rgb(if dark { 0xf2c56b } else { 0x9a6400 }),
             heart: rgb(0xe34b5f),
+            glass: glass_color(scheme.style, scheme.accent, custom, dark),
             dark,
         }
     }
@@ -485,6 +566,19 @@ const TAHOMA: &[(&str, &str)] = &[
         "System/Library/Fonts/Supplemental/Tahoma.ttf",
         "System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
     ),
+    // Drawn after Verdana, as Tahoma was, and narrow like it.
+    (
+        "usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+        "usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSansCondensed.ttf",
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSansCondensed-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/TTF/DejaVuSansCondensed.ttf",
+        "usr/share/fonts/TTF/DejaVuSansCondensed-Bold.ttf",
+    ),
     (
         "usr/share/fonts/truetype/msttcorefonts/Verdana.ttf",
         "usr/share/fonts/truetype/msttcorefonts/Verdana_Bold.ttf",
@@ -498,33 +592,8 @@ const TAHOMA: &[(&str, &str)] = &[
         "System/Library/Fonts/Supplemental/Verdana Bold.ttf",
     ),
 ];
-/// Windows 98's dialogs drew MS Sans Serif; its outline heirs, then Arial.
-const MS_SANS: &[(&str, &str)] = &[
-    (
-        "usr/share/wine/fonts/tahoma.ttf",
-        "usr/share/wine/fonts/tahomabd.ttf",
-    ),
-    (
-        "System/Library/Fonts/Supplemental/Microsoft Sans Serif.ttf",
-        "System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    ),
-    (
-        "usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
-        "usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
-    ),
-    (
-        "usr/share/fonts/msttcore/arial.ttf",
-        "usr/share/fonts/msttcore/arialbd.ttf",
-    ),
-    (
-        "usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ),
-    (
-        "usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-        "usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
-    ),
-];
+/// Windows 95 and 98 drew MS Sans Serif, a pixel font; W95FA redraws it.
+const MS_SANS: &[(&str, &str)] = &[("bundled:W95FA.otf", "bundled:W95FA-Bold.ttf")];
 /// XP's title bars: Trebuchet MS in bold.
 const TREBUCHET_BOLD: &[&str] = &[
     "usr/share/fonts/truetype/msttcorefonts/trebucbd.ttf",
@@ -555,29 +624,46 @@ const LUCIDA: &[(&str, &str)] = &[
         "usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
     ),
 ];
-const SEGOE: &[(&str, &str)] = &[
+/// Vista and 7 drew Segoe UI; Microsoft's Selawik is made to stand in.
+const SEGOE: &[(&str, &str)] = &[(
+    "bundled:Selawik-Regular.ttf",
+    "bundled:Selawik-Semibold.ttf",
+)];
+/// Mac OS 9 drew titles, menus and buttons in Charcoal or Chicago, and
+/// lists in Geneva: ChicagoFLF for the first, a plain sans for the rest.
+const CHICAGO: &[(&str, &str)] = &[
+    ("System/Library/Fonts/Geneva.ttf", "bundled:ChicagoFLF.ttf"),
     (
-        "usr/share/fonts/truetype/selawik/selawk.ttf",
-        "usr/share/fonts/truetype/selawik/selawkb.ttf",
+        "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "bundled:ChicagoFLF.ttf",
     ),
     (
-        "usr/share/fonts/selawik/selawk.ttf",
-        "usr/share/fonts/selawik/selawkb.ttf",
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "bundled:ChicagoFLF.ttf",
     ),
-    // Noto Sans is drawn much like it.
+    (
+        "usr/share/fonts/TTF/DejaVuSans.ttf",
+        "bundled:ChicagoFLF.ttf",
+    ),
     (
         "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "bundled:ChicagoFLF.ttf",
     ),
-    (
-        "usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "usr/share/fonts/noto/NotoSans-Bold.ttf",
-    ),
-    (
-        "usr/share/fonts/google-noto/NotoSans-Regular.ttf",
-        "usr/share/fonts/google-noto/NotoSans-Bold.ttf",
-    ),
+    ("bundled:Inter-Regular.ttf", "bundled:ChicagoFLF.ttf"),
 ];
+
+/// A font PkgDeck carries, by the name its list gives it.
+fn bundled(path: &str) -> Option<&'static [u8]> {
+    Some(match path.strip_prefix("bundled:")? {
+        "W95FA.otf" => include_bytes!("../../assets/fonts/W95FA.otf"),
+        "W95FA-Bold.ttf" => include_bytes!("../../assets/fonts/W95FA-Bold.ttf"),
+        "Selawik-Regular.ttf" => include_bytes!("../../assets/fonts/Selawik-Regular.ttf"),
+        "Selawik-Semibold.ttf" => include_bytes!("../../assets/fonts/Selawik-Semibold.ttf"),
+        "ChicagoFLF.ttf" => include_bytes!("../../assets/fonts/ChicagoFLF.ttf"),
+        "Inter-Regular.ttf" => include_bytes!("../../assets/fonts/Inter-Regular.ttf"),
+        _ => return None,
+    })
+}
 
 /// Which faces draw text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -596,7 +682,8 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
         Typeface::Style => match style.family() {
             Family::Retro => Face::Style(MS_SANS),
             Family::Luna => Face::Style(TAHOMA),
-            Family::Gel | Family::Platinum => Face::Style(LUCIDA),
+            Family::Gel => Face::Style(LUCIDA),
+            Family::Platinum => Face::Style(CHICAGO),
             Family::Glass => Face::Style(SEGOE),
             Family::Modern => Face::Inter,
         },
@@ -617,7 +704,7 @@ pub fn set_font_root(ctx: &egui::Context, root: &Path) {
 /// [`fonts`], with `face` first.
 pub fn fonts_with(root: &Path, face: Face) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-    let read = |path: &str| mapped(&root.join(path));
+    let read = |path: &str| bundled(path).or_else(|| mapped(&root.join(path)));
     let defaults = fonts.families[&FontFamily::Proportional].clone();
     fonts.font_data.insert(
         "inter".into(),
@@ -837,9 +924,177 @@ pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32
 
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
+    if skin().family() != Family::Modern && name != "heart" {
+        icon_fills(painter, rect, name, color);
+    }
+    icon_lines(painter, rect, name, color);
+}
+
+/// The colour an icon takes where the older styles draw icons in colour,
+/// as theirs were: boxes in cardboard, checks and arrows in green, bins
+/// and gears in grey, and each source in its own colour.
+pub fn icon_hue(name: &str) -> Option<Color32> {
+    let hex: u32 = match name {
+        "package" | "apt" | "discover" | "toolbox" | "distrobox" => 0xc89a55,
+        "search" | "filter" | "info" | "help" | "clock" => 0x4f86c6,
+        "installed" | "updates" | "up" | "refresh" | "macos-updates" | "fwupd" => 0x2e9b3a,
+        "install" | "down" | "flatpak" | "appimage" | "macos-apps" | "mas" => 0x3f7fd0,
+        "remove" | "settings" | "sources" | "dev-caches" | "duplicates" | "system-image" => {
+            0x8a95a3
+        }
+        "activity" | "npm" | "gem" => 0xc8392f,
+        "projects" | "bell" | "lock" | "warning" | "homebrew" | "homebrew-cask" => 0xe0a526,
+        "snap" => 0x6fb38f,
+        "docker" => 0x2496ed,
+        "podman" | "mise" => 0x8a3fa0,
+        "cargo" | "rustup" | "composer" => 0xb5541c,
+        "pnpm" | "bun" => 0xe8822a,
+        "pip" | "pipx" | "uv" => 0x3a6fb0,
+        _ => return None,
+    };
+    Some(Color32::from_rgb(
+        (hex >> 16) as u8,
+        (hex >> 8) as u8,
+        hex as u8,
+    ))
+}
+
+/// Icon `name` in colour, as the older styles drew toolbars, trees and
+/// lists: its closed shapes filled in its hue, shaded where the style
+/// shaded, inside a darker outline; `ink`'s alpha fades it. Modern, and
+/// icons without a hue, keep `ink`.
+pub fn paint_colour_icon(painter: &Painter, rect: Rect, name: &str, ink: Color32) {
+    let family = skin().family();
+    let Some(hue) = icon_hue(name).filter(|_| family != Family::Modern) else {
+        return paint_icon(painter, rect, name, ink);
+    };
+    let opacity = f32::from(ink.a()) / 255.0;
+    let (top, bottom, outline) = icon_tones(family, hue);
+    let fade = |color: Color32| color.gamma_multiply(opacity);
     let scale = rect.width() / 24.0;
     let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
-    let stroke = Stroke::new((1.7 * scale).max(1.0), color);
+    for polygon in icons::closed_shapes(name).iter() {
+        let points: Vec<Pos2> = polygon.iter().map(|&(x, y)| at(x, y)).collect();
+        shaded_polygon(painter, &points, fade(top), fade(bottom));
+    }
+    for &(x, y, radius) in icons::rings(name) {
+        painter.circle_filled(at(x, y), radius * scale, fade(over(top, bottom, 0.5)));
+    }
+    // A filled shape takes a thin outline, so its colour reads; lines
+    // alone, a check or an arrow, are drawn bold in the colour itself.
+    if icons::closed_shapes(name).is_empty() && icons::rings(name).is_empty() {
+        icon_lines_wide(
+            painter,
+            rect,
+            name,
+            fade(over(hue, Color32::BLACK, 0.12)),
+            2.4,
+        );
+    } else {
+        icon_lines_wide(painter, rect, name, fade(outline), 1.3);
+    }
+}
+
+/// A coloured icon's fill, top and bottom, and its outline: flat with a
+/// black edge on Windows 95 and Mac OS 9, shaded from light on XP, 7 and
+/// Aqua.
+fn icon_tones(family: Family, hue: Color32) -> (Color32, Color32, Color32) {
+    match family {
+        Family::Retro | Family::Platinum => {
+            let fill = over(hue, Color32::WHITE, 0.15);
+            (fill, fill, over(hue, Color32::BLACK, 0.75))
+        }
+        _ => (
+            over(hue, Color32::WHITE, 0.55),
+            hue,
+            over(hue, Color32::BLACK, 0.45),
+        ),
+    }
+}
+
+/// A convex polygon shaded from `top` at its highest point to `bottom` at
+/// its lowest.
+fn shaded_polygon(painter: &Painter, points: &[Pos2], top: Color32, bottom: Color32) {
+    if points.len() < 3 {
+        return;
+    }
+    let (high, low) = points.iter().fold((f32::MAX, f32::MIN), |(high, low), p| {
+        (high.min(p.y), low.max(p.y))
+    });
+    let mut mesh = egui::Mesh::default();
+    for point in points {
+        let t = (point.y - high) / (low - high).max(0.001);
+        mesh.colored_vertex(*point, over(top, bottom, t));
+    }
+    for i in 1..points.len() as u32 - 1 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// A source's mark in colour: its drawn icon, or its letters in white on
+/// a box of its colour.
+pub fn paint_colour_source_icon(painter: &Painter, rect: Rect, id: &str, ink: Color32) {
+    let family = skin().family();
+    if family == Family::Modern || icons::drawn(id) {
+        return if icons::drawn(id) {
+            paint_colour_icon(painter, rect, id, ink)
+        } else {
+            paint_source_icon(painter, rect, id, ink)
+        };
+    }
+    let hue = icon_hue(id).unwrap_or(ink);
+    let (top, bottom, outline) = icon_tones(family, hue);
+    let scale = rect.width() / 24.0;
+    let tile = rect.shrink(2.5 * scale);
+    super::skin::gradient(
+        painter,
+        tile,
+        CornerRadius::same((4.0 * scale) as u8),
+        top,
+        bottom,
+        false,
+    );
+    painter.rect_stroke(
+        tile,
+        CornerRadius::same((4.0 * scale) as u8),
+        Stroke::new((1.2 * scale).max(1.0), outline),
+        egui::StrokeKind::Inside,
+    );
+    let letters = icons::monogram(id);
+    let letters = if rect.width() < 16.0 {
+        letters.get(..1).unwrap_or("")
+    } else {
+        letters
+    };
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letters,
+        bold(rect.height() * 0.42),
+        ink_on_hue(bottom),
+    );
+}
+
+/// White on a dark hue, black on a light one.
+fn ink_on_hue(hue: Color32) -> Color32 {
+    if luminance(hue) < 0.4 {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
+}
+
+/// Icon `name`'s strokes and arcs in `color`.
+fn icon_lines(painter: &Painter, rect: Rect, name: &str, color: Color32) {
+    icon_lines_wide(painter, rect, name, color, 1.7);
+}
+
+/// [`icon_lines`], `width` wide in the icon's 24-unit grid.
+fn icon_lines_wide(painter: &Painter, rect: Rect, name: &str, color: Color32, width: f32) {
+    let scale = rect.width() / 24.0;
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
+    let stroke = Stroke::new((width * scale).max(1.0), color);
     if name == "heart" {
         // Filled: two lobes and the point below them.
         for x in [7.0, 17.0] {
@@ -890,6 +1145,34 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
             arc((12.0, 12.0), 9.0, 21.6, 158.4);
         }
         _ => {}
+    }
+}
+
+/// The tint inside an icon's closed shapes, so the older styles' icons
+/// read in two tones as theirs did: a light fill in a dark outline.
+/// A faded icon keeps its fill as faint as its outline.
+fn icon_fill(color: Color32) -> Color32 {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let solid = Color32::from_rgb(r, g, b);
+    let fill = if luminance(solid) < 0.5 {
+        over(solid, Color32::WHITE, 0.62)
+    } else {
+        solid.gamma_multiply(0.3)
+    };
+    fill.gamma_multiply(f32::from(a) / 255.0)
+}
+
+/// Fills the closed outlines and rings of icon `name` in [`icon_fill`].
+fn icon_fills(painter: &Painter, rect: Rect, name: &str, color: Color32) {
+    let scale = rect.width() / 24.0;
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
+    let fill = icon_fill(color);
+    for polygon in icons::closed_shapes(name).iter() {
+        let points: Vec<Pos2> = polygon.iter().map(|&(x, y)| at(x, y)).collect();
+        painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
+    }
+    for &(x, y, radius) in icons::rings(name) {
+        painter.circle_filled(at(x, y), radius * scale, fill);
     }
 }
 
@@ -947,6 +1230,35 @@ mod tests {
     }
 
     #[test]
+    fn old_desktops_go_dark_as_their_dark_schemes_did() {
+        let of = |style: Style, accent: Accent, dark| {
+            Palette::of(
+                Scheme {
+                    style,
+                    accent,
+                    ..Scheme::default()
+                },
+                dark,
+            )
+        };
+        // Windows 98 takes High Contrast Black, purple and all.
+        let black = of(Style::Retro, Accent::Navy, true);
+        assert_eq!((black.canvas, black.ink), (Color32::BLACK, Color32::WHITE));
+        assert_eq!(black.deep, rgb(0x800080));
+        // Mac OS 9 takes Hi-Tech's blue.
+        let hi_tech = of(Style::Platinum, Accent::Lavender, true);
+        assert_eq!(hi_tech.deep, rgb(0x0063ff));
+        assert_eq!(hi_tech.accent, hi_tech.bright);
+        // Aqua turns to the slate of Apple's dark pro apps.
+        assert_eq!(of(Style::Tiger, Accent::Blue, true).deep, rgb(0x3d5a80));
+        assert_ne!(of(Style::Tiger, Accent::Blue, false).deep, rgb(0x3d5a80));
+        // In the light, or with an accent picked by hand, they don't.
+        assert_eq!(of(Style::Retro, Accent::Navy, false).deep, rgb(0x000080));
+        assert_eq!(of(Style::Retro, Accent::Teal, true).deep, rgb(0x0b7580));
+        assert_ne!(of(Style::Platinum, Accent::Green, true).deep, rgb(0x0063ff));
+    }
+
+    #[test]
     fn every_style_reads_in_light_and_dark_with_every_accent() {
         for (scheme, dark) in schemes() {
             let palette = Palette::of(scheme, dark);
@@ -983,8 +1295,9 @@ mod tests {
                     }
                 }
             }
-            // Vista, Panther and Tiger bring their own colours.
-            assert_ne!(colours(Style::Vista), colours(Style::Glass));
+            // Vista's dark, Panther and Tiger bring their own colours;
+            // Vista and 7 share Explorer's white.
+            assert_eq!(colours(Style::Vista) == colours(Style::Glass), !dark);
             assert_ne!(colours(Style::Panther), colours(Style::Gel));
             assert_ne!(colours(Style::Tiger), colours(Style::Gel));
             assert_ne!(colours(Style::Tiger), colours(Style::Panther));
@@ -1118,11 +1431,64 @@ mod tests {
         assert_eq!(face(Style::Retro, Typeface::Style), Face::Style(MS_SANS));
         assert_eq!(face(Style::Luna, Typeface::Style), Face::Style(TAHOMA));
         assert_eq!(face(Style::Gel, Typeface::Style), Face::Style(LUCIDA));
-        assert_eq!(face(Style::Platinum, Typeface::Style), Face::Style(LUCIDA));
+        assert_eq!(face(Style::Platinum, Typeface::Style), Face::Style(CHICAGO));
         for style in Style::ALL {
             assert_eq!(face(style, Typeface::Inter), Face::Inter);
             assert_eq!(face(style, Typeface::System), Face::System);
         }
+    }
+
+    #[test]
+    fn carried_faces_load_with_nothing_installed() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-carried-{}", std::process::id()));
+        for list in [MS_SANS, SEGOE, CHICAGO] {
+            let fonts = fonts_with(&root, Face::Style(list));
+            assert_eq!(fonts.families[&FontFamily::Proportional][0], "style");
+            assert_eq!(fonts.families[&bold_family()][0], "style-bold");
+        }
+        // Each draws its own letters: the same words come out another width
+        // than in Inter.
+        let width = |fonts: FontDefinitions, family: FontFamily| {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(fonts);
+            let mut width = 0.0;
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(Default::default(), |ui| {
+                    width = ui
+                        .painter()
+                        .layout_no_wrap(
+                            "Installed packages".into(),
+                            FontId::new(14.0, family.clone()),
+                            Color32::BLACK,
+                        )
+                        .size()
+                        .x;
+                });
+                output.textures_delta.clear();
+            }
+            width
+        };
+        for family in [FontFamily::Proportional, bold_family()] {
+            let inter = width(fonts_with(&root, Face::Inter), family.clone());
+            for list in [MS_SANS, SEGOE] {
+                let own = width(fonts_with(&root, Face::Style(list)), family.clone());
+                assert!((own - inter).abs() > 1.0, "{family:?} {own} {inter}");
+            }
+        }
+        let chicago = width(fonts_with(&root, Face::Style(CHICAGO)), bold_family());
+        let inter = width(fonts_with(&root, Face::Inter), bold_family());
+        assert!((chicago - inter).abs() > 1.0);
+        // Every carried name in every list is one PkgDeck has.
+        for list in [MS_SANS, SEGOE, CHICAGO, TAHOMA, LUCIDA] {
+            for path in list.iter().flat_map(|(a, b)| [*a, *b]) {
+                assert!(
+                    !path.starts_with("bundled:") || bundled(path).is_some(),
+                    "{path}"
+                );
+            }
+        }
+        assert_eq!(bundled("bundled:Nope.ttf"), None);
+        assert_eq!(bundled("W95FA.otf"), None);
     }
 
     #[test]
@@ -1218,6 +1584,41 @@ mod tests {
         assert_eq!(rings("system-image"), 2);
         assert_eq!(rings("rustup"), 2);
         assert_eq!(rings("package"), 0);
+    }
+
+    #[test]
+    fn old_styles_fill_their_icons_in_a_second_tone() {
+        let fills = |style: Style, color: Color32| {
+            let skin = Skin {
+                style,
+                ..Skin::default()
+            };
+            with_skin(skin, || {
+                paint(|painter| paint_icon(painter, square(0.0, 24.0), "package", color))
+            })
+            .iter()
+            .filter(|shape| matches!(shape, Shape::Path(path) if path.fill != Color32::TRANSPARENT))
+            .count()
+        };
+        assert_eq!(fills(Style::Modern, Color32::BLACK), 0);
+        assert_eq!(fills(Style::Retro, Color32::BLACK), 1);
+        // Light on dark, then dark on light.
+        assert!(luminance(icon_fill(Color32::BLACK)) > 0.25);
+        assert!(icon_fill(Color32::WHITE).a() < 255);
+        // A faded icon's fill fades with it.
+        let faded = icon_fill(Color32::from_black_alpha(128));
+        assert!((120..=136).contains(&faded.a()), "{faded:?}");
+        assert_eq!(icon_fill(Color32::TRANSPARENT).a(), 0);
+        let rings = with_skin(
+            Skin {
+                style: Style::Tiger,
+                ..Skin::default()
+            },
+            || paint(|painter| paint_icon(painter, square(0.0, 24.0), "search", Color32::BLACK)),
+        );
+        assert!(rings.iter().any(
+            |shape| matches!(shape, Shape::Circle(circle) if circle.fill != Color32::TRANSPARENT)
+        ));
     }
 
     #[test]
