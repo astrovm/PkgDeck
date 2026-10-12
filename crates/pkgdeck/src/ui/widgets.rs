@@ -529,16 +529,14 @@ pub fn paint_tick(ui: &Ui, rect: Rect, id: Id, checked: bool, enabled: bool, hov
     );
     let opacity = if enabled { 1.0 } else { 0.42 };
     let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-    let Some(ink) = skin::paint_check(
+    let ink = skin::paint_check(
         ui.painter(),
         box_rect,
         &palette,
         t,
         hovered && enabled,
         opacity,
-    ) else {
-        return;
-    };
+    );
     if t > 0.01 {
         let scale = t.max(0.0);
         let check = Rect::from_center_size(box_rect.center(), Vec2::splat(14.0 * scale));

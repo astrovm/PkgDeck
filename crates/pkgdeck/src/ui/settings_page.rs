@@ -206,7 +206,7 @@ fn appearance(app: &mut App, ui: &mut Ui) {
             }
             custom_swatch(ui, &mut app.settings);
         });
-        // Windows 95 and 98 are square whatever the roundness.
+        // Windows 98 is square whatever the roundness.
         if app.settings.style.family() != Family::Retro {
             // Quarter steps from square to twice the style's own.
             let mut step = (app.settings.roundness * 4.0).round().clamp(0.0, 8.0) as usize;

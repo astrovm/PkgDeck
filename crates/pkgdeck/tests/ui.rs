@@ -391,12 +391,8 @@ fn styles_and_their_choices_change_the_look() {
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Retro);
     assert_eq!(settings.accent, Accent::Navy);
-    // Windows 98 has its own colours and is always square, like 95.
+    // Windows 98 has its own colours and is always square.
     assert!(harness.query_by_label("Charcoal").is_none());
-    assert!(harness.query_by_label("Roundness").is_none());
-    harness.get_by_label("Windows 95").click();
-    harness.run_steps(3);
-    assert_eq!(harness.state().1.settings.style, Style::Win95);
     assert!(harness.query_by_label("Roundness").is_none());
     harness.get_by_label("Windows XP").click();
     harness.run_steps(3);

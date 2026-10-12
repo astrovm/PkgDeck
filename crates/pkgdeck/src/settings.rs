@@ -94,32 +94,26 @@ impl Accent {
     }
 }
 
-/// The shape of everything: corners, borders, depth and shine, after one
-/// version of a desktop from the past, or today's flat look.
+/// The shape of everything: corners, borders, depth and shine, after a
+/// desktop from the past, or today's flat look. Names of styles PkgDeck
+/// no longer has read as the closest one left.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Style {
     /// Flat and rounded.
     #[default]
     Modern,
-    /// Windows 95: grey bevels and a solid navy title bar.
-    Win95,
     /// Windows 98: grey bevels and a navy title bar fading to blue.
+    #[serde(alias = "win95")]
     Retro,
     /// Windows XP's blue Luna.
     Luna,
-    /// Windows Vista: dark, smoky glass.
-    Vista,
     /// Windows 7: light, sky-blue glass.
+    #[serde(alias = "vista")]
     Glass,
-    /// Mac OS 9's Platinum.
-    Platinum,
-    /// Mac OS X 10.2 Jaguar: Aqua on pinstripes.
-    Gel,
-    /// Mac OS X 10.3 Panther: Aqua on brushed metal.
-    Panther,
-    /// Mac OS X 10.4 Tiger: Aqua with plain grey title bars.
-    Tiger,
+    /// Mac OS X's Aqua, as Tiger drew it: gel buttons, plain grey title bars.
+    #[serde(alias = "tiger", alias = "gel", alias = "panther", alias = "platinum")]
+    Aqua,
 }
 
 /// The desktop a style is a version of. Versions of one desktop share how
@@ -127,54 +121,41 @@ pub enum Style {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Family {
     Modern,
-    /// Windows 95 and 98.
+    /// Windows 98.
     Retro,
     /// Windows XP.
     Luna,
-    /// Windows Vista and 7.
+    /// Windows 7.
     Glass,
     /// Mac OS X.
     Gel,
-    /// Mac OS 9.
-    Platinum,
 }
 
 impl Style {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 5] = [
         Self::Modern,
-        Self::Win95,
         Self::Retro,
         Self::Luna,
-        Self::Vista,
         Self::Glass,
-        Self::Platinum,
-        Self::Gel,
-        Self::Panther,
-        Self::Tiger,
+        Self::Aqua,
     ];
     pub fn name(self) -> &'static str {
         match self {
             Self::Modern => "Modern",
-            Self::Win95 => "Windows 95",
             Self::Retro => "Windows 98",
             Self::Luna => "Windows XP",
-            Self::Vista => "Vista",
             Self::Glass => "Windows 7",
-            Self::Platinum => "Mac OS 9",
-            Self::Gel => "Jaguar",
-            Self::Panther => "Panther",
-            Self::Tiger => "Tiger",
+            Self::Aqua => "Aqua",
         }
     }
     /// The desktop this style is a version of.
     pub fn family(self) -> Family {
         match self {
             Self::Modern => Family::Modern,
-            Self::Win95 | Self::Retro => Family::Retro,
+            Self::Retro => Family::Retro,
             Self::Luna => Family::Luna,
-            Self::Vista | Self::Glass => Family::Glass,
-            Self::Platinum => Family::Platinum,
-            Self::Gel | Self::Panther | Self::Tiger => Family::Gel,
+            Self::Glass => Family::Glass,
+            Self::Aqua => Family::Gel,
         }
     }
     /// The accent the style was made with, picked when it's chosen.
@@ -182,7 +163,6 @@ impl Style {
         match self.family() {
             Family::Modern | Family::Luna | Family::Glass | Family::Gel => Accent::Blue,
             Family::Retro => Accent::Navy,
-            Family::Platinum => Accent::Lavender,
         }
     }
 }
@@ -757,7 +737,7 @@ mod tests {
             ("null", 1.0),
         ] {
             let text = format!(
-                r#"{{"style":"aqua","density":"tiny","typeface":"comic","roundness":{roundness}}}"#
+                r#"{{"style":"bubbles","density":"tiny","typeface":"comic","roundness":{roundness}}}"#
             );
             let settings: Settings = serde_json::from_str(&text).unwrap();
             assert_eq!(settings.roundness, read, "{roundness}");
@@ -766,7 +746,7 @@ mod tests {
             assert_eq!(settings.typeface, Typeface::Style);
         }
         let saved = Settings {
-            style: Style::Platinum,
+            style: Style::Aqua,
             accent: Accent::Custom,
             custom_accent: "#ff8800".into(),
             roundness: 1.5,
@@ -784,7 +764,7 @@ mod tests {
         assert_eq!(names.len(), Style::ALL.len());
         assert_eq!(Style::Modern.accent(), Accent::Blue);
         assert_eq!(Style::Retro.accent(), Accent::Navy);
-        assert_eq!(Style::Platinum.accent(), Accent::Lavender);
+        assert_eq!(Style::Aqua.accent(), Accent::Blue);
         for style in Style::ALL {
             assert!(Accent::ALL.contains(&style.accent()));
             // Versions of one desktop share its accent.
@@ -804,13 +784,8 @@ mod tests {
             [
                 Family::Modern,
                 Family::Retro,
-                Family::Retro,
                 Family::Luna,
                 Family::Glass,
-                Family::Glass,
-                Family::Platinum,
-                Family::Gel,
-                Family::Gel,
                 Family::Gel,
             ]
         );
@@ -823,11 +798,15 @@ mod tests {
             })
             .into();
         assert_eq!(saved.len(), Style::ALL.len());
+        // Styles PkgDeck dropped read as the closest one left.
         for (text, style) in [
-            ("\"win95\"", Style::Win95),
-            ("\"vista\"", Style::Vista),
-            ("\"panther\"", Style::Panther),
-            ("\"tiger\"", Style::Tiger),
+            ("\"win95\"", Style::Retro),
+            ("\"retro\"", Style::Retro),
+            ("\"vista\"", Style::Glass),
+            ("\"tiger\"", Style::Aqua),
+            ("\"gel\"", Style::Aqua),
+            ("\"panther\"", Style::Aqua),
+            ("\"platinum\"", Style::Aqua),
         ] {
             assert_eq!(serde_json::from_str::<Style>(text).unwrap(), style);
         }

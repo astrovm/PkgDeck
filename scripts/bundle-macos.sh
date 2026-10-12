@@ -26,7 +26,6 @@ cp LICENSE "$contents/Resources/licenses/PkgDeck"
 cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$contents/Resources/licenses/Inter"
 cp crates/pkgdeck/assets/fonts/Selawik-LICENSE.txt "$contents/Resources/licenses/Selawik"
 cp crates/pkgdeck/assets/fonts/W95FA-LICENSE.txt "$contents/Resources/licenses/W95FA"
-cp crates/pkgdeck/assets/fonts/ChicagoFLF-LICENSE.txt "$contents/Resources/licenses/ChicagoFLF"
 # sudo's password prompt for Homebrew casks that need administrator access.
 install -m 755 packaging/macos/pkgdeck-askpass "$contents/Resources/pkgdeck-askpass"
 iconset=$work/PkgDeck.iconset
