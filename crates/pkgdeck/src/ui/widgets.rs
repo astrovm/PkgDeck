@@ -369,13 +369,7 @@ impl<'a> Button<'a> {
                     Pos2::new(x, rect.center().y - icon_size / 2.0),
                     Vec2::splat(icon_size),
                 );
-                // Toolbar buttons show their icons in colour, as the
-                // older desktops' toolbars did.
-                if matches!(self.look, Look::Flat) {
-                    theme::paint_colour_icon(painter, icon_rect, icon, ink);
-                } else {
-                    theme::paint_icon(painter, icon_rect, icon, ink);
-                }
+                theme::paint_icon(painter, icon_rect, icon, ink);
                 x += icon_size + 8.0;
             } else if let Some(galley) = &galley {
                 x = center - galley.size().x / 2.0;
@@ -404,18 +398,7 @@ pub fn icon_button(
     color: Color32,
     enabled: bool,
 ) -> Response {
-    icon_button_sized(ui, 32.0, icon, tooltip, color, enabled)
-}
-
-/// [`icon_button`], `size` across.
-pub fn icon_button_sized(
-    ui: &mut Ui,
-    size: f32,
-    icon: &str,
-    tooltip: &str,
-    color: Color32,
-    enabled: bool,
-) -> Response {
+    let size = 32.0;
     let sense = if enabled {
         Sense::click()
     } else {
@@ -439,7 +422,7 @@ pub fn icon_button_sized(
         );
         theme::paint_icon(
             ui.painter(),
-            Rect::from_center_size(rect.center(), Vec2::splat((size * 0.56).round())),
+            Rect::from_center_size(rect.center(), Vec2::splat(18.0)),
             icon,
             alpha(color, opacity),
         );

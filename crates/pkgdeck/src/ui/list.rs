@@ -8,26 +8,16 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui,
-    UiBuilder, Vec2,
+    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Vec2,
 };
 
 const ROW: f32 = 60.0;
 /// A wide row's height at the chosen density.
 fn wide_row() -> f32 {
-    (ROW * skin::list_look().row_scale * theme::skin().density.scale()).round()
+    (ROW * theme::skin().density.scale()).round()
 }
 const ROW_COMPACT: f32 = 78.0;
-/// What the chosen row grows by where it opens to show its buttons.
-const OPENED: f32 = 34.0;
-
-/// Whether row `index` is open, showing its buttons under it.
-fn opened(app: &App, index: usize, width: Width) -> bool {
-    skin::chosen_row_opens()
-        && skin::list_look().one_line
-        && width != Width::Compact
-        && app.selected_index() == Some(index)
-}
 const GROUP_HEADING: f32 = 36.0;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -73,10 +63,10 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         Width::Wide
     };
     let mut top = rect.top();
-    let in_list = skin::page_chrome().status == skin::StatusAt::List;
-    if in_list && counted(app) {
+    let heading_shown = !app.items.is_empty() || app.busy || app.writing;
+    if heading_shown {
         let heading = Rect::from_min_size(rect.min, vec2(rect.width(), 48.0));
-        heading_row(app, ui, heading, palette.muted);
+        heading_row(app, ui, heading);
         top = heading.bottom();
         ui.painter().line_segment(
             [pos2(rect.left(), top), pos2(rect.right(), top)],
@@ -101,22 +91,6 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         return;
     }
     rows(app, ui, body, width);
-}
-
-/// Whether the list has a count to show: rows, or rows on their way.
-fn counted(app: &App) -> bool {
-    !app.items.is_empty() || app.busy || app.writing
-}
-
-/// The status bar across `rect`, with the list's count and reload button
-/// on pages that list.
-pub fn status_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
-    let palette = Palette::current(ui.ctx());
-    let ink = skin::paint_status_bar(ui.painter(), rect, &palette);
-    let empty_search = app.page == Page::Search && app.query.trim().is_empty() && !app.busy;
-    if app.page.lists() && app.opened.is_none() && counted(app) && !empty_search {
-        heading_row(app, ui, rect.shrink2(vec2(0.0, 1.0)), ink);
-    }
 }
 
 fn search_prompt(app: &mut App, ui: &mut Ui, rect: Rect) {
@@ -188,12 +162,9 @@ fn waiting_text(names: &[String]) -> String {
     }
 }
 
-fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect, ink: Color32) {
+fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
-    let palette = Palette {
-        muted: ink,
-        ..Palette::current(&ctx)
-    };
+    let palette = Palette::current(&ctx);
     let inner = rect.shrink2(vec2(16.0, 0.0));
     ui.scope_builder(
         UiBuilder::new()
@@ -264,8 +235,6 @@ struct Columns {
     icon: Option<Rect>,
     name: Rect,
     version: Option<Rect>,
-    /// The source, where the style gives it a column of its own.
-    source: Option<Rect>,
     summary: Option<Rect>,
     actions: Rect,
 }
@@ -298,12 +267,7 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         r
     });
     let icon = (row.width() >= 420.0).then(|| {
-        let look = skin::list_look();
-        let size = if width == Width::Compact {
-            look.compact_icon
-        } else {
-            look.icon
-        };
+        let size = if width == Width::Compact { 40.0 } else { 36.0 };
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(size, row.height()));
         x += size + 12.0;
         r
@@ -338,27 +302,11 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         }
         Width::Compact => (available, 0.0, false),
     };
-    // The old details views give the source a column, after the version.
-    let source_w = if skin::list_look().one_line && width != Width::Compact {
-        (available * 0.16).clamp(72.0, 170.0)
-    } else {
-        0.0
-    };
-    let name_w = if width == Width::Medium {
-        (name_w - source_w - 12.0).max(60.0)
-    } else {
-        name_w
-    };
     let name = Rect::from_min_size(pos2(x, row.top()), vec2(name_w, row.height()));
     x += name_w + 12.0;
     let version = (width != Width::Compact).then(|| {
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(version_w, row.height()));
         x += version_w + 12.0;
-        r
-    });
-    let source = (source_w > 0.0 && right - x >= source_w).then(|| {
-        let r = Rect::from_min_size(pos2(x, row.top()), vec2(source_w, row.height()));
-        x += source_w + 12.0;
         r
     });
     let summary = (summary && right - x > 40.0)
@@ -370,7 +318,6 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         icon,
         name,
         version,
-        source,
         summary,
         actions: actions_rect,
     }
@@ -386,9 +333,6 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     let mut titles = vec![(Column::Name, "NAME", cols.name)];
     if let Some(v) = cols.version {
         titles.push((Column::Version, version_title, v));
-    }
-    if let Some(s) = cols.source {
-        titles.push((Column::Source, "SOURCE", s));
     }
     if let Some(s) = cols.summary {
         titles.push((Column::Summary, "SUMMARY", s));
@@ -588,10 +532,6 @@ fn row_height(app: &App, index: usize, width: Width) -> f32 {
     };
     base + if app.items[index].group.is_some() {
         GROUP_HEADING
-    } else {
-        0.0
-    } + if opened(app, index, width) {
-        OPENED
     } else {
         0.0
     }
@@ -873,16 +813,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         );
         rect.min.y += GROUP_HEADING;
     }
-    // An open row keeps its line at the top, its buttons under it.
-    let open = opened(app, index, width);
-    let whole = rect;
-    let rect = if open {
-        Rect::from_min_size(rect.min, vec2(rect.width(), wide_row()))
-    } else {
-        rect
-    };
     let id = Id::new(("row", &identity));
-    let response = ui.interact(whole.shrink2(vec2(6.0, 2.0)), id, Sense::click());
+    let response = ui.interact(rect.shrink2(vec2(6.0, 2.0)), id, Sense::click());
     let selected = app.selected.as_deref() == Some(identity.as_str());
     let hover = ease(
         &ctx,
@@ -896,14 +828,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         Some(ink) if selected => skin::on_fill(&palette, ink),
         _ => palette,
     };
-    let surface = whole.shrink2(vec2(6.0, 2.0));
+    let surface = rect.shrink2(vec2(6.0, 2.0));
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
     });
-    let look = skin::list_look();
     if let Some(stripe) = skin::row_stripe(&palette, index).filter(|_| !selected) {
         ui.painter()
-            .rect_filled(whole.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
+            .rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
     }
     // The selected row's own background slides in `selection_highlight`.
     skin::paint_row_hover(ui.painter(), surface, &palette, hover * (1.0 - chosen));
@@ -948,12 +879,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             Column::Name => Some(cols.name),
             Column::Version => cols.version,
             Column::Summary => cols.summary,
-            Column::Source => cols.source,
         };
         if let Some(area) = area {
             let shade = Rect::from_min_max(
-                pos2(area.left() - 8.0, whole.top()),
-                pos2(area.right() + 4.0, whole.bottom()),
+                pos2(area.left() - 8.0, rect.top()),
+                pos2(area.right() + 4.0, rect.bottom()),
             );
             painter.rect_filled(shade, 0.0, tint);
         }
@@ -985,206 +915,143 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     // Name and source.
     let title = row.title().to_owned();
     let line = model::source_line(&row, item.variants.len() > 1);
-    if look.one_line && !compact {
-        one_line_cells(
-            ui,
-            &painter,
-            &row,
-            &line,
-            &cols,
-            rect,
-            &palette,
-            held.as_ref(),
-            id,
-        );
+    let top_y = if line.is_empty() {
+        rect.center().y
+    } else if compact {
+        rect.top() + 14.0
     } else {
-        let top_y = if line.is_empty() {
-            rect.center().y
-        } else if compact {
-            rect.top() + 14.0
+        rect.center().y - 10.0
+    };
+    let name = one_line(
+        ui,
+        &title,
+        theme::bold(14.5),
+        palette.ink,
+        cols.name.width(),
+    );
+    painter.galley(
+        pos2(cols.name.left(), top_y - name.size().y / 2.0),
+        name,
+        palette.ink,
+    );
+    let sub = one_line(
+        ui,
+        &line,
+        theme::font(12.5),
+        palette.muted,
+        cols.name.width(),
+    );
+    painter.galley(pos2(cols.name.left(), top_y + 10.0), sub, palette.muted);
+    let version = model::version_text(&row);
+    let version_color = match row.kind.as_str() {
+        "failure" => palette.danger,
+        _ if row.has_update() => palette.accent,
+        _ => palette.muted,
+    };
+    if compact {
+        // Version in its own colour, then the summary in what's left. Every
+        // task here is a cache unless it says otherwise.
+        let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
+            String::new()
+        } else if left_out_of_clean_all(&row) {
+            format!("{version}, {LEFT_OUT}")
         } else {
-            rect.center().y - 10.0
+            version.clone()
         };
-        let name = one_line(
-            ui,
-            &title,
-            if look.bold_names {
-                theme::bold(14.5)
-            } else {
-                theme::font(14.5)
-            },
-            palette.ink,
-            cols.name.width(),
-        );
-        painter.galley(
-            pos2(cols.name.left(), top_y - name.size().y / 2.0),
-            name,
-            palette.ink,
-        );
-        let sub = one_line(
-            ui,
-            &line,
-            theme::font(12.5),
-            palette.muted,
-            cols.name.width(),
-        );
-        painter.galley(pos2(cols.name.left(), top_y + 10.0), sub, palette.muted);
-        let version = model::version_text(&row);
-        let version_color = match row.kind.as_str() {
-            "failure" => palette.danger,
-            _ if row.has_update() => palette.accent,
-            _ => palette.muted,
-        };
-        if compact {
-            // Version in its own colour, then the summary in what's left. Every
-            // task here is a cache unless it says otherwise.
-            let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
-                String::new()
-            } else if left_out_of_clean_all(&row) {
-                format!("{version}, {LEFT_OUT}")
-            } else {
-                version.clone()
-            };
-            let width = cols.name.width();
-            let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
-            let mut at = pos2(cols.name.left(), top_y + 30.0);
-            if let Some(held) = &held {
-                held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
-                at.x += 20.0;
-            }
-            // No version, no gap before the summary.
-            let used = version.size().x;
-            let gap = if used > 0.0 { 12.0 } else { 0.0 };
-            painter.galley(at, version, version_color);
-            if !row.summary.is_empty() && width - used > 40.0 {
-                let summary = one_line(
-                    ui,
-                    &row.summary,
-                    theme::font(12.5),
-                    palette.muted,
-                    width - used - gap,
-                );
-                painter.galley(at + vec2(used + gap, 0.0), summary, palette.muted);
-            }
+        let width = cols.name.width();
+        let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
+        let mut at = pos2(cols.name.left(), top_y + 30.0);
+        if let Some(held) = &held {
+            held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
+            at.x += 20.0;
         }
-        if let Some(v) = cols.version {
-            // An update reads the same on every page: the new version, and
-            // what it replaces under it.
-            if row.has_update() {
-                let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
-                let mut left = v.left();
-                if let Some(held) = &held {
-                    let mark = Rect::from_center_size(
-                        pos2(left + 8.0, rect.center().y - 10.0),
-                        Vec2::splat(16.0),
-                    );
-                    held_mark(ui, held, mark, id);
-                    left += 22.0;
-                }
-                let font = if look.fixed_versions {
-                    theme::mono(13.0)
-                } else {
-                    theme::font(13.0)
-                };
-                let galley = one_line(ui, &new, font, palette.accent, v.width());
-                painter.galley(
-                    pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
-                    galley,
-                    palette.accent,
-                );
-                if let Some(old) = row.installed.as_deref().filter(|o| !o.is_empty()) {
-                    let galley = one_line(
-                        ui,
-                        &format!("from {old}"),
-                        theme::font(12.0),
-                        palette.muted,
-                        v.width(),
-                    );
-                    painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
-                }
-            } else {
-                let font = if row.kind == "package" && look.fixed_versions {
-                    theme::mono(13.0)
-                } else {
-                    theme::font(13.0)
-                };
-                let galley = one_line(ui, &version, font, version_color, v.width());
-                if left_out_of_clean_all(&row) {
-                    painter.galley(
-                        pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
-                        galley,
-                        version_color,
-                    );
-                    let tag = one_line(ui, LEFT_OUT, theme::font(12.0), palette.warning, v.width());
-                    painter.galley(pos2(v.left(), rect.center().y + 2.0), tag, palette.warning);
-                } else {
-                    painter.galley(
-                        pos2(v.left(), rect.center().y - galley.size().y / 2.0),
-                        galley,
-                        version_color,
-                    );
-                }
-            }
-        }
-        if let Some(s) = cols.summary {
-            let galley = one_line(
+        // No version, no gap before the summary.
+        let used = version.size().x;
+        let gap = if used > 0.0 { 12.0 } else { 0.0 };
+        painter.galley(at, version, version_color);
+        if !row.summary.is_empty() && width - used > 40.0 {
+            let summary = one_line(
                 ui,
                 &row.summary,
-                theme::font(13.0),
+                theme::font(12.5),
                 palette.muted,
-                s.width(),
+                width - used - gap,
             );
-            painter.galley(
-                pos2(s.left(), rect.center().y - galley.size().y / 2.0),
-                galley,
-                palette.muted,
-            );
+            painter.galley(at + vec2(used + gap, 0.0), summary, palette.muted);
         }
     }
-    // Buttons. The old lists had none on their rows, so there they show
-    // on the row in hand only, sized to it.
-    let in_hand = !look.one_line
-        || compact
-        || selected
-        || (ui.rect_contains_pointer(surface) && !retaining)
-        || running;
-    let side = if look.one_line && !compact {
-        22.0
-    } else {
-        34.0
-    };
-    let mut x = cols.actions.right();
-    if open {
-        if let Some(action) = action.filter(|_| !page_open_here) {
-            let enabled = running || (app.can_act() && !retaining);
-            let label = if running { "Cancel" } else { action.label() };
-            let area = Rect::from_min_max(
-                pos2(whole.right() - 132.0, rect.bottom() + 2.0),
-                pos2(whole.right() - 14.0, whole.bottom() - 4.0),
+    if let Some(v) = cols.version {
+        // An update reads the same on every page: the new version, and
+        // what it replaces under it.
+        if row.has_update() {
+            let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
+            let mut left = v.left();
+            if let Some(held) = &held {
+                let mark = Rect::from_center_size(
+                    pos2(left + 8.0, rect.center().y - 10.0),
+                    Vec2::splat(16.0),
+                );
+                held_mark(ui, held, mark, id);
+                left += 22.0;
+            }
+            let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
+            painter.galley(
+                pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
+                galley,
+                palette.accent,
             );
-            let mut child = ui.new_child(
-                UiBuilder::new()
-                    .max_rect(area)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            );
-            let clicked = Button::new(Look::Secondary, label)
-                .small()
-                .min_width(96.0)
-                .enabled(enabled)
-                .id_salt(("open-row", &identity))
-                .show(&mut child)
-                .clicked();
-            if clicked {
-                if running {
-                    app.cancel();
-                } else {
-                    app.run_row_action(index);
-                }
+            if let Some(old) = row.installed.as_deref().filter(|o| !o.is_empty()) {
+                let galley = one_line(
+                    ui,
+                    &format!("from {old}"),
+                    theme::font(12.0),
+                    palette.muted,
+                    v.width(),
+                );
+                painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
+            }
+        } else {
+            let font = if row.kind == "package" {
+                theme::mono(13.0)
+            } else {
+                theme::font(13.0)
+            };
+            let galley = one_line(ui, &version, font, version_color, v.width());
+            if left_out_of_clean_all(&row) {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
+                let tag = one_line(ui, LEFT_OUT, theme::font(12.0), palette.warning, v.width());
+                painter.galley(pos2(v.left(), rect.center().y + 2.0), tag, palette.warning);
+            } else {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
             }
         }
     }
-    if let Some(action) = action.filter(|_| !page_open_here && in_hand && !open) {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(side));
+    if let Some(s) = cols.summary {
+        let galley = one_line(
+            ui,
+            &row.summary,
+            theme::font(13.0),
+            palette.muted,
+            s.width(),
+        );
+        painter.galley(
+            pos2(s.left(), rect.center().y - galley.size().y / 2.0),
+            galley,
+            palette.muted,
+        );
+    }
+    // Buttons.
+    let mut x = cols.actions.right();
+    if let Some(action) = action.filter(|_| !page_open_here) {
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
         x -= 38.0;
         let enabled = running || (app.can_act() && !retaining);
         // Coloured only on the row in hand, so a long list isn't a wall of
@@ -1225,7 +1092,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             }
         };
         let mut child = ui.new_child(UiBuilder::new().max_rect(button));
-        if icon_button_sized(&mut child, side - 2.0, icon, &tip, color, enabled).clicked() {
+        if icon_button(&mut child, icon, &tip, color, enabled).clicked() {
             if running {
                 app.cancel();
             } else {
@@ -1233,13 +1100,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             }
         }
     }
-    if pull && !running && in_hand && !open {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(side));
+    if pull && !running {
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
         let mut child = ui.new_child(UiBuilder::new().max_rect(button));
         let tip = format!("Pull {title} from {line}");
-        if icon_button_sized(
+        if icon_button(
             &mut child,
-            side - 2.0,
             "updates",
             &tip,
             palette.accent,
@@ -1268,15 +1134,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     // Divider.
-    if look.dividers {
-        painter.line_segment(
-            [
-                pos2(rect.left() + 18.0, rect.bottom()),
-                pos2(rect.right() - 18.0, rect.bottom()),
-            ],
-            Stroke::new(1.0, alpha(palette.line, 0.55)),
-        );
-    }
+    painter.line_segment(
+        [
+            pos2(rect.left() + 18.0, rect.bottom()),
+            pos2(rect.right() - 18.0, rect.bottom()),
+        ],
+        Stroke::new(1.0, alpha(palette.line, 0.55)),
+    );
     let accessible = format!(
         "{}{}{title}, {line}, {}",
         held.as_ref()
@@ -1313,92 +1177,6 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         app.choose(index, true);
     }
     response.hovered().then_some(item.raw)
-}
-
-/// A row of the old details views: every column on one line.
-#[allow(clippy::too_many_arguments)]
-fn one_line_cells(
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    row: &Row,
-    line: &str,
-    cols: &Columns,
-    rect: Rect,
-    palette: &Palette,
-    held: Option<&model::Held>,
-    id: Id,
-) {
-    let look = skin::list_look();
-    let y = rect.center().y;
-    let font = theme::font(look.text);
-    let put = |at: f32, galley: std::sync::Arc<egui::Galley>, color: Color32| {
-        painter.galley(pos2(at, y - galley.size().y / 2.0), galley, color);
-    };
-    let name_font = if look.bold_names {
-        theme::bold(look.text)
-    } else {
-        font.clone()
-    };
-    put(
-        cols.name.left(),
-        one_line(ui, row.title(), name_font, palette.ink, cols.name.width()),
-        palette.ink,
-    );
-    if let Some(v) = cols.version {
-        let mut left = v.left();
-        if let Some(held) = held {
-            held_mark(
-                ui,
-                held,
-                Rect::from_center_size(pos2(left + 8.0, y), Vec2::splat(15.0)),
-                id,
-            );
-            left += 20.0;
-        }
-        let room = v.right() - left;
-        // The new version, then what it replaces, as far as it fits.
-        let (first, color, then, then_color) = if row.has_update() {
-            let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
-            let old = row
-                .installed
-                .as_deref()
-                .filter(|old| !old.is_empty())
-                .map(|old| format!(" from {old}"));
-            (new, palette.accent, old, palette.muted)
-        } else {
-            let color = if row.kind == "failure" {
-                palette.danger
-            } else {
-                palette.muted
-            };
-            let tag = left_out_of_clean_all(row).then(|| format!(", {LEFT_OUT}"));
-            (model::version_text(row), color, tag, palette.warning)
-        };
-        let galley = one_line(ui, &first, font.clone(), color, room);
-        let used = galley.size().x;
-        put(left, galley, color);
-        if let Some(then) = then.filter(|_| room - used > 24.0) {
-            put(
-                left + used,
-                one_line(ui, &then, font.clone(), then_color, room - used),
-                then_color,
-            );
-        }
-    }
-    if let Some(s) = cols.source {
-        put(
-            s.left(),
-            one_line(ui, line, font.clone(), palette.muted, s.width()),
-            palette.muted,
-        );
-    }
-    if let Some(s) = cols.summary {
-        put(
-            s.left(),
-            one_line(ui, &row.summary, font, palette.muted, s.width()),
-            palette.muted,
-        );
-    }
 }
 
 /// An app's icon, or its source's mark.

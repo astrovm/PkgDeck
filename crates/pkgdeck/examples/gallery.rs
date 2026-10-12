@@ -4,7 +4,7 @@
 //! the shots whose name has `text`.
 
 use eframe::egui;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::Harness;
 use pkgdeck::{
     app::{Launch, Toast, ToastAction},
     model::{self, Page, Tone},
@@ -144,17 +144,6 @@ fn offline(app: &mut App, page: Page) {
 }
 
 fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)) {
-    render_then(name, size, dark, prepare, None);
-}
-
-/// [`render`], clicking what's labelled `click` first.
-fn render_then(
-    name: &str,
-    size: [f32; 2],
-    dark: bool,
-    prepare: impl FnOnce(&mut App),
-    click: Option<&str>,
-) {
     let args: Vec<String> = std::env::args().collect();
     if let Some(only) = args
         .iter()
@@ -190,10 +179,6 @@ fn render_then(
             (false, app),
         );
     harness.run_steps(40);
-    if let Some(label) = click {
-        harness.get_by_label(label).click();
-        harness.run_steps(10);
-    }
     let image = harness.render().expect("render");
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/gallery");
     std::fs::create_dir_all(&dir).unwrap();
@@ -373,23 +358,6 @@ fn main() {
                     app.selected = Some(app.rows[app.items[1].raw].identity());
                 },
             );
-            // The menu bar's View menu, open, where the style has one.
-            if matches!(
-                style.family(),
-                pkgdeck::settings::Family::Retro | pkgdeck::settings::Family::Luna
-            ) {
-                render_then(
-                    &format!("style-{name}-menu-{mode}"),
-                    [1180.0, 780.0],
-                    dark,
-                    |app| {
-                        app.settings.style = style;
-                        app.settings.accent = style.accent();
-                        offline(app, Page::Installed);
-                    },
-                    Some("View"),
-                );
-            }
             render(
                 &format!("style-{name}-settings-{mode}"),
                 [1180.0, 1100.0],

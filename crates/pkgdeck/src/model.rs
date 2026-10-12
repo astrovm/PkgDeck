@@ -1146,7 +1146,6 @@ pub enum Column {
     Name,
     Version,
     Summary,
-    Source,
 }
 impl Column {
     pub fn key(self) -> &'static str {
@@ -1154,7 +1153,6 @@ impl Column {
             Column::Name => "name",
             Column::Version => "version",
             Column::Summary => "summary",
-            Column::Source => "source",
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
@@ -1162,7 +1160,6 @@ impl Column {
             "name" => Some(Column::Name),
             "version" => Some(Column::Version),
             "summary" | "status" => Some(Column::Summary),
-            "source" => Some(Column::Source),
             _ => None,
         }
     }
@@ -1232,7 +1229,6 @@ fn sort_key(row: &Row, column: Column) -> String {
             .unwrap_or_default()
             .to_lowercase(),
         Column::Summary => row.summary.to_lowercase(),
-        Column::Source => format!("{} {}", row_source_name(row), row.title()).to_lowercase(),
     }
 }
 

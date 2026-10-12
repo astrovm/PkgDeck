@@ -546,11 +546,8 @@ out of date, and each page refreshes when you open it.
   - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop.
-  - The older styles also lay out the page as their desktops did: the
-    page's name in the title bar, its buttons on a toolbar, and the count
-    of what's listed in a status bar along the bottom (Mac OS 9: in a
-    header under the title bar). Lists pack their rows tighter, Aqua's
-    stripe in pale blue, and icons take a second, lighter tone.
+  - Every style has the same layout. The older ones draw icons in colour,
+    and Aqua stripes its lists in pale blue.
   - In dark mode, the older styles take the dark look their maker shipped:
     High Contrast Black for Windows 95 and 98, Royale Noir for XP, Media
     Center for Windows 7, Graphite for Vista and Hi-Tech for Mac OS 9.

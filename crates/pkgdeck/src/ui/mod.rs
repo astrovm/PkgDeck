@@ -10,8 +10,6 @@ mod gel;
 pub mod icons;
 mod list;
 mod luna;
-mod menu;
-mod nav;
 mod page;
 mod platinum;
 mod settings_page;
@@ -105,64 +103,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(&ctx);
     let window = ui.max_rect();
     // The older styles draw the window's own frame around the app.
-    let title = skin::window_title(app.page.name());
-    let inside = frame::show(ui, window, &title, &palette);
-    let full = inside;
+    let full = frame::show(ui, window, "PkgDeck", &palette);
     skin::paint_canvas(ui.painter(), full, &palette);
-    // The older desktops count what's listed in a bar across the window.
-    let (full, status) = match skin::page_chrome().status {
-        skin::StatusAt::List => (full, None),
-        skin::StatusAt::Bottom => {
-            let top = full.bottom() - skin::STATUS_HEIGHT;
-            (
-                Rect::from_min_max(full.min, pos2(full.right(), top)),
-                Some(Rect::from_min_max(pos2(full.left(), top), full.max)),
-            )
-        }
-        skin::StatusAt::Top => {
-            let bottom = full.top() + skin::STATUS_HEIGHT;
-            (
-                Rect::from_min_max(pos2(full.left(), bottom), full.max),
-                Some(Rect::from_min_max(full.min, pos2(full.right(), bottom))),
-            )
-        }
-    };
-    if let Some(status) = status {
-        list::status_bar(app, ui, status);
-    }
-    // Windows before Vista put a menu bar under the title.
-    let full = menu::take(app, ui, full);
-    // A toolbar runs the window's width under the title bar, as Explorer's
-    // and Aqua's did, with the page's buttons from the left.
-    let band = Rect::from_min_size(full.min, vec2(full.width(), skin::TOOLBAR_HEIGHT));
-    let banded = !skin::page_chrome().heading && skin::paint_toolbar(ui.painter(), band, &palette);
-    let full = if banded {
-        let row = Rect::from_center_size(band.center(), vec2(band.width() - 28.0, 38.0));
-        ui.scope_builder(UiBuilder::new().max_rect(row).id_salt("toolbar"), |ui| {
-            header(app, ui);
-        });
-        Rect::from_min_max(pos2(full.left(), band.bottom()), full.max)
-    } else {
-        full
-    };
     let rail = full.width() < RAIL_BELOW;
-    let navigation = skin::nav();
     let sidebar_width = glide(
         &ctx,
         Id::new("sidebar-width"),
-        match navigation {
-            skin::Nav::Tabs => 0.0,
-            _ if rail => 68.0,
-            other => nav::width(other),
-        },
+        if rail { 68.0 } else { 224.0 },
         LAYOUT,
     );
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
-    content_ui(app, ui, content, banded);
-    // The drawer dims the toolbar and the status bar too.
-    activity::drawer(app, ui, inside);
+    content_ui(app, ui, content);
+    activity::drawer(app, ui, full);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
     frame::edges(ui, window);
@@ -302,12 +256,6 @@ fn dropped_files(app: &mut App, ctx: &egui::Context) {
 // Sidebar
 
 fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
-    match skin::nav() {
-        skin::Nav::Tabs => return,
-        skin::Nav::Rail => {}
-        _ if rail => {}
-        _ => return nav::side(app, ui, rect),
-    }
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
     let painter = ui.painter_at(rect);
@@ -478,31 +426,18 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
 // ---------------------------------------------------------------------------
 // The page
 
-fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect, toolbar_shown: bool) {
+fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     let margin = if rect.width() + 224.0 < RAIL_BELOW {
         14.0
     } else {
         28.0
     };
-    // Without a heading, the page starts with its buttons, unless they're
-    // up on the toolbar.
-    let top = if toolbar_shown || !skin::page_chrome().heading {
-        14.0
-    } else {
-        20.0
-    };
     let inner = rect.shrink2(vec2(margin, 0.0));
     let inner = Rect::from_min_max(
-        pos2(inner.left(), rect.top() + top),
+        pos2(inner.left(), rect.top() + 20.0),
         pos2(inner.right(), rect.bottom() - margin.min(20.0)),
     );
-    // Mac OS 9 puts the pages on tabs, over a panel holding the page.
-    let inner = if skin::nav() == skin::Nav::Tabs {
-        nav::tabs(app, ui, inner).shrink(12.0)
-    } else {
-        inner
-    };
     // Each page fades and rises into place.
     let entered = progress_since(&ctx, app.page_changed.elapsed().as_secs_f32(), 0.16);
     let lift = (1.0 - entered) * 10.0;
@@ -510,9 +445,7 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect, toolbar_shown: bool) {
     ui.scope_builder(UiBuilder::new().max_rect(inner).id_salt("content"), |ui| {
         ui.multiply_opacity(0.35 + 0.65 * entered);
         ui.spacing_mut().item_spacing = vec2(10.0, 12.0);
-        if !toolbar_shown {
-            header(app, ui);
-        }
+        header(app, ui);
         if app.opened.is_some() {
             let rest = ui.available_rect_before_wrap();
             page::opened_page(app, ui, rest);
@@ -590,22 +523,11 @@ fn header(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
     let compact = width < 600.0;
-    let toolbar = !skin::page_chrome().heading;
-    // On a toolbar the buttons line up from the left, flat until pointed
-    // at; beside a heading they sit at the right, outlined.
-    let secondary = if toolbar { Look::Flat } else { Look::Secondary };
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
-        if !toolbar {
-            let (font, ink) = skin::heading(&palette);
-            ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
-        }
-        let layout = if toolbar {
-            egui::Layout::left_to_right(egui::Align::Center)
-        } else {
-            egui::Layout::right_to_left(egui::Align::Center)
-        };
-        ui.with_layout(layout, |ui| {
+        let (font, ink) = skin::heading(&palette);
+        ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
                 let duplicates = app.page == Page::Installed && app.duplicates_only;
@@ -621,7 +543,7 @@ fn header(app: &mut App, ui: &mut Ui) {
                     if filtered {
                         Look::Soft(Tone::Accent)
                     } else {
-                        secondary
+                        Look::Secondary
                     },
                     &label,
                 )
@@ -646,7 +568,7 @@ fn header(app: &mut App, ui: &mut Ui) {
                 if working {
                     Look::Soft(Tone::Accent)
                 } else {
-                    secondary
+                    Look::Secondary
                 },
                 if working { "Working" } else { "Activity" },
             )
@@ -680,7 +602,7 @@ fn header(app: &mut App, ui: &mut Ui) {
             let adoptable = adoptable_appimages(app);
             if adoptable > 0 {
                 let label = format!("Manage {adoptable} AppImages");
-                if Button::new(secondary, &label)
+                if Button::new(Look::Secondary, &label)
                     .icon("install")
                     .icon_only(compact)
                     .tooltip(format!("Manage {adoptable} AppImages with PkgDeck"))
@@ -693,7 +615,7 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
             if app.page == Page::Search && can_open_files && app.opened.is_none() {
-                let response = Button::new(secondary, "Install from file…")
+                let response = Button::new(Look::Secondary, "Install from file…")
                     .icon("package")
                     .icon_only(compact)
                     .tooltip("Install from a file or link")
