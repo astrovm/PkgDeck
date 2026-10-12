@@ -1,7 +1,8 @@
 //! Windows XP's Luna frame, measured from screenshots of Luna Blue: the
 //! title bar row by row, the four-line frame and the caption buttons'
 //! colours, lit from the top left. Other accents take the same light and
-//! shade in their own colour; the dark appearance takes Royale Noir's.
+//! shade in their own colour. In the dark the frame stays Luna's, and
+//! windows behind fade to slate rather than XP's pale lilac.
 
 use super::frame::{Caption, Press, WindowState};
 use super::skin::{lerp, rgb};
@@ -20,16 +21,6 @@ const TITLE: [u32; 30] = [
 
 /// The frame's lines from the outside in.
 const FRAME: [u32; 4] = [0x0019cf, 0x0831d9, 0x166aee, 0x0855dd];
-
-/// Royale Noir's near-black title bar: a light line, a blue one, then
-/// black-blue deepening down.
-const NOIR: [(f32, u32); 5] = [
-    (0.0, 0x1d2025),
-    (0.04, 0x1c4ba5),
-    (0.08, 0x121a29),
-    (0.92, 0x080c13),
-    (1.0, 0x000000),
-];
 
 /// The blue the measured colours are shades of.
 const BLUE: u32 = 0x0054e3;
@@ -119,16 +110,6 @@ pub fn recolor(color: u32, base: Option<Color32>) -> Color32 {
 /// The title bar's colours top to bottom, as gradient stops; each
 /// measured row keeps its own band.
 fn title_stops(base: Option<Color32>, active: bool, dark: bool) -> Vec<(f32, Color32)> {
-    if dark {
-        let stops = NOIR.iter().map(|&(t, c)| (t, rgb(c)));
-        return if active {
-            stops.collect()
-        } else {
-            stops
-                .map(|(t, c)| (t, lerp(c, rgb(0x3a3f48), 0.5)))
-                .collect()
-        };
-    }
     let rows = TITLE.len() as f32;
     TITLE
         .iter()
@@ -146,15 +127,25 @@ fn title_stops(base: Option<Color32>, active: bool, dark: bool) -> Vec<(f32, Col
                     color = lerp(color, Color32::BLACK, 0.06);
                 }
             }
-            // Away from the front, the blue washes out to Luna's pale one.
+            // Away from the front, the blue washes out.
             let color = if active {
                 color
             } else {
-                lerp(color, rgb(0xcbc2dc), 0.6)
+                lerp(color, away(dark), 0.6)
             };
             [(row as f32 / rows, color), ((row + 1) as f32 / rows, color)]
         })
         .collect()
+}
+
+/// What windows behind wash toward: Luna's pale lilac, or slate in the
+/// dark.
+fn away(dark: bool) -> Color32 {
+    if dark {
+        rgb(0x3c4250)
+    } else {
+        rgb(0xcbc2dc)
+    }
 }
 
 /// The accent to shade with, or `None` for Luna's own blue.
@@ -174,12 +165,10 @@ pub fn paint_frame(
     let base = base(palette_deep);
     let open = !state.maximized;
     let wash = |color: Color32| {
-        if dark {
-            lerp(color, rgb(0x0b0f17), 0.85)
-        } else if state.active {
+        if state.active {
             color
         } else {
-            lerp(color, rgb(0xcbc2dc), 0.6)
+            lerp(color, away(dark), 0.6)
         }
     };
     let radius = if open {
@@ -287,15 +276,12 @@ fn image(
             if !close {
                 let packed = u32::from_be_bytes([0, color.r(), color.g(), color.b()]);
                 color = recolor(packed, base);
-                if dark {
-                    color = lerp(color, rgb(0x0b1220), 0.55);
-                }
             }
             color = match light {
                 Light::Rest => color,
                 Light::Hover => lerp(color, Color32::WHITE, 0.2),
                 Light::Down => lerp(color, Color32::BLACK, 0.22),
-                Light::Away => lerp(color, rgb(0xcbc2dc), 0.55),
+                Light::Away => lerp(color, away(dark), 0.55),
             };
             pixels.push(color);
         }
@@ -333,7 +319,7 @@ pub fn paint_caption(
     // One slot per face and light, so a colour being dragged replaces its
     // texture rather than piling up new ones. Close is red whatever the
     // accent.
-    let (base, dark) = if close { (None, false) } else { (base, dark) };
+    let base = if close { None } else { base };
     let slot = Id::new(("pkgdeck-luna-caption", close, light));
     let key = Id::new((base, dark, size));
     let cached = painter
@@ -487,11 +473,13 @@ mod tests {
         assert_eq!(stops.len(), 60);
         assert_eq!(stops[2], (1.0 / 30.0, rgb(0x3f97ff)));
         assert_eq!(stops.last().unwrap().1, rgb(0x0043cf));
-        // Behind, it pales; in the dark, it's Royale Noir's black.
+        // Behind, it pales; in the dark it fades to slate instead. In
+        // front it's Luna's blue either way.
         let away = title_stops(None, false, false);
         assert!(luma(away[14].1) > luma(stops[14].1));
-        let noir = title_stops(None, true, true);
-        assert!(noir.iter().all(|(_, c)| luma(*c) < 0.35));
+        assert_eq!(title_stops(None, true, true), stops);
+        let slate = title_stops(None, false, true);
+        assert!(luma(slate[14].1) < luma(away[14].1));
     }
 
     #[test]

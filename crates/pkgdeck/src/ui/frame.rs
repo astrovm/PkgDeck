@@ -294,9 +294,6 @@ fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
             // fades to a lighter self.
             let end = if deep == rgb(0x000080) {
                 rgb(0x1084d0)
-            } else if palette.dark && deep == rgb(0x800080) {
-                // High Contrast Black's purple doesn't fade.
-                deep
             } else {
                 lerp(deep, Color32::WHITE, 0.45)
             };

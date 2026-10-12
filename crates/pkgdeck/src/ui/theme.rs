@@ -276,7 +276,7 @@ fn accent_colors(accent: Accent) -> (u32, u32) {
 }
 
 /// How bright `color` looks, from 0 to 1.
-fn luminance(color: Color32) -> f32 {
+pub(super) fn luminance(color: Color32) -> f32 {
     let channel = |c: u8| {
         let c = c as f32 / 255.0;
         if c <= 0.04045 {
@@ -317,8 +317,9 @@ impl Palette {
                 LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
                 LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
             },
-            // Windows' own dark: High Contrast Black.
-            (Family::Retro, true) => (0x000000, 0x000000, 0xffffff, 0xc0c0c0),
+            // Windows 98's grey turned down: the same bevels on a dark face,
+            // fields darker still.
+            (Family::Retro, true) => (0x3a3a3a, 0x1f1f1f, 0xeeeeee, 0xb0b0b0),
             (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
             (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
             (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
@@ -350,14 +351,18 @@ impl Palette {
             ),
             None => (rgb(on_light), rgb(on_dark)),
         };
-        // The style's own accent in the dark takes what its dark scheme
-        // used: High Contrast Black's purple, Hi-Tech's blue.
-        let own = custom.is_none() && scheme.accent == scheme.style.accent();
-        let (deep, bright) = match (scheme.style.family(), dark && own) {
-            (Family::Retro, true) => (rgb(0x800080), rgb(0xff80ff)),
-            // Aperture's and Logic's matte slate, not Aqua's bright gel.
-            (Family::Gel, true) => (rgb(0x3d5a80), rgb(0x8aaee0)),
-            _ => (deep, bright),
+        // A grey accent fills title bars and selections as dark as a dark
+        // window itself; lift it until the fill stands out, white text
+        // still reading on it.
+        let deep = if dark {
+            (0..=6)
+                .map(|step| over(deep, Color32::WHITE, step as f32 * 0.05))
+                .find(|fill| {
+                    contrast(*fill, canvas) >= 1.25 || contrast(Color32::WHITE, *fill) < 4.5
+                })
+                .unwrap_or(deep)
+        } else {
+            deep
         };
         Self {
             canvas,
@@ -1166,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn old_desktops_go_dark_as_their_dark_schemes_did() {
+    fn old_desktops_keep_their_colours_in_the_dark() {
         let of = |style: Style, accent: Accent, dark| {
             Palette::of(
                 Scheme {
@@ -1177,17 +1182,33 @@ mod tests {
                 dark,
             )
         };
-        // Windows 98 takes High Contrast Black, purple and all.
-        let black = of(Style::Retro, Accent::Navy, true);
-        assert_eq!((black.canvas, black.ink), (Color32::BLACK, Color32::WHITE));
-        assert_eq!(black.deep, rgb(0x800080));
-        // Aqua turns to the slate of Apple's dark pro apps.
-        assert_eq!(of(Style::Aqua, Accent::Blue, true).deep, rgb(0x3d5a80));
-        assert_ne!(of(Style::Aqua, Accent::Blue, false).deep, rgb(0x3d5a80));
-        // In the light, or with an accent picked by hand, they don't.
-        assert_eq!(of(Style::Retro, Accent::Navy, false).deep, rgb(0x000080));
-        assert_eq!(of(Style::Retro, Accent::Teal, true).deep, rgb(0x0b7580));
-        assert_ne!(of(Style::Aqua, Accent::Green, true).deep, rgb(0x3d5a80));
+        // Title bars and selections keep the desktop's own colour: 98's
+        // navy, Aqua's blue gel.
+        for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
+            for accent in [style.accent(), Accent::Teal] {
+                assert_eq!(
+                    of(style, accent, true).deep,
+                    of(style, accent, false).deep,
+                    "{style:?} {accent:?}"
+                );
+            }
+        }
+        assert_eq!(of(Style::Retro, Accent::Navy, true).deep, rgb(0x000080));
+        // Graphite, a grey as dark as the window, lifts off it in the dark.
+        for style in Style::ALL {
+            let graphite = of(style, Accent::Graphite, true);
+            assert!(
+                contrast(graphite.deep, graphite.canvas) >= 1.25,
+                "{style:?}"
+            );
+            assert!(contrast(Color32::WHITE, graphite.deep) >= 4.5, "{style:?}");
+        }
+        // Windows 98 turns its grey down rather than going black, so its
+        // bevels still show: lighter than black, darker than its fields'
+        // ink.
+        let grey = of(Style::Retro, Accent::Navy, true);
+        assert_ne!(grey.canvas, Color32::BLACK);
+        assert!(luminance(grey.surface) < luminance(grey.canvas));
     }
 
     #[test]

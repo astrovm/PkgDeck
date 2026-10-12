@@ -1,7 +1,8 @@
 //! Renders each page with sample data to `target/gallery/*.png`, without a
 //! display, so the look can be checked by eye:
 //! `cargo run -p pkgdeck --example gallery`. `--only <text>` renders just
-//! the shots whose name has `text`.
+//! the shots whose name has `text`; `--styles`, `--mixes` and
+//! `--accents` render more.
 
 use eframe::egui;
 use egui_kittest::Harness;
@@ -280,9 +281,63 @@ fn mixes() {
     }
 }
 
+/// Settings and a chosen row in every style, mode and accent, plus a
+/// colour picked by hand and each of Modern's themes. Only these with
+/// `--accents`.
+fn accents() {
+    use pkgdeck::settings::{Accent, DarkTheme, LightTheme, Style};
+    let shot = |name: String, dark: bool, set: &dyn Fn(&mut App)| {
+        render(&format!("{name}-settings"), [1180.0, 760.0], dark, |app| {
+            set(app);
+            offline(app, Page::Settings);
+        });
+        render(&format!("{name}-selected"), [1180.0, 520.0], dark, |app| {
+            set(app);
+            offline(app, Page::Installed);
+            app.refresh_items();
+            app.selected = Some(app.rows[app.items[1].raw].identity());
+        });
+    };
+    for style in Style::ALL {
+        let name = style.name().to_lowercase().replace(' ', "-");
+        for dark in [false, true] {
+            let mode = if dark { "dark" } else { "light" };
+            for accent in Accent::ALL.into_iter().chain([Accent::Custom]) {
+                let label = accent.name().to_lowercase();
+                shot(format!("accent-{name}-{mode}-{label}"), dark, &|app| {
+                    app.settings.style = style;
+                    app.settings.accent = accent;
+                    app.settings.custom_accent = "#e8c547".into();
+                });
+            }
+        }
+    }
+    for theme in [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate] {
+        shot(
+            format!("theme-dark-{theme:?}").to_lowercase(),
+            true,
+            &|app| {
+                app.settings.dark_theme = theme;
+            },
+        );
+    }
+    for theme in [LightTheme::Classic, LightTheme::White, LightTheme::Paper] {
+        shot(
+            format!("theme-light-{theme:?}").to_lowercase(),
+            false,
+            &|app| {
+                app.settings.light_theme = theme;
+            },
+        );
+    }
+}
+
 fn main() {
     if std::env::args().any(|arg| arg == "--mixes") {
         return mixes();
+    }
+    if std::env::args().any(|arg| arg == "--accents") {
+        return accents();
     }
     // Each style, light and dark, on a list and on Settings. Only these
     // with `--styles`.

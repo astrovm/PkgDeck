@@ -123,15 +123,14 @@ pub fn bevel(painter: &Painter, rect: Rect, light: Color32, dark: Color32) {
 /// black and dark grey below; swapped when `sunken`.
 pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: bool, opacity: f32) {
     let shade = |color| faded(color, opacity);
-    let (outer_light, outer_dark) = (shade(lighter(face, 0.9)), shade(darker(face, 0.85)));
-    let (inner_light, inner_dark) = (shade(lighter(face, 0.45)), shade(darker(face, 0.33)));
-    // On High Contrast Black's black, shadows can't be darker: they're
-    // its greys.
-    let (outer_dark, inner_dark) = if face == Color32::BLACK {
-        (shade(gray(0xc0)), shade(gray(0x80)))
+    // A dark face lights its edges less, or they glare.
+    let (light, dark) = if theme::luminance(face) < 0.2 {
+        ((0.38, 0.18), (0.9, 0.5))
     } else {
-        (outer_dark, inner_dark)
+        ((0.9, 0.45), (0.85, 0.33))
     };
+    let (outer_light, outer_dark) = (shade(lighter(face, light.0)), shade(darker(face, dark.0)));
+    let (inner_light, inner_dark) = (shade(lighter(face, light.1)), shade(darker(face, dark.1)));
     if sunken {
         bevel(painter, rect, inner_dark, outer_light);
         bevel(painter, rect.shrink(1.0), outer_dark, inner_light);
@@ -1134,9 +1133,10 @@ pub fn paint_sidebar(
             end(rgb(0xd6e5f5));
         }
         Family::Gel => {
-            // The blue-grey source list.
+            // The blue-grey source list; in the dark, a shade under the
+            // window's grey.
             let list = if dark {
-                lerp(palette.canvas, palette.deep, 0.1)
+                darker(palette.canvas, 0.18)
             } else {
                 lerp(gray(0xdc), palette.deep, 0.07)
             };
