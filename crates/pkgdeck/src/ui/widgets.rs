@@ -299,9 +299,10 @@ impl<'a> Button<'a> {
                         palette.surface,
                     )
                 }
+                // A wash of the accent, so every button carries it.
                 Look::Secondary => (
-                    mix(palette.surface, palette.hover_solid(), hover),
-                    Stroke::new(1.0, mix(palette.line, palette.strong_line, hover)),
+                    mix(palette.surface, palette.accent, 0.07 + hover * 0.07),
+                    Stroke::new(1.0, alpha(palette.accent, 0.3 + hover * 0.25)),
                     palette.ink,
                 ),
                 Look::Soft(t) => {

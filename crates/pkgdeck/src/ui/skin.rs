@@ -272,18 +272,19 @@ pub fn paint_button(
         }
         Family::Luna => {
             let radius = theme::round(9);
+            let tone = |hex| palette.tone(rgb(hex));
             let stops = match (pressed, dark) {
                 (false, false) => [
-                    (0.0, Color32::WHITE),
-                    (0.6, rgb(0xf4f3ee)),
-                    (0.85, rgb(0xebe8de)),
-                    (1.0, rgb(0xd6d0c5)),
+                    (0.0, palette.tone(Color32::WHITE)),
+                    (0.6, tone(0xf4f3ee)),
+                    (0.85, tone(0xebe8de)),
+                    (1.0, tone(0xd6d0c5)),
                 ],
                 (true, false) => [
-                    (0.0, rgb(0xe3e2da)),
-                    (0.6, rgb(0xe6e5de)),
-                    (0.85, rgb(0xeeede7)),
-                    (1.0, rgb(0xf3f3ef)),
+                    (0.0, tone(0xe3e2da)),
+                    (0.6, tone(0xe6e5de)),
+                    (0.85, tone(0xeeede7)),
+                    (1.0, tone(0xf3f3ef)),
                 ],
                 (false, true) => {
                     let base = lighter(palette.surface, 0.1);
@@ -359,7 +360,7 @@ pub fn paint_button(
             } else {
                 let tint = |amount| lerp(Color32::WHITE, blue, amount);
                 (
-                    [gray(0xf2), gray(0xeb), gray(0xdd), gray(0xcf)],
+                    [gray(0xf2), gray(0xeb), gray(0xdd), gray(0xcf)].map(|c| palette.tone(c)),
                     [tint(0.07), tint(0.13), tint(0.28), tint(0.36)],
                     [tint(0.12), tint(0.22), tint(0.42), tint(0.55)],
                     gray(0x70),
@@ -417,12 +418,14 @@ pub fn paint_button(
             } else if dark {
                 lighter(palette.surface, 0.16)
             } else {
-                gray(0xe6)
+                palette.tone(gray(0xe6))
             };
             let base = darker(lighter(base, hover * 0.06), press * 0.15);
+            // Tiger's measured rows are its own grey; a tinted window
+            // shades its own.
             let measured = if dark {
                 None
-            } else if !blue {
+            } else if !blue && palette.tint_amount == 0.0 {
                 Some(&TIGER_BUTTON[..])
             } else if palette.deep == rgb(0x2f68d8) {
                 Some(&TIGER_DEFAULT[..])
@@ -1018,7 +1021,11 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
                 painter,
                 rect,
                 CornerRadius::ZERO,
-                rgb(0x0b2d63),
+                if palette.tint_amount > 0.0 {
+                    lerp(Color32::BLACK, palette.tint, 0.4)
+                } else {
+                    rgb(0x0b2d63)
+                },
                 palette.canvas,
                 false,
             );
@@ -1135,8 +1142,8 @@ pub fn paint_sidebar(
         }
         // Explorer's navigation pane and its pale blue splitter.
         Family::Glass => {
-            painter.rect_filled(rect, CornerRadius::ZERO, rgb(0xfcfcfc));
-            end(rgb(0xd6e5f5));
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.tone(rgb(0xfcfcfc)));
+            end(palette.tone(rgb(0xd6e5f5)));
         }
         Family::Gel => {
             // The blue-grey source list; in the dark, a shade under the
@@ -1227,6 +1234,9 @@ pub fn row_stripe(palette: &Palette, index: usize) -> Option<Color32> {
     (style() == Family::Gel && index % 2 == 1).then(|| {
         if palette.dark {
             lighter(palette.surface, 0.05)
+        } else if palette.tint_amount > 0.0 {
+            // Another accent stripes in its own pale shade.
+            lerp(Color32::WHITE, palette.tint, 0.08)
         } else {
             rgb(0xedf3fe)
         }

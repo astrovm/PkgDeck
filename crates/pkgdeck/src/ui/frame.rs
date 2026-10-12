@@ -548,9 +548,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         _ => {}
     }
     if let Some(icon_rect) = icon_at {
-        egui::Image::new(egui::include_image!("../../assets/logo.svg"))
-            .fit_to_exact_size(icon_rect.size())
-            .paint_at(ui, icon_rect);
+        theme::paint_logo(painter, icon_rect, palette);
     }
     painter.galley_with_override_text_color(text_at, galley, ink);
 }

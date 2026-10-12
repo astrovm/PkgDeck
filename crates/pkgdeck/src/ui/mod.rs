@@ -287,9 +287,7 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
         ),
         Vec2::splat(30.0),
     );
-    egui::Image::new(egui::include_image!("../../assets/logo.svg"))
-        .fit_to_exact_size(logo.size())
-        .paint_at(ui, logo);
+    theme::paint_logo(&painter, logo, &palette);
     let name_shown = ease(&ctx, Id::new("sidebar-names"), !rail, LAYOUT);
     if name_shown > 0.02 {
         painter.text(
