@@ -167,7 +167,7 @@ fn tree(app: &mut App, ui: &mut Ui, rect: Rect) {
             vec2(label.size().x + 4.0, 16.0),
         );
         let response = entry(app, ui, item, page);
-        theme::paint_icon(&painter, icon, page.icon(), palette.ink);
+        theme::paint_colour_icon(&painter, icon, page.icon(), palette.ink);
         if current {
             painter.rect_filled(name, CornerRadius::ZERO, palette.deep);
         }
@@ -250,7 +250,7 @@ fn strip(app: &mut App, ui: &mut Ui, rect: Rect) {
                 StrokeKind::Inside,
             );
         }
-        theme::paint_icon(
+        theme::paint_colour_icon(
             &painter,
             Rect::from_center_size(pos2(item.center().x, item.top() + 22.0), Vec2::splat(28.0)),
             page.icon(),
@@ -353,7 +353,7 @@ fn source(app: &mut App, ui: &mut Ui, rect: Rect) {
         } else {
             palette.ink
         };
-        theme::paint_icon(
+        theme::paint_colour_icon(
             &painter,
             Rect::from_min_size(
                 pos2(item.left() + 14.0, item.center().y - 8.0),

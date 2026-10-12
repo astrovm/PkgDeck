@@ -369,7 +369,13 @@ impl<'a> Button<'a> {
                     Pos2::new(x, rect.center().y - icon_size / 2.0),
                     Vec2::splat(icon_size),
                 );
-                theme::paint_icon(painter, icon_rect, icon, ink);
+                // Toolbar buttons show their icons in colour, as the
+                // older desktops' toolbars did.
+                if matches!(self.look, Look::Flat) {
+                    theme::paint_colour_icon(painter, icon_rect, icon, ink);
+                } else {
+                    theme::paint_icon(painter, icon_rect, icon, ink);
+                }
                 x += icon_size + 8.0;
             } else if let Some(galley) = &galley {
                 x = center - galley.size().x / 2.0;

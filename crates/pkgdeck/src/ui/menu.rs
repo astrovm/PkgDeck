@@ -3,8 +3,8 @@
 //! Windows 95 sinks the open menu's title and lights items in navy; XP
 //! lights both in its selection blue, on white menus.
 
-use super::skin::{self, gray, retro_edge};
 use super::focus_for_page;
+use super::skin::{self, gray, retro_edge};
 use crate::{
     app::App,
     model::{self, Page},

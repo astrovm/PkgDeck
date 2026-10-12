@@ -1521,6 +1521,12 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
     );
 }
 
+/// Whether the chosen row opens to show its buttons, as XP's Add or
+/// Remove Programs did; elsewhere they sit at the row's end.
+pub fn chosen_row_opens() -> bool {
+    style() == Family::Luna
+}
+
 /// How a style moves between pages: Modern's sidebar, Explorer's folder
 /// tree, XP's strip of big buttons, 7's task pane links, Mac OS 9's tabs,
 /// or the Finder's source list.
@@ -1860,6 +1866,10 @@ pub fn on_fill(palette: &Palette, ink: Color32) -> Palette {
         accent_ink: palette.deep,
         line: faded(ink, 0.25),
         strong_line: faded(ink, 0.5),
+        // Red, green and amber would vanish into the fill too.
+        danger: ink,
+        success: ink,
+        warning: ink,
         ..*palette
     }
 }
@@ -2532,6 +2542,7 @@ mod tests {
                                     assert!(theme::contrast(ink, palette.deep) >= 4.0, "{at}");
                                     let on = on_fill(palette, ink);
                                     assert_eq!((on.ink, on.accent), (ink, ink), "{at}");
+                                    assert_eq!((on.danger, on.warning), (ink, ink), "{at}");
                                 }
                                 // The accent reads on the window and on cards.
                                 for under in [palette.surface, palette.canvas] {

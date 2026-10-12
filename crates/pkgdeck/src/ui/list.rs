@@ -18,6 +18,16 @@ fn wide_row() -> f32 {
     (ROW * skin::list_look().row_scale * theme::skin().density.scale()).round()
 }
 const ROW_COMPACT: f32 = 78.0;
+/// What the chosen row grows by where it opens to show its buttons.
+const OPENED: f32 = 34.0;
+
+/// Whether row `index` is open, showing its buttons under it.
+fn opened(app: &App, index: usize, width: Width) -> bool {
+    skin::chosen_row_opens()
+        && skin::list_look().one_line
+        && width != Width::Compact
+        && app.selected_index() == Some(index)
+}
 const GROUP_HEADING: f32 = 36.0;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -580,6 +590,10 @@ fn row_height(app: &App, index: usize, width: Width) -> f32 {
         GROUP_HEADING
     } else {
         0.0
+    } + if opened(app, index, width) {
+        OPENED
+    } else {
+        0.0
     }
 }
 
@@ -859,8 +873,16 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         );
         rect.min.y += GROUP_HEADING;
     }
+    // An open row keeps its line at the top, its buttons under it.
+    let open = opened(app, index, width);
+    let whole = rect;
+    let rect = if open {
+        Rect::from_min_size(rect.min, vec2(rect.width(), wide_row()))
+    } else {
+        rect
+    };
     let id = Id::new(("row", &identity));
-    let response = ui.interact(rect.shrink2(vec2(6.0, 2.0)), id, Sense::click());
+    let response = ui.interact(whole.shrink2(vec2(6.0, 2.0)), id, Sense::click());
     let selected = app.selected.as_deref() == Some(identity.as_str());
     let hover = ease(
         &ctx,
@@ -874,14 +896,14 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         Some(ink) if selected => skin::on_fill(&palette, ink),
         _ => palette,
     };
-    let surface = rect.shrink2(vec2(6.0, 2.0));
+    let surface = whole.shrink2(vec2(6.0, 2.0));
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
     });
     let look = skin::list_look();
     if let Some(stripe) = skin::row_stripe(&palette, index).filter(|_| !selected) {
         ui.painter()
-            .rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
+            .rect_filled(whole.shrink2(vec2(1.0, 0.0)), 0.0, stripe);
     }
     // The selected row's own background slides in `selection_highlight`.
     skin::paint_row_hover(ui.painter(), surface, &palette, hover * (1.0 - chosen));
@@ -930,8 +952,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         };
         if let Some(area) = area {
             let shade = Rect::from_min_max(
-                pos2(area.left() - 8.0, rect.top()),
-                pos2(area.right() + 4.0, rect.bottom()),
+                pos2(area.left() - 8.0, whole.top()),
+                pos2(area.right() + 4.0, whole.bottom()),
             );
             painter.rect_filled(shade, 0.0, tint);
         }
@@ -1132,7 +1154,36 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         34.0
     };
     let mut x = cols.actions.right();
-    if let Some(action) = action.filter(|_| !page_open_here && in_hand) {
+    if open {
+        if let Some(action) = action.filter(|_| !page_open_here) {
+            let enabled = running || (app.can_act() && !retaining);
+            let label = if running { "Cancel" } else { action.label() };
+            let area = Rect::from_min_max(
+                pos2(whole.right() - 132.0, rect.bottom() + 2.0),
+                pos2(whole.right() - 14.0, whole.bottom() - 4.0),
+            );
+            let mut child = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(area)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let clicked = Button::new(Look::Secondary, label)
+                .small()
+                .min_width(96.0)
+                .enabled(enabled)
+                .id_salt(("open-row", &identity))
+                .show(&mut child)
+                .clicked();
+            if clicked {
+                if running {
+                    app.cancel();
+                } else {
+                    app.run_row_action(index);
+                }
+            }
+        }
+    }
+    if let Some(action) = action.filter(|_| !page_open_here && in_hand && !open) {
         let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(side));
         x -= 38.0;
         let enabled = running || (app.can_act() && !retaining);
@@ -1182,7 +1233,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             }
         }
     }
-    if pull && !running && in_hand {
+    if pull && !running && in_hand && !open {
         let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(side));
         let mut child = ui.new_child(UiBuilder::new().max_rect(button));
         let tip = format!("Pull {title} from {line}");
@@ -1362,9 +1413,9 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
             rect.shrink(rect.width() * 0.24)
         };
         if row.kind == "failure" {
-            theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
+            theme::paint_colour_icon(ui.painter(), mark, "warning", palette.accent);
         } else {
-            theme::paint_source_icon(ui.painter(), mark, &row.source, palette.accent);
+            theme::paint_colour_source_icon(ui.painter(), mark, &row.source, palette.accent);
         }
     };
     let uri = row

@@ -348,7 +348,7 @@ impl Palette {
             (Family::Gel, true) => (0x1f1f1f, 0x2b2b2b, 0xe6e6e6, 0x9c9c9c),
             (Family::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
             (Family::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
-            (Family::Platinum, false) => (0xdddddd, 0xeeeeee, 0x000000, 0x4a4a4a),
+            (Family::Platinum, false) => (0xdddddd, 0xffffff, 0x000000, 0x4a4a4a),
         }
     }
 
@@ -924,9 +924,177 @@ pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32
 
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
+    if skin().family() != Family::Modern && name != "heart" {
+        icon_fills(painter, rect, name, color);
+    }
+    icon_lines(painter, rect, name, color);
+}
+
+/// The colour an icon takes where the older styles draw icons in colour,
+/// as theirs were: boxes in cardboard, checks and arrows in green, bins
+/// and gears in grey, and each source in its own colour.
+pub fn icon_hue(name: &str) -> Option<Color32> {
+    let hex: u32 = match name {
+        "package" | "apt" | "discover" | "toolbox" | "distrobox" => 0xc89a55,
+        "search" | "filter" | "info" | "help" | "clock" => 0x4f86c6,
+        "installed" | "updates" | "up" | "refresh" | "macos-updates" | "fwupd" => 0x2e9b3a,
+        "install" | "down" | "flatpak" | "appimage" | "macos-apps" | "mas" => 0x3f7fd0,
+        "remove" | "settings" | "sources" | "dev-caches" | "duplicates" | "system-image" => {
+            0x8a95a3
+        }
+        "activity" | "npm" | "gem" => 0xc8392f,
+        "projects" | "bell" | "lock" | "warning" | "homebrew" | "homebrew-cask" => 0xe0a526,
+        "snap" => 0x6fb38f,
+        "docker" => 0x2496ed,
+        "podman" | "mise" => 0x8a3fa0,
+        "cargo" | "rustup" | "composer" => 0xb5541c,
+        "pnpm" | "bun" => 0xe8822a,
+        "pip" | "pipx" | "uv" => 0x3a6fb0,
+        _ => return None,
+    };
+    Some(Color32::from_rgb(
+        (hex >> 16) as u8,
+        (hex >> 8) as u8,
+        hex as u8,
+    ))
+}
+
+/// Icon `name` in colour, as the older styles drew toolbars, trees and
+/// lists: its closed shapes filled in its hue, shaded where the style
+/// shaded, inside a darker outline; `ink`'s alpha fades it. Modern, and
+/// icons without a hue, keep `ink`.
+pub fn paint_colour_icon(painter: &Painter, rect: Rect, name: &str, ink: Color32) {
+    let family = skin().family();
+    let Some(hue) = icon_hue(name).filter(|_| family != Family::Modern) else {
+        return paint_icon(painter, rect, name, ink);
+    };
+    let opacity = f32::from(ink.a()) / 255.0;
+    let (top, bottom, outline) = icon_tones(family, hue);
+    let fade = |color: Color32| color.gamma_multiply(opacity);
     let scale = rect.width() / 24.0;
     let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
-    let stroke = Stroke::new((1.7 * scale).max(1.0), color);
+    for polygon in icons::closed_shapes(name).iter() {
+        let points: Vec<Pos2> = polygon.iter().map(|&(x, y)| at(x, y)).collect();
+        shaded_polygon(painter, &points, fade(top), fade(bottom));
+    }
+    for &(x, y, radius) in icons::rings(name) {
+        painter.circle_filled(at(x, y), radius * scale, fade(over(top, bottom, 0.5)));
+    }
+    // A filled shape takes a thin outline, so its colour reads; lines
+    // alone, a check or an arrow, are drawn bold in the colour itself.
+    if icons::closed_shapes(name).is_empty() && icons::rings(name).is_empty() {
+        icon_lines_wide(
+            painter,
+            rect,
+            name,
+            fade(over(hue, Color32::BLACK, 0.12)),
+            2.4,
+        );
+    } else {
+        icon_lines_wide(painter, rect, name, fade(outline), 1.3);
+    }
+}
+
+/// A coloured icon's fill, top and bottom, and its outline: flat with a
+/// black edge on Windows 95 and Mac OS 9, shaded from light on XP, 7 and
+/// Aqua.
+fn icon_tones(family: Family, hue: Color32) -> (Color32, Color32, Color32) {
+    match family {
+        Family::Retro | Family::Platinum => {
+            let fill = over(hue, Color32::WHITE, 0.15);
+            (fill, fill, over(hue, Color32::BLACK, 0.75))
+        }
+        _ => (
+            over(hue, Color32::WHITE, 0.55),
+            hue,
+            over(hue, Color32::BLACK, 0.45),
+        ),
+    }
+}
+
+/// A convex polygon shaded from `top` at its highest point to `bottom` at
+/// its lowest.
+fn shaded_polygon(painter: &Painter, points: &[Pos2], top: Color32, bottom: Color32) {
+    if points.len() < 3 {
+        return;
+    }
+    let (high, low) = points.iter().fold((f32::MAX, f32::MIN), |(high, low), p| {
+        (high.min(p.y), low.max(p.y))
+    });
+    let mut mesh = egui::Mesh::default();
+    for point in points {
+        let t = (point.y - high) / (low - high).max(0.001);
+        mesh.colored_vertex(*point, over(top, bottom, t));
+    }
+    for i in 1..points.len() as u32 - 1 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// A source's mark in colour: its drawn icon, or its letters in white on
+/// a box of its colour.
+pub fn paint_colour_source_icon(painter: &Painter, rect: Rect, id: &str, ink: Color32) {
+    let family = skin().family();
+    if family == Family::Modern || icons::drawn(id) {
+        return if icons::drawn(id) {
+            paint_colour_icon(painter, rect, id, ink)
+        } else {
+            paint_source_icon(painter, rect, id, ink)
+        };
+    }
+    let hue = icon_hue(id).unwrap_or(ink);
+    let (top, bottom, outline) = icon_tones(family, hue);
+    let scale = rect.width() / 24.0;
+    let tile = rect.shrink(2.5 * scale);
+    super::skin::gradient(
+        painter,
+        tile,
+        CornerRadius::same((4.0 * scale) as u8),
+        top,
+        bottom,
+        false,
+    );
+    painter.rect_stroke(
+        tile,
+        CornerRadius::same((4.0 * scale) as u8),
+        Stroke::new((1.2 * scale).max(1.0), outline),
+        egui::StrokeKind::Inside,
+    );
+    let letters = icons::monogram(id);
+    let letters = if rect.width() < 16.0 {
+        letters.get(..1).unwrap_or("")
+    } else {
+        letters
+    };
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letters,
+        bold(rect.height() * 0.42),
+        ink_on_hue(bottom),
+    );
+}
+
+/// White on a dark hue, black on a light one.
+fn ink_on_hue(hue: Color32) -> Color32 {
+    if luminance(hue) < 0.4 {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
+}
+
+/// Icon `name`'s strokes and arcs in `color`.
+fn icon_lines(painter: &Painter, rect: Rect, name: &str, color: Color32) {
+    icon_lines_wide(painter, rect, name, color, 1.7);
+}
+
+/// [`icon_lines`], `width` wide in the icon's 24-unit grid.
+fn icon_lines_wide(painter: &Painter, rect: Rect, name: &str, color: Color32, width: f32) {
+    let scale = rect.width() / 24.0;
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
+    let stroke = Stroke::new((width * scale).max(1.0), color);
     if name == "heart" {
         // Filled: two lobes and the point below them.
         for x in [7.0, 17.0] {
@@ -938,9 +1106,6 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
             Stroke::NONE,
         ));
         return;
-    }
-    if skin().family() != Family::Modern {
-        icon_fills(painter, rect, name, color);
     }
     for line in icons::strokes(name) {
         let points: Vec<Pos2> = line.chunks(2).map(|xy| at(xy[0], xy[1])).collect();

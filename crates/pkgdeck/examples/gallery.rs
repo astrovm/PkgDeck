@@ -360,6 +360,19 @@ fn main() {
                     offline(app, Page::Installed);
                 },
             );
+            // A row chosen, as each style marks it.
+            render(
+                &format!("style-{name}-selected-{mode}"),
+                [1180.0, 780.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Installed);
+                    app.refresh_items();
+                    app.selected = Some(app.rows[app.items[1].raw].identity());
+                },
+            );
             // The menu bar's View menu, open, where the style has one.
             if matches!(
                 style.family(),
