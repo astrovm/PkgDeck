@@ -695,17 +695,29 @@ mod tests {
     fn age_files(dir: &Path, days: u64) {
         let when = SystemTime::now() - Duration::from_secs(days * 86_400);
         let mut pending = vec![dir.to_owned()];
+        // Git may still be tidying up, so a file can go between listing and
+        // dating it.
+        let gone = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
         while let Some(path) = pending.pop() {
-            let metadata = fs::symlink_metadata(&path).unwrap();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if gone(&error) => continue,
+                Err(error) => panic!("{}: {error}", path.display()),
+            };
             if metadata.is_dir() {
-                pending.extend(
-                    fs::read_dir(&path)
-                        .unwrap()
-                        .map(|entry| entry.unwrap().path()),
-                );
+                match fs::read_dir(&path) {
+                    Ok(entries) => {
+                        pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()))
+                    }
+                    Err(error) if gone(&error) => {}
+                    Err(error) => panic!("{}: {error}", path.display()),
+                }
             } else if metadata.is_file() {
                 // The owner may date a file it can't write, like Git's objects.
-                fs::File::open(&path).unwrap().set_modified(when).unwrap();
+                match fs::File::open(&path).and_then(|file| file.set_modified(when)) {
+                    Err(error) if !gone(&error) => panic!("{}: {error}", path.display()),
+                    _ => {}
+                }
             }
         }
     }
