@@ -5019,6 +5019,28 @@ impl ffi::PackageController {
         self.as_mut().show_pending();
         self.as_mut().rust_mut().hold_partials = refreshing;
         if view == "Search" && query.trim().is_empty() {
+            // An empty search shows nothing, so a section still loading,
+            // or waiting to, must not land here once it's done.
+            self.as_mut().rust_mut().deferred_load = None;
+            if matches!(self.rust().queued, Some(Job::Load(..))) {
+                self.as_mut().rust_mut().queued = None;
+            }
+            let reading = self
+                .rust()
+                .worker
+                .as_ref()
+                .filter(|worker| matches!(worker.job, Job::Load(..) | Job::RetrySource(..)));
+            if let Some(worker) = reading {
+                worker.cancel.cancel();
+                self.as_mut().rust_mut().background = true;
+                self.as_mut().set_busy(false);
+            }
+            if self.rows().to_string() != "[]" {
+                self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().cleanup.clear();
+                self.as_mut().rust_mut().sources.clear();
+                self.as_mut().set_rows("[]".into());
+            }
             // Seed the selected sources before the first query starts.
             if self.rust().worker.is_none() {
                 self.as_mut().rust_mut().source_filter = sources;
@@ -8694,6 +8716,51 @@ mod tests {
         assert!(controller.rows().to_string().contains("cached cleanup"));
         assert!(cancel.requested());
         assert!(matches!(&controller.rust().queued, Some(Job::Load(view, _)) if view == "Clean"));
+    }
+
+    #[test]
+    fn a_section_still_loading_never_lands_on_an_empty_search() {
+        for queued in [false, true] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().prefetch.clear();
+            let (release, gate) = mpsc::channel::<()>();
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let _ = gate.recv();
+                let mut report = PackageReport::default();
+                report
+                    .packages
+                    .push(synthetic_package("installed-only", "installed-only"));
+                report.successful_sources.push("apt".into());
+                let _ = sender.send(Reply::Partial(report.clone()));
+                let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+            });
+            let cancel = Cancellation::default();
+            controller.as_mut().rust_mut().active_view = "Installed".into();
+            controller.as_mut().rust_mut().worker = Some(Worker {
+                handle,
+                receiver,
+                cancel: cancel.clone(),
+                job: Job::Load("Installed".into(), "".into()),
+            });
+            if queued {
+                // Switched on to Updates first, which waits its turn.
+                controller.as_mut().rust_mut().queued =
+                    Some(Job::Load("Updates".into(), "".into()));
+            }
+            controller.as_mut().set_busy(true);
+            controller
+                .as_mut()
+                .load("Search".into(), "".into(), "".into(), false, false);
+            assert!(cancel.requested());
+            assert!(controller.rust().queued.is_none());
+            assert!(!*controller.busy());
+            release.send(()).unwrap();
+            wait_until(&mut controller, |c| c.rust().worker.is_none());
+            assert_eq!(controller.rows().to_string(), "[]", "queued: {queued}");
+            assert!(!*controller.busy());
+        }
     }
 
     #[test]
