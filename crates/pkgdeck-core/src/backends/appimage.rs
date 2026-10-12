@@ -9,6 +9,10 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -76,6 +80,9 @@ const GITHUB_REUSE_SECONDS: u64 = 15 * 60;
 
 /// Imports only Type 2 AppImages into PkgDeck-owned storage. Metadata inspection
 /// reads the ELF header; imported files are never executed by this backend.
+/// Size and modification time: an AppImage is unchanged while they are.
+type ContentsKey = (u64, i64, i64);
+
 pub struct AppImage {
     root: PathBuf,
     applications: PathBuf,
@@ -402,15 +409,11 @@ impl AppImage {
         entry
     }
     /// What the AppImage at `path` says about itself, remembered while the
-    /// file is unchanged. Unreadable contents count as empty.
-    fn contents(path: &Path) -> std::sync::Arc<Contents> {
-        use std::{
-            collections::HashMap,
-            sync::{Arc, Mutex, OnceLock},
-        };
-        /// Size and modification time: the file is unchanged while they are.
-        type Key = (u64, i64, i64);
-        type Seen = HashMap<PathBuf, (Key, Arc<Contents>)>;
+    /// file is unchanged, here and on disk so the next start doesn't open
+    /// the image again. Unreadable contents count as empty. Only contents
+    /// just read carry the icon; save it with [`Self::icon_for`].
+    fn contents(&self, path: &Path) -> Arc<Contents> {
+        type Seen = HashMap<PathBuf, (ContentsKey, Arc<Contents>)>;
         static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
         let key = fs::metadata(path)
             .ok()
@@ -424,13 +427,74 @@ impl AppImage {
         {
             return contents.clone();
         }
-        let contents = Arc::new(appimage_contents::read(path).unwrap_or_default());
-        if let Some(key) = key {
+        let remembered = key.and_then(|key| {
+            self.remembered_contents()
+                .remove(&path.display().to_string())
+                .filter(|(known, _)| *known == key)
+                .map(|(_, contents)| Arc::new(contents))
+        });
+        if let (Some(contents), Some(key)) = (remembered, key) {
             seen.lock()
                 .unwrap()
                 .insert(path.to_path_buf(), (key, contents.clone()));
+            return contents;
         }
-        contents
+        let contents = appimage_contents::read(path).unwrap_or_default();
+        if let Some(key) = key {
+            let kept = Contents {
+                icon: None,
+                ..contents.clone()
+            };
+            self.remember_contents(path, key, &kept);
+            seen.lock()
+                .unwrap()
+                .insert(path.to_path_buf(), (key, Arc::new(kept)));
+        }
+        Arc::new(contents)
+    }
+    /// Where what AppImages say about themselves is remembered, next to the
+    /// icons read out of them.
+    fn contents_file(&self) -> PathBuf {
+        self.root.with_file_name("appimage-contents.json")
+    }
+    fn remembered_contents(&self) -> HashMap<String, (ContentsKey, Contents)> {
+        fs::read(self.contents_file())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+    /// Remember `contents` for `path`, dropping AppImages that are gone.
+    fn remember_contents(&self, path: &Path, key: ContentsKey, contents: &Contents) {
+        let mut all = self.remembered_contents();
+        all.retain(|known, _| Path::new(known).is_file());
+        all.insert(path.display().to_string(), (key, contents.clone()));
+        let file = self.contents_file();
+        let Some(dir) = file.parent() else { return };
+        let temporary = dir.join(format!(".appimage-contents.{}", std::process::id()));
+        let written = fs::create_dir_all(dir)
+            .and_then(|()| fs::write(&temporary, serde_json::to_vec(&all).unwrap_or_default()))
+            .and_then(|()| fs::rename(&temporary, &file));
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+    }
+    /// The icon saved as `key` for the AppImage at `path`: the one already
+    /// saved, else the one in `contents`, else read out of the image.
+    fn icon_for(&self, key: &str, path: &Path, contents: &Contents) -> Option<PathBuf> {
+        if let Some(saved) = ["png", "svg"]
+            .into_iter()
+            .map(|extension| self.icons().join(format!("{key}.{extension}")))
+            .find(|icon| icon.is_file())
+        {
+            return Some(saved);
+        }
+        match &contents.icon {
+            Some(icon) => self.save_icon(key, icon),
+            None => appimage_contents::read(path)
+                .ok()?
+                .icon
+                .and_then(|icon| self.save_icon(key, &icon)),
+        }
     }
     /// Icons PkgDeck read out of AppImages live next to its AppImage folder,
     /// which holds nothing but managed AppImages.
@@ -516,21 +580,12 @@ impl AppImage {
         }
         let architecture = Self::type2(&path)?;
         let digest = &name[8..72];
-        let contents = Self::contents(&path);
+        let contents = self.contents(&path);
         let version = contents
             .version
             .clone()
             .unwrap_or_else(|| UNKNOWN_VERSION.into());
-        let icon = ["png", "svg"]
-            .into_iter()
-            .map(|extension| self.icons().join(format!("pkgdeck-{digest}.{extension}")))
-            .find(|icon| icon.is_file())
-            .or_else(|| {
-                contents
-                    .icon
-                    .as_ref()
-                    .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon))
-            });
+        let icon = self.icon_for(&format!("pkgdeck-{digest}"), &path, &contents);
         Ok(Package {
             id: PackageId {
                 backend: "appimage".into(),
@@ -652,7 +707,7 @@ impl AppImage {
                     .unwrap_or_else(|| "External AppImage".into());
                 // The AppImage's own version wins: an entry written at
                 // install time goes stale once the app updates itself.
-                let inside = Self::contents(&canonical);
+                let inside = self.contents(&canonical);
                 let version = inside
                     .version
                     .clone()
@@ -661,10 +716,7 @@ impl AppImage {
                 // External entries keep their own desktop file, so its Icon=
                 // resolves like any local entry; otherwise the AppImage's own.
                 let icon = super::desktop_icon(None, &desktop).or_else(|| {
-                    inside
-                        .icon
-                        .as_ref()
-                        .and_then(|icon| self.save_icon(&Self::external_icon_key(&canonical), icon))
+                    self.icon_for(&Self::external_icon_key(&canonical), &canonical, &inside)
                 });
                 Some((
                     Package {
@@ -829,11 +881,8 @@ impl AppImage {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Imported AppImage");
-            let contents = Self::contents(&destination);
-            let icon = contents
-                .icon
-                .as_ref()
-                .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon));
+            let contents = self.contents(&destination);
+            let icon = self.icon_for(&format!("pkgdeck-{digest}"), &destination, &contents);
             let mut desktop =
                 Self::desktop_entry(&destination, fallback_name, &contents, icon.as_deref());
             if let Some(carried) = &carried {
@@ -1271,7 +1320,7 @@ impl AppImage {
         };
         let theirs = appimage_github::plain_version(&asset.tag);
         let offered = Some(theirs.to_owned());
-        if let Some(ours) = Self::contents(path).version.clone() {
+        if let Some(ours) = self.contents(path).version.clone() {
             let ours = appimage_github::plain_version(&ours);
             let newer = match (
                 appimage_github::ordered(theirs),
@@ -1481,11 +1530,8 @@ impl Backend for AppImage {
             let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
             let desktop = self.applications.join(format!("pkgdeck-{digest}.desktop"));
             let already_imported = Self::existing_import(&destination, &desktop, &digest)?;
-            let contents = Self::contents(&source);
-            let icon = contents
-                .icon
-                .as_ref()
-                .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon));
+            let contents = self.contents(&source);
+            let icon = self.icon_for(&format!("pkgdeck-{digest}"), &source, &contents);
             let version = contents.version.clone();
             return Ok(vec![Package {
                 id: PackageId {
@@ -1578,7 +1624,7 @@ impl Backend for AppImage {
             PathBuf::from(&package.id.name)
         };
         Ok(PackageDetails {
-            description: Self::contents(&path).comment.clone().unwrap_or_default(),
+            description: self.contents(&path).comment.clone().unwrap_or_default(),
             homepage: None,
             dependencies: vec![],
             package,
@@ -1601,7 +1647,7 @@ impl Backend for AppImage {
         let Some(original) = self.external_at(source) else {
             return Ok(None);
         };
-        let contents = Self::contents(&original);
+        let contents = self.contents(&original);
         let name = contents.name.clone().unwrap_or_else(|| {
             source
                 .file_name()
@@ -1825,6 +1871,57 @@ mod tests {
             Some(DEMO_PNG.to_vec())
         );
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn contents_are_remembered_on_disk_without_the_icon_until_the_file_changes() {
+        let base = test_base("remembered");
+        let uid = rustix::process::getuid().as_raw();
+        let root = base.join("data/pkgdeck/appimages");
+        let backend = AppImage::new(root.clone(), base.join("data/applications"), uid);
+        let path = base.join("demo.AppImage");
+        appimage_with(
+            &path,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        // Just read: the icon comes along, but isn't kept.
+        let read = backend.contents(&path);
+        assert_eq!(read.name.as_deref(), Some("Demo App"));
+        assert!(read.icon.is_some());
+        let file = fs::read_to_string(root.with_file_name("appimage-contents.json")).unwrap();
+        assert!(file.contains("Demo App"));
+        assert!(!file.contains("demo icon"));
+        assert!(backend.contents(&path).icon.is_none());
+
+        // Another start reads the file, not the image: here the image is
+        // garbage of the remembered size and time.
+        let other = base.join("other.AppImage");
+        fs::write(&other, b"not an image").unwrap();
+        let metadata = fs::metadata(&other).unwrap();
+        let key = (metadata.len(), metadata.mtime(), metadata.mtime_nsec());
+        let remembered = Contents {
+            name: Some("Remembered".into()),
+            ..Contents::default()
+        };
+        backend.remember_contents(&other, key, &remembered);
+        assert_eq!(backend.contents(&other).name.as_deref(), Some("Remembered"));
+        // Changed since: read again, and garbage reads as nothing.
+        let changed = base.join("changed.AppImage");
+        fs::write(&changed, b"not an image either").unwrap();
+        backend.remember_contents(&changed, (1, 0, 0), &remembered);
+        assert_eq!(backend.contents(&changed).name, None);
+        // Files that are gone are dropped the next time one is kept.
+        fs::remove_file(&other).unwrap();
+        backend.remember_contents(&path, (1, 0, 0), &remembered);
+        let kept = backend.remembered_contents();
+        assert!(!kept.contains_key(&other.display().to_string()));
+        assert!(kept.contains_key(&path.display().to_string()));
+        // A damaged file is the same as none.
+        fs::write(root.with_file_name("appimage-contents.json"), b"{").unwrap();
+        assert!(backend.remembered_contents().is_empty());
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

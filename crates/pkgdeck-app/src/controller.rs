@@ -1492,6 +1492,8 @@ pub struct Controller {
     auto_clean: bool,
     /// When automatic cleaning last ran, in seconds since 1970.
     auto_cleaned_at: u64,
+    /// A window shows the sections; see `set_window_open`.
+    window_open: bool,
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -1624,6 +1626,7 @@ impl Default for Controller {
             auto_clean: false,
             auto_cleaned_at: 0,
             source_filter: Vec::new(),
+            window_open: true,
             sudo: false,
             worker: None,
             names: Names::new(),
@@ -1682,7 +1685,7 @@ impl Controller {
             || self.approval_worker.is_some()
             || self.activity_worker.is_some()
             || self.awaiting_prefetch
-            || !self.prefetch.is_empty() && !held
+            || self.window_open && !self.prefetch.is_empty() && !held
     }
     /// Whether the saved approval still covers the helper this app would
     /// start, so an unattended update can't stop at a password prompt.
@@ -3059,11 +3062,12 @@ impl CachedView {
 }
 /// The slow sections' last snapshots, kept between runs so the next launch
 /// shows them at once, marked stale, while they load again.
+/// The kept sections live only in the file: the cache holds what shows,
+/// and a second copy here would double the memory they take.
 struct ViewStore {
     path: PathBuf,
-    views: Vec<StoredView>,
-    /// Writes run on their own threads; the newest one wins.
-    written: std::sync::Arc<std::sync::Mutex<u64>>,
+    /// Writes run on their own threads; for each section the newest wins.
+    written: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     generation: u64,
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -3103,18 +3107,9 @@ impl ViewStore {
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
         Some(base.join("pkgdeck/views.json"))
     }
-    /// Reads what the last run kept. A missing, damaged or older file is
-    /// the same as none.
     fn open(path: PathBuf) -> Self {
-        let views = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<StoredViews>(&bytes).ok())
-            .filter(|stored| stored.version == pkgdeck_core::VERSION)
-            .map(|stored| stored.views)
-            .unwrap_or_default();
         Self {
             path,
-            views,
             written: Default::default(),
             generation: 0,
         }
@@ -3124,7 +3119,7 @@ impl ViewStore {
         let loaded = Instant::now()
             .checked_sub(VIEW_TTL)
             .unwrap_or_else(Instant::now);
-        self.views
+        stored_views(&self.path)
             .iter()
             .map(|view| {
                 (
@@ -3147,40 +3142,51 @@ impl ViewStore {
             .collect()
     }
     fn keep(&mut self, view: StoredView) {
-        self.views.retain(|old| old.key != view.key);
-        self.views.push(view);
         self.generation += 1;
         let (generation, written) = (self.generation, self.written.clone());
-        let (path, stored) = (
-            self.path.clone(),
-            StoredViews {
-                version: pkgdeck_core::VERSION.into(),
-                views: self.views.clone(),
-            },
-        );
-        thread::spawn(move || write_views(&path, &stored, generation, &written));
+        let path = self.path.clone();
+        thread::spawn(move || write_view(&path, view, generation, &written));
     }
 }
-/// Writes the kept snapshots unless a newer generation already was: writes
-/// run on their own threads and may finish out of order. Whole, then
-/// renamed, so a crash never leaves half a file.
-fn write_views(
+/// What the last run kept at `path`. A missing, damaged or older file is
+/// the same as none.
+fn stored_views(path: &std::path::Path) -> Vec<StoredView> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StoredViews>(&bytes).ok())
+        .filter(|stored| stored.version == pkgdeck_core::VERSION)
+        .map(|stored| stored.views)
+        .unwrap_or_default()
+}
+/// Puts `view` in the file at `path` in place of its older snapshot, unless
+/// a newer one of the same section was written already: writes run on
+/// their own threads and may finish out of order. Whole, then renamed, so
+/// a crash never leaves half a file.
+fn write_view(
     path: &std::path::Path,
-    stored: &StoredViews,
+    view: StoredView,
     generation: u64,
-    written: &std::sync::Mutex<u64>,
+    written: &std::sync::Mutex<std::collections::HashMap<String, u64>>,
 ) -> bool {
-    // A writer that panicked left a generation that's still worth comparing.
+    // A writer that panicked left generations that are still worth comparing.
     let mut last = written
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if *last > generation {
+    let newest = last.entry(view.key.clone()).or_default();
+    if *newest > generation {
         return false;
     }
-    *last = generation;
+    *newest = generation;
+    let mut views = stored_views(path);
+    views.retain(|old| old.key != view.key);
+    views.push(view);
+    let stored = StoredViews {
+        version: pkgdeck_core::VERSION.into(),
+        views,
+    };
     let temporary = path.with_extension("json.tmp");
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    serde_json::to_vec(stored)
+    serde_json::to_vec(&stored)
         .map_err(std::io::Error::other)
         .and_then(|bytes| {
             std::fs::create_dir_all(dir)?;
@@ -3995,6 +4001,43 @@ impl ffi::PackageController {
             self.as_mut().set_background_state(encoded(state));
         }
         hold
+    }
+    /// Carry over when the copy that ran before last checked, so this one
+    /// waits out the interval instead of checking right away.
+    pub fn resume_checks(mut self: Pin<&mut Self>, last_check: u64) {
+        self.as_mut()
+            .rust_mut()
+            .background_schedule
+            .resume(last_check);
+    }
+    /// Whether a window shows the sections. Without one, nothing preloads
+    /// and what was preloaded goes, so PkgDeck stays small in the tray.
+    pub fn set_window_open(mut self: Pin<&mut Self>, open: bool) {
+        let rust = self.as_mut().rust_mut();
+        if rust.window_open == open {
+            return;
+        }
+        rust.window_open = open;
+        rust.invalidate_prefetch();
+        if open {
+            // Show what was kept at once, while the sections load again.
+            if rust.view_cache.entries.is_empty() {
+                let kept = rust.view_store.as_ref().map(ViewStore::cached);
+                for (key, view) in kept.into_iter().flatten() {
+                    rust.view_cache.insert(key, view);
+                }
+            }
+        } else {
+            rust.prefetch.clear();
+            rust.view_cache.entries.clear();
+            rust.prepared_rows = RowsCache::default();
+            rust.invalidate_details();
+            if rust.worker.is_none() {
+                rust.engine = None;
+                rust.engine_scope = None;
+            }
+        }
+        self.sync_needs_poll();
     }
     /// Clean automatically, and when that last happened, so a restart
     /// doesn't clean again the same day.
@@ -6298,6 +6341,10 @@ impl ffi::PackageController {
     /// with failures may carry a failed fetch, which a plain Installed read
     /// would not hit, so Installed loads on its own then.
     fn warm_inventory(mut self: Pin<&mut Self>, mut report: PackageReport, refreshed: bool) {
+        // Without a window nobody switches sections; keep nothing.
+        if !self.rust().window_open {
+            return;
+        }
         let sources = self.rust().source_filter.clone();
         let sudo = self.rust().sudo;
         if !refreshed || report.failures.is_empty() {
@@ -6608,6 +6655,10 @@ impl ffi::PackageController {
             if !finished {
                 return;
             }
+        }
+        // Nobody sees preloaded sections without a window.
+        if !self.rust().window_open {
+            return;
         }
         self.as_mut().rewarm_if_due();
         let writing = self.rust().worker.as_ref().is_some_and(|w| w.job.writes())
@@ -8606,6 +8657,14 @@ mod tests {
             assert_eq!(cached.contains_key(&installed), installed_cached);
             assert_eq!(cached.contains_key(&updates), refreshed);
         }
+        // Without a window, nothing is kept for later.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_window_open(false);
+        controller
+            .as_mut()
+            .warm_inventory(PackageReport::default(), true);
+        assert!(controller.rust().prefetched.is_empty());
     }
 
     #[test]
@@ -8789,27 +8848,104 @@ mod tests {
     fn an_older_write_never_replaces_a_newer_one() {
         let dir = Scratch::new("ordered-views");
         let path = dir.path().join("views.json");
-        let written = std::sync::Mutex::new(0);
-        let stored = |name: &str| StoredViews {
-            version: pkgdeck_core::VERSION.into(),
-            views: vec![StoredView {
-                key: name.into(),
-                packages: vec![],
-                cleanup: vec![],
-                rows: "[]".into(),
-                status: String::new(),
-                report_state: String::new(),
-                upgradable: false,
-                updates_view: false,
-            }],
+        let written = std::sync::Mutex::new(std::collections::HashMap::new());
+        let stored = |key: &str, status: &str| StoredView {
+            key: key.into(),
+            packages: vec![],
+            cleanup: vec![],
+            rows: "[]".into(),
+            status: status.into(),
+            report_state: String::new(),
+            upgradable: false,
+            updates_view: false,
         };
-        assert!(write_views(&path, &stored("newer"), 2, &written));
-        assert!(!write_views(&path, &stored("older"), 1, &written));
+        assert!(write_view(&path, stored("Installed", "newer"), 2, &written));
+        assert!(!write_view(
+            &path,
+            stored("Installed", "older"),
+            1,
+            &written
+        ));
+        // Another section's older write still lands, beside the first.
+        assert!(write_view(&path, stored("Updates", "other"), 1, &written));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("newer") && !text.contains("older"));
+        assert!(text.contains("other"));
         // A file in the way of the directory is a failed write, not a crash.
         let blocked = dir.path().join("views.json").join("views.json");
-        assert!(!write_views(&blocked, &stored("blocked"), 3, &written));
+        assert!(!write_view(
+            &blocked,
+            stored("Clean", "blocked"),
+            3,
+            &written
+        ));
+    }
+
+    #[test]
+    fn a_closed_window_keeps_no_sections_in_memory_and_gets_them_back() {
+        let dir = Scratch::new("window-views");
+        let path = dir.path().join("views.json");
+        let key = cache_key("Installed", "", &[], false);
+        let view = StoredView {
+            key: key.clone(),
+            packages: vec![],
+            cleanup: vec![],
+            rows: "[]".into(),
+            status: "kept".into(),
+            report_state: String::new(),
+            upgradable: false,
+            updates_view: false,
+        };
+        let written = std::sync::Mutex::new(std::collections::HashMap::new());
+        assert!(write_view(&path, view, 1, &written));
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .rust_mut()
+            .open_view_store(Some(path.clone()));
+        assert!(controller.rust().view_cache.get(&key).is_some());
+        assert!(!controller.rust().prefetch.is_empty());
+
+        controller.as_mut().set_window_open(false);
+        let rust = controller.rust();
+        assert!(rust.view_cache.entries.is_empty());
+        assert!(rust.prefetch.is_empty());
+        assert!(rust.engine.is_none());
+        // Nothing left to load, so the tray can sleep.
+        assert!(!rust.outstanding());
+        assert!(!*controller.needs_poll());
+        // Closing twice changes nothing.
+        controller.as_mut().set_window_open(false);
+        assert!(controller.rust().prefetch.is_empty());
+
+        controller.as_mut().set_window_open(true);
+        assert!(controller.rust().view_cache.get(&key).is_some());
+        assert_eq!(controller.rust().prefetch, prefetch_views());
+        // Opening twice changes nothing.
+        controller.as_mut().set_window_open(true);
+        assert!(controller.rust().view_cache.get(&key).is_some());
+        // Sections already in memory aren't read again.
+        controller.as_mut().set_window_open(false);
+        let fresh = cache_key("Updates", "", &[], false);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(fresh.clone(), cached_view("loaded while closed"));
+        controller.as_mut().set_window_open(true);
+        let cache = &controller.rust().view_cache;
+        assert!(cache.get(&fresh).is_some());
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn a_new_copy_waits_out_the_last_ones_check() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().resume_checks(100);
+        let schedule = &mut controller.as_mut().rust_mut().background_schedule;
+        assert!(!schedule.ready(150, true, false, false, false, false));
     }
 
     #[test]

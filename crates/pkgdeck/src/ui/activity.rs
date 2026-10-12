@@ -139,7 +139,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
     let expanded = app.expanded.contains(&entry.id);
     let response = egui::Frame::new()
         .fill(palette.canvas)
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(theme::round(12))
         .inner_margin(egui::Margin {
             left: 16,
             right: 12,
@@ -171,7 +171,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                     if entry.tone() != Tone::Success {
                         egui::Frame::new()
                             .fill(alpha(color, 0.14))
-                            .corner_radius(CornerRadius::same(8))
+                            .corner_radius(theme::round(8))
                             .inner_margin(egui::Margin::symmetric(8, 2))
                             .show(ui, |ui| {
                                 ui.label(
@@ -281,7 +281,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                         egui::Frame::new()
                             .fill(palette.surface)
                             .stroke(Stroke::new(1.0, palette.line))
-                            .corner_radius(CornerRadius::same(8))
+                            .corner_radius(theme::round(8))
                             .inner_margin(egui::Margin::same(8))
                             .show(ui, |ui| {
                                 egui::ScrollArea::vertical()
@@ -308,7 +308,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
     let rect = response.response.rect;
     ui.painter().rect_filled(
         Rect::from_min_size(rect.min + vec2(0.0, 10.0), vec2(3.0, rect.height() - 20.0)),
-        CornerRadius::same(2),
+        theme::round(2),
         color,
     );
     if expandable {

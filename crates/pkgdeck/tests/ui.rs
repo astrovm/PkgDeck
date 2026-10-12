@@ -74,6 +74,23 @@ fn harness_with(app: App, size: egui::Vec2, step: f32) -> Harness<'static, (bool
         )
 }
 
+/// Scrolls the control into view first, as a person would, then clicks it.
+/// `role` tells it apart from text with the same label.
+fn click_in_view(harness: &mut Harness<'static, (bool, App)>, role: Option<Role>, label: &str) {
+    for scroll in [true, false] {
+        let node = match role {
+            Some(role) => harness.get_by_role_and_label(role, label),
+            None => harness.get_by_label(label),
+        };
+        if scroll {
+            node.scroll_to_me();
+        } else {
+            node.click();
+        }
+        harness.run_steps(3);
+    }
+}
+
 fn show(page: Page) -> Harness<'static, (bool, App)> {
     let mut app = app();
     app.page = page;
@@ -338,30 +355,199 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
 fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
     let before = harness.state().1.settings.auto_update;
-    harness
-        .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
-        .click();
-    harness.run_steps(3);
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Update apps and packages automatically",
+    );
     assert_ne!(harness.state().1.settings.auto_update, before);
-    harness.get_by_label("Light").click();
-    harness.run_steps(3);
+    click_in_view(&mut harness, None, "Light");
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
     // Only the colours of the mode on screen are offered.
     assert!(harness.query_by_label("Black").is_none());
     for choice in ["Paper", "Dark", "Black", "Teal", "Large"] {
-        harness.get_by_label(choice).click();
-        harness.run_steps(3);
+        click_in_view(&mut harness, None, choice);
     }
     let settings = &harness.state().1.settings;
     assert_eq!(settings.dark_theme, DarkTheme::Black);
     assert_eq!(settings.light_theme, LightTheme::Paper);
     assert_eq!(settings.accent, Accent::Teal);
     assert_eq!(settings.text_size, TextSize::Large);
-    harness
-        .get_by_role_and_label(Role::CheckBox, "Animations")
-        .click();
-    harness.run_steps(3);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Animations");
     assert!(!harness.state().1.settings.reduce_motion);
+}
+
+#[test]
+fn styles_and_their_choices_change_the_look() {
+    use pkgdeck::settings::{Density, Style, Typeface};
+    let mut harness = show(Page::Settings);
+    // Every style is offered, Modern first and chosen.
+    for style in Style::ALL {
+        assert!(harness.query_by_label(style.name()).is_some(), "{style:?}");
+    }
+    assert!(harness.query_by_label("Charcoal").is_some());
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Retro);
+    assert_eq!(settings.accent, Accent::Navy);
+    // Windows 98 has its own colours and is always square, like 95.
+    assert!(harness.query_by_label("Charcoal").is_none());
+    assert!(harness.query_by_label("Roundness").is_none());
+    harness.get_by_label("Windows 95").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.style, Style::Win95);
+    assert!(harness.query_by_label("Roundness").is_none());
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Roundness").is_some());
+    for choice in ["Roomy", "Inter", "Teal"] {
+        harness.get_by_label(choice).click();
+        harness.run_steps(3);
+    }
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Luna);
+    assert_eq!(settings.density, Density::Roomy);
+    assert_eq!(settings.typeface, Typeface::Inter);
+    assert_eq!(settings.accent, Accent::Teal);
+    // Choosing the style on screen again keeps the accent picked since.
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.accent, Accent::Teal);
+    assert!(harness.query_by_label("Custom accent").is_some());
+    assert!(harness.query_by_label("Export").is_some());
+    assert!(harness.query_by_label("Import").is_some());
+    harness.get_by_label("Modern").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.accent, Accent::Blue);
+    assert!(harness.query_by_label("Charcoal").is_some());
+}
+
+#[test]
+fn every_style_mixes_with_every_other_look_option() {
+    use pkgdeck::settings::{Density, Family, Style, Typeface};
+    let mut harness = show(Page::Installed);
+    let colours = ["", "#ffe14d", "#202020", "#f4f4f4"];
+    let sizes = [
+        TextSize::Small,
+        TextSize::Normal,
+        TextSize::Large,
+        TextSize::Larger,
+    ];
+    let densities = [Density::Compact, Density::Normal, Density::Roomy];
+    let faces = [Typeface::Style, Typeface::Inter, Typeface::System];
+    let mut turn = 0;
+    for style in Style::ALL {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for roundness in [0.0, 1.0, 2.0] {
+                turn += 1;
+                let colour = colours[turn % colours.len()];
+                {
+                    let settings = &mut harness.state_mut().1.settings;
+                    settings.style = style;
+                    settings.appearance = appearance;
+                    settings.roundness = roundness;
+                    settings.custom_accent = colour.to_owned();
+                    settings.accent = if colour.is_empty() {
+                        style.accent()
+                    } else {
+                        Accent::Custom
+                    };
+                    settings.text_size = sizes[turn % sizes.len()];
+                    settings.density = densities[turn % densities.len()];
+                    settings.typeface = faces[turn % faces.len()];
+                }
+                let at = format!("{style:?} {appearance:?} round={roundness} {colour}");
+                for page in [Page::Installed, Page::Settings] {
+                    harness.state_mut().1.page = page;
+                    harness.state_mut().1.invalidate();
+                    harness.run_steps(3);
+                }
+                // Switches stay switches to a screen reader, drawn as a
+                // check box or not.
+                assert!(
+                    harness
+                        .query_by_role_and_label(Role::CheckBox, "Animations")
+                        .is_some(),
+                    "{at}"
+                );
+                // Only styles with corners offer to change them.
+                assert_eq!(
+                    harness.query_by_label("Roundness").is_some(),
+                    style.family() != Family::Retro,
+                    "{at}"
+                );
+                // The older styles bring their own title bar and buttons.
+                for caption in ["Minimize window", "Maximize window", "Close window"] {
+                    assert_eq!(
+                        harness
+                            .query_by_role_and_label(Role::Button, caption)
+                            .is_some(),
+                        style != Style::Modern,
+                        "{at} {caption}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_older_styles_title_bar_buttons_answer_clicks() {
+    use pkgdeck::settings::Style;
+    for style in Style::ALL.into_iter().filter(|s| *s != Style::Modern) {
+        let mut harness = show(Page::Installed);
+        harness.state_mut().1.settings.style = style;
+        harness.state_mut().1.invalidate();
+        harness.run_steps(3);
+        // Each button asks the window for what it says.
+        for (caption, command) in [
+            ("Minimize window", egui::ViewportCommand::Minimized(true)),
+            ("Maximize window", egui::ViewportCommand::Maximized(true)),
+            ("Close window", egui::ViewportCommand::Close),
+        ] {
+            harness.get_by_role_and_label(Role::Button, caption).click();
+            let mut sent = Vec::new();
+            for _ in 0..3 {
+                harness.step();
+                sent.extend(
+                    harness.output().viewport_output[&egui::ViewportId::ROOT]
+                        .commands
+                        .clone(),
+                );
+            }
+            assert!(sent.contains(&command), "{style:?} {caption}: {sent:?}");
+        }
+    }
+    // Modern leaves the window to the system's frame, and the older styles
+    // take it back.
+    let mut harness = show(Page::Installed);
+    let decorations = |harness: &mut Harness<'static, (bool, App)>| {
+        let mut sent = Vec::new();
+        for _ in 0..3 {
+            harness.step();
+            sent.extend(
+                harness.output().viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        egui::ViewportCommand::Decorations(on) => Some(*on),
+                        _ => None,
+                    }),
+            );
+        }
+        sent
+    };
+    decorations(&mut harness);
+    harness.state_mut().1.settings.style = Style::Retro;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), [false]);
+    harness.state_mut().1.settings.style = Style::Luna;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), Vec::<bool>::new());
+    harness.state_mut().1.settings.style = Style::Modern;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), [true]);
 }
 
 /// A catalog with two package managers, one whose check failed and one
@@ -504,10 +690,11 @@ fn settings_say_what_automatic_updates_wait_for() {
         harness.run_steps(4);
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
-        harness
-            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
-            .click();
-        harness.run_steps(3);
+        click_in_view(
+            &mut harness,
+            Some(Role::CheckBox),
+            "Update apps and packages automatically",
+        );
         assert!(harness.query_by_label(text).is_none(), "{text}");
     }
     // A reason this version doesn't know shows nothing.

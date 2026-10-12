@@ -1,18 +1,22 @@
 //! The results card: its heading, column titles, rows, and what it shows
 //! while loading or when there's nothing to list.
 
-use super::{widgets::*, COMPACT_BELOW, MEDIUM_BELOW};
+use super::{skin, widgets::*, COMPACT_BELOW, MEDIUM_BELOW};
 use crate::{
     app::App,
     model::{self, Column, Page, Row, Tone},
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CornerRadius, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind,
-    Ui, UiBuilder, Vec2,
+    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Vec2,
 };
 
 const ROW: f32 = 60.0;
+/// A wide row's height at the chosen density.
+fn wide_row() -> f32 {
+    (ROW * theme::skin().density.scale()).round()
+}
 const ROW_COMPACT: f32 = 78.0;
 const GROUP_HEADING: f32 = 36.0;
 
@@ -42,21 +46,14 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         focused && app.ui.keyboard_nav,
         REVEAL,
     );
-    ui.painter().add(
-        egui::epaint::Shadow {
-            offset: [0, 1],
-            blur: 6,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(if palette.dark { 40 } else { 10 }),
-        }
-        .as_shape(rect, CornerRadius::same(12)),
-    );
-    ui.painter().rect(
+    // A list box sits into the window in the styles with bevels.
+    let line = skin::panel_stroke(&palette).color;
+    skin::paint_panel(
+        ui.painter(),
         rect,
-        CornerRadius::same(12),
-        palette.surface,
-        Stroke::new(1.0, mix(palette.line, palette.accent, ring)),
-        StrokeKind::Inside,
+        &palette,
+        true,
+        Stroke::new(1.0, mix(line, palette.accent, ring)),
     );
     let width = if rect.width() < COMPACT_BELOW {
         Width::Compact
@@ -377,7 +374,10 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             }
         }
     }
-    for (column, title, area) in titles {
+    // The older styles draw each heading as a cell of a header bar.
+    let band = skin::paint_column_band(ui.painter(), rect.shrink2(vec2(2.0, 0.0)), &palette);
+    let starts: Vec<f32> = titles.iter().map(|(_, _, area)| area.left()).collect();
+    for (index, (column, title, area)) in titles.into_iter().enumerate() {
         let response = ui
             .interact(
                 Rect::from_min_max(
@@ -389,21 +389,46 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             )
             .on_hover_cursor(CursorIcon::PointingHand);
         let sorted = app.sort.filter(|(c, _)| *c == column);
-        let color = if sorted.is_some() || response.hovered() {
+        let mut color = if sorted.is_some() || response.hovered() || band {
             palette.ink
         } else {
             palette.muted
         };
+        if band {
+            let left = if index == 0 {
+                rect.left() + 2.0
+            } else {
+                area.left() - 8.0
+            };
+            let right = starts
+                .get(index + 1)
+                .map_or(rect.right() - 2.0, |next| next - 8.0);
+            let cell = Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom()));
+            if let Some(ink) = skin::paint_column_cell(
+                ui.painter(),
+                cell,
+                &palette,
+                sorted.is_some(),
+                response.hovered(),
+            ) {
+                color = ink;
+            }
+        }
+        let title = skin::column_title(title);
         let text = match sorted {
             Some((_, true)) => format!("{title}  ▲"),
             Some((_, false)) => format!("{title}  ▼"),
-            None => title.to_owned(),
+            None => title,
         };
         ui.painter().text(
             pos2(area.left(), rect.center().y),
             Align2::LEFT_CENTER,
             text,
-            theme::bold(11.0),
+            if band {
+                theme::font(13.0)
+            } else {
+                theme::bold(11.0)
+            },
             color,
         );
         if response.clicked() {
@@ -415,13 +440,15 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         }
     }
     column_dividers(app, ui, rect, &cols);
-    ui.painter().line_segment(
-        [
-            pos2(rect.left() + 12.0, rect.bottom()),
-            pos2(rect.right() - 12.0, rect.bottom()),
-        ],
-        Stroke::new(1.0, alpha(palette.line, 0.7)),
-    );
+    if !band {
+        ui.painter().line_segment(
+            [
+                pos2(rect.left() + 12.0, rect.bottom()),
+                pos2(rect.right() - 12.0, rect.bottom()),
+            ],
+            Stroke::new(1.0, alpha(palette.line, 0.7)),
+        );
+    }
 }
 
 /// Drag the line after a column heading to resize it; double-click it for
@@ -501,7 +528,7 @@ fn row_height(app: &App, index: usize, width: Width) -> f32 {
     let base = if width == Width::Compact {
         ROW_COMPACT
     } else {
-        ROW
+        wide_row()
     };
     base + if app.items[index].group.is_some() {
         GROUP_HEADING
@@ -714,16 +741,12 @@ fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin:
         pos2(ui.max_rect().right(), origin + bottom),
     )
     .shrink2(vec2(6.0, 2.0));
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(10),
-        alpha(palette.selection, shown),
-    );
+    skin::paint_row_selection(ui.painter(), rect, &palette, shown);
     // The keyboard's outline moves with it.
     if selected.is_some() && app.ui.keyboard_nav && app.ui.list_focused {
         ui.painter().rect_stroke(
             rect,
-            CornerRadius::same(10),
+            theme::round(10),
             Stroke::new(1.5, alpha(palette.accent, shown)),
             StrokeKind::Inside,
         );
@@ -765,13 +788,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             vec2(rect.width() - 16.0, GROUP_HEADING - 6.0),
         );
         ui.painter()
-            .rect_filled(heading, CornerRadius::same(8), alpha(palette.accent, 0.08));
+            .rect_filled(heading, theme::round(8), alpha(palette.accent, 0.08));
         ui.painter().rect_filled(
             Rect::from_min_size(
                 heading.min + vec2(0.0, 6.0),
                 vec2(3.0, heading.height() - 12.0),
             ),
-            CornerRadius::same(2),
+            theme::round(2),
             palette.accent,
         );
         ui.painter().text(
@@ -800,6 +823,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         FEEDBACK,
     );
     let chosen = ease(&ctx, id.with("selected"), selected, REVEAL);
+    // On a solid selection, everything in the row takes its ink.
+    let palette = match skin::row_selection_ink(&palette) {
+        Some(ink) if selected => skin::on_fill(&palette, ink),
+        _ => palette,
+    };
     let surface = rect.shrink2(vec2(6.0, 2.0));
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
@@ -811,8 +839,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         fill = mix(fill, alpha(palette.success, 0.2), flash);
         ctx.request_repaint();
     }
-    ui.painter()
-        .rect_filled(surface, CornerRadius::same(10), fill);
+    ui.painter().rect_filled(surface, theme::round(10), fill);
     let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
@@ -1133,9 +1160,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
 pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
     let palette = Palette::current(ui.ctx());
     let fallback = |ui: &mut Ui| {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(10), alpha(palette.accent, 0.1));
-        let mark = rect.shrink(rect.width() * 0.24);
+        let mark = if skin::bare_icons() {
+            rect.shrink(rect.width() * 0.12)
+        } else {
+            ui.painter()
+                .rect_filled(rect, theme::round(10), alpha(palette.accent, 0.1));
+            rect.shrink(rect.width() * 0.24)
+        };
         if row.kind == "failure" {
             theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
         } else {
@@ -1157,7 +1188,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
         Some(uri) => {
             let image = egui::Image::new(uri.clone())
                 .fit_to_exact_size(rect.size())
-                .corner_radius(CornerRadius::same(8));
+                .corner_radius(theme::round(8));
             match image.load_for_size(ui.ctx(), rect.size()) {
                 Ok(egui::load::TexturePoll::Ready { .. }) => {
                     image.paint_at(ui, rect);
@@ -1194,13 +1225,14 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
 fn skeleton_rows(ui: &mut Ui, body: Rect, palette: &Palette) {
     let color = palette.hover_solid();
     for i in 0..8 {
-        let top = body.top() + 8.0 + i as f32 * ROW;
-        if top + ROW > body.bottom() {
+        let row = wide_row();
+        let top = body.top() + 8.0 + i as f32 * row;
+        if top + row > body.bottom() {
             break;
         }
         let row = Rect::from_min_size(
             pos2(body.left() + 20.0, top),
-            vec2(body.width() - 40.0, ROW),
+            vec2(body.width() - 40.0, row),
         );
         paint_skeleton(
             ui,

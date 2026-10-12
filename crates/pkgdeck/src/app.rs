@@ -1618,6 +1618,16 @@ impl App {
         }
     }
 
+    /// Nothing running, queued, or waiting for an answer.
+    pub fn idle(&self) -> bool {
+        !self.busy
+            && !*self.ctl.needs_poll()
+            && self.confirmation.is_none()
+            && self.ctl.confirmation().is_empty()
+            && self.restart_at.is_none()
+            && self.search_due.is_none()
+    }
+
     /// The tray icon follows background checks.
     pub fn sync_tray(&mut self) {
         let visible = self.settings.background_mode;

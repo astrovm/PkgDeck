@@ -2,14 +2,17 @@
 //! managers it uses, where Clean looks for old projects, what it is, and
 //! its keyboard shortcuts.
 
-use super::widgets::*;
+use super::{skin, widgets::*};
 use crate::{
     app::App,
     model::{self, Tone},
-    settings::{Accent, Appearance, DarkTheme, LightTheme, TextSize},
+    settings::{
+        Accent, Appearance, DarkTheme, Density, Family, LightTheme, Style, TextSize, Theme,
+        Typeface,
+    },
     theme::{self, Palette},
 };
-use eframe::egui::{self, vec2, CornerRadius, Id, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{self, vec2, Id, Sense, Stroke, Ui, Vec2};
 use pkgdeck_core::{backends::ProjectSettings, host::Host};
 use std::path::{Path, PathBuf};
 
@@ -40,15 +43,63 @@ const SWITCH: Vec2 = vec2(40.0, 24.0);
 
 fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
-    card(&palette)
-        .inner_margin(egui::Margin::symmetric(18, 16))
-        .show(ui, |ui| {
+    let margin = egui::Margin::symmetric(18, 16);
+    // The older styles frame settings in their group boxes.
+    let Some(group) = skin::group(&palette) else {
+        show_card(ui, card(&palette).inner_margin(margin), |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.set_width(ui.available_width());
             caption(ui, title);
             ui.add_space(4.0);
             content(ui);
         });
+        return;
+    };
+    let font = if group.bold {
+        theme::bold(group.size)
+    } else {
+        theme::font(group.size)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), font, group.ink);
+    let title_height = galley.size().y;
+    if group.on_line {
+        ui.add_space(title_height / 2.0);
+    }
+    let shown = egui::Frame::new()
+        .fill(group.fill)
+        .stroke(group.stroke)
+        .corner_radius(group.radius)
+        .shadow(group.shadow)
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.set_width(ui.available_width());
+            // Room for the title, drawn once the box's size is known.
+            ui.add_space(if group.on_line {
+                4.0
+            } else {
+                title_height + 8.0
+            });
+            content(ui);
+        });
+    let rect = shown.response.rect;
+    skin::paint_group(ui.painter(), rect, &palette);
+    let at = if group.on_line {
+        egui::pos2(rect.left() + 12.0, rect.top() - title_height / 2.0)
+    } else {
+        egui::pos2(rect.left() + 18.0, rect.top() + 14.0)
+    };
+    if group.on_line {
+        // The title breaks the line it sits on.
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(at, galley.size()).expand2(vec2(5.0, 0.0)),
+            egui::CornerRadius::ZERO,
+            palette.canvas,
+        );
+    }
+    ui.painter().galley(at, galley, group.ink);
 }
 
 /// A label with an optional line under it, and a control `size` big: on
@@ -122,34 +173,75 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.appearance = all[choice];
             }
         });
+        styles(app, ui);
         // Only the colours of the appearance on screen; the other mode keeps
-        // its own choice.
-        setting_row(ui, "Colours", "", vec2(252.0, 34.0), |ui| {
-            if ui.ctx().theme() == egui::Theme::Dark {
-                let all = [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate];
-                if let Some(choice) = segmented(
-                    ui,
-                    Id::new("dark-theme"),
-                    &["Charcoal", "Black", "Slate"],
-                    position(&all, app.settings.dark_theme),
-                ) {
-                    app.settings.dark_theme = all[choice];
+        // its own choice. The older styles have their own.
+        if app.settings.style == Style::Modern {
+            setting_row(ui, "Colours", "", vec2(252.0, 34.0), |ui| {
+                if ui.ctx().theme() == egui::Theme::Dark {
+                    let all = [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate];
+                    if let Some(choice) = segmented(
+                        ui,
+                        Id::new("dark-theme"),
+                        &["Charcoal", "Black", "Slate"],
+                        position(&all, app.settings.dark_theme),
+                    ) {
+                        app.settings.dark_theme = all[choice];
+                    }
+                } else {
+                    let all = [LightTheme::Classic, LightTheme::White, LightTheme::Paper];
+                    if let Some(choice) = segmented(
+                        ui,
+                        Id::new("light-theme"),
+                        &["Classic", "White", "Paper"],
+                        position(&all, app.settings.light_theme),
+                    ) {
+                        app.settings.light_theme = all[choice];
+                    }
                 }
-            } else {
-                let all = [LightTheme::Classic, LightTheme::White, LightTheme::Paper];
-                if let Some(choice) = segmented(
-                    ui,
-                    Id::new("light-theme"),
-                    &["Classic", "White", "Paper"],
-                    position(&all, app.settings.light_theme),
-                ) {
-                    app.settings.light_theme = all[choice];
-                }
-            }
-        });
+            });
+        }
         setting_row(ui, "Accent", "", vec2(swatches_width(), 34.0), |ui| {
             if let Some(accent) = swatches(ui, app.settings.accent) {
                 app.settings.accent = accent;
+            }
+            custom_swatch(ui, &mut app.settings);
+        });
+        // Windows 95 and 98 are square whatever the roundness.
+        if app.settings.style.family() != Family::Retro {
+            // Quarter steps from square to twice the style's own.
+            let mut step = (app.settings.roundness * 4.0).round().clamp(0.0, 8.0) as usize;
+            let hint = match step {
+                0 => "Square".to_owned(),
+                4 => "As the style draws it".to_owned(),
+                _ => format!("{}%", step * 25),
+            };
+            setting_row(ui, "Roundness", &hint, vec2(240.0, 28.0), |ui| {
+                if steps(ui, Id::new("roundness"), 9, &mut step, true, 240.0) {
+                    app.settings.roundness = step as f32 / 4.0;
+                }
+            });
+        }
+        setting_row(ui, "Density", "", vec2(252.0, 34.0), |ui| {
+            let all = [Density::Compact, Density::Normal, Density::Roomy];
+            if let Some(choice) = segmented(
+                ui,
+                Id::new("density"),
+                &["Compact", "Normal", "Roomy"],
+                position(&all, app.settings.density),
+            ) {
+                app.settings.density = all[choice];
+            }
+        });
+        setting_row(ui, "Font", "", vec2(252.0, 34.0), |ui| {
+            let all = [Typeface::Style, Typeface::Inter, Typeface::System];
+            if let Some(choice) = segmented(
+                ui,
+                Id::new("typeface"),
+                &["Style", "Inter", "System"],
+                position(&all, app.settings.typeface),
+            ) {
+                app.settings.typeface = all[choice];
             }
         });
         setting_row(ui, "Text size", "", vec2(336.0, 34.0), |ui| {
@@ -181,7 +273,253 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.reduce_motion = !on;
             }
         });
+        theme_files(app, ui);
     });
+}
+
+const PREVIEW: Vec2 = vec2(104.0, 74.0);
+const PREVIEW_GAP: f32 = 10.0;
+
+/// A small window drawn in each style, the current one ringed. Picking
+/// one also picks the accent it was made with.
+fn styles(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let width = ui.available_width();
+    let columns =
+        (((width + PREVIEW_GAP) / (PREVIEW.x + PREVIEW_GAP)).floor() as usize).clamp(1, 6);
+    let rows = Style::ALL.len().div_ceil(columns);
+    let cell = vec2(PREVIEW.x, PREVIEW.y + 24.0);
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(width, rows as f32 * (cell.y + PREVIEW_GAP)),
+        Sense::hover(),
+    );
+    for (index, style) in Style::ALL.into_iter().enumerate() {
+        let at = rect.min
+            + vec2(
+                (index % columns) as f32 * (cell.x + PREVIEW_GAP),
+                (index / columns) as f32 * (cell.y + PREVIEW_GAP),
+            );
+        let card = egui::Rect::from_min_size(at, PREVIEW);
+        let response = ui
+            .interact(card, Id::new("style").with(index), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let current = app.settings.style == style;
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, current, style.name())
+        });
+        let mut scheme = theme::Scheme::of(&app.settings);
+        scheme.style = style;
+        if !current {
+            scheme.accent = style.accent();
+        }
+        let look = Palette::of(scheme, palette.dark);
+        let skin = theme::Skin {
+            style,
+            roundness: scheme.roundness,
+            density: scheme.density,
+        };
+        let painter = ui.painter_at(card);
+        theme::with_skin(skin, || preview(&painter, card, &look));
+        let hover = ease(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered(),
+            FEEDBACK,
+        );
+        let ring = ease(ui.ctx(), response.id.with("on"), current, FEEDBACK);
+        let ring_color = mix(alpha(palette.strong_line, hover), palette.accent, ring);
+        ui.painter().rect_stroke(
+            card.expand(3.0),
+            theme::round(12),
+            Stroke::new(2.0, ring_color),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            egui::pos2(card.center().x, card.bottom() + 14.0),
+            egui::Align2::CENTER_CENTER,
+            style.name(),
+            if current {
+                theme::bold(13.0)
+            } else {
+                theme::font(13.0)
+            },
+            if current { palette.ink } else { palette.muted },
+        );
+        if response.clicked() && !current {
+            app.settings.style = style;
+            app.settings.accent = style.accent();
+        }
+    }
+}
+
+/// A window in miniature: a sidebar with a chosen entry, a panel with a
+/// title strip and a button.
+fn preview(painter: &egui::Painter, rect: egui::Rect, palette: &Palette) {
+    skin::paint_canvas(painter, rect, palette);
+    let sidebar = egui::Rect::from_min_size(rect.min, vec2(30.0, rect.height()));
+    let pill = egui::Rect::from_min_size(sidebar.min + vec2(5.0, 16.0), vec2(20.0, 9.0));
+    let logo = egui::Rect::from_min_size(sidebar.min + vec2(5.0, 6.0), vec2(20.0, 4.0));
+    let entries =
+        egui::Rect::from_min_max(pill.min, egui::pos2(pill.right(), rect.bottom() - 10.0));
+    skin::paint_sidebar(painter, sidebar, logo, entries, palette);
+    skin::paint_selection(painter, pill, palette);
+    for row in 1..4 {
+        let line = egui::Rect::from_min_size(
+            sidebar.min + vec2(7.0, 16.0 + row as f32 * 13.0 + 3.0),
+            vec2(14.0, 3.0),
+        );
+        painter.rect_filled(line, egui::CornerRadius::same(1), alpha(palette.muted, 0.5));
+    }
+    let panel = egui::Rect::from_min_max(
+        egui::pos2(sidebar.right() + 8.0, rect.top() + 9.0),
+        rect.max - vec2(8.0, 9.0),
+    );
+    skin::paint_panel(painter, panel, palette, false, skin::panel_stroke(palette));
+    let strip = egui::Rect::from_min_size(panel.min, vec2(panel.width(), 13.0)).shrink(1.0);
+    if skin::paint_title_strip(painter, strip, palette).is_none() {
+        let caption = egui::Rect::from_min_size(panel.min + vec2(7.0, 6.0), vec2(24.0, 3.0));
+        painter.rect_filled(
+            caption,
+            egui::CornerRadius::same(1),
+            alpha(palette.muted, 0.6),
+        );
+    }
+    for row in 0..2 {
+        let line = egui::Rect::from_min_size(
+            panel.min + vec2(7.0, 20.0 + row as f32 * 8.0),
+            vec2(panel.width() * (0.7 - row as f32 * 0.2), 3.0),
+        );
+        painter.rect_filled(line, egui::CornerRadius::same(1), alpha(palette.ink, 0.35));
+    }
+    let button = egui::Rect::from_min_size(
+        egui::pos2(panel.right() - 36.0, panel.bottom() - 18.0),
+        vec2(29.0, 12.0),
+    );
+    skin::paint_button(
+        painter,
+        button,
+        skin::Weight::Strong,
+        palette.accent,
+        Stroke::NONE,
+        skin::State {
+            hover: 0.0,
+            press: 0.0,
+            opacity: 1.0,
+        },
+        palette,
+    );
+}
+
+/// The last swatch: a colour picked by hand.
+fn custom_swatch(ui: &mut Ui, settings: &mut crate::settings::Settings) {
+    let palette = Palette::current(ui.ctx());
+    let (cell, response) = ui.allocate_exact_size(Vec2::splat(SWATCH), Sense::click());
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Pick a colour");
+    let current = settings.accent == Accent::Custom;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, current, "Custom accent")
+    });
+    let center = cell.center();
+    let hovered = if response.hovered() { 1.0 } else { 0.0 };
+    let radius = SWATCH / 2.0 - 4.0 + 2.0 * hovered;
+    let picked = theme::parse_hex(&settings.custom_accent);
+    match picked.filter(|_| current) {
+        Some(color) => {
+            ui.painter().circle_filled(center, radius, color);
+            ui.painter()
+                .circle_stroke(center, SWATCH / 2.0 - 1.0, Stroke::new(2.0, color));
+        }
+        None => paint_wheel(ui.painter(), center, radius),
+    }
+    egui::Popup::menu(&response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            let mut color = picked.unwrap_or(palette.accent);
+            if egui::color_picker::color_picker_color32(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::Opaque,
+            ) {
+                settings.accent = Accent::Custom;
+                settings.custom_accent = theme::hex(color);
+            }
+        });
+}
+
+/// A colour wheel, for the custom accent before one is picked.
+fn paint_wheel(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
+    let steps = 24;
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(center, egui::Color32::WHITE);
+    for step in 0..=steps {
+        let turn = step as f32 / steps as f32;
+        let angle = turn * std::f32::consts::TAU;
+        let color = egui::ecolor::Hsva::new(turn, 0.75, 0.95, 1.0).into();
+        mesh.colored_vertex(center + radius * vec2(angle.cos(), angle.sin()), color);
+    }
+    for step in 0..steps {
+        mesh.add_triangle(0, step + 1, step + 2);
+    }
+    painter.add(mesh);
+}
+
+/// Saving the look to a file and loading one.
+fn theme_files(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let error_id = Id::new("theme-file-error");
+    setting_row(
+        ui,
+        "Theme file",
+        "Share a look, or use someone else's",
+        vec2(220.0, 34.0),
+        |ui| {
+            ui.horizontal(|ui| {
+                if Button::new(Look::Secondary, "Export")
+                    .icon("external")
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    let dialog = rfd::FileDialog::new()
+                        .set_title("Export theme")
+                        .set_file_name(format!("{}.toml", app.settings.style.name()))
+                        .add_filter("Theme", &["toml"]);
+                    if let Some(path) = dialog.save_file() {
+                        let error = Theme::of(&app.settings)
+                            .write(&path)
+                            .err()
+                            .map(|error| format!("Couldn't save the theme: {error}"));
+                        ui.data_mut(|data| data.insert_temp(error_id, error));
+                    }
+                }
+                if Button::new(Look::Secondary, "Import")
+                    .icon("install")
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    let dialog = rfd::FileDialog::new()
+                        .set_title("Import theme")
+                        .add_filter("Theme", &["toml"]);
+                    if let Some(path) = dialog.pick_file() {
+                        let error = match Theme::read(&path) {
+                            Ok(theme) => {
+                                theme.apply(&mut app.settings);
+                                None
+                            }
+                            Err(error) => Some(error.to_string()),
+                        };
+                        ui.data_mut(|data| data.insert_temp(error_id, error));
+                    }
+                }
+            });
+        },
+    );
+    if let Some(Some(error)) = ui.data(|data| data.get_temp::<Option<String>>(error_id)) {
+        ui.label(egui::RichText::new(error).color(palette.danger));
+    }
 }
 
 fn position<T: PartialEq>(all: &[T], current: T) -> usize {
@@ -192,7 +530,8 @@ const SWATCH: f32 = 26.0;
 const SWATCH_GAP: f32 = 8.0;
 
 fn swatches_width() -> f32 {
-    let count = Accent::ALL.len() as f32;
+    // The presets and the custom colour.
+    let count = Accent::ALL.len() as f32 + 1.0;
     count * SWATCH + (count - 1.0) * SWATCH_GAP
 }
 
@@ -200,7 +539,8 @@ fn swatches_width() -> f32 {
 /// ringed. Returns a new choice.
 fn swatches(ui: &mut Ui, current: Accent) -> Option<Accent> {
     let palette = Palette::current(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(vec2(swatches_width(), 34.0), Sense::hover());
+    let width = swatches_width() - SWATCH - SWATCH_GAP;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
     let mut chosen = None;
     for (index, accent) in Accent::ALL.into_iter().enumerate() {
         let center = egui::pos2(
@@ -256,21 +596,53 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     let palette = Palette::current(ui.ctx());
     let part = 84.0;
     let (rect, _) = ui.allocate_exact_size(vec2(part * labels.len() as f32, 34.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(10), palette.hover_solid());
+    let modern = theme::skin().style == Style::Modern;
+    if modern {
+        ui.painter()
+            .rect_filled(rect, theme::round(10), palette.hover_solid());
+    } else {
+        skin::paint_field(ui.painter(), rect, theme::round(10), &palette, 0.0);
+    }
     let x = glide(
         ui.ctx(),
         id.with("knob"),
         rect.left() + current as f32 * part,
         LAYOUT,
     );
-    ui.painter().rect(
-        egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(part, rect.height())).shrink(3.0),
-        CornerRadius::same(8),
-        palette.surface,
-        Stroke::new(1.0, palette.line),
-        egui::StrokeKind::Inside,
-    );
+    let knob =
+        egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(part, rect.height())).shrink(3.0);
+    let mut chosen_ink = palette.ink;
+    if modern {
+        ui.painter().rect(
+            knob,
+            theme::round(8),
+            palette.surface,
+            Stroke::new(1.0, palette.line),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        // Aqua's chosen segment is blue gel; Windows 98's is pressed in.
+        let family = theme::skin().family();
+        if let Some(ink) = skin::paint_button(
+            ui.painter(),
+            knob,
+            if family == Family::Gel {
+                skin::Weight::Strong
+            } else {
+                skin::Weight::Normal
+            },
+            palette.surface,
+            Stroke::new(1.0, palette.line),
+            skin::State {
+                hover: 0.0,
+                press: if family == Family::Retro { 1.0 } else { 0.0 },
+                opacity: 1.0,
+            },
+            &palette,
+        ) {
+            chosen_ink = ink;
+        }
+    }
     let mut chosen = None;
     for (index, label) in labels.iter().enumerate() {
         let cell = egui::Rect::from_min_size(
@@ -289,7 +661,7 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
             )
         });
         let color = if index == current {
-            palette.ink
+            chosen_ink
         } else {
             palette.muted
         };
@@ -865,7 +1237,7 @@ fn shortcuts(ui: &mut Ui) {
                             egui::Frame::new()
                                 .fill(palette.canvas)
                                 .stroke(Stroke::new(1.0, palette.line))
-                                .corner_radius(CornerRadius::same(6))
+                                .corner_radius(theme::round(6))
                                 .inner_margin(egui::Margin::symmetric(7, 2))
                                 .show(ui, |ui| {
                                     ui.label(

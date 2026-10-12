@@ -433,6 +433,9 @@ once; change them later in Settings.
 - Clicking a notification opens Updates.
 - Closing the window really closes it. PkgDeck keeps checking from the
   tray or menu bar. **Open** brings a new window back.
+- In the tray, PkgDeck keeps little in memory: it loads nothing for the
+  window until you open it. On Linux, once the window closes and nothing is
+  running, PkgDeck starts itself again in the tray, small.
 - On macOS, Cmd+W closes the window too, and clicking the Dock icon brings
   it back.
 - At login, and when PkgDeck restarts after updating itself with the window
@@ -528,18 +531,42 @@ out of date, and each page refreshes when you open it.
 ## Settings
 
 - **Theme**: **System**, **Light** or **Dark**.
-- **Colours**: the colours of the mode on screen. In dark mode, **Charcoal**
+- **Style**: the shape of everything, shown as small previews. Each comes in
+  light and dark.
+  - **Modern**: flat and rounded, the default.
+  - **Windows 95**: grey 3D bevels, square corners and a solid navy title
+    bar.
+  - **Windows 98**: like 95, with a title bar fading from navy to blue.
+  - **Windows XP**: glossy blue bars and rounded buttons.
+  - **Vista**: dark, smoky glass and a blue to green side pane.
+  - **Windows 7**: light, sky-blue glass.
+  - **Mac OS 9**: light grey with fine bevels and a striped title bar.
+  - **Jaguar**: gel buttons on pinstripes, after Mac OS X 10.2.
+  - **Panther**: gel buttons on brushed metal, after Mac OS X 10.3.
+  - **Tiger**: gel buttons with plain grey title bars, after Mac OS X 10.4.
+  - Every style but **Modern** draws its own title bar and window buttons.
+  - Picking a style also picks the accent it was made with.
+- **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
   blue-grey of earlier versions). In light mode, **Classic** (blue-grey, the
   default), **White** (neutral grey) or **Paper** (warm). Each mode keeps its
   own choice.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
-  red, orange, green, teal or graphite.
+  red, orange, green, teal, graphite, navy or lavender. The last swatch picks
+  any colour; PkgDeck lightens or darkens it until it reads well.
+- **Roundness** (all but Windows 95 and 98): from square corners to twice the
+  style's own.
+- **Density**: **Compact**, **Normal** or **Roomy** rows.
+- **Font**: **Style** (the style's own font when it's installed, such as
+  Tahoma or Lucida Grande, else Inter), **Inter** or **System**.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
+- **Theme file**: **Export** saves the style, colours, accent, roundness,
+  density and font as a `.toml` file. **Import** loads one. Light or dark,
+  text size and animations stay as you set them.
 - **Background checks**, **Check every**, **Update apps and packages
   automatically**, **Allow updates that remove packages**, **Update system
   packages without a password** and **Start in background at login**: see

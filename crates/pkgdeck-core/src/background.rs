@@ -54,6 +54,13 @@ impl Schedule {
         })
         .expect("notification history is serializable")
     }
+    /// Carry the last check over from a copy that ran before, so starting
+    /// again doesn't check before the interval is up.
+    pub fn resume(&mut self, last_started: u64) {
+        if last_started > 0 {
+            self.last_started = Some(last_started);
+        }
+    }
     pub fn acknowledge_notification(&mut self) {
         for (source, updates) in std::mem::take(&mut self.pending) {
             self.notified.insert(source, updates);
@@ -302,6 +309,24 @@ fn autostart_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_resumed_schedule_waits_out_the_interval() {
+        // Nothing to carry over: the first check runs at once.
+        let mut schedule = Schedule::default();
+        schedule.resume(0);
+        assert!(schedule.ready(10, true, false, false, false, false));
+        let mut schedule = Schedule::default();
+        schedule.resume(100);
+        assert!(!schedule.ready(150, true, false, false, false, false));
+        assert!(schedule.ready(
+            100 + CHECK_INTERVAL_SECONDS,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
     #[test]
     fn schedule_skips_offline_metered_busy_and_resume_bursts() {
         let mut schedule = Schedule::default();

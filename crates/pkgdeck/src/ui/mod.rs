@@ -4,10 +4,12 @@
 
 mod activity;
 mod dialogs;
+mod frame;
 pub mod icons;
 mod list;
 mod page;
 mod settings_page;
+mod skin;
 pub mod theme;
 pub mod widgets;
 pub mod window;
@@ -19,8 +21,8 @@ use crate::{
     theme::Palette,
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Key, Modifiers, Rect, Sense,
-    Stroke, StrokeKind, Ui, UiBuilder, Vec2,
+    self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Modifiers, Rect, Sense, Stroke,
+    StrokeKind, Ui, UiBuilder, Vec2,
 };
 use std::collections::HashSet;
 use widgets::*;
@@ -81,15 +83,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         Appearance::Light => egui::ThemePreference::Light,
         Appearance::Dark => egui::ThemePreference::Dark,
     });
-    theme::set_scheme(
-        &ctx,
-        theme::Scheme {
-            dark: app.settings.dark_theme,
-            light: app.settings.light_theme,
-            accent: app.settings.accent,
-            text_size: app.settings.text_size,
-        },
-    );
+    theme::set_scheme(&ctx, theme::Scheme::of(&app.settings));
     if !app.ui.started {
         app.ui.started = true;
         app.ui.focus_search = app.page == Page::Search;
@@ -102,9 +96,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 
     let palette = Palette::current(&ctx);
-    let full = ui.max_rect();
-    ui.painter()
-        .rect_filled(full, CornerRadius::ZERO, palette.canvas);
+    let window = ui.max_rect();
+    // The older styles draw the window's own frame around the app.
+    let full = frame::show(ui, window, "PkgDeck", &palette);
+    skin::paint_canvas(ui.painter(), full, &palette);
     let rail = full.width() < RAIL_BELOW;
     let sidebar_width = glide(
         &ctx,
@@ -119,6 +114,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     activity::drawer(app, ui, full);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
+    frame::edges(ui, window);
 }
 
 fn keyboard(app: &mut App, ctx: &egui::Context) {
@@ -258,13 +254,22 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
-    painter.line_segment(
-        [rect.right_top(), rect.right_bottom()],
-        Stroke::new(1.0, palette.line),
-    );
     let margin = if rail { 12.0 } else { 16.0 };
     let inner = rect.shrink2(vec2(margin, 0.0));
+    let entry_height = 40.0;
+    let top = rect.top() + 84.0;
+    let entries = Rect::from_min_size(
+        pos2(inner.left(), top),
+        vec2(
+            inner.width(),
+            Page::ALL.len() as f32 * (entry_height + 4.0) - 4.0,
+        ),
+    );
+    let logo_row = Rect::from_min_max(
+        pos2(inner.left(), rect.top() + 24.0),
+        pos2(inner.right(), rect.top() + 54.0),
+    );
+    let ink = skin::paint_sidebar(&painter, rect, logo_row, entries, &palette);
     // The logo and name, level with the page's heading.
     let logo = Rect::from_min_size(
         pos2(
@@ -288,12 +293,10 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             Align2::LEFT_CENTER,
             "PkgDeck",
             theme::bold(19.0),
-            alpha(palette.ink, name_shown),
+            alpha(ink.name.unwrap_or(palette.ink), name_shown),
         );
     }
     // The sections.
-    let entry_height = 40.0;
-    let top = rect.top() + 84.0;
     let current = Page::ALL.iter().position(|p| *p == app.page).unwrap_or(0);
     let pill_y = glide(
         &ctx,
@@ -305,14 +308,15 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
         pos2(inner.left(), pill_y),
         vec2(inner.width(), entry_height),
     );
-    painter.rect_filled(pill, CornerRadius::same(10), palette.selection);
-    if !rail {
+    // Styles that fill the pill solid draw what's on it in their own ink.
+    let pill_ink = skin::paint_selection(&painter, pill, &palette);
+    if !rail && skin::selection_bar() {
         painter.rect_filled(
             Rect::from_min_size(
                 pos2(pill.left(), pill.top() + 10.0),
                 vec2(3.0, entry_height - 20.0),
             ),
-            CornerRadius::same(2),
+            theme::round(2),
             palette.accent,
         );
     }
@@ -338,14 +342,12 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             response.hovered() && page != app.page,
             FEEDBACK,
         );
-        painter.rect_filled(
-            entry,
-            CornerRadius::same(10),
-            alpha(palette.ink, hover * 0.05),
-        );
+        painter.rect_filled(entry, theme::round(10), alpha(palette.ink, hover * 0.05));
         let is_current = page == app.page;
         let color = if is_current {
-            palette.accent
+            pill_ink.unwrap_or(palette.accent)
+        } else if let Some(link) = ink.entries {
+            link
         } else {
             mix(palette.muted, palette.ink, hover)
         };
@@ -372,7 +374,9 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
                 },
                 alpha(
                     if is_current {
-                        palette.ink
+                        pill_ink.unwrap_or(palette.ink)
+                    } else if let Some(link) = ink.entries {
+                        link
                     } else {
                         mix(palette.muted, palette.ink, 0.55 + hover * 0.45)
                     },
@@ -497,7 +501,7 @@ fn clear_filter_button(ui: &mut Ui, chip: Rect) -> bool {
     let painter = ui.painter();
     painter.rect_filled(
         rect.shrink(5.0),
-        CornerRadius::same(theme::SMALL_RADIUS),
+        theme::round(theme::SMALL_RADIUS),
         alpha(palette.accent, hover * 0.16),
     );
     painter.vline(
@@ -516,11 +520,8 @@ fn header(app: &mut App, ui: &mut Ui) {
     let compact = width < 600.0;
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
-        ui.label(
-            egui::RichText::new(app.page.name())
-                .font(theme::bold(26.0))
-                .color(palette.ink),
-        );
+        let (font, ink) = skin::heading(&palette);
+        ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
@@ -719,57 +720,54 @@ pub fn progress_line(app: &mut App, ui: &mut Ui) {
 pub fn progress_card(app: &mut App, ui: &mut Ui, salt: &str) {
     let palette = Palette::current(ui.ctx());
     let progress = app.progress.clone();
-    card(&palette)
-        .inner_margin(egui::Margin::symmetric(14, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                spinner(ui, 16.0, palette.accent);
-                let label_width = (ui.available_width() * 0.42).max(120.0);
-                let galley = one_line(
+    let frame = card(&palette).inner_margin(egui::Margin::symmetric(14, 10));
+    show_card(ui, frame, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            spinner(ui, 16.0, palette.accent);
+            let label_width = (ui.available_width() * 0.42).max(120.0);
+            let galley = one_line(
+                ui,
+                &progress.label,
+                theme::bold(14.0),
+                palette.ink,
+                label_width,
+            );
+            let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 20.0), Sense::hover());
+            ui.painter().galley(
+                pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+                galley,
+                palette.ink,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if Button::new(Look::Flat, "Cancel")
+                    .small()
+                    .icon("cancel")
+                    .show(ui)
+                    .clicked()
+                {
+                    app.cancel();
+                }
+                let count = progress.count();
+                if !count.is_empty() {
+                    ui.label(
+                        egui::RichText::new(count)
+                            .font(theme::mono(12.5))
+                            .color(palette.muted),
+                    );
+                }
+                let (bar, _) = ui
+                    .allocate_exact_size(vec2(ui.available_width().max(40.0), 6.0), Sense::hover());
+                paint_bar(
                     ui,
-                    &progress.label,
-                    theme::bold(14.0),
-                    palette.ink,
-                    label_width,
+                    bar,
+                    progress.bar(),
+                    palette.accent,
+                    Id::new(("bar", salt)),
                 );
-                let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 20.0), Sense::hover());
-                ui.painter().galley(
-                    pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
-                    galley,
-                    palette.ink,
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if Button::new(Look::Flat, "Cancel")
-                        .small()
-                        .icon("cancel")
-                        .show(ui)
-                        .clicked()
-                    {
-                        app.cancel();
-                    }
-                    let count = progress.count();
-                    if !count.is_empty() {
-                        ui.label(
-                            egui::RichText::new(count)
-                                .font(theme::mono(12.5))
-                                .color(palette.muted),
-                        );
-                    }
-                    let (bar, _) = ui.allocate_exact_size(
-                        vec2(ui.available_width().max(40.0), 6.0),
-                        Sense::hover(),
-                    );
-                    paint_bar(
-                        ui,
-                        bar,
-                        progress.bar(),
-                        palette.accent,
-                        Id::new(("bar", salt)),
-                    );
-                });
             });
         });
+    });
 }
 
 fn notice_banner(app: &mut App, ui: &mut Ui) {
@@ -786,7 +784,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
     egui::Frame::new()
         .fill(alpha(color, if palette.dark { 0.12 } else { 0.08 }))
         .stroke(Stroke::new(1.0, alpha(color, 0.35)))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(theme::round(12))
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -837,7 +835,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                 egui::Frame::new()
                     .fill(palette.canvas)
                     .stroke(Stroke::new(1.0, palette.line))
-                    .corner_radius(CornerRadius::same(8))
+                    .corner_radius(theme::round(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -881,7 +879,7 @@ fn failure_banner(app: &mut App, ui: &mut Ui) {
             if palette.dark { 0.10 } else { 0.07 },
         ))
         .stroke(Stroke::new(1.0, alpha(palette.warning, 0.3)))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(theme::round(12))
         .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -943,7 +941,7 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
                     ui.multiply_opacity(open);
                     ui.painter().rect_filled(
                         page_rect,
-                        CornerRadius::same(12),
+                        theme::round(12),
                         alpha(Palette::current(&ctx).canvas, open),
                     );
                     if wants_side {
@@ -983,7 +981,7 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
         if shown > 0.0 {
             ui.painter().rect_filled(
                 Rect::from_center_size(handle.center(), vec2(3.0, 44.0)),
-                CornerRadius::same(2),
+                theme::round(2),
                 alpha(Palette::current(&ctx).accent, shown),
             );
         }
@@ -1182,11 +1180,11 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                         spread: 0,
                         color: Color32::from_black_alpha(if palette.dark { 90 } else { 30 }),
                     }
-                    .as_shape(frame_rect, CornerRadius::same(12)),
+                    .as_shape(frame_rect, theme::round(12)),
                 );
                 ui.painter().rect(
                     frame_rect,
-                    CornerRadius::same(12),
+                    theme::round(12),
                     palette.surface,
                     Stroke::new(1.0, palette.strong_line),
                     StrokeKind::Inside,

@@ -174,7 +174,181 @@ fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)
     image.save(dir.join(format!("{name}.png"))).unwrap();
 }
 
+/// Each style with the other options pushed to their ends, to see they
+/// mix: a picked colour, corners, room, face and size. Only these with
+/// `--mixes`.
+fn mixes() {
+    use pkgdeck::settings::{Accent, Density, Style, TextSize, Typeface};
+    let mixes = [
+        (
+            Style::Modern,
+            false,
+            "#00ff66",
+            0.0,
+            Density::Compact,
+            Typeface::System,
+            TextSize::Small,
+        ),
+        (
+            Style::Retro,
+            true,
+            "#ffe14d",
+            2.0,
+            Density::Roomy,
+            Typeface::Inter,
+            TextSize::Larger,
+        ),
+        (
+            Style::Luna,
+            true,
+            "#ff4fa3",
+            0.0,
+            Density::Compact,
+            Typeface::Style,
+            TextSize::Large,
+        ),
+        (
+            Style::Glass,
+            false,
+            "#0b3d0b",
+            2.0,
+            Density::Roomy,
+            Typeface::System,
+            TextSize::Small,
+        ),
+        (
+            Style::Gel,
+            false,
+            "#fff3b0",
+            0.0,
+            Density::Roomy,
+            Typeface::Inter,
+            TextSize::Normal,
+        ),
+        (
+            Style::Platinum,
+            true,
+            "#202020",
+            2.0,
+            Density::Compact,
+            Typeface::Style,
+            TextSize::Larger,
+        ),
+        (
+            Style::Win95,
+            false,
+            "#008080",
+            1.0,
+            Density::Normal,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Vista,
+            true,
+            "#c03030",
+            1.0,
+            Density::Compact,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Platinum,
+            false,
+            "#3a7d44",
+            0.0,
+            Density::Normal,
+            Typeface::System,
+            TextSize::Large,
+        ),
+        (
+            Style::Panther,
+            true,
+            "#7a5cff",
+            1.0,
+            Density::Roomy,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Tiger,
+            false,
+            "#ff8a00",
+            2.0,
+            Density::Compact,
+            Typeface::Inter,
+            TextSize::Small,
+        ),
+    ];
+    for (style, dark, color, roundness, density, typeface, size) in mixes {
+        let set = |app: &mut App| {
+            app.settings.style = style;
+            app.settings.accent = Accent::Custom;
+            app.settings.custom_accent = color.to_owned();
+            app.settings.roundness = roundness;
+            app.settings.density = density;
+            app.settings.typeface = typeface;
+            app.settings.text_size = size;
+        };
+        let name = style.name().to_lowercase().replace(' ', "-");
+        render(
+            &format!("mix-{name}-installed"),
+            [1180.0, 780.0],
+            dark,
+            |app| {
+                set(app);
+                offline(app, Page::Installed);
+                app.refresh_items();
+                app.selected = Some(app.rows[app.items[1].raw].identity());
+            },
+        );
+        render(
+            &format!("mix-{name}-settings"),
+            [1180.0, 1100.0],
+            dark,
+            |app| {
+                set(app);
+                offline(app, Page::Settings);
+            },
+        );
+    }
+}
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--mixes") {
+        return mixes();
+    }
+    // Each style, light and dark, on a list and on Settings. Only these
+    // with `--styles`.
+    for style in pkgdeck::settings::Style::ALL {
+        let name = style.name().to_lowercase().replace(' ', "-");
+        for dark in [false, true] {
+            let mode = if dark { "dark" } else { "light" };
+            render(
+                &format!("style-{name}-installed-{mode}"),
+                [1180.0, 780.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Installed);
+                },
+            );
+            render(
+                &format!("style-{name}-settings-{mode}"),
+                [1180.0, 1100.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Settings);
+                },
+            );
+        }
+    }
+    if std::env::args().any(|arg| arg == "--styles") {
+        return;
+    }
     render("search-empty", [1180.0, 780.0], true, |app| {
         app.rows.clear()
     });

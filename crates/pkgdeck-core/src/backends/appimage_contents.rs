@@ -14,7 +14,8 @@ const MAX_ICON_BYTES: usize = 4 * 1024 * 1024;
 /// Symlinks followed inside the image (`.DirIcon` usually is one).
 const MAX_LINKS: usize = 8;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(super) struct Contents {
     pub name: Option<String>,
     pub comment: Option<String>,
@@ -23,6 +24,9 @@ pub(super) struct Contents {
     pub startup_wm_class: Option<String>,
     /// The `Exec=` arguments after the program, e.g. `--no-sandbox %U`.
     pub arguments: Option<String>,
+    /// Only right after reading the image: what's remembered of it leaves
+    /// the icon out, which is saved to a file instead.
+    #[serde(skip)]
     pub icon: Option<Icon>,
 }
 
