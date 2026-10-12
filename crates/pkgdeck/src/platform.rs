@@ -56,6 +56,14 @@ mod native {
         fn pkgdeck_mac_pump(seconds: f64);
         fn pkgdeck_mac_watch_reopen(watching: c_int);
         fn pkgdeck_mac_tray_titles() -> *mut c_char;
+        fn pkgdeck_mac_fill_window(
+            view: *mut std::ffi::c_void,
+            fill: c_int,
+            r: c_uchar,
+            g: c_uchar,
+            b: c_uchar,
+            dark: c_int,
+        );
         fn free(pointer: *mut std::ffi::c_void);
     }
     extern "C" fn event(code: c_int) {
@@ -114,6 +122,13 @@ mod native {
     }
     pub fn watch_reopen(watching: bool) {
         unsafe { pkgdeck_mac_watch_reopen(watching.into()) }
+    }
+    /// `view` must be the window's live `NSView`, on the main thread.
+    pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<([u8; 3], bool)>) {
+        let ([r, g, b], dark) = fill.unwrap_or_default();
+        unsafe {
+            pkgdeck_mac_fill_window(view.as_ptr(), fill.is_some().into(), r, g, b, dark.into())
+        }
     }
     pub fn tray_titles() -> Vec<String> {
         unsafe {
@@ -581,6 +596,13 @@ fn tray_icon() -> Vec<ksni::Icon> {
         height: height as i32,
         data,
     }]
+}
+
+/// Fills the Mac window behind its content and system title bar with
+/// `fill`'s colour, light or dark, or makes it see-through with none.
+#[cfg(target_os = "macos")]
+pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<([u8; 3], bool)>) {
+    native::fill_window(view, fill);
 }
 
 /// Finds out whether the desktop can blur, once, off the caller's thread,
