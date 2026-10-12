@@ -399,10 +399,12 @@ pub fn closed_shapes(name: &str) -> Shapes {
         static FOUND: std::cell::RefCell<std::collections::HashMap<String, Shapes>> = Default::default();
     }
     FOUND.with_borrow_mut(|found| {
-        found
-            .entry(name.to_owned())
-            .or_insert_with(|| find_closed_shapes(name).into())
-            .clone()
+        if let Some(shapes) = found.get(name) {
+            return shapes.clone();
+        }
+        let shapes: Shapes = find_closed_shapes(name).into();
+        found.insert(name.to_owned(), shapes.clone());
+        shapes
     })
 }
 

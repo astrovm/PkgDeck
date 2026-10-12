@@ -5022,22 +5022,23 @@ impl ffi::PackageController {
             // An empty search shows nothing, so a section still loading,
             // or waiting to, must not land here once it's done.
             self.as_mut().rust_mut().deferred_load = None;
-            if matches!(self.rust().queued, Some(Job::Load(..))) {
+            let section = |job: &Job| {
+                matches!(
+                    job,
+                    Job::Load(..) | Job::RetrySource(..) | Job::RetryFailedUpdates(..)
+                )
+            };
+            if self.rust().queued.as_ref().is_some_and(section) {
                 self.as_mut().rust_mut().queued = None;
             }
-            let reading = self
-                .rust()
-                .worker
-                .as_ref()
-                .filter(|worker| matches!(worker.job, Job::Load(..) | Job::RetrySource(..)));
-            if let Some(worker) = reading {
+            if let Some(worker) = self.rust().worker.as_ref().filter(|w| section(&w.job)) {
                 worker.cancel.cancel();
                 self.as_mut().rust_mut().background = true;
-                self.as_mut().set_busy(false);
-            } else if self.rust().worker.is_none() {
-                // Nothing runs, but a preload the page waited on said busy.
-                self.as_mut().set_busy(false);
             }
+            // Busy only while something the person started still runs, not
+            // for a section read or a preload the page waited on.
+            let busy = self.rust().foreground_worker();
+            self.as_mut().set_busy(busy);
             if self.rows().to_string() != "[]" {
                 self.as_mut().rust_mut().packages.clear();
                 self.as_mut().rust_mut().cleanup.clear();
@@ -8781,6 +8782,81 @@ mod tests {
         assert!(!*controller.busy());
         assert!(!controller.rust().awaiting_prefetch);
         assert_eq!(controller.rows().to_string(), "[]");
+    }
+
+    #[test]
+    fn an_empty_search_drops_section_retries() {
+        // A retry waiting its turn never starts.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().rust_mut().queued = Some(Job::RetrySource(
+            "Installed".into(),
+            "".into(),
+            "apt".into(),
+        ));
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert!(controller.rust().queued.is_none());
+        // Update all's retry stops, and its rows stay off Search.
+        let (sender, receiver) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            report
+                .packages
+                .push(synthetic_package("updates-only", "updates-only"));
+            report.successful_sources.push("apt".into());
+            let _ = sender.send(Reply::Done(Ok(Payload::RetryFailedUpdates(
+                vec!["apt".into()],
+                report,
+            ))));
+        });
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().active_view = "Updates".into();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle,
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::RetryFailedUpdates(vec!["apt".into()]),
+        });
+        controller.as_mut().set_busy(true);
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert!(cancel.requested());
+        assert!(!*controller.busy());
+        release.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        assert_eq!(controller.rows().to_string(), "[]");
+    }
+
+    #[test]
+    fn an_empty_search_is_idle_beside_background_checks() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let (_sender, receiver) = mpsc::channel::<Reply>();
+        let cancel = Cancellation::default();
+        // Installed cancelled the background check to wait on its preload.
+        cancel.cancel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel,
+            job: Job::BackgroundUpdates(vec!["apt".into()]),
+        });
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().set_busy(true);
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert!(!*controller.busy());
+        assert!(controller.rust().worker.is_some());
     }
 
     #[test]
