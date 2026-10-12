@@ -3,14 +3,14 @@
 //! keeps the system's frame.
 
 use super::skin::{
-    bands, bevel, darker, faded, gloss, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb,
+    bands, bevel, darker, faded, gradient, gray, ink_on, lerp, lighter, retro_edge, rgb,
     top_corners,
 };
 use super::theme::{self, Palette};
 use crate::settings::{Family, Style};
 use eframe::egui::{
-    self, epaint::RectShape, pos2, vec2, viewport::ResizeDirection, Color32, CornerRadius,
-    CursorIcon, Id, Painter, Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
+    self, pos2, vec2, viewport::ResizeDirection, Color32, CornerRadius, CursorIcon, Id, Painter,
+    Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
 };
 
 /// A button in the title bar.
@@ -58,8 +58,9 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         Family::Retro => (4.0, 4.0, 22.0, 2.0),
         // XP: a blue border, the title bar up to the top.
         Family::Luna => (4.0, 0.0, 30.0, 0.0),
-        // Vista: thick glass all round, the title on the glass.
-        Family::Glass => (7.0, 0.0, 30.0, 0.0),
+        // Vista and 7: 8 pixels of glass and two lines round the content,
+        // the title on the glass.
+        Family::Glass => (10.0, 0.0, 30.0, 2.0),
         // Aqua: a hairline and the striped title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
         // Mac OS 9: a grey drag frame and the striped title bar.
@@ -267,33 +268,16 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Close, close),
             ]
         }
-        Family::Glass => {
-            // Hung from the top edge, close the widest; 7's are a little
-            // bigger than Vista's.
-            let top = bar.top() + 1.0;
-            let ((min_w, max_w, close_w), height) = if style == Style::Vista {
-                ((25.0, 25.0, 43.0), 19.0)
-            } else {
-                ((28.0, 27.0, 46.0), 20.0)
-            };
-            let close = Rect::from_min_size(
-                pos2(bar.right() - 4.0 - close_w, top),
-                vec2(close_w, height),
-            );
-            let maximize =
-                Rect::from_min_size(pos2(close.left() - max_w, top), vec2(max_w, height));
-            let minimize =
-                Rect::from_min_size(pos2(maximize.left() - min_w, top), vec2(min_w, height));
-            vec![
-                (Caption::Minimize, minimize),
-                (Caption::Maximize, maximize),
-                (Caption::Close, close),
-            ]
-        }
+        Family::Glass => super::aero::captions(style == Style::Vista, bar),
         Family::Gel => {
-            // Close, minimize and zoom at the left.
-            let size = vec2(14.0, 14.0);
-            let at = |i: f32| square(pos2(bar.left() + 15.0 + i * 21.0, y), size);
+            // Close, minimize and zoom at the left: Jaguar's a pixel
+            // narrower and further apart.
+            let (size, left, pitch) = if style == Style::Gel {
+                (vec2(13.0, 14.0), 9.0, 22.0)
+            } else {
+                (vec2(14.0, 14.0), 8.0, 21.0)
+            };
+            let at = |i: f32| square(pos2(bar.left() + left + size.x / 2.0 + i * pitch, y), size);
             vec![
                 (Caption::Close, at(0.0)),
                 (Caption::Minimize, at(1.0)),
@@ -403,56 +387,14 @@ pub fn paint_frame(
                 ],
             );
         }
-        Family::Glass => {
-            // Glass over a blue-grey desktop: tinted, with streaks of light.
-            // Vista's glass is deep and smoky; 7's is light sky blue.
-            let vista = theme::skin().style == Style::Vista;
-            let base = match (vista, dark) {
-                (true, true) => rgb(0x0f1822),
-                (true, false) => rgb(0x4f7fc4),
-                (false, true) => rgb(0x1a2a3c),
-                (false, false) => rgb(0xb4d3ef),
-            };
-            let tint = lerp(base, palette.deep, if state.active { 0.14 } else { 0.04 });
-            bands(
-                painter,
-                full,
-                CornerRadius::ZERO,
-                &[
-                    (0.0, lighter(tint, 0.25)),
-                    (0.06, tint),
-                    (1.0, darker(tint, 0.06)),
-                ],
-            );
-            let shine = match (vista, dark) {
-                (true, true) => 16,
-                (true, false) => 64,
-                (false, true) => 10,
-                (false, false) => 46,
-            };
-            super::skin::glass_streaks(painter, full, shine);
-            if open {
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::from_black_alpha(140)),
-                    StrokeKind::Inside,
-                );
-                painter.rect_stroke(
-                    full.shrink(1.0),
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::from_white_alpha(if dark { 30 } else { 120 })),
-                    StrokeKind::Inside,
-                );
-            }
-            // The edge where the glass meets the window's content.
-            painter.rect_stroke(
-                inner.expand(1.0),
-                CornerRadius::ZERO,
-                Stroke::new(1.0, Color32::from_black_alpha(if dark { 160 } else { 90 })),
-                StrokeKind::Inside,
-            );
-        }
+        Family::Glass => super::aero::paint_frame(
+            painter,
+            full,
+            inner,
+            palette,
+            state,
+            theme::skin().style == Style::Vista,
+        ),
         Family::Gel if theme::skin().style == Style::Panther => {
             // Brushed metal from the title bar down, in one piece.
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
@@ -631,122 +573,24 @@ pub fn paint_caption(
             );
             glyph(painter, rect, caption, state.maximized, Color32::WHITE, 2.0);
         }
-        Family::Glass => {
-            let close = caption == Caption::Close;
-            let radius = match caption {
-                Caption::Minimize => CornerRadius {
-                    sw: 4,
-                    ..CornerRadius::ZERO
-                },
-                Caption::Close => CornerRadius {
-                    se: 4,
-                    ..CornerRadius::ZERO
-                },
-                Caption::Maximize => CornerRadius::ZERO,
-            };
-            let (top, bottom) = if close && (state.active || press.hovered) {
-                let red = if press.hovered {
-                    rgb(0xe8513f)
-                } else {
-                    rgb(0xc4473a)
-                };
-                (lighter(red, 0.35), red)
-            } else if press.hovered {
-                (rgb(0xc6e1f8), rgb(0x5ea9e6))
-            } else {
-                let glass = if dark { rgb(0x2a3a4c) } else { rgb(0xd3e2f2) };
-                (lighter(glass, 0.4), glass)
-            };
-            let (top, bottom) = if press.pressed {
-                (darker(top, 0.2), darker(bottom, 0.2))
-            } else {
-                (top, bottom)
-            };
-            bands(
-                painter,
-                rect,
-                radius,
-                &[
-                    (0.0, top),
-                    (0.5, lerp(top, bottom, 0.4)),
-                    (0.51, bottom),
-                    (1.0, lighter(bottom, 0.15)),
-                ],
-            );
-            painter.rect_stroke(
-                rect,
-                radius,
-                Stroke::new(1.0, Color32::from_black_alpha(130)),
-                StrokeKind::Inside,
-            );
-            // White symbols with a dark edge, readable on any glass.
-            glyph(
-                painter,
-                rect.translate(vec2(0.0, 1.0)),
-                caption,
-                state.maximized,
-                Color32::from_black_alpha(150),
-                2.4,
-            );
-            glyph(painter, rect, caption, state.maximized, Color32::WHITE, 1.6);
-        }
+        Family::Glass => super::aero::paint_caption(
+            painter,
+            rect,
+            caption,
+            press,
+            state,
+            theme::skin().style == Style::Vista,
+        ),
         Family::Gel => {
-            let color = if !state.active && !press.group {
-                gray(0xc4)
+            let look = if !state.active && !press.group {
+                super::gel::Look::Asleep
+            } else if press.pressed {
+                super::gel::Look::Pressed
             } else {
-                match caption {
-                    Caption::Close => rgb(0xe0443e),
-                    Caption::Minimize => rgb(0xdea123),
-                    Caption::Maximize => rgb(0x1aab29),
-                }
+                super::gel::Look::Lit
             };
-            let color = if press.pressed {
-                darker(color, 0.25)
-            } else {
-                color
-            };
-            let round = CornerRadius::same((rect.height() / 2.0) as u8);
-            painter.add(
-                RectShape::filled(
-                    rect.translate(vec2(0.0, 1.0)),
-                    round,
-                    Color32::from_black_alpha(50),
-                )
-                .with_blur_width(2.0),
-            );
-            gradient(
-                painter,
-                rect,
-                round,
-                darker(color, 0.15),
-                lighter(color, 0.45),
-                false,
-            );
-            gloss(painter, rect, 0.9);
-            painter.rect_stroke(
-                rect,
-                round,
-                Stroke::new(1.0, darker(color, 0.4)),
-                StrokeKind::Inside,
-            );
-            if press.group {
-                let ink = darker(color, 0.65);
-                match caption {
-                    Caption::Close => glyph(painter, rect.shrink(1.5), caption, false, ink, 1.4),
-                    Caption::Minimize => {
-                        painter.hline(
-                            (rect.left() + 3.5)..=(rect.right() - 3.5),
-                            rect.center().y,
-                            Stroke::new(1.6, ink),
-                        );
-                    }
-                    Caption::Maximize => {
-                        let c = rect.center();
-                        painter.hline((c.x - 3.5)..=(c.x + 3.5), c.y, Stroke::new(1.6, ink));
-                        painter.vline(c.x, (c.y - 3.5)..=(c.y + 3.5), Stroke::new(1.6, ink));
-                    }
-                }
-            }
+            let jaguar = theme::skin().style == Style::Gel;
+            super::gel::paint_light(painter, rect, caption, jaguar, look, press.group);
         }
         Family::Platinum => {
             if !state.active {
@@ -867,7 +711,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         ),
         Family::Luna => (theme::title(15.0), Color32::WHITE, false),
         Family::Glass => (
-            theme::font(14.0),
+            theme::font(12.5),
             if palette.dark {
                 Color32::WHITE
             } else {
@@ -903,7 +747,10 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         );
         (None, text)
     } else {
-        let left = bar.left() + if style == Family::Glass { 8.0 } else { 4.0 };
+        // Vista's and 7's icon sits 8 pixels in from the window's edge,
+        // or the screen's when maximized.
+        let glass = style == Family::Glass && bar.left() > 0.5;
+        let left = bar.left() + if glass { -2.0 } else { 4.0 };
         let icon_rect =
             Rect::from_center_size(pos2(left + icon / 2.0, bar.center().y), vec2(icon, icon));
         (
@@ -923,17 +770,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 faded(darker(from, 0.6), 0.85),
             );
         }
-        Family::Glass => {
-            let glow = if palette.dark {
-                Color32::from_black_alpha(150)
-            } else {
-                Color32::from_white_alpha(200)
-            };
-            painter.add(
-                RectShape::filled(area.expand2(vec2(10.0, 3.0)), CornerRadius::same(10), glow)
-                    .with_blur_width(14.0),
-            );
-        }
+        Family::Glass => super::aero::paint_title_glow(painter, area, palette.dark),
         Family::Gel if !palette.dark => {
             painter.galley_with_override_text_color(
                 text_at + vec2(0.0, 1.0),

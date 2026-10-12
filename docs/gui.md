@@ -564,9 +564,6 @@ out of date, and each page refreshes when you open it.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
-- **Theme file**: **Export** saves the style, colours, accent, roundness,
-  density and font as a `.toml` file. **Import** loads one. Light or dark,
-  text size and animations stay as you set them.
 - **Background checks**, **Check every**, **Update apps and packages
   automatically**, **Allow updates that remove packages**, **Update system
   packages without a password** and **Start in background at login**: see

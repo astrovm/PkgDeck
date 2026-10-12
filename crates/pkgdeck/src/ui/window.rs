@@ -35,6 +35,8 @@ pub struct Window<'a> {
     smoke_test: Option<u32>,
     /// Whether a frame has been drawn, so the window is on screen.
     shown: bool,
+    /// Whether the desktop was last asked to blur behind the window.
+    blurred: Option<bool>,
 }
 
 impl<'a> Window<'a> {
@@ -45,10 +47,13 @@ impl<'a> Window<'a> {
         app.window_visible = true;
         app.c().set_window_open(true);
         let smoke_test = app.launch.smoke_test.then_some(0);
+        crate::backdrop::probe(ctx);
+        crate::backdrop::allow_wallpaper(wallpaper_cache());
         Self {
             app,
             smoke_test,
             shown: false,
+            blurred: None,
         }
     }
 
@@ -98,6 +103,46 @@ impl<'a> Window<'a> {
     }
 }
 
+/// Where the wallpaper's blurred copy is kept: in PkgDeck's cache, unless
+/// running as root or told not to cache.
+fn wallpaper_cache() -> Option<std::path::PathBuf> {
+    let var = |key| {
+        std::env::var(key)
+            .ok()
+            .filter(|v: &String| v.starts_with('/'))
+    };
+    if rustix::process::geteuid().is_root() || std::env::var_os("PKGDECK_NO_CACHE").is_some() {
+        return None;
+    }
+    let dir = var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| var("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))?;
+    Some(dir.join("pkgdeck"))
+}
+
+/// Asks the desktop to blur behind the window, or to stop: through winit
+/// on Wayland and macOS, and through KWin's own property on X11.
+fn ask_blur(frame: &eframe::Frame, blur: bool) {
+    if let Some(window) = frame.winit_window() {
+        window.set_blur(blur);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let window = frame
+            .window_handle()
+            .ok()
+            .and_then(|handle| match handle.as_raw() {
+                RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
+                RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+                _ => None,
+            });
+        if let Some(window) = window {
+            crate::backdrop::blur_x11(window, blur);
+        }
+    }
+}
+
 impl Drop for Window<'_> {
     fn drop(&mut self) {
         self.app.window_visible = false;
@@ -109,7 +154,14 @@ impl Drop for Window<'_> {
 }
 
 impl eframe::App for Window<'_> {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let blur = crate::backdrop::can_blur()
+            && self.app.settings.style.family() == crate::settings::Family::Glass;
+        if self.blurred != Some(blur) {
+            self.blurred = Some(blur);
+            ask_blur(frame, blur);
+        }
+        theme::set_see_through(blur);
         self.frame(ui);
     }
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

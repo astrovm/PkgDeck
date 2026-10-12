@@ -3,15 +3,17 @@
 //! 7, Mac OS 9, and Mac OS X Jaguar, Panther and Tiger. Versions of
 //! one desktop share their drawing and differ where the real ones did.
 //! Buttons, fields, check boxes, panels, the canvas, the sidebar,
-//! selections, title bars, list headings and group boxes. Modern draws them flat. Only egui's own shapes, so a frame
-//! costs the same in any style.
+//! selections, title bars, list headings and group boxes. Modern draws
+//! them flat. Only egui's own shapes, so a frame costs the same in any
+//! style.
 
+use super::shade::{self, Axis};
 use super::theme::{self, Palette};
 use crate::settings::{Family, Style};
 use eframe::egui::{
     self, epaint,
-    epaint::{tessellator::path, Mesh, Shadow},
-    pos2, vec2, Color32, CornerRadius, FontId, Painter, Pos2, Rangef, Rect, Stroke, StrokeKind,
+    epaint::{Mesh, Shadow},
+    pos2, vec2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Stroke, StrokeKind,
 };
 
 /// What a button is for, which decides how much it stands out.
@@ -98,102 +100,15 @@ pub fn gradient(
     end: Color32,
     across: bool,
 ) {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return;
-    }
-    let mut outline = Vec::new();
-    path::rounded_rectangle(&mut outline, rect, radius.into());
-    let at = |point: Pos2| {
-        let t = if across {
-            (point.x - rect.left()) / rect.width()
-        } else {
-            (point.y - rect.top()) / rect.height()
-        };
-        lerp(start, end, t)
-    };
-    let mut mesh = Mesh::default();
-    mesh.colored_vertex(rect.center(), at(rect.center()));
-    for point in &outline {
-        mesh.colored_vertex(*point, at(*point));
-    }
-    let count = outline.len() as u32;
-    for index in 0..count {
-        mesh.add_triangle(0, 1 + index, 1 + (index + 1) % count);
-    }
-    painter.add(mesh);
-}
-
-/// The colour at `t` of a gradient through `stops`, given as places from 0
-/// to 1 in order.
-fn color_at(stops: &[(f32, Color32)], t: f32) -> Color32 {
-    let Some(&(first_at, first)) = stops.first() else {
-        return Color32::TRANSPARENT;
-    };
-    if t <= first_at {
-        return first;
-    }
-    for pair in stops.windows(2) {
-        let ((from, a), (to, b)) = (pair[0], pair[1]);
-        if t <= to {
-            return lerp(a, b, (t - from) / (to - from).max(1e-6));
-        }
-    }
-    stops[stops.len() - 1].1
+    let axis = if across { Axis::Across } else { Axis::Down };
+    shade::gradient(painter, rect, radius, axis, &[(0.0, start), (1.0, end)]);
 }
 
 /// A top-to-bottom gradient through several `stops` across `rect`,
 /// rounded by `radius`: the many-banded fills of glossy buttons and title
 /// bars. Two stops at nearly the same place make a hard edge.
 pub fn bands(painter: &Painter, rect: Rect, radius: CornerRadius, stops: &[(f32, Color32)]) {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 || stops.is_empty() {
-        return;
-    }
-    let limit = rect.width().min(rect.height()) / 2.0;
-    let clamp = |radius: u8| (radius as f32).min(limit);
-    let (nw, ne, sw, se) = (
-        clamp(radius.nw),
-        clamp(radius.ne),
-        clamp(radius.sw),
-        clamp(radius.se),
-    );
-    // How far in from its side a corner of `radius` keeps the outline,
-    // `from_edge` away from the top or bottom.
-    let inset = |radius: f32, from_edge: f32| {
-        if radius <= 0.0 || from_edge >= radius {
-            0.0
-        } else {
-            let d = radius - from_edge.max(0.0);
-            radius - (radius * radius - d * d).max(0.0).sqrt()
-        }
-    };
-    let left = |y: f32| rect.left() + inset(nw, y - rect.top()).max(inset(sw, rect.bottom() - y));
-    let right = |y: f32| rect.right() - inset(ne, y - rect.top()).max(inset(se, rect.bottom() - y));
-    let color = |y: f32| color_at(stops, (y - rect.top()) / rect.height());
-    let mut ys: Vec<f32> = stops
-        .iter()
-        .map(|(at, _)| rect.top() + at.clamp(0.0, 1.0) * rect.height())
-        .collect();
-    for step in 0..=8 {
-        let f = step as f32 / 8.0;
-        ys.extend([rect.top() + nw * f, rect.top() + ne * f]);
-        ys.extend([rect.bottom() - sw * f, rect.bottom() - se * f]);
-    }
-    ys.extend([rect.top(), rect.bottom()]);
-    ys.retain(|y| (rect.top()..=rect.bottom()).contains(y));
-    ys.sort_by(f32::total_cmp);
-    ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    let mut mesh = Mesh::default();
-    for pair in ys.windows(2) {
-        let (top, bottom) = (pair[0], pair[1]);
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(pos2(left(top), top), color(top));
-        mesh.colored_vertex(pos2(right(top), top), color(top));
-        mesh.colored_vertex(pos2(left(bottom), bottom), color(bottom));
-        mesh.colored_vertex(pos2(right(bottom), bottom), color(bottom));
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base + 1, base + 3, base + 2);
-    }
-    painter.add(mesh);
+    shade::gradient(painter, rect, radius, Axis::Down, stops);
 }
 
 /// Every stop of `stops` faded to `opacity`.
@@ -1170,9 +1085,10 @@ pub fn paint_steps(
 pub fn shadow(palette: &Palette) -> Shadow {
     let (offset, blur, alpha) = match style() {
         Family::Modern => (1, 6, if palette.dark { 40 } else { 10 }),
-        Family::Glass => (2, 10, if palette.dark { 80 } else { 26 }),
+        // Explorer's panes lie flat on its white.
+        Family::Glass if palette.dark => (2, 10, 80),
         Family::Gel => (3, 12, if palette.dark { 90 } else { 40 }),
-        Family::Retro | Family::Luna | Family::Platinum => (0, 0, 0),
+        Family::Glass | Family::Retro | Family::Luna | Family::Platinum => (0, 0, 0),
     };
     Shadow {
         offset: [0, offset],
@@ -1189,7 +1105,9 @@ pub fn panel_stroke(palette: &Palette) -> Stroke {
         Family::Retro => darker(palette.canvas, 0.6),
         Family::Luna => luna_line(palette),
         Family::Glass if palette.dark => lighter(palette.canvas, 0.22),
-        Family::Glass | Family::Gel => lerp(palette.ink, palette.surface, 0.62),
+        // A list view's frame.
+        Family::Glass => rgb(0xc0c1cd),
+        Family::Gel => lerp(palette.ink, palette.surface, 0.62),
         Family::Platinum => lerp(palette.ink, palette.canvas, 0.3),
     };
     Stroke::new(1.0, color)
@@ -1232,7 +1150,7 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
 }
 
 /// Behind everything: the canvas colour, with Aqua's pinstripes or
-/// Vista's glass.
+/// metal, or Media Center's blue.
 pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
     painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
     match style() {
@@ -1256,36 +1174,15 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
             }
             painter.add(mesh);
         }
-        Family::Glass => {
-            // Tinted glass, deepest at the top, with light caught in streaks.
-            let (top, middle, bottom) = if palette.dark {
-                (
-                    lerp(palette.canvas, palette.deep, 0.5),
-                    lerp(palette.canvas, palette.deep, 0.25),
-                    palette.canvas,
-                )
+        // Explorer's white, or in the dark Media Center's deep blue on 7
+        // and Graphite's near-black on Vista.
+        Family::Glass if palette.dark => {
+            let (top, bottom) = if version() == Style::Vista {
+                (rgb(0x161b22), palette.canvas)
             } else {
-                (
-                    lerp(palette.canvas, palette.deep, 0.42),
-                    lerp(palette.canvas, palette.deep, 0.18),
-                    lighter(palette.canvas, 0.35),
-                )
+                (rgb(0x0b2d63), palette.canvas)
             };
-            let reach = (rect.height() / 600.0).clamp(0.05, 1.0);
-            bands(
-                painter,
-                rect,
-                CornerRadius::ZERO,
-                &[(0.0, top), (0.4 / reach.max(0.4), middle), (1.0, bottom)],
-            );
-            // Vista's streaks catch more light than 7's.
-            let shine = match (version(), palette.dark) {
-                (Style::Vista, true) => 14,
-                (Style::Vista, false) => 52,
-                (_, true) => 9,
-                (_, false) => 30,
-            };
-            glass_streaks(painter, rect, shine);
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
         }
         _ => {}
     }
@@ -1294,7 +1191,8 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
 /// Panther's brushed metal over `rect`: fine horizontal grain, keyed to
 /// the height on screen so pieces painted apart line up.
 pub(super) fn brushed_metal(painter: &Painter, rect: Rect, dark: bool) {
-    let strength = if dark { 9.0 } else { 26.0 };
+    // Measured on Panther's Finder: rows wander about 3 levels.
+    let strength = if dark { 4.0 } else { 8.0 };
     let mut mesh = Mesh::default();
     let mut y = rect.top().floor();
     while y < rect.bottom() {
@@ -1312,6 +1210,19 @@ pub(super) fn brushed_metal(painter: &Painter, rect: Rect, dark: bool) {
         y += 1.0;
     }
     painter.add(mesh);
+    // Light sweeps across the metal, brightest left of the middle.
+    let sheen = if dark { 8 } else { 34 };
+    super::shade::gradient(
+        painter,
+        rect,
+        CornerRadius::ZERO,
+        super::shade::Axis::Across,
+        &[
+            (0.0, Color32::from_black_alpha(sheen / 2)),
+            (0.4, Color32::from_white_alpha(sheen)),
+            (1.0, Color32::from_black_alpha(sheen / 3)),
+        ],
+    );
 }
 
 /// Noise from 0 to 1 for row `y`, the same every frame.
@@ -1321,65 +1232,6 @@ fn grain(y: i32) -> f32 {
     h = h.wrapping_mul(0x85eb_ca6b);
     h ^= h >> 13;
     (h & 0xffff) as f32 / 65535.0
-}
-
-/// Vista's diagonal streaks of light across glass in `rect`, `shine` the
-/// white's opacity.
-pub(super) fn glass_streaks(painter: &Painter, rect: Rect, shine: u8) {
-    let slant = rect.height().min(900.0) * 0.4;
-    let mut mesh = Mesh::default();
-    let mut x = rect.left() - slant;
-    let widths = [70.0, 24.0, 110.0, 36.0];
-    let gaps = [40.0, 150.0, 60.0, 220.0];
-    let mut index = 0;
-    let lit = Color32::from_white_alpha(shine);
-    let bottom = rect.top() + slant * 2.0;
-    while x < rect.right() {
-        let width = widths[index % widths.len()];
-        let streak = [
-            (pos2(x + slant, rect.top()), lit),
-            (pos2(x + slant + width, rect.top()), lit),
-            (pos2(x - slant + width, bottom), Color32::TRANSPARENT),
-            (pos2(x - slant, bottom), Color32::TRANSPARENT),
-        ];
-        fan(&mut mesh, &clip_sides(&streak, rect.x_range()));
-        x += width + gaps[index % gaps.len()];
-        index += 1;
-    }
-    painter.add(mesh);
-}
-
-/// The part of the convex `polygon` between the sides of `x`, its colours
-/// blended where it's cut.
-fn clip_sides(polygon: &[(Pos2, Color32)], x: Rangef) -> Vec<(Pos2, Color32)> {
-    let mut points = polygon.to_vec();
-    for (edge, keep_right) in [(x.min, true), (x.max, false)] {
-        let inside = |p: Pos2| if keep_right { p.x >= edge } else { p.x <= edge };
-        let mut kept = Vec::with_capacity(points.len() + 2);
-        for (i, &(a, a_color)) in points.iter().enumerate() {
-            let (b, b_color) = points[(i + 1) % points.len()];
-            if inside(a) {
-                kept.push((a, a_color));
-            }
-            if inside(a) != inside(b) {
-                let t = (edge - a.x) / (b.x - a.x);
-                kept.push((a.lerp(b, t), lerp(a_color, b_color, t)));
-            }
-        }
-        points = kept;
-    }
-    points
-}
-
-/// Adds the convex `polygon` to `mesh` as a fan of triangles.
-fn fan(mesh: &mut Mesh, polygon: &[(Pos2, Color32)]) {
-    let base = mesh.vertices.len() as u32;
-    for &(pos, color) in polygon {
-        mesh.colored_vertex(pos, color);
-    }
-    for i in 2..polygon.len() as u32 {
-        mesh.add_triangle(base, base + i - 1, base + i);
-    }
 }
 
 /// The colours the sidebar's name and entries take when the style picks
@@ -1494,27 +1346,24 @@ pub fn paint_sidebar(
                 entries: Some(Color32::WHITE),
             };
         }
+        Family::Glass if dark => {
+            painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha(60));
+            end(Color32::from_white_alpha(24));
+        }
+        // Explorer's navigation pane and its pale blue splitter.
         Family::Glass => {
-            painter.rect_filled(
-                rect,
-                CornerRadius::ZERO,
-                if dark {
-                    Color32::from_black_alpha(60)
-                } else {
-                    Color32::from_white_alpha(60)
-                },
-            );
-            end(Color32::from_white_alpha(if dark { 24 } else { 120 }));
+            painter.rect_filled(rect, CornerRadius::ZERO, rgb(0xfcfcfc));
+            end(rgb(0xd6e5f5));
         }
         Family::Gel if version() == Style::Panther => {
-            // A light source list set into the metal.
+            // A white source list set square into the metal.
             let list = rect.shrink2(vec2(8.0, 10.0));
-            let fill = if dark { gray(0x2e) } else { gray(0xf0) };
-            painter.rect_filled(list, theme::round(10), fill);
+            let fill = if dark { gray(0x2e) } else { Color32::WHITE };
+            painter.rect_filled(list, CornerRadius::ZERO, fill);
             painter.rect_stroke(
                 list,
-                theme::round(10),
-                Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x8c) }),
+                CornerRadius::ZERO,
+                Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x99) }),
                 StrokeKind::Inside,
             );
         }
@@ -1556,6 +1405,17 @@ pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Opti
         Family::Glass => {
             glass_selection(painter, rect, palette, 1.0);
             None
+        }
+        Family::Gel if version() == Style::Panther => {
+            // Panther's metal source list selects in graphite.
+            let (top, bottom, edge) = if palette.dark {
+                (gray(0x6a), gray(0x4c), gray(0x7a))
+            } else {
+                (rgb(0xbbbbbf), rgb(0x9a9a9e), gray(0x97))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, edge));
+            Some(Color32::WHITE)
         }
         Family::Gel => {
             // A source list's selection: a blue band with a light top edge.
@@ -1707,10 +1567,27 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
             );
             Some(ink_on(blue))
         }
-        Family::Glass => {
-            // The page's title sits on the glass itself.
+        // Explorer's command bar.
+        Family::Glass if !dark => {
+            bands(
+                painter,
+                rect,
+                CornerRadius::ZERO,
+                &[
+                    (0.0, rgb(0xfafcfd)),
+                    (0.5, rgb(0xe6f0fa)),
+                    (0.5, rgb(0xdce6f4)),
+                    (1.0, rgb(0xdce7f6)),
+                ],
+            );
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, rgb(0xa0afc3)),
+            );
             Some(palette.ink)
         }
+        Family::Glass => Some(palette.ink),
         Family::Gel => {
             let radius = top_corners(theme::round(14));
             let (top, bottom, line) = if dark {
@@ -2058,6 +1935,7 @@ mod tests {
     use super::*;
 
     use crate::settings::{Accent, Density};
+    use crate::ui::shade::color_at;
     use eframe::egui::Shape;
 
     fn scheme(style: Style) -> theme::Scheme {
@@ -2121,7 +1999,8 @@ mod tests {
     /// Every point drawn is a real number inside `area`, so nothing spills
     /// or turns into NaN at the ends of the settings.
     fn inside(shapes: &[Shape], area: Rect) -> bool {
-        let area = area.expand(6.0);
+        // Glows reach 6 points out, and soft edges half a pixel more.
+        let area = area.expand(6.5);
         shapes.iter().all(|shape| {
             let bounds = match shape {
                 // Soft shadows and glows fade out past their shape on purpose.
@@ -2404,15 +2283,23 @@ mod tests {
             })
         };
         assert!(meshes(&canvas(Style::Gel)) >= 1);
-        assert!(meshes(&canvas(Style::Glass)) >= 1);
         assert_eq!(meshes(&canvas(Style::Retro)), 0);
+        // Explorer is plain white; its dark versions fade.
+        assert_eq!(meshes(&canvas(Style::Glass)), 0);
+        let dark = |style| {
+            drawn(style, true, |painter, palette| {
+                paint_canvas(painter, rect(), palette)
+            })
+        };
+        assert!(meshes(&dark(Style::Glass)) >= 1);
+        assert!(meshes(&dark(Style::Vista)) >= 1);
         // The old desktops cast no shadows; the glossy ones do.
         for (style, shadowed) in [
             (Style::Retro, false),
             (Style::Luna, false),
             (Style::Platinum, false),
             (Style::Modern, true),
-            (Style::Glass, true),
+            (Style::Glass, false),
             (Style::Gel, true),
         ] {
             let palette = Palette::of(scheme(style), false);
@@ -2533,12 +2420,13 @@ mod tests {
                 .iter()
                 .map(Shape::visual_bounding_rect)
                 .fold(Rect::NOTHING, |a, b| a.union(b));
-            assert!((bounds.top() - rect().top()).abs() < 1.0, "{bounds:?}");
+            // Rounded fills fade half a pixel past their edge.
+            assert!((bounds.top() - rect().top()).abs() <= 0.5, "{bounds:?}");
             assert!(
-                (bounds.bottom() - rect().bottom()).abs() < 1.0,
+                (bounds.bottom() - rect().bottom()).abs() <= 0.5,
                 "{bounds:?}"
             );
-            assert!((bounds.width() - rect().width()).abs() < 1.0, "{bounds:?}");
+            assert!((bounds.width() - rect().width()).abs() <= 1.0, "{bounds:?}");
         }
         // Empty areas draw nothing rather than a broken shape.
         let none = drawn(Style::Luna, false, |painter, _| {

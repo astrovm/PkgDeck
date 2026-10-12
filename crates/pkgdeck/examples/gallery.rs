@@ -1,6 +1,7 @@
 //! Renders each page with sample data to `target/gallery/*.png`, without a
 //! display, so the look can be checked by eye:
-//! `cargo run -p pkgdeck --example gallery`.
+//! `cargo run -p pkgdeck --example gallery`. `--only <text>` renders just
+//! the shots whose name has `text`.
 
 use eframe::egui;
 use egui_kittest::Harness;
@@ -143,6 +144,16 @@ fn offline(app: &mut App, page: Page) {
 }
 
 fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)) {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(only) = args
+        .iter()
+        .position(|arg| arg == "--only")
+        .and_then(|i| args.get(i + 1))
+    {
+        if !name.contains(only.as_str()) {
+            return;
+        }
+    }
     let mut app = sample_app();
     prepare(&mut app);
     // Past the page's fade-in, which runs on the wall clock.

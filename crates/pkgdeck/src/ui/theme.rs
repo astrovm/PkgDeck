@@ -31,7 +31,61 @@ pub struct Palette {
     pub success: Color32,
     pub warning: Color32,
     pub heart: Color32,
+    /// Vista's and 7's glass colour, its alpha the colour intensity, from
+    /// the swatches they shipped.
+    pub glass: Color32,
     pub dark: bool,
+}
+/// The glass colour Windows Vista or 7 shipped closest to `accent`, its
+/// alpha the colour intensity; dark windows take the deep swatches.
+fn glass_color(style: Style, accent: Accent, custom: Option<Color32>, dark: bool) -> Color32 {
+    let argb: u32 = if style == Style::Vista {
+        match accent {
+            // Graphite, Vista's smoky black glass.
+            Accent::Blue if dark => 0xA3000000,
+            // Default.
+            Accent::Blue => 0x45409EFE,
+            Accent::Graphite => 0xA3000000,
+            // Blue.
+            Accent::Navy => 0xA8004ADE,
+            // Teal.
+            Accent::Teal | Accent::Green => 0x82008CA5,
+            Accent::Red => 0x9CCE0C0F,
+            Accent::Orange => 0xA6FF7700,
+            // Pink.
+            Accent::Pink | Accent::Purple | Accent::Lavender => 0x49F93EE7,
+            Accent::Custom => 0x80000000,
+        }
+    } else {
+        match accent {
+            // Twilight.
+            Accent::Blue | Accent::Navy if dark => 0xA80046AD,
+            // Sky, 7's default.
+            Accent::Blue => 0x6B74B8FC,
+            Accent::Navy => 0xA80046AD,
+            // Sea.
+            Accent::Teal => 0x8032CDCD,
+            // Leaf.
+            Accent::Green => 0x6614A600,
+            // Ruby.
+            Accent::Red => 0xA8CE0F0F,
+            // Pumpkin.
+            Accent::Orange => 0x80FF9C00,
+            // Fuchsia.
+            Accent::Pink => 0x66FF0099,
+            // Violet.
+            Accent::Purple => 0x856E3BA1,
+            Accent::Lavender => 0x528D5A94,
+            // Slate.
+            Accent::Graphite => 0x80555555,
+            Accent::Custom => 0x80000000,
+        }
+    };
+    let [a, r, g, b] = argb.to_be_bytes();
+    match custom {
+        Some(color) => Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a),
+        None => Color32::from_rgba_unmultiplied(r, g, b, a),
+    }
 }
 fn tint(color: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -153,6 +207,16 @@ impl Skin {
 }
 thread_local! {
     static SKIN: std::cell::Cell<Skin> = std::cell::Cell::new(Skin::default());
+    static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Whether this thread's window lets the desktop show through its glass,
+/// blurred: the desktop blurs behind it and the style has glass.
+pub fn see_through() -> bool {
+    SEE_THROUGH.with(std::cell::Cell::get)
+}
+/// Sets [`see_through`] for this thread's window.
+pub fn set_see_through(see_through: bool) {
+    SEE_THROUGH.with(|cell| cell.set(see_through));
 }
 /// The style this thread's window shows.
 pub fn skin() -> Skin {
@@ -278,8 +342,9 @@ impl Palette {
             (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
             (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
             (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
-            (Family::Glass, true) => (0x0b1017, 0x151d28, 0xe8eef5, 0x95a3b5),
-            (Family::Glass, false) => (0xd8e3f0, 0xfbfcfe, 0x1e1e1e, 0x56606c),
+            // Explorer's white; in the dark, Media Center's blue.
+            (Family::Glass, true) => (0x04142f, 0x0b2148, 0xeef3fa, 0x9fb4d3),
+            (Family::Glass, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
             (Family::Gel, true) => (0x262626, 0x313131, 0xeeeeee, 0xa3a3a3),
             (Family::Gel, false) => (0xe6e6e6, 0xffffff, 0x000000, 0x555555),
             (Family::Platinum, true) => (0x2e2e2e, 0x3b3b3b, 0xeeeeee, 0xababab),
@@ -291,10 +356,10 @@ impl Palette {
         // Canvas, surface, ink and muted text: Modern's come from the chosen
         // theme, the other styles bring their own.
         let (canvas, surface, ink, muted) = match (scheme.style, dark) {
-            // Vista's glass is deeper; Panther's brushed metal and Tiger's
-            // plain grey replace Jaguar's pinstriped white.
+            // Vista's dark is Graphite's near-black; Panther's brushed
+            // metal and Tiger's plain grey replace Jaguar's pinstriped white.
             (Style::Vista, true) => (0x080c12, 0x141b25, 0xe8eef5, 0x95a3b5),
-            (Style::Vista, false) => (0xbfd1e8, 0xfbfcfe, 0x1e1e1e, 0x4f5966),
+            (Style::Vista, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
             (Style::Panther, true) => (0x3a3a3a, 0x2b2b2b, 0xeeeeee, 0xa8a8a8),
             (Style::Panther, false) => (0xc4c4c4, 0xffffff, 0x000000, 0x474747),
             (Style::Tiger, true) => (0x2c2c2c, 0x343434, 0xeeeeee, 0xa3a3a3),
@@ -346,6 +411,7 @@ impl Palette {
             success: rgb(if dark { 0x6fd39a } else { 0x1b7a45 }),
             warning: rgb(if dark { 0xf2c56b } else { 0x9a6400 }),
             heart: rgb(0xe34b5f),
+            glass: glass_color(scheme.style, scheme.accent, custom, dark),
             dark,
         }
     }
@@ -983,8 +1049,9 @@ mod tests {
                     }
                 }
             }
-            // Vista, Panther and Tiger bring their own colours.
-            assert_ne!(colours(Style::Vista), colours(Style::Glass));
+            // Vista's dark, Panther and Tiger bring their own colours;
+            // Vista and 7 share Explorer's white.
+            assert_eq!(colours(Style::Vista) == colours(Style::Glass), !dark);
             assert_ne!(colours(Style::Panther), colours(Style::Gel));
             assert_ne!(colours(Style::Tiger), colours(Style::Gel));
             assert_ne!(colours(Style::Tiger), colours(Style::Panther));
