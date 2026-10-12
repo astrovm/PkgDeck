@@ -62,7 +62,6 @@ mod native {
             r: c_uchar,
             g: c_uchar,
             b: c_uchar,
-            dark: c_int,
         );
         fn free(pointer: *mut std::ffi::c_void);
     }
@@ -124,11 +123,9 @@ mod native {
         unsafe { pkgdeck_mac_watch_reopen(watching.into()) }
     }
     /// `view` must be the window's live `NSView`, on the main thread.
-    pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<([u8; 3], bool)>) {
-        let ([r, g, b], dark) = fill.unwrap_or_default();
-        unsafe {
-            pkgdeck_mac_fill_window(view.as_ptr(), fill.is_some().into(), r, g, b, dark.into())
-        }
+    pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<[u8; 3]>) {
+        let [r, g, b] = fill.unwrap_or_default();
+        unsafe { pkgdeck_mac_fill_window(view.as_ptr(), fill.is_some().into(), r, g, b) }
     }
     pub fn tray_titles() -> Vec<String> {
         unsafe {
@@ -599,9 +596,9 @@ fn tray_icon() -> Vec<ksni::Icon> {
 }
 
 /// Fills the Mac window behind its content and system title bar with
-/// `fill`'s colour, light or dark, or makes it see-through with none.
+/// `fill`'s colour, or makes it see-through with none.
 #[cfg(target_os = "macos")]
-pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<([u8; 3], bool)>) {
+pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<[u8; 3]>) {
     native::fill_window(view, fill);
 }
 

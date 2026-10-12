@@ -38,7 +38,7 @@ pub struct Window<'a> {
     /// Whether the desktop was last asked to blur behind the window.
     blurred: Option<bool>,
     /// What the window was last filled with behind its content.
-    filled: Option<Option<([u8; 3], bool)>>,
+    filled: Option<Option<[u8; 3]>>,
 }
 
 impl<'a> Window<'a> {
@@ -147,33 +147,38 @@ fn ask_blur(frame: &eframe::Frame, blur: bool) {
     }
 }
 
-/// What fills the window behind its content: the canvas's colour and
-/// whether it's dark under the system's frame, or nothing, see-through,
-/// for glass and the frames styles draw themselves.
+/// What fills the window behind its content: the canvas's colour under
+/// the system's frame, or nothing, see-through, for glass and the frames
+/// styles draw themselves.
 fn backdrop(
     style: crate::settings::Style,
     blur: bool,
     palette: &theme::Palette,
-) -> Option<([u8; 3], bool)> {
+) -> Option<[u8; 3]> {
     let [r, g, b, _] = palette.canvas.to_array();
-    (!blur && crate::ui::frame::metrics(style).is_none()).then_some(([r, g, b], palette.dark))
+    (!blur && crate::ui::frame::metrics(style).is_none()).then_some([r, g, b])
 }
 
-/// Fills the window behind its content with a colour, light or dark, or
-/// makes it see-through. Only the Mac leaves the system's title bar
-/// unfilled in a see-through window.
-fn fill_window(frame: &eframe::Frame, fill: Option<([u8; 3], bool)>) {
+/// Fills the window behind its content with a colour, or makes it
+/// see-through. Only the Mac leaves the system's title bar unfilled in a
+/// see-through window. Returns whether the window could be reached.
+fn fill_window(frame: &eframe::Frame, fill: Option<[u8; 3]>) -> bool {
     #[cfg(target_os = "macos")]
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         if let Ok(handle) = frame.window_handle() {
             if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
                 crate::platform::fill_window(handle.ns_view, fill);
+                return true;
             }
         }
+        false
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (frame, fill);
+    {
+        let _ = (frame, fill);
+        true
+    }
 }
 
 impl Drop for Window<'_> {
@@ -202,9 +207,8 @@ impl eframe::App for Window<'_> {
             blur,
             &theme::Palette::current(ui.ctx()),
         );
-        if self.filled != Some(fill) {
+        if self.filled != Some(fill) && fill_window(frame, fill) {
             self.filled = Some(fill);
-            fill_window(frame, fill);
         }
         self.frame(ui);
     }
@@ -224,10 +228,7 @@ mod tests {
         for dark in [true, false] {
             let palette = Palette::of(Scheme::default(), dark);
             let [r, g, b, _] = palette.canvas.to_array();
-            assert_eq!(
-                backdrop(Style::Modern, false, &palette),
-                Some(([r, g, b], dark))
-            );
+            assert_eq!(backdrop(Style::Modern, false, &palette), Some([r, g, b]));
             assert_eq!(backdrop(Style::Modern, true, &palette), None);
             for style in [Style::Luna, Style::Glass, Style::Platinum, Style::Win95] {
                 assert_eq!(backdrop(style, false, &palette), None, "{style:?}");
