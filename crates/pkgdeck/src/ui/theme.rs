@@ -985,12 +985,16 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
 
 /// The tint inside an icon's closed shapes, so the older styles' icons
 /// read in two tones as theirs did: a light fill in a dark outline.
+/// A faded icon keeps its fill as faint as its outline.
 fn icon_fill(color: Color32) -> Color32 {
-    if luminance(color) < 0.5 {
-        over(color, Color32::WHITE, 0.62)
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let solid = Color32::from_rgb(r, g, b);
+    let fill = if luminance(solid) < 0.5 {
+        over(solid, Color32::WHITE, 0.62)
     } else {
-        color.gamma_multiply(0.3)
-    }
+        solid.gamma_multiply(0.3)
+    };
+    fill.gamma_multiply(f32::from(a) / 255.0)
 }
 
 /// Fills the closed outlines and rings of icon `name` in [`icon_fill`].
@@ -998,7 +1002,7 @@ fn icon_fills(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     let scale = rect.width() / 24.0;
     let at = |x: f32, y: f32| rect.min + Vec2::new(x * scale, y * scale);
     let fill = icon_fill(color);
-    for polygon in icons::closed_shapes(name) {
+    for polygon in icons::closed_shapes(name).iter() {
         let points: Vec<Pos2> = polygon.iter().map(|&(x, y)| at(x, y)).collect();
         painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
     }
@@ -1436,6 +1440,10 @@ mod tests {
         // Light on dark, then dark on light.
         assert!(luminance(icon_fill(Color32::BLACK)) > 0.25);
         assert!(icon_fill(Color32::WHITE).a() < 255);
+        // A faded icon's fill fades with it.
+        let faded = icon_fill(Color32::from_black_alpha(128));
+        assert!((120..=136).contains(&faded.a()), "{faded:?}");
+        assert_eq!(icon_fill(Color32::TRANSPARENT).a(), 0);
         let rings = with_skin(
             Skin {
                 style: Style::Tiger,

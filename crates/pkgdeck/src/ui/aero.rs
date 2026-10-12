@@ -125,7 +125,7 @@ fn wallpaper_texture(ctx: &eframe::egui::Context) -> Option<eframe::egui::Textur
     if let Some(texture) = ctx.data(|data| data.get_temp::<eframe::egui::TextureHandle>(id)) {
         return Some(texture.id());
     }
-    let wallpaper = crate::backdrop::wallpaper(ctx)?;
+    let wallpaper = crate::platform::wallpaper(ctx)?;
     let image = eframe::egui::ColorImage::new(
         wallpaper.size,
         wallpaper

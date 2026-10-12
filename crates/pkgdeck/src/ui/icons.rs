@@ -388,9 +388,25 @@ pub fn monogram(id: &str) -> &str {
     }
 }
 
+/// Outlines, each a list of points.
+pub type Shapes = std::rc::Rc<[Vec<(f32, f32)>]>;
+
 /// The convex shapes icon `name` closes: each stroke that comes back to
-/// where it started, up to that point.
-pub fn closed_shapes(name: &str) -> Vec<Vec<(f32, f32)>> {
+/// where it started, up to that point. Found once per icon, since every
+/// frame paints them.
+pub fn closed_shapes(name: &str) -> Shapes {
+    thread_local! {
+        static FOUND: std::cell::RefCell<std::collections::HashMap<String, Shapes>> = Default::default();
+    }
+    FOUND.with_borrow_mut(|found| {
+        found
+            .entry(name.to_owned())
+            .or_insert_with(|| find_closed_shapes(name).into())
+            .clone()
+    })
+}
+
+fn find_closed_shapes(name: &str) -> Vec<Vec<(f32, f32)>> {
     strokes(name)
         .iter()
         .filter_map(|line| {
@@ -436,7 +452,7 @@ mod tests {
     fn closed_convex_outlines_are_the_shapes_to_fill() {
         // The package's hexagon, stopping where it closes.
         assert_eq!(
-            closed_shapes("package"),
+            closed_shapes("package").to_vec(),
             [vec![
                 (3.0, 7.0),
                 (12.0, 2.0),

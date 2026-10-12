@@ -5034,6 +5034,9 @@ impl ffi::PackageController {
                 worker.cancel.cancel();
                 self.as_mut().rust_mut().background = true;
                 self.as_mut().set_busy(false);
+            } else if self.rust().worker.is_none() {
+                // Nothing runs, but a preload the page waited on said busy.
+                self.as_mut().set_busy(false);
             }
             if self.rows().to_string() != "[]" {
                 self.as_mut().rust_mut().packages.clear();
@@ -8761,6 +8764,23 @@ mod tests {
             assert_eq!(controller.rows().to_string(), "[]", "queued: {queued}");
             assert!(!*controller.busy());
         }
+    }
+
+    #[test]
+    fn an_empty_search_stops_waiting_on_a_preload() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        // Installed waits on its preload: busy, with nothing running.
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().set_busy(true);
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert!(!*controller.busy());
+        assert!(!controller.rust().awaiting_prefetch);
+        assert_eq!(controller.rows().to_string(), "[]");
     }
 
     #[test]

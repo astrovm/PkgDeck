@@ -3,19 +3,17 @@
 //! Wayland and X11, and macOS. Elsewhere they paint their own glass.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Once;
 
 const UNKNOWN: u8 = 0;
 const BLUR: u8 = 1;
 const NO_BLUR: u8 = 2;
 
 static CAN_BLUR: AtomicU8 = AtomicU8::new(UNKNOWN);
-static PROBE: Once = Once::new();
 /// The window to repaint when a background job finishes. Each window
 /// that asks replaces it, so a job outliving its window repaints the next.
 static REPAINT: std::sync::Mutex<Option<eframe::egui::Context>> = std::sync::Mutex::new(None);
 
-fn watch(ctx: &eframe::egui::Context) {
+pub fn watch(ctx: &eframe::egui::Context) {
     if let Ok(mut slot) = REPAINT.lock() {
         if slot.as_ref() != Some(ctx) {
             *slot = Some(ctx.clone());
@@ -39,39 +37,18 @@ pub fn set_can_blur(blur: bool) {
     CAN_BLUR.store(if blur { BLUR } else { NO_BLUR }, Ordering::Relaxed);
 }
 
-/// Finds out whether the desktop can blur, once, off the caller's thread,
-/// and repaints `ctx` when it knows.
-pub fn probe(ctx: &eframe::egui::Context) {
-    watch(ctx);
-    PROBE.call_once(|| {
-        if CAN_BLUR.load(Ordering::Relaxed) != UNKNOWN {
-            return;
-        }
-        std::thread::spawn(move || {
-            // PKGDECK_NO_BLUR turns it off, for desktops whose blur misbehaves.
-            let blur = std::env::var_os("PKGDECK_NO_BLUR").is_none()
-                && desktop_blurs(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref());
-            set_can_blur(blur);
-            if blur {
-                repaint();
-            }
-        });
-    });
+/// Whether nobody has found out yet if the desktop can blur.
+pub fn probe_needed() -> bool {
+    CAN_BLUR.load(Ordering::Relaxed) == UNKNOWN
 }
 
-#[cfg(target_os = "macos")]
-fn desktop_blurs(_desktop: Option<&str>) -> bool {
-    true
-}
-
-#[cfg(target_os = "linux")]
-fn desktop_blurs(desktop: Option<&str>) -> bool {
-    blurs_on(desktop, kwin_blur_loaded)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn desktop_blurs(_desktop: Option<&str>) -> bool {
-    false
+/// Records what the desktop said about blurring, and repaints the window
+/// when it can.
+pub fn blur_known(blur: bool) {
+    set_can_blur(blur);
+    if blur {
+        repaint();
+    }
 }
 
 /// Whether `desktop`, as `XDG_CURRENT_DESKTOP` names it, blurs behind
@@ -82,81 +59,6 @@ pub fn blurs_on(desktop: Option<&str>, effect_on: impl FnOnce() -> Option<bool>)
         .split(':')
         .any(|name| name.eq_ignore_ascii_case("kde"));
     kde && effect_on().unwrap_or(false)
-}
-
-/// Asks KWin whether its blur effect is on.
-#[cfg(target_os = "linux")]
-fn kwin_blur_loaded() -> Option<bool> {
-    let connection = zbus::blocking::Connection::session().ok()?;
-    let reply = connection
-        .call_method(
-            Some("org.kde.KWin"),
-            "/Effects",
-            Some("org.kde.kwin.Effects"),
-            "isEffectLoaded",
-            &("blur",),
-        )
-        .ok()?;
-    reply.body().deserialize::<bool>().ok()
-}
-
-/// Asks the desktop to blur behind the X11 window `window`, or to stop.
-/// KWin reads this property; an empty region means the whole window, as
-/// winit asks on Wayland and macOS. The few pixels outside the rounded
-/// top corners blur too, too small to notice; content covers the rest.
-/// One thread does the asking, so quick toggles land in order.
-#[cfg(target_os = "linux")]
-pub fn blur_x11(window: u32, blur: bool) {
-    use std::sync::mpsc::{channel, Sender};
-    static ASK: std::sync::Mutex<Option<Sender<(u32, bool)>>> = std::sync::Mutex::new(None);
-    let Ok(mut ask) = ASK.lock() else {
-        return;
-    };
-    let sender = ask.get_or_insert_with(|| {
-        let (sender, asks) = channel();
-        std::thread::spawn(move || {
-            let mut connection = None;
-            for (window, blur) in asks {
-                if connection.is_none() {
-                    connection = x11rb::connect(None).ok().map(|(connection, _)| connection);
-                }
-                if let Some(connection) = &connection {
-                    set_blur_region(connection, window, blur);
-                }
-            }
-        });
-        sender
-    });
-    let _ = sender.send((window, blur));
-}
-
-#[cfg(target_os = "linux")]
-fn set_blur_region(connection: &impl x11rb::connection::Connection, window: u32, blur: bool) {
-    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode};
-    use x11rb::wrapper::ConnectionExt as _;
-    {
-        let Ok(atom) = connection
-            .intern_atom(false, b"_KDE_NET_WM_BLUR_BEHIND_REGION")
-            .map_err(drop)
-            .and_then(|cookie| cookie.reply().map_err(drop))
-        else {
-            return;
-        };
-        let _ = if blur {
-            connection
-                .change_property32(
-                    PropMode::REPLACE,
-                    window,
-                    atom.atom,
-                    AtomEnum::CARDINAL,
-                    &[],
-                )
-                .map(drop)
-        } else {
-            connection.delete_property(window, atom.atom).map(drop)
-        };
-        let _ = connection.flush();
-    }
 }
 
 /// A tiny, blurred copy of the desktop's wallpaper, for glass to show
@@ -173,13 +75,12 @@ const WALLPAPER_WIDTH: u32 = 96;
 const WALLPAPER_MEMORY: u64 = 160 << 20;
 
 static WALLPAPER: std::sync::Mutex<Option<std::sync::Arc<Wallpaper>>> = std::sync::Mutex::new(None);
-static WALLPAPER_LOAD: Once = Once::new();
 /// Where the copy is kept between runs, once the window allows reading
 /// the wallpaper at all; previews and tests never do.
 static WALLPAPER_CACHE: std::sync::Mutex<Option<Option<std::path::PathBuf>>> =
     std::sync::Mutex::new(None);
 
-/// Lets [`wallpaper`] read the desktop's wallpaper, keeping its copy in
+/// Lets the window read the desktop's wallpaper, keeping its copy in
 /// `cache`.
 pub fn allow_wallpaper(cache: Option<std::path::PathBuf>) {
     if let Ok(mut slot) = WALLPAPER_CACHE.lock() {
@@ -187,50 +88,30 @@ pub fn allow_wallpaper(cache: Option<std::path::PathBuf>) {
     }
 }
 
-/// The wallpaper's copy once loaded, if allowed. The first call starts
-/// loading it off the caller's thread, from the cache when an earlier run
-/// made it, and repaints `ctx` when it's ready.
-pub fn wallpaper(ctx: &eframe::egui::Context) -> Option<std::sync::Arc<Wallpaper>> {
-    let cache = WALLPAPER_CACHE.lock().ok()?.clone()?;
-    watch(ctx);
-    WALLPAPER_LOAD.call_once(|| {
-        std::thread::spawn(move || {
-            let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
-            let Some(path) = home.as_deref().and_then(wallpaper_path) else {
-                return;
-            };
-            if let Some(copy) = load_wallpaper(&path, cache.as_deref()) {
-                if let Ok(mut slot) = WALLPAPER.lock() {
-                    *slot = Some(std::sync::Arc::new(copy));
-                }
-                repaint();
-            }
-        });
-    });
+/// Where the window may keep the wallpaper's copy, once it allows reading
+/// the wallpaper at all.
+pub fn wallpaper_cache() -> Option<Option<std::path::PathBuf>> {
+    WALLPAPER_CACHE.lock().ok()?.clone()
+}
+
+/// Keeps the wallpaper's copy for the glass, and repaints the window.
+pub fn wallpaper_loaded(copy: Wallpaper) {
+    if let Ok(mut slot) = WALLPAPER.lock() {
+        *slot = Some(std::sync::Arc::new(copy));
+    }
+    repaint();
+}
+
+/// The wallpaper's copy, once loaded.
+pub fn current_wallpaper() -> Option<std::sync::Arc<Wallpaper>> {
     WALLPAPER.lock().ok().and_then(|slot| slot.clone())
 }
 
-/// The wallpaper's file: Plasma's for the first screen, else GNOME's.
-fn wallpaper_path(home: &std::path::Path) -> Option<std::path::PathBuf> {
-    let plasma =
-        std::fs::read_to_string(home.join(".config/plasma-org.kde.plasma.desktop-appletsrc"))
-            .ok()
-            .and_then(|text| plasma_wallpaper(&text));
-    let path = plasma.or_else(|| {
-        let out = std::process::Command::new("gsettings")
-            .args(["get", "org.gnome.desktop.background", "picture-uri"])
-            .output()
-            .ok()?;
-        Some(
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .trim_matches('\'')
-                .to_owned(),
-        )
-    })?;
-    let path = file_path(&path);
+/// The picture a wallpaper `setting` names: the file, or the largest
+/// picture in a wallpaper package.
+pub fn wallpaper_file(setting: &str) -> Option<std::path::PathBuf> {
+    let path = file_path(setting);
     if path.is_dir() {
-        // A wallpaper package: its largest picture.
         let images = std::fs::read_dir(path.join("contents/images")).ok()?;
         return images
             .flatten()
@@ -307,7 +188,10 @@ pub fn plasma_wallpaper(text: &str) -> Option<String> {
 
 /// The wallpaper at `path` shrunk and blurred, from `cache` if it was
 /// made before from the same file, else made and kept there.
-fn load_wallpaper(path: &std::path::Path, cache: Option<&std::path::Path>) -> Option<Wallpaper> {
+pub fn load_wallpaper(
+    path: &std::path::Path,
+    cache: Option<&std::path::Path>,
+) -> Option<Wallpaper> {
     use std::hash::{Hash, Hasher};
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -387,6 +271,72 @@ fn keep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs frames until the window stops asking for more.
+    fn settle(ctx: &eframe::egui::Context) {
+        for _ in 0..4 {
+            ctx.run_ui(Default::default(), |_| {})
+                .textures_delta
+                .clear();
+        }
+    }
+
+    #[test]
+    fn what_the_desktop_says_reaches_the_window() {
+        let ctx = eframe::egui::Context::default();
+        watch(&ctx);
+        watch(&ctx);
+        assert!(REPAINT.lock().unwrap().as_ref() == Some(&ctx));
+        settle(&ctx);
+        assert!(!ctx.has_requested_repaint());
+        // Blurring repaints, so the glass turns clear.
+        assert!(probe_needed());
+        blur_known(true);
+        assert!(can_blur() && !probe_needed());
+        assert!(ctx.has_requested_repaint());
+        settle(&ctx);
+        blur_known(false);
+        assert!(!can_blur() && !ctx.has_requested_repaint());
+        // The wallpaper too, once the window allows reading it.
+        assert!(wallpaper_cache().is_none());
+        allow_wallpaper(Some("/cache/wall".into()));
+        assert_eq!(wallpaper_cache(), Some(Some("/cache/wall".into())));
+        assert!(current_wallpaper().is_none());
+        wallpaper_loaded(Wallpaper {
+            size: [1, 1],
+            pixels: vec![[1, 2, 3, 255]],
+        });
+        assert!(ctx.has_requested_repaint());
+        assert_eq!(current_wallpaper().unwrap().pixels, [[1, 2, 3, 255]]);
+        // A newer window takes over.
+        let next = eframe::egui::Context::default();
+        watch(&next);
+        assert!(REPAINT.lock().unwrap().as_ref() == Some(&next));
+        *WALLPAPER.lock().unwrap() = None;
+        *WALLPAPER_CACHE.lock().unwrap() = None;
+        *REPAINT.lock().unwrap() = None;
+        CAN_BLUR.store(UNKNOWN, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn wallpaper_packages_show_their_largest_picture() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-package-{}", std::process::id()));
+        let images = dir.join("Next/contents/images");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("1280x800.png"), [0; 10]).unwrap();
+        std::fs::write(images.join("3840x2160.png"), [0; 30]).unwrap();
+        std::fs::write(images.join("1920x1080.png"), [0; 20]).unwrap();
+        let package = dir.join("Next");
+        let url = format!("file://{}", package.display());
+        assert_eq!(wallpaper_file(&url), Some(images.join("3840x2160.png")));
+        // A plain picture is itself; anything else, nothing.
+        let plain = images.join("1280x800.png");
+        assert_eq!(wallpaper_file(plain.to_str().unwrap()), Some(plain));
+        assert_eq!(wallpaper_file(dir.join("gone.png").to_str().unwrap()), None);
+        std::fs::create_dir_all(dir.join("Empty")).unwrap();
+        assert_eq!(wallpaper_file(dir.join("Empty").to_str().unwrap()), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn plasma_shows_the_first_screens_wallpaper() {

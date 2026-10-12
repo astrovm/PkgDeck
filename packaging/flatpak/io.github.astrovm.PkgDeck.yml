@@ -98,6 +98,12 @@ modules:
       - install -Dm644 assets/io.github.astrovm.PkgDeck.desktop /app/share/applications/io.github.astrovm.PkgDeck.desktop
       - install -Dm644 assets/io.github.astrovm.PkgDeck.metainfo.xml /app/share/metainfo/io.github.astrovm.PkgDeck.metainfo.xml
       - install -Dm644 assets/io.github.astrovm.PkgDeck.svg /app/share/icons/hicolor/scalable/apps/io.github.astrovm.PkgDeck.svg
+      # The fonts built into pkgdeck carry their own licenses.
+      - install -Dm644 LICENSE /app/share/licenses/pkgdeck/LICENSE
+      - install -Dm644 crates/pkgdeck/assets/fonts/Inter-LICENSE.txt /app/share/licenses/pkgdeck/INTER-OFL
+      - install -Dm644 crates/pkgdeck/assets/fonts/Selawik-LICENSE.txt /app/share/licenses/pkgdeck/SELAWIK-OFL
+      - install -Dm644 crates/pkgdeck/assets/fonts/W95FA-LICENSE.txt /app/share/licenses/pkgdeck/W95FA-OFL
+      - install -Dm644 crates/pkgdeck/assets/fonts/ChicagoFLF-LICENSE.txt /app/share/licenses/pkgdeck/CHICAGOFLF
     sources:
       - type: dir
         path: ../..

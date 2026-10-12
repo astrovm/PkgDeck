@@ -355,12 +355,6 @@ impl Default for Settings {
     }
 }
 
-/// Whether `text` is a `#rrggbb` colour.
-pub fn is_hex_colour(text: &str) -> bool {
-    text.strip_prefix('#')
-        .is_some_and(|hex| hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
 /// Where the settings live: `$XDG_CONFIG_HOME/pkgdeck`, else
 /// `~/.config/pkgdeck`.
 pub fn directory(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {

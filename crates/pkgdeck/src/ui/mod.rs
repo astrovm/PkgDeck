@@ -104,7 +104,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let window = ui.max_rect();
     // The older styles draw the window's own frame around the app.
     let title = skin::window_title(app.page.name());
-    let full = frame::show(ui, window, &title, &palette);
+    let inside = frame::show(ui, window, &title, &palette);
+    let full = inside;
     skin::paint_canvas(ui.painter(), full, &palette);
     // The older desktops count what's listed in a bar across the window.
     let (full, status) = match skin::page_chrome().status {
@@ -151,7 +152,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
     content_ui(app, ui, content, banded);
-    activity::drawer(app, ui, full);
+    // The drawer dims the toolbar and the status bar too.
+    activity::drawer(app, ui, inside);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
     frame::edges(ui, window);

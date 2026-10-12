@@ -850,10 +850,14 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
             .collect();
     }
     let width = 340.0f32.min(ctx.content_rect().width() - 24.0);
-    let pos = egui::pos2(
-        button.rect.right() - width,
-        button.rect.bottom() + 6.0 - (1.0 - shown) * 6.0,
-    );
+    // Under a toolbar the button starts the row, so the list opens from its
+    // left edge; at the end of a heading, from its right.
+    let left = if super::skin::page_chrome().heading {
+        button.rect.right() - width
+    } else {
+        button.rect.left()
+    };
+    let pos = egui::pos2(left, button.rect.bottom() + 6.0 - (1.0 - shown) * 6.0);
     let mut changed = false;
     let area = egui::Area::new(Id::new("source-picker"))
         .order(egui::Order::Foreground)

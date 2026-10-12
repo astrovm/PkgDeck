@@ -583,6 +583,163 @@ fn tray_icon() -> Vec<ksni::Icon> {
     }]
 }
 
+/// Finds out whether the desktop can blur, once, off the caller's thread,
+/// and repaints `ctx` when it knows.
+pub fn probe_blur(ctx: &eframe::egui::Context) {
+    use crate::backdrop;
+    static PROBE: std::sync::Once = std::sync::Once::new();
+    backdrop::watch(ctx);
+    PROBE.call_once(|| {
+        if !backdrop::probe_needed() {
+            return;
+        }
+        std::thread::spawn(move || {
+            // PKGDECK_NO_BLUR turns it off, for desktops whose blur misbehaves.
+            backdrop::blur_known(
+                std::env::var_os("PKGDECK_NO_BLUR").is_none()
+                    && desktop_blurs(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()),
+            );
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_blurs(_desktop: Option<&str>) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_blurs(desktop: Option<&str>) -> bool {
+    crate::backdrop::blurs_on(desktop, kwin_blur_loaded)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn desktop_blurs(_desktop: Option<&str>) -> bool {
+    false
+}
+
+/// Asks KWin whether its blur effect is on.
+#[cfg(target_os = "linux")]
+fn kwin_blur_loaded() -> Option<bool> {
+    let connection = zbus::blocking::Connection::session().ok()?;
+    let reply = connection
+        .call_method(
+            Some("org.kde.KWin"),
+            "/Effects",
+            Some("org.kde.kwin.Effects"),
+            "isEffectLoaded",
+            &("blur",),
+        )
+        .ok()?;
+    reply.body().deserialize::<bool>().ok()
+}
+
+/// Asks the desktop to blur behind the X11 window `window`, or to stop.
+/// KWin reads this property; an empty region means the whole window, as
+/// winit asks on Wayland and macOS. The few pixels outside the rounded
+/// top corners blur too, too small to notice; content covers the rest.
+/// One thread does the asking, so quick toggles land in order.
+#[cfg(target_os = "linux")]
+pub fn blur_x11(window: u32, blur: bool) {
+    use std::sync::mpsc::{channel, Sender};
+    static ASK: Mutex<Option<Sender<(u32, bool)>>> = Mutex::new(None);
+    let Ok(mut ask) = ASK.lock() else {
+        return;
+    };
+    let sender = ask.get_or_insert_with(|| {
+        let (sender, asks) = channel();
+        std::thread::spawn(move || {
+            let mut connection = None;
+            for (window, blur) in asks {
+                if connection.is_none() {
+                    connection = x11rb::connect(None).ok().map(|(connection, _)| connection);
+                }
+                if let Some(connection) = &connection {
+                    set_blur_region(connection, window, blur);
+                }
+            }
+        });
+        sender
+    });
+    let _ = sender.send((window, blur));
+}
+
+#[cfg(target_os = "linux")]
+fn set_blur_region(connection: &impl x11rb::connection::Connection, window: u32, blur: bool) {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode};
+    use x11rb::wrapper::ConnectionExt as _;
+    let Ok(atom) = connection
+        .intern_atom(false, b"_KDE_NET_WM_BLUR_BEHIND_REGION")
+        .map_err(drop)
+        .and_then(|cookie| cookie.reply().map_err(drop))
+    else {
+        return;
+    };
+    let _ = if blur {
+        connection
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                atom.atom,
+                AtomEnum::CARDINAL,
+                &[],
+            )
+            .map(drop)
+    } else {
+        connection.delete_property(window, atom.atom).map(drop)
+    };
+    let _ = connection.flush();
+}
+
+/// The wallpaper's copy once loaded, if allowed. The first call starts
+/// loading it off the caller's thread, from the cache when an earlier run
+/// made it, and repaints `ctx` when it's ready.
+pub fn wallpaper(
+    ctx: &eframe::egui::Context,
+) -> Option<std::sync::Arc<crate::backdrop::Wallpaper>> {
+    use crate::backdrop;
+    static LOAD: std::sync::Once = std::sync::Once::new();
+    let cache = backdrop::wallpaper_cache()?;
+    backdrop::watch(ctx);
+    LOAD.call_once(|| {
+        std::thread::spawn(move || {
+            let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+            let Some(path) = home
+                .as_deref()
+                .and_then(wallpaper_setting)
+                .and_then(|setting| backdrop::wallpaper_file(&setting))
+            else {
+                return;
+            };
+            if let Some(copy) = backdrop::load_wallpaper(&path, cache.as_deref()) {
+                backdrop::wallpaper_loaded(copy);
+            }
+        });
+    });
+    backdrop::current_wallpaper()
+}
+
+/// The wallpaper the desktop names: Plasma's for the first screen, else
+/// GNOME's.
+fn wallpaper_setting(home: &std::path::Path) -> Option<String> {
+    let plasma =
+        std::fs::read_to_string(home.join(".config/plasma-org.kde.plasma.desktop-appletsrc"))
+            .ok()
+            .and_then(|text| crate::backdrop::plasma_wallpaper(&text));
+    plasma.or_else(|| {
+        let out = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.background", "picture-uri"])
+            .output()
+            .ok()?;
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .trim_matches('\'')
+                .to_owned(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

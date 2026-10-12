@@ -47,7 +47,7 @@ impl<'a> Window<'a> {
         app.window_visible = true;
         app.c().set_window_open(true);
         let smoke_test = app.launch.smoke_test.then_some(0);
-        crate::backdrop::probe(ctx);
+        crate::platform::probe_blur(ctx);
         crate::backdrop::allow_wallpaper(wallpaper_cache());
         Self {
             app,
@@ -139,7 +139,7 @@ fn ask_blur(frame: &eframe::Frame, blur: bool) {
                 _ => None,
             });
         if let Some(window) = window {
-            crate::backdrop::blur_x11(window, blur);
+            crate::platform::blur_x11(window, blur);
         }
     }
 }
