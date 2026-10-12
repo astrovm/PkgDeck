@@ -10,6 +10,8 @@ mod gel;
 pub mod icons;
 mod list;
 mod luna;
+mod menu;
+mod nav;
 mod page;
 mod platinum;
 mod settings_page;
@@ -128,6 +130,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if let Some(status) = status {
         list::status_bar(app, ui, status);
     }
+    // Windows before Vista put a menu bar under the title.
+    let full = menu::take(app, ui, full);
     // A toolbar runs the window's width under the title bar, as Explorer's
     // and Aqua's did, with the page's buttons from the left.
     let band = Rect::from_min_size(full.min, vec2(full.width(), skin::TOOLBAR_HEIGHT));
@@ -142,10 +146,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         full
     };
     let rail = full.width() < RAIL_BELOW;
+    let navigation = skin::nav();
     let sidebar_width = glide(
         &ctx,
         Id::new("sidebar-width"),
-        if rail { 68.0 } else { 224.0 },
+        match navigation {
+            skin::Nav::Tabs => 0.0,
+            _ if rail => 68.0,
+            other => nav::width(other),
+        },
         LAYOUT,
     );
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
@@ -293,6 +302,12 @@ fn dropped_files(app: &mut App, ctx: &egui::Context) {
 // Sidebar
 
 fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
+    match skin::nav() {
+        skin::Nav::Tabs => return,
+        skin::Nav::Rail => {}
+        _ if rail => {}
+        _ => return nav::side(app, ui, rect),
+    }
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
     let painter = ui.painter_at(rect);
@@ -482,6 +497,12 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect, toolbar_shown: bool) {
         pos2(inner.left(), rect.top() + top),
         pos2(inner.right(), rect.bottom() - margin.min(20.0)),
     );
+    // Mac OS 9 puts the pages on tabs, over a panel holding the page.
+    let inner = if skin::nav() == skin::Nav::Tabs {
+        nav::tabs(app, ui, inner).shrink(12.0)
+    } else {
+        inner
+    };
     // Each page fades and rises into place.
     let entered = progress_since(&ctx, app.page_changed.elapsed().as_secs_f32(), 0.16);
     let lift = (1.0 - entered) * 10.0;

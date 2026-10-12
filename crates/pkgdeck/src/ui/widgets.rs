@@ -398,7 +398,18 @@ pub fn icon_button(
     color: Color32,
     enabled: bool,
 ) -> Response {
-    let size = 32.0;
+    icon_button_sized(ui, 32.0, icon, tooltip, color, enabled)
+}
+
+/// [`icon_button`], `size` across.
+pub fn icon_button_sized(
+    ui: &mut Ui,
+    size: f32,
+    icon: &str,
+    tooltip: &str,
+    color: Color32,
+    enabled: bool,
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -422,7 +433,7 @@ pub fn icon_button(
         );
         theme::paint_icon(
             ui.painter(),
-            Rect::from_center_size(rect.center(), Vec2::splat(18.0)),
+            Rect::from_center_size(rect.center(), Vec2::splat((size * 0.56).round())),
             icon,
             alpha(color, opacity),
         );

@@ -1521,6 +1521,30 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
     );
 }
 
+/// How a style moves between pages: Modern's sidebar, Explorer's folder
+/// tree, XP's strip of big buttons, 7's task pane links, Mac OS 9's tabs,
+/// or the Finder's source list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Rail,
+    Tree,
+    Strip,
+    Links,
+    Tabs,
+    Source,
+}
+
+pub fn nav() -> Nav {
+    match style() {
+        Family::Modern => Nav::Rail,
+        Family::Retro => Nav::Tree,
+        Family::Luna => Nav::Strip,
+        Family::Glass => Nav::Links,
+        Family::Platinum => Nav::Tabs,
+        Family::Gel => Nav::Source,
+    }
+}
+
 /// Where a style shows a list's count and its reload button: a status
 /// bar along the window's foot, Mac OS 9's window header under its title
 /// bar, or Modern's line atop the list.
@@ -1707,6 +1731,11 @@ pub struct ListLook {
     pub fixed_versions: bool,
     /// A line between rows; the old lists had none.
     pub dividers: bool,
+    /// One line a row, the source in a column of its own, as the old
+    /// lists' details views had; Modern puts it under the name.
+    pub one_line: bool,
+    /// The size of a row's text.
+    pub text: f32,
 }
 
 /// How `style`'s lists look: the older desktops packed rows tight, with
@@ -1720,14 +1749,21 @@ pub fn list_look() -> ListLook {
             bold_names: true,
             fixed_versions: true,
             dividers: true,
+            one_line: false,
+            text: 14.5,
         },
-        _ => ListLook {
-            row_scale: 0.74,
-            icon: 24.0,
+        // A 16-pixel icon in a row a little taller, as Explorer's and the
+        // Finder's details views had them.
+        family => ListLook {
+            row_scale: 0.4,
+            icon: 16.0,
             compact_icon: 32.0,
             bold_names: false,
             fixed_versions: false,
             dividers: false,
+            one_line: true,
+            // The pixel font is sharp at whole pixels only.
+            text: if family == Family::Retro { 12.5 } else { 13.0 },
         },
     }
 }
