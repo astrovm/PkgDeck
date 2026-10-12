@@ -147,8 +147,14 @@ fn wallpaper_uv(ctx: &eframe::egui::Context, full: Rect) -> Rect {
     let monitor = monitor.filter(|m| m.x > 0.0 && m.y > 0.0);
     match (outer, monitor) {
         (Some(outer), Some(monitor)) if outer.min != pos2(0.0, 0.0) => {
-            let min = outer.min.to_vec2() / monitor;
-            let max = (outer.min.to_vec2() + full.size()) / monitor;
+            // On a second screen, where it sits on that screen, taking
+            // the screens as the same size.
+            let at = vec2(
+                outer.min.x.rem_euclid(monitor.x),
+                outer.min.y.rem_euclid(monitor.y),
+            );
+            let min = at / monitor;
+            let max = (at + full.size()) / monitor;
             Rect::from_min_max(min.to_pos2(), max.to_pos2())
         }
         (_, Some(monitor)) => {
@@ -340,7 +346,7 @@ fn face_of(caption: Caption, press: Press, active: bool, vista: bool) -> Face {
                 (0.5, white(55)),
                 (0.5, Color32::from_rgba_premultiplied(0, 4, 20, 56)),
                 (0.75, Color32::from_rgba_premultiplied(0, 4, 20, 50)),
-                (1.0, Color32::from_rgba_premultiplied(10, 24, 50, 40)),
+                (1.0, Color32::from_rgba_premultiplied(5, 12, 25, 40)),
             ],
             glow: None,
             halo: None,

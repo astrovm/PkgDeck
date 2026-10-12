@@ -330,12 +330,18 @@ pub fn paint_caption(
         (face.width() * scale).round().max(1.0) as usize,
         (face.height() * scale).round().max(1.0) as usize,
     ];
-    let id = Id::new(("pkgdeck-luna-caption", close, light, base, dark, size));
-    let texture = match painter
+    // One slot per face and light, so a colour being dragged replaces its
+    // texture rather than piling up new ones. Close is red whatever the
+    // accent.
+    let (base, dark) = if close { (None, false) } else { (base, dark) };
+    let slot = Id::new(("pkgdeck-luna-caption", close, light));
+    let key = Id::new((base, dark, size));
+    let cached = painter
         .ctx()
-        .data(|data| data.get_temp::<TextureHandle>(id))
-    {
-        Some(texture) => texture,
+        .data(|data| data.get_temp::<(Id, TextureHandle)>(slot))
+        .filter(|(held, _)| *held == key);
+    let texture = match cached {
+        Some((_, texture)) => texture,
         None => {
             let texture = painter.ctx().load_texture(
                 "luna-caption",
@@ -344,7 +350,7 @@ pub fn paint_caption(
             );
             painter
                 .ctx()
-                .data_mut(|data| data.insert_temp(id, texture.clone()));
+                .data_mut(|data| data.insert_temp(slot, (key, texture.clone())));
             texture
         }
     };
@@ -406,6 +412,40 @@ fn symbol(painter: &Painter, rect: Rect, caption: Caption, maximized: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_a_colour_keeps_one_texture_per_button() {
+        let ctx = eframe::egui::Context::default();
+        let textures = || ctx.tex_manager().read().num_allocated();
+        let mut counts = Vec::new();
+        for hue in 0..40u8 {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                let painter = ui.painter().clone();
+                let bar = Rect::from_min_size(pos2(0.0, 0.0), eframe::egui::vec2(800.0, 30.0));
+                for (caption, rect) in captions(bar) {
+                    paint_caption(
+                        &painter,
+                        rect,
+                        caption,
+                        Press::default(),
+                        WindowState {
+                            maximized: false,
+                            active: true,
+                        },
+                        Color32::from_rgb(hue.wrapping_mul(6), 0x60, 0x30),
+                        false,
+                    );
+                }
+            });
+            output.textures_delta.clear();
+            counts.push(textures());
+        }
+        // The first frame loads the faces; new colours replace them.
+        assert!(
+            counts.windows(2).all(|pair| pair[1] == pair[0]),
+            "{counts:?}"
+        );
+    }
 
     #[test]
     fn blue_keeps_its_measured_colours_and_others_follow_its_shading() {

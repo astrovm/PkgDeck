@@ -53,7 +53,8 @@ impl<'a> Window<'a> {
             app,
             smoke_test,
             shown: false,
-            blurred: None,
+            // A new window starts without blur, so only glass asks.
+            blurred: Some(false),
         }
     }
 

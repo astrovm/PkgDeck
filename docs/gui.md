@@ -550,8 +550,9 @@ out of date, and each page refreshes when you open it.
     High Contrast Black for Windows 95 and 98, Royale Noir for XP, Media
     Center for Windows 7, Graphite for Vista and Hi-Tech for Mac OS 9.
   - **Vista** and **Windows 7** blur what's behind the window on KDE Plasma
-    and macOS. Elsewhere, the glass shows a blurred copy of your wallpaper.
-    Set `PKGDECK_NO_BLUR=1` to always use the wallpaper.
+    and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
+    copy of your wallpaper; other desktops get painted glass. Set
+    `PKGDECK_NO_BLUR=1` to never blur.
   - Picking a style also picks the accent it was made with.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the

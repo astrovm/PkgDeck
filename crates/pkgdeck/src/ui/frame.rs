@@ -132,7 +132,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     if drag.double_clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!state.maximized));
     }
-    let buttons = captions(style, bar);
+    let buttons = live_captions(style, bar, state);
     let hovered_group = buttons
         .iter()
         .any(|(_, rect)| ui.rect_contains_pointer(rect.expand(2.0)));
@@ -164,15 +164,13 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 /// title bar and its buttons next to the edge don't take the press.
 pub fn edges(ui: &mut Ui, full: Rect) {
     let ctx = ui.ctx().clone();
-    let Some(metrics) = metrics(theme::skin().style) else {
-        return;
-    };
-    if WindowState::of(&ctx).maximized {
+    let style = theme::skin().style;
+    if metrics(style).is_none() || WindowState::of(&ctx).maximized {
         return;
     }
     let Some(direction) = ctx
         .pointer_hover_pos()
-        .and_then(|pointer| edge_at(metrics, full, pointer))
+        .and_then(|pointer| edge_at(style, full, pointer))
     else {
         return;
     };
@@ -183,9 +181,18 @@ pub fn edges(ui: &mut Ui, full: Rect) {
 }
 
 /// Which way the window resizes from `pointer`: anywhere near the edge,
-/// and diagonally near a corner.
-pub fn edge_at(metrics: Metrics, full: Rect, pointer: egui::Pos2) -> Option<ResizeDirection> {
+/// and diagonally near a corner, but not on a title bar button that
+/// reaches into the edge.
+pub fn edge_at(style: Style, full: Rect, pointer: egui::Pos2) -> Option<ResizeDirection> {
+    let metrics = metrics(style)?;
     if !full.contains(pointer) {
+        return None;
+    }
+    let (bar, _) = layout(metrics, full, false);
+    if captions(style, bar)
+        .iter()
+        .any(|(_, rect)| rect.contains(pointer))
+    {
         return None;
     }
     let reach = metrics.side.max(5.0);
@@ -234,6 +241,15 @@ fn decorate(ctx: &egui::Context, on: bool) {
         ctx.data_mut(|data| data.insert_temp(id, on));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(on));
     }
+}
+
+/// The buttons that take clicks: Mac OS 9 hides a window's boxes when
+/// it's behind, so a click there only brings it forward.
+fn live_captions(style: Style, bar: Rect, state: WindowState) -> Vec<(Caption, Rect)> {
+    if style.family() == Family::Platinum && !state.active {
+        return Vec::new();
+    }
+    captions(style, bar)
 }
 
 /// Where each button of `style`'s title bar `bar` sits, left to right.
@@ -969,8 +985,7 @@ mod tests {
 
     #[test]
     fn the_edges_resize_and_the_corners_resize_both_ways() {
-        let retro = metrics(Style::Retro).unwrap();
-        let at = |x, y| edge_at(retro, window(), pos2(x, y));
+        let at = |x, y| edge_at(Style::Retro, window(), pos2(x, y));
         assert_eq!(at(320.0, 1.0), Some(ResizeDirection::North));
         assert_eq!(at(320.0, 399.0), Some(ResizeDirection::South));
         assert_eq!(at(1.0, 200.0), Some(ResizeDirection::West));
@@ -991,15 +1006,54 @@ mod tests {
         assert_eq!(at(-1.0, 200.0), None);
         assert_eq!(at(641.0, 1.0), None);
         // Glass's thick border reaches further in.
-        let glass = metrics(Style::Glass).unwrap();
         assert_eq!(
-            edge_at(glass, window(), pos2(6.0, 200.0)),
+            edge_at(Style::Glass, window(), pos2(6.0, 200.0)),
             Some(ResizeDirection::West)
         );
         assert_eq!(
-            edge_at(glass, window(), pos2(18.0, 1.0)),
+            edge_at(Style::Glass, window(), pos2(18.0, 1.0)),
             Some(ResizeDirection::NorthWest)
         );
+        assert_eq!(edge_at(Style::Modern, window(), pos2(1.0, 1.0)), None);
+    }
+
+    #[test]
+    fn hidden_boxes_take_no_clicks() {
+        let bar = Rect::from_min_max(pos2(6.0, 1.0), pos2(634.0, 22.0));
+        for active in [false, true] {
+            let state = WindowState {
+                maximized: false,
+                active,
+            };
+            for style in Style::ALL
+                .into_iter()
+                .filter(|&style| metrics(style).is_some())
+            {
+                let live = live_captions(style, bar, state).len();
+                let hidden = style.family() == Family::Platinum && !active;
+                assert_eq!(live == 0, hidden, "{style:?} {active}");
+            }
+        }
+    }
+
+    #[test]
+    fn title_bar_buttons_in_the_edge_still_click() {
+        // Vista and 7 hang theirs from the top, inside the resize border.
+        for style in Style::ALL {
+            let Some(metrics) = metrics(style) else {
+                continue;
+            };
+            let (bar, _) = layout(metrics, window(), false);
+            for (caption, rect) in captions(style, bar) {
+                for point in [rect.center(), rect.center_top() + vec2(0.0, 0.5)] {
+                    assert_eq!(
+                        edge_at(style, window(), point),
+                        None,
+                        "{style:?} {caption:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
