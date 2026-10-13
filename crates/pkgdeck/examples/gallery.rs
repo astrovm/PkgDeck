@@ -531,6 +531,18 @@ fn main() {
             ]}),
         ),
         (
+            "confirm-update-apt",
+            json!({"action": "Update", "summary": "Update 7 packages", "items": [
+                {"group": "APT", "icon_name": "apt", "title": "ffmpeg", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libavcodec62", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libavcodec62 (i386)", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libavformat62", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libavfilter11", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libswscale9", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"},
+                {"group": "APT", "icon_name": "apt", "title": "libswresample6", "from": "7:8.0.1-3ubuntu2+esm4", "to": "7:8.0.1-3ubuntu2+esm5"}
+            ]}),
+        ),
+        (
             "confirm-update-short",
             json!({"action": "Update", "summary": "Update 2 selected packages", "items": [
                 {"group": "npm", "icon_name": "npm", "title": "@anthropic-ai/claude-code", "from": "2.1.3", "to": "2.1.4"},
@@ -555,6 +567,9 @@ fn main() {
             offline(app, Page::Installed);
             app.confirmation = Some(serde_json::from_value(confirmation).unwrap());
             app.confirm_open = true;
+            // Long lists start closed, so open them.
+            app.ui.confirm_details_flipped =
+                name.starts_with("confirm-update") && !name.ends_with("short");
         });
     }
     render("notice-error", [1000.0, 420.0], true, |app| {

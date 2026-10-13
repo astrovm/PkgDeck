@@ -218,7 +218,8 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                         super::scrollbar::vertical()
                             .max_height(260.0)
                             .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
+                                // Leave room for the scroll bar beside long versions.
+                                ui.set_width(ui.available_width() - 14.0);
                                 detail_list(ui, &data, &palette);
                             });
                     });
@@ -304,20 +305,11 @@ fn detail_list(ui: &mut Ui, data: &model::Confirmation, palette: &Palette) {
         if !data.items.is_empty() {
             ui.add_space(8.0);
         }
-        let font = if data.details_mono {
-            theme::mono(12.5)
-        } else {
-            theme::font(13.0)
-        };
         ui.add(
             egui::Label::new(
                 egui::RichText::new(text)
-                    .font(font)
-                    .color(if data.details_mono {
-                        palette.ink
-                    } else {
-                        palette.muted
-                    }),
+                    .font(theme::font(13.0))
+                    .color(palette.muted),
             )
             .selectable(true),
         );

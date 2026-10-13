@@ -3237,28 +3237,61 @@ fn confirm_item(package: &Package) -> Value {
         "note": if package.id.backend == "fwupd" { package.summary.as_str() } else { "" },
     })
 }
-/// The packages `operations` update, one row each.
+/// What an APT plan changes beyond the updates the dialog's rows already
+/// name: extra installs and removals, or nothing.
+fn apt_extra(plan: &AptUpgradePlan) -> String {
+    let extra = [("Install", &plan.installs), ("Remove", &plan.removals)]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(label, names)| format!("{label} ({}): {}", names.len(), names.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if extra.is_empty() {
+        extra
+    } else {
+        format!("\n\n{extra}")
+    }
+}
+/// The packages `operations` update, one row each. A name that appears
+/// more than once (such as an i386 build next to the native one) gets its
+/// architecture so the rows can be told apart.
 fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
-    let mut items = Vec::new();
+    let mut chosen: Vec<&Package> = Vec::new();
     for operation in operations {
         match operation {
-            Operation::Upgrade(id) => {
-                items.extend(packages.iter().filter(|p| p.id == *id).map(confirm_item));
-            }
+            Operation::Upgrade(id) => chosen.extend(packages.iter().filter(|p| p.id == *id)),
             Operation::UpgradeAll { backend } => {
-                items.extend(
-                    packages
-                        .iter()
-                        .filter(|p| {
-                            p.id.backend == *backend && p.update == UpdateAvailability::Available
-                        })
-                        .map(confirm_item),
-                );
+                chosen.extend(packages.iter().filter(|p| {
+                    p.id.backend == *backend && p.update == UpdateAvailability::Available
+                }))
             }
             _ => {}
         }
     }
-    items
+    let title = |package: &Package| -> String {
+        if package.display_name.is_empty() {
+            package_name(&package.id).to_owned()
+        } else {
+            package.display_name.clone()
+        }
+    };
+    chosen
+        .iter()
+        .map(|package| {
+            let mut item = confirm_item(package);
+            let repeated = chosen
+                .iter()
+                .filter(|other| {
+                    other.id.backend == package.id.backend && title(other) == title(package)
+                })
+                .count()
+                > 1;
+            if repeated && !package.id.architecture.is_empty() {
+                item["title"] = json!(format!("{} ({})", title(package), package.id.architecture));
+            }
+            item
+        })
+        .collect()
 }
 /// One line for progress and results, such as "Install htop (APT)".
 fn operation_title(operation: &Operation) -> String {
@@ -5959,9 +5992,7 @@ impl ffi::PackageController {
                     .map(|operation| confirmation_label(operation, &self.rust().packages))
                     .collect::<Vec<_>>()
                     .join("\n\n");
-                let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
-                    format!("\n\nAPT changes:\n{}", plan.summary())
-                });
+                let apt = apt_plan.as_ref().map_or_else(String::new, apt_extra);
                 let removals = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     if plan.removals.is_empty() {
                         String::new()
@@ -5992,7 +6023,7 @@ impl ffi::PackageController {
                     format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
                 let items = update_items(&operations, &self.rust().packages);
-                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}").trim(), "details_mono": !apt.is_empty(), "items": items})));
+                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}").trim(), "items": items})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed {noun}?{incomplete}{left_out}{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
@@ -13888,6 +13919,49 @@ mod tests {
             &[package("upgradable"), package("other")],
         );
         assert_eq!(all.len(), 2);
+    }
+    #[test]
+    fn an_apt_confirmation_says_only_what_its_rows_do_not() {
+        let mut plan = AptUpgradePlan {
+            preview: String::new(),
+            upgrades: vec!["libavcodec62".into()],
+            installs: vec![],
+            removals: vec![],
+        };
+        assert_eq!(apt_extra(&plan), "");
+        plan.installs = vec!["libnew1".into()];
+        plan.removals = vec!["libold1".into(), "libold2".into()];
+        assert_eq!(
+            apt_extra(&plan),
+            "\n\nInstall (1): libnew1\nRemove (2): libold1, libold2"
+        );
+        let build = |architecture: &str| Package {
+            id: PackageId {
+                backend: "apt".into(),
+                name: "libavcodec62".into(),
+                architecture: architecture.into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: String::new(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        };
+        let items = update_items(
+            &[Operation::UpgradeAll {
+                backend: "apt".into(),
+            }],
+            &[build("amd64"), build("i386")],
+        );
+        assert_eq!(items[0]["title"], "libavcodec62 (amd64)");
+        assert_eq!(items[1]["title"], "libavcodec62 (i386)");
     }
     #[test]
     fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {

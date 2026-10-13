@@ -638,8 +638,6 @@ pub struct Confirmation {
     /// What the change touches, one row each. Shown as a list instead of
     /// `details` text when present.
     pub items: Vec<ConfirmItem>,
-    /// `details` is a command preview, so it is drawn in monospace.
-    pub details_mono: bool,
 }
 /// One row of a confirmation: a package, source or cleanup task.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
