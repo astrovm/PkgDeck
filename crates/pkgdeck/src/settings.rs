@@ -152,13 +152,15 @@ impl Family {
 }
 
 impl Style {
+    /// In the order the picker shows them: Windows oldest to newest, then
+    /// the Mac.
     pub const ALL: [Self; 7] = [
         Self::Modern,
         Self::Retro,
         Self::Luna,
         Self::Glass,
-        Self::Aqua,
         Self::Fluent,
+        Self::Aqua,
         Self::Liquid,
     ];
     pub fn name(self) -> &'static str {
@@ -818,8 +820,8 @@ mod tests {
                 Family::Retro,
                 Family::Luna,
                 Family::Glass,
-                Family::Gel,
                 Family::Fluent,
+                Family::Gel,
                 Family::Liquid,
             ]
         );

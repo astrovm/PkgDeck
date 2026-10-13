@@ -261,9 +261,9 @@ fn themes() {
         (Style::Modern, true, None),
         (Style::Retro, false, None),
         (Style::Luna, false, None),
-        (Style::Fluent, true, None),
-        (Style::Glass, true, Some(Accent::Pink)),
         (Style::Glass, false, None),
+        (Style::Glass, true, Some(Accent::Pink)),
+        (Style::Fluent, true, None),
         (Style::Aqua, true, None),
         (Style::Liquid, false, None),
     ];

@@ -538,9 +538,9 @@ out of date, and each page refreshes when you open it.
     from navy to blue.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
-  - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
     on the side and the flat minimise, maximise and close buttons.
+  - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **macOS 27**: a sidebar that runs up to the top edge, with icons in the
     accent, Liquid Glass traffic lights at the top left and large soft
     corners.
