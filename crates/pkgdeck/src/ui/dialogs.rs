@@ -387,29 +387,26 @@ fn detail_row(ui: &mut Ui, item: &model::ConfirmItem, grouped: bool, palette: &P
             }
         },
     );
-    let indent = if grouped { 22.0 } else { 0.0 };
+    let indent = if grouped { 22 } else { 0 };
+    let beside = |ui: &mut Ui, label: egui::Label| {
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                left: indent,
+                ..Default::default()
+            })
+            .show(ui, |ui| ui.add(label.wrap()));
+    };
     if !item.note.is_empty() {
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-            ui.label(
-                egui::RichText::new(&item.note)
-                    .font(theme::font(12.5))
-                    .color(palette.muted),
-            );
-        });
+        let note = egui::RichText::new(&item.note)
+            .font(theme::font(12.5))
+            .color(palette.muted);
+        beside(ui, egui::Label::new(note));
     }
     if !item.preview.trim().is_empty() {
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(item.preview.trim())
-                        .font(theme::mono(12.0))
-                        .color(palette.muted),
-                )
-                .selectable(true),
-            );
-        });
+        let preview = egui::RichText::new(item.preview.trim())
+            .font(theme::mono(12.0))
+            .color(palette.muted);
+        beside(ui, egui::Label::new(preview).selectable(true));
         ui.add_space(4.0);
     }
 }

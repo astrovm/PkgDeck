@@ -13890,6 +13890,34 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
     #[test]
+    fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {
+        let item = |title: &str, bytes: Option<u64>| CleanupItem {
+            id: CleanupId {
+                backend: "fixture".into(),
+                key: title.into(),
+            },
+            kind: CleanupKind::PackageCache,
+            title: title.into(),
+            summary: String::new(),
+            preview: format!("Would empty {title}"),
+            bytes,
+        };
+        let (cache, logs) = (item("cache", Some(2_000_000_000)), item("logs", None));
+        let data = clean_confirmation(&[&cache, &logs]);
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["group"], "fixture");
+        assert_eq!(items[0]["size"], "2.0 GB");
+        assert_eq!(items[0]["preview"], "Would empty cache");
+        assert!(items[1]["size"].is_null());
+        assert!(data["details"].is_null());
+        // The queued-revalidation path reads this as the confirmation text.
+        assert_eq!(
+            data["labels"].as_str().unwrap(),
+            format!("{}\n\n{}", cleanup_label(&cache), cleanup_label(&logs))
+        );
+    }
+    #[test]
     fn failure_details_carry_backend_error_and_hint() {
         let failure = BackendFailure {
             backend: "npm".into(),

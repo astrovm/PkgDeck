@@ -611,7 +611,7 @@ pub fn begin(
     let runner = appimage
         .map(|path| (path, true))
         .or_else(|| runner_path(host).map(|path| (path, false)))
-        .or_else(|| self_runner(host));
+        .or_else(|| self_runner(host, mode));
     start_runner(
         host,
         authorization,
@@ -625,13 +625,25 @@ pub fn begin(
 /// A debug build run from its build folder has no packaged runner, which
 /// would ask for the password once per source. It starts itself as the
 /// runner (`--batch-runner`) instead. Release builds never do.
-fn self_runner(host: &Host) -> Option<(PathBuf, bool)> {
+#[cfg(debug_assertions)]
+fn self_runner(host: &Host, mode: BatchMode) -> Option<(PathBuf, bool)> {
     let executable = fs::canonicalize(std::env::current_exe().ok()?).ok()?;
-    self_runner_for(cfg!(debug_assertions), host.runtime, executable)
+    self_runner_for(mode, host.runtime, executable)
 }
-fn self_runner_for(debug: bool, runtime: Runtime, executable: PathBuf) -> Option<(PathBuf, bool)> {
+#[cfg(not(debug_assertions))]
+fn self_runner(_: &Host, _: BatchMode) -> Option<(PathBuf, bool)> {
+    None
+}
+#[cfg(debug_assertions)]
+fn self_runner_for(
+    mode: BatchMode,
+    runtime: Runtime,
+    executable: PathBuf,
+) -> Option<(PathBuf, bool)> {
     // Only the window knows `--batch-runner`, not a test binary or `pkd`.
-    (debug && runtime == Runtime::Native && executable.file_name()? == "pkgdeck")
+    (mode == BatchMode::Reviewed
+        && runtime == Runtime::Native
+        && executable.file_name()? == "pkgdeck")
         .then_some((executable, true))
 }
 /// Start the session through `runner`, the one [`begin`] found, if any.
@@ -1719,22 +1731,32 @@ done"#;
         let flatpak = Host::new(Runtime::Flatpak, BTreeMap::new());
         assert!(runner_path(&flatpak).is_none());
         // A debug window without a packaged runner runs as its own, so one
-        // password covers the batch; nothing else ever does.
-        let window = PathBuf::from("/work/target/debug/pkgdeck");
-        assert_eq!(
-            self_runner_for(true, Runtime::Native, window.clone()),
-            Some((window.clone(), true))
-        );
-        assert_eq!(
-            self_runner_for(false, Runtime::Native, window.clone()),
-            None
-        );
-        assert_eq!(self_runner_for(true, Runtime::Flatpak, window), None);
-        for other in [
-            "/work/target/debug/pkd",
-            "/work/target/debug/deps/batch-1a2b",
-        ] {
-            assert_eq!(self_runner_for(true, Runtime::Native, other.into()), None);
+        // password covers a reviewed batch; nothing else ever does.
+        #[cfg(debug_assertions)]
+        {
+            let window = PathBuf::from("/work/target/debug/pkgdeck");
+            let upgrade_only = BatchMode::UpgradeOnly { removals: false };
+            assert_eq!(
+                self_runner_for(BatchMode::Reviewed, Runtime::Native, window.clone()),
+                Some((window.clone(), true))
+            );
+            assert_eq!(
+                self_runner_for(upgrade_only, Runtime::Native, window.clone()),
+                None
+            );
+            assert_eq!(
+                self_runner_for(BatchMode::Reviewed, Runtime::Flatpak, window),
+                None
+            );
+            for other in [
+                "/work/target/debug/pkd",
+                "/work/target/debug/deps/batch-1a2b",
+            ] {
+                assert_eq!(
+                    self_runner_for(BatchMode::Reviewed, Runtime::Native, other.into()),
+                    None
+                );
+            }
         }
         assert!(begin(
             &host,
