@@ -17482,6 +17482,32 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_cleanup_selection_text_never_creates_an_operation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let item = sized("projects", "fixture-key", CleanupKind::Worktree, Some(1));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![item],
+                failures: vec![],
+            })));
+        let mut seed = 12345u64;
+        for length in 0..128 {
+            let text: String = (0..length)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    char::from(32 + (seed % 95) as u8)
+                })
+                .collect();
+            controller.as_mut().propose_clean_checked(text.into());
+            assert!(controller.rust().pending.is_none());
+        }
+    }
+
+    #[test]
     fn automatic_updates_read_back_as_set() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();

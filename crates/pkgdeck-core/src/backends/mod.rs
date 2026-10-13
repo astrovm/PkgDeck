@@ -84,6 +84,9 @@ const CLEAN_CAPABILITIES: &[Capability] = &[
 /// Backend ids accepted by `--from` and the source checklist. Adding a
 /// backend means extending this list, the GUI `sourceIds`, and the CLI
 /// value parser together.
+/// Explicit empty scope for callers whose empty source list means all sources.
+pub const NO_BACKENDS: &str = "__none__";
+
 pub const BACKEND_IDS: &[&str] = &[
     "fwupd",
     "apt",
@@ -6371,6 +6374,9 @@ fn native_engine_on(
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
+    if sources == [NO_BACKENDS] {
+        return Ok(Engine::default());
+    }
     if let Some(unknown) = sources.iter().find(|s| !BACKEND_IDS.contains(&s.as_str())) {
         return Err(EngineError::UnknownBackend(unknown.into()));
     }
@@ -8197,6 +8203,15 @@ mod native_transport_tests {
         // Asked for alone, Docker stays so it can explain itself.
         assert_eq!(sources(&["docker"]), ["docker"]);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn explicit_empty_scope_has_no_cleanup_tasks_or_package_sources() {
+        let cancel = Cancellation::default();
+        let mut engine =
+            native_engine(&[NO_BACKENDS.into()], false, Authorization::Polkit, &cancel).unwrap();
+        assert!(engine.cleanup(&cancel).items.is_empty());
+        assert!(engine.source_ids().is_empty());
     }
 
     #[test]

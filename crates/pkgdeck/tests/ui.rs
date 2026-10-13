@@ -1157,6 +1157,13 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     assert!(harness.query_by_label("Clean all (3 MB)").is_some());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select First cache");
     assert!(harness.query_by_label("Clean selected (2 MB)").is_some());
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Select all tasks")
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::Mixed)
+    );
     click_in_view(&mut harness, None, "Select none");
     assert!(harness.query_by_label_contains("Clean selected").is_none());
     click_in_view(&mut harness, None, "Select all");

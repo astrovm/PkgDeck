@@ -1406,6 +1406,28 @@ mod tests {
     }
 
     #[test]
+    fn developer_cache_choice_names_are_stable_and_sources_are_separate() {
+        let choices = pkgdeck_core::backends::developer_cleanup_choices(Host::current());
+        assert!(choices
+            .iter()
+            .any(|(id, name)| id.key == "sccache" && *name == "sccache compiler cache"));
+        assert!(choices.iter().all(|(id, _)| id.backend == "dev-caches"));
+        let catalog: Vec<model::Source> = serde_json::from_value(serde_json::json!([
+            {"source":"apt", "available":true, "capabilities":["clean","upgrade"]},
+            {"source":"projects", "available":true, "capabilities":["clean"]},
+            {"source":"dev-caches", "available":true, "capabilities":["clean"]}
+        ]))
+        .unwrap();
+        assert_eq!(
+            shown_sources(&catalog)
+                .iter()
+                .map(|source| source.source.as_str())
+                .collect::<Vec<_>>(),
+            ["apt"]
+        );
+    }
+
+    #[test]
     fn project_waits_snap_to_steps_and_read_naturally() {
         assert_eq!(PROJECT_DAYS[project_step(7)], 7);
         // A hand-edited wait shows on the next longer step.

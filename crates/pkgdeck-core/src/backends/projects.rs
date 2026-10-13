@@ -1505,6 +1505,26 @@ mod tests {
     }
 
     #[test]
+    fn protection_choices_have_the_promised_labels_and_file_rules() {
+        assert_eq!(
+            WorktreeProtection::ALL.map(WorktreeProtection::name),
+            [
+                "Any local files",
+                "Uncommitted changes",
+                "Edited tracked files"
+            ]
+        );
+        assert_eq!(
+            WorktreeProtection::ALL.map(WorktreeProtection::description),
+            [
+                "Keeps edits, untracked files and ignored files, including .env",
+                "Keeps edits and untracked files. Deletes ignored files, including .env",
+                "Keeps tracked edits. Deletes untracked and ignored files, including .env"
+            ]
+        );
+    }
+
+    #[test]
     fn ages_read_in_rough_steps() {
         let now = SystemTime::now();
         let ago = |days: u64| age(now - Duration::from_secs(days * 86_400 + 60), now);

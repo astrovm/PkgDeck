@@ -1029,10 +1029,11 @@ impl App {
         let mut list: Vec<String> = all_sources(&self.catalog)
             .into_iter()
             .filter(|id| sources.contains(id))
+            .filter(|id| page != Page::Clean || self.usable(id, Page::Clean))
             .collect();
         list.dedup();
         if list.is_empty() && page == Page::Clean {
-            "__none__".into()
+            pkgdeck_core::backends::NO_BACKENDS.into()
         } else {
             list.join(",")
         }
@@ -1070,7 +1071,7 @@ impl App {
             .collect();
         list.dedup();
         self.settings.source_list = list.join(",");
-        self.page_sources.clear();
+        self.page_sources.retain(|page, _| *page == Page::Clean);
         self.settings.search_hint = search_hint(
             &self.catalog,
             &self.enabled_sources(),
@@ -1080,11 +1081,14 @@ impl App {
     }
 
     pub fn set_page_sources(&mut self, page: Page, sources: HashSet<String>) {
-        let all: HashSet<String> = self
-            .effective_sources(page)
-            .into_iter()
-            .filter(|id| self.usable(id, page))
-            .collect();
+        let all: HashSet<String> = (if page == Page::Clean {
+            self.enabled_cleanup_sources()
+        } else {
+            self.enabled_sources()
+        })
+        .into_iter()
+        .filter(|id| self.usable(id, page))
+        .collect();
         if sources == all || sources.is_empty() {
             self.page_sources.remove(&page);
         } else {
