@@ -1110,10 +1110,7 @@ fn page_actions_height(app: &App) -> f32 {
                 .any(|i| app.shown_rows()[i.raw].is_package())
                 || !app.refreshable_sources().is_empty()
         }
-        Page::Clean => app
-            .items
-            .iter()
-            .any(|item| app.shown_rows()[item.raw].batch_cleanable()),
+        Page::Clean => !app.items.is_empty(),
         _ => false,
     };
     if any {
@@ -1220,7 +1217,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             } else {
                 format!("{action} ({})", model::size(bytes))
             };
-            if selected > 0
+            if (selected > 0 || (total == 0 && !app.items.is_empty()))
                 && Button::new(Look::Solid(Tone::Danger), &label)
                     .icon("remove")
                     .enabled(app.can_act() && app.retained.is_none())

@@ -1154,9 +1154,9 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     app.react();
     let mut harness = harness(app);
     harness.run_steps(4);
-    assert!(harness.query_by_label("Clean all (3 MB)").is_some());
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select First cache");
-    assert!(harness.query_by_label("Clean selected (2 MB)").is_some());
+    assert!(harness.query_by_label("Clean selected (2.0 MB)").is_some());
     assert_eq!(
         harness
             .get_by_role_and_label(Role::CheckBox, "Select all tasks")
@@ -1167,13 +1167,13 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     click_in_view(&mut harness, None, "Select none");
     assert!(harness.query_by_label_contains("Clean selected").is_none());
     click_in_view(&mut harness, None, "Select all");
-    assert!(harness.query_by_label("Clean all (3 MB)").is_some());
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
     assert!(harness
         .get_by_role_and_label(Role::CheckBox, "Select Volume")
         .accesskit_node()
         .is_disabled());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
-    assert!(harness.query_by_label("Clean all (3 MB)").is_none());
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_none());
 }
 
 #[test]
