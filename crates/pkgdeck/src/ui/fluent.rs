@@ -85,6 +85,8 @@ pub fn paint_caption(
     };
     // Snap to a pixel's middle so one-pixel lines stay crisp.
     let center = pos2(rect.center().x.floor() + 0.5, rect.center().y.floor() + 0.5);
+    // A box's inside stroke is crisp when its corner is on a whole pixel.
+    let whole = center - vec2(0.5, 0.5);
     let stroke = Stroke::new(1.0, ink);
     let half = 5.0;
     match caption {
@@ -94,20 +96,22 @@ pub fn paint_caption(
         Caption::Maximize if state.maximized => {
             // Two windows, the front one a corner lower.
             let front =
-                Rect::from_min_size(pos2(center.x - half, center.y - half + 2.0), vec2(8.0, 8.0));
+                Rect::from_min_size(pos2(whole.x - half, whole.y - half + 2.0), vec2(8.0, 8.0));
             painter.rect_stroke(front, CornerRadius::same(1), stroke, StrokeKind::Inside);
+            // The back window's visible edges, on the same half pixels.
+            let back_box = front.translate(vec2(2.0, -2.0));
             let back = [
-                pos2(front.left() + 2.0, front.top()),
-                pos2(front.left() + 2.0, front.top() - 2.0),
-                pos2(front.right() + 2.0, front.top() - 2.0),
-                pos2(front.right() + 2.0, front.bottom() - 2.0),
-                pos2(front.right(), front.bottom() - 2.0),
+                pos2(back_box.left() + 0.5, front.top()),
+                pos2(back_box.left() + 0.5, back_box.top() + 0.5),
+                pos2(back_box.right() - 0.5, back_box.top() + 0.5),
+                pos2(back_box.right() - 0.5, back_box.bottom() - 0.5),
+                pos2(front.right(), back_box.bottom() - 0.5),
             ];
             painter.add(eframe::egui::Shape::line(back.to_vec(), stroke));
         }
         Caption::Maximize => {
             painter.rect_stroke(
-                Rect::from_center_size(center, vec2(10.0, 10.0)),
+                Rect::from_center_size(whole, vec2(10.0, 10.0)),
                 CornerRadius::same(2),
                 stroke,
                 StrokeKind::Inside,

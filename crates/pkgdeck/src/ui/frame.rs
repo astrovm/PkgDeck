@@ -168,8 +168,24 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 pub fn edges(ui: &mut Ui, full: Rect) {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
-    if metrics(style).is_none() || WindowState::of(&ctx).maximized {
+    let state = WindowState::of(&ctx);
+    if metrics(style).is_none() || state.maximized {
         return;
+    }
+    if style.family() == Family::Liquid {
+        // The sidebar and page reach the edge, so the hairline goes on top.
+        let palette = Palette::current(&ctx);
+        let edge = if state.active {
+            palette.strong_line
+        } else {
+            palette.line
+        };
+        ui.painter().rect_stroke(
+            full,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, edge),
+            StrokeKind::Inside,
+        );
     }
     let Some(direction) = ctx
         .pointer_hover_pos()
@@ -348,19 +364,6 @@ pub fn paint_frame(
                 CornerRadius::ZERO,
                 super::skin::sidebar_color(palette),
             );
-            if !state.maximized {
-                let edge = if state.active {
-                    palette.strong_line
-                } else {
-                    palette.line
-                };
-                painter.rect_stroke(
-                    full,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, edge),
-                    StrokeKind::Inside,
-                );
-            }
         }
         Family::Retro => {
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
@@ -902,6 +905,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_mac_hairline_goes_on_top_of_the_edge_to_edge_sidebar() {
+        let palette = palette(Style::Liquid, false);
+        let shapes = in_style(Style::Liquid, || {
+            theme::painted(|ui| {
+                show(ui, window(), "PkgDeck", &palette);
+                // The app fills the room under the bar.
+                ui.painter()
+                    .rect_filled(window(), CornerRadius::ZERO, Color32::RED);
+                edges(ui, window());
+            })
+        });
+        match shapes.last() {
+            Some(Shape::Rect(outline)) => {
+                assert_eq!(outline.rect, window());
+                assert!(outline.fill.a() == 0 && outline.stroke.width == 1.0);
+            }
+            other => panic!("the outline should come last, got {other:?}"),
         }
     }
 

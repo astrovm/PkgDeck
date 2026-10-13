@@ -573,8 +573,8 @@ out of date, and each page refreshes when you open it.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
   font, or a free copy of it: MS Sans Serif's pixels for Windows 98, Tahoma
-  for XP, Segoe UI for Windows 7 and Lucida Grande for Aqua. Where one isn't installed, the
-  closest font that is.
+  for XP, Segoe UI for Windows 7 and Windows 11, and Lucida Grande for Aqua. Where one isn't
+  installed, the closest font that is. macOS 27 uses Inter.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
 - **Animations**: turn motion on or off. When the system turns motion off

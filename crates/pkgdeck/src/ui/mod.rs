@@ -133,7 +133,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     );
     // The frame's title bar paints the sidebar's colour that far, where the
     // sidebar runs up behind the window's buttons.
-    ctx.data_mut(|data| data.insert_temp(Id::new("sidebar-extent"), sidebar_width));
+    // The frame paints before this runs, so a change takes one more frame.
+    let extent = Id::new("sidebar-extent");
+    let before = ctx.data(|data| data.get_temp::<f32>(extent));
+    ctx.data_mut(|data| data.insert_temp(extent, sidebar_width));
+    if before != Some(sidebar_width) {
+        ctx.request_repaint();
+    }
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);

@@ -1523,9 +1523,9 @@ pub fn heading(palette: &Palette) -> (FontId, Color32) {
 }
 
 /// A list's column headings as the style draws them: in title case in
-/// the older styles, capitals in Modern.
+/// the older styles, capitals in the flat ones.
 pub fn column_title(title: &str) -> String {
-    if style() == Family::Modern {
+    if style().flat() {
         return title.to_owned();
     }
     let lower = title.to_lowercase();
@@ -2160,7 +2160,7 @@ mod tests {
                 assert_eq!(selection_bar(), style == Style::Fluent, "{style:?}");
                 assert!(!bare_icons(), "{style:?}");
                 assert!(!switch_as_check(), "{style:?}");
-                assert_eq!(column_title("SUMMARY"), "Summary");
+                assert_eq!(column_title("SUMMARY"), "SUMMARY", "{style:?}");
                 assert!(group(&palette).is_none(), "{style:?}");
                 assert!(row_selection_ink(&palette).is_none(), "{style:?}");
             });

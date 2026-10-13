@@ -537,7 +537,7 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     let palette = Palette::current(ui.ctx());
     let part = 84.0;
     let (rect, _) = ui.allocate_exact_size(vec2(part * labels.len() as f32, 34.0), Sense::hover());
-    let modern = theme::skin().style == Style::Modern;
+    let modern = theme::skin().family().flat();
     if modern {
         ui.painter()
             .rect_filled(rect, theme::round(10), palette.hover_solid());
