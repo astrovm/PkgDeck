@@ -176,6 +176,11 @@ impl Skin {
     fn style_roundness(self) -> f32 {
         match self.family() {
             Family::Modern => 1.0,
+            // Windows 11's corners are small and even: 4 on controls, 8 on
+            // cards.
+            Family::Fluent => 0.55,
+            // Liquid Glass rounds everything, to a capsule on controls.
+            Family::Liquid => 1.1,
             Family::Luna => 0.45,
             // Aqua's panels are nearly square; its buttons are pills.
             Family::Gel => 0.35,
@@ -332,6 +337,12 @@ impl Palette {
             (Family::Glass, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
             (Family::Gel, true) => (0x1f1f1f, 0x2b2b2b, 0xe6e6e6, 0x9c9c9c),
             (Family::Gel, false) => (0xececec, 0xffffff, 0x000000, 0x555555),
+            // Windows 11: Mica's grey with cards a step lighter.
+            (Family::Fluent, true) => (0x202020, 0x2b2b2b, 0xffffff, 0xc5c5c5),
+            (Family::Fluent, false) => (0xf3f3f3, 0xfbfbfb, 0x1b1b1b, 0x5f5f5f),
+            // macOS: the window's grey behind white content.
+            (Family::Liquid, true) => (0x1e1e20, 0x2a2a2d, 0xf5f5f7, 0x9d9da3),
+            (Family::Liquid, false) => (0xf0f0f2, 0xffffff, 0x1d1d1f, 0x6e6e73),
         }
     }
 
@@ -357,8 +368,9 @@ impl Palette {
         let hue = custom.unwrap_or(rgb(on_light));
         let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
-            (Family::Modern, _) if dark => 0.05,
-            (Family::Modern, _) => 0.04,
+            (Family::Fluent | Family::Liquid, _) if own => 0.0,
+            (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
+            (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
             _ if own => 0.0,
             (Family::Glass, false) => 0.03,
             (_, true) => 0.06,
@@ -669,7 +681,9 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
             Family::Luna => Face::Style(TAHOMA),
             Family::Gel => Face::Style(LUCIDA),
             Family::Glass => Face::Style(SEGOE),
-            Family::Modern => Face::Inter,
+            // Selawik stands in for Segoe UI Variable, Inter for SF Pro.
+            Family::Fluent => Face::Style(SEGOE),
+            Family::Modern | Family::Liquid => Face::Inter,
         },
     }
 }
@@ -852,7 +866,7 @@ pub fn apply(ctx: &egui::Context) {
 /// none for Modern's, which float over the content.
 pub fn scroll_bar(style: Style, palette: &Palette) -> Option<(f32, Color32)> {
     let handle = match style.family() {
-        Family::Modern => return None,
+        Family::Modern | Family::Fluent | Family::Liquid => return None,
         Family::Retro => palette.canvas,
         Family::Luna => over(
             palette.surface,
@@ -994,7 +1008,7 @@ pub fn logo_rgba(hue: Color32, size: u32) -> Vec<u8> {
 
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
-    if skin().family() != Family::Modern && name != "heart" {
+    if !skin().family().flat() && name != "heart" {
         icon_fills(painter, rect, name, color);
     }
     icon_lines(painter, rect, name, color);
@@ -1035,7 +1049,7 @@ pub fn icon_hue(name: &str) -> Option<Color32> {
 /// icons without a hue, keep `ink`.
 pub fn paint_colour_icon(painter: &Painter, rect: Rect, name: &str, ink: Color32) {
     let family = skin().family();
-    let Some(hue) = icon_hue(name).filter(|_| family != Family::Modern) else {
+    let Some(hue) = icon_hue(name).filter(|_| !family.flat()) else {
         return paint_icon(painter, rect, name, ink);
     };
     let opacity = f32::from(ink.a()) / 255.0;
@@ -1106,7 +1120,7 @@ fn shaded_polygon(painter: &Painter, points: &[Pos2], top: Color32, bottom: Colo
 /// a box of its colour.
 pub fn paint_colour_source_icon(painter: &Painter, rect: Rect, id: &str, ink: Color32) {
     let family = skin().family();
-    if family == Family::Modern || icons::drawn(id) {
+    if family.flat() || icons::drawn(id) {
         return if icons::drawn(id) {
             paint_colour_icon(painter, rect, id, ink)
         } else {
@@ -1435,7 +1449,7 @@ mod tests {
                     Accent::Green
                 };
                 let green = wearing(other);
-                if style.family() == Family::Modern {
+                if style == Style::Modern {
                     assert!(own.tint_amount > 0.0, "{at}");
                 } else {
                     // The desktop's own greys, as it drew them.
@@ -1450,6 +1464,15 @@ mod tests {
                 );
             }
         }
+        // Windows 11 in its own blue is Mica's plain #f3f3f3.
+        let mica = Palette::of(
+            Scheme {
+                style: Style::Fluent,
+                ..Scheme::default()
+            },
+            false,
+        );
+        assert_eq!(mica.canvas, rgb(0xf3f3f3));
         // OLED black stays black whatever the accent.
         let black = Palette::of(
             Scheme {

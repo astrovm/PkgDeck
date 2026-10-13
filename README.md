@@ -4,7 +4,7 @@ One app for every package manager.
 
 Search, install, update, and clean up software, from the app or the `pkd` command line.
 
-![PkgDeck Settings in Modern, Windows 98, Windows XP, Windows 7 and Aqua styles, light and dark](docs/screenshots/themes.png)
+![PkgDeck Settings in Modern, Windows 98, Windows XP, Windows 7, Windows 11, Mac OS X Tiger and macOS 27 styles, light and dark](docs/screenshots/themes.png)
 
 ## ✨ Features
 

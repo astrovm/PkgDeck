@@ -5,9 +5,11 @@
 mod activity;
 mod aero;
 mod dialogs;
+mod fluent;
 mod frame;
 mod gel;
 pub mod icons;
+mod liquid;
 mod list;
 mod luna;
 mod page;
@@ -71,9 +73,19 @@ pub struct State {
 pub const RAIL_BELOW: f32 = 820.0;
 /// The sidebar's width with icons only, by default, and as far as it drags.
 const RAIL_WIDTH: f32 = 68.0;
+/// macOS 27's rail is wider, so its traffic lights, which sit in it, fit.
+const LIQUID_RAIL_WIDTH: f32 = 96.0;
 const SIDEBAR_DEFAULT: f32 = 224.0;
 const SIDEBAR_FLOOR: f32 = 168.0;
 const SIDEBAR_MAX: f32 = 360.0;
+/// The sidebar's width with icons only, in the style being drawn.
+fn rail_width() -> f32 {
+    if theme::skin().style.family() == crate::settings::Family::Liquid {
+        LIQUID_RAIL_WIDTH
+    } else {
+        RAIL_WIDTH
+    }
+}
 /// Dragged thinner than this, the sidebar drops to icons only.
 const RAIL_SNAP: f32 = 120.0;
 pub const MEDIUM_BELOW: f32 = 640.0;
@@ -115,7 +127,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     skin::paint_canvas(ui.painter(), full, &palette);
     // A narrow window shows icons only; so does a sidebar dragged thin.
     let narrow = full.width() < RAIL_BELOW;
-    let stored = app.settings.sidebar_width.clamp(RAIL_WIDTH, SIDEBAR_MAX);
+    let rail_width = rail_width();
+    let stored = app.settings.sidebar_width.clamp(rail_width, SIDEBAR_MAX);
     let rail = narrow || stored < RAIL_SNAP;
     let splitter = Id::new("sidebar-splitter");
     let dragging = ctx.dragged_id() == Some(splitter);
@@ -123,12 +136,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         &ctx,
         Id::new("sidebar-width"),
         if rail {
-            RAIL_WIDTH
+            rail_width
         } else {
             stored.max(SIDEBAR_FLOOR)
         },
         if dragging { 0.0 } else { LAYOUT },
     );
+    // The frame's title bar paints the sidebar's colour that far, where the
+    // sidebar runs up behind the window's buttons.
+    // The frame paints before this runs, so a change takes one more frame.
+    let extent = Id::new("sidebar-extent");
+    let before = ctx.data(|data| data.get_temp::<f32>(extent));
+    ctx.data_mut(|data| data.insert_temp(extent, sidebar_width));
+    if before != Some(sidebar_width) {
+        ctx.request_repaint();
+    }
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
@@ -164,7 +186,7 @@ fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) {
     if response.dragged() {
         if let Some(pointer) = ctx.pointer_interact_pos() {
             app.settings.sidebar_width =
-                (pointer.x - sidebar.left()).clamp(RAIL_WIDTH, SIDEBAR_MAX);
+                (pointer.x - sidebar.left()).clamp(rail_width(), SIDEBAR_MAX);
         }
     }
     if response.double_clicked() {
@@ -401,6 +423,8 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             pill_ink.unwrap_or(palette.accent)
         } else if let Some(link) = ink.entries {
             link
+        } else if let Some(icons) = ink.icons {
+            icons
         } else {
             mix(palette.muted, palette.ink, hover)
         };

@@ -246,6 +246,42 @@ fn mixes() {
             Typeface::Inter,
             TextSize::Small,
         ),
+        (
+            Style::Fluent,
+            true,
+            "#60cdff",
+            1.0,
+            Density::Normal,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Fluent,
+            false,
+            "#c42b1c",
+            2.0,
+            Density::Roomy,
+            Typeface::Inter,
+            TextSize::Large,
+        ),
+        (
+            Style::Liquid,
+            false,
+            "#007aff",
+            1.0,
+            Density::Normal,
+            Typeface::Style,
+            TextSize::Normal,
+        ),
+        (
+            Style::Liquid,
+            true,
+            "#ff375f",
+            0.0,
+            Density::Compact,
+            Typeface::System,
+            TextSize::Small,
+        ),
     ];
     for (style, dark, color, roundness, density, typeface, size) in mixes {
         let set = |app: &mut App| {

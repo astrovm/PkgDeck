@@ -114,6 +114,14 @@ pub enum Style {
     /// Mac OS X's Aqua, as Tiger drew it: gel buttons, plain grey title bars.
     #[serde(alias = "tiger", alias = "gel", alias = "panther", alias = "platinum")]
     Aqua,
+    /// Windows 11: Fluent, flat panes on Mica with a pill for the page you
+    /// are on.
+    #[serde(alias = "win11")]
+    Fluent,
+    /// macOS 27: Liquid Glass, an edge-to-edge sidebar and glass traffic
+    /// lights.
+    #[serde(alias = "tahoe", alias = "macos")]
+    Liquid,
 }
 
 /// The desktop a style is a version of. Versions of one desktop share how
@@ -129,15 +137,31 @@ pub enum Family {
     Glass,
     /// Mac OS X.
     Gel,
+    /// Windows 11.
+    Fluent,
+    /// macOS 27.
+    Liquid,
+}
+
+impl Family {
+    /// Whether the desktop draws flat, rounded controls, as Modern does,
+    /// rather than bevels and gradients.
+    pub fn flat(self) -> bool {
+        matches!(self, Self::Modern | Self::Fluent | Self::Liquid)
+    }
 }
 
 impl Style {
-    pub const ALL: [Self; 5] = [
+    /// In the order the picker shows them: Windows oldest to newest, then
+    /// the Mac.
+    pub const ALL: [Self; 7] = [
         Self::Modern,
         Self::Retro,
         Self::Luna,
         Self::Glass,
+        Self::Fluent,
         Self::Aqua,
+        Self::Liquid,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -145,7 +169,9 @@ impl Style {
             Self::Retro => "Windows 98",
             Self::Luna => "Windows XP",
             Self::Glass => "Windows 7",
-            Self::Aqua => "Aqua",
+            Self::Aqua => "Mac OS X Tiger",
+            Self::Fluent => "Windows 11",
+            Self::Liquid => "macOS 27",
         }
     }
     /// The desktop this style is a version of.
@@ -156,12 +182,19 @@ impl Style {
             Self::Luna => Family::Luna,
             Self::Glass => Family::Glass,
             Self::Aqua => Family::Gel,
+            Self::Fluent => Family::Fluent,
+            Self::Liquid => Family::Liquid,
         }
     }
     /// The accent the style was made with, picked when it's chosen.
     pub fn accent(self) -> Accent {
         match self.family() {
-            Family::Modern | Family::Luna | Family::Glass | Family::Gel => Accent::Blue,
+            Family::Modern
+            | Family::Luna
+            | Family::Glass
+            | Family::Gel
+            | Family::Fluent
+            | Family::Liquid => Accent::Blue,
             Family::Retro => Accent::Navy,
         }
     }
@@ -787,7 +820,9 @@ mod tests {
                 Family::Retro,
                 Family::Luna,
                 Family::Glass,
+                Family::Fluent,
                 Family::Gel,
+                Family::Liquid,
             ]
         );
         // Every style is saved under a name of its own and read back.

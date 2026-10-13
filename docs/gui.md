@@ -538,15 +538,22 @@ out of date, and each page refreshes when you open it.
     from navy to blue.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
-  - **Aqua**: gel buttons and plain grey title bars, after Mac OS X Tiger.
+  - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
+    on the side and the flat minimise, maximise and close buttons.
+  - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
+  - **macOS 27**: a sidebar that runs up to the top edge, with icons in the
+    accent, traffic lights at the top left and large soft corners.
   - Every style but **Modern** draws its own title bar and window buttons,
-    measured from screenshots of the real desktop.
+    measured from screenshots of the real desktop. The window's corners are
+    round where its desktop's are: the title bar's on Mac OS X Tiger, all
+    four on Windows 11 and macOS 27, and none when maximized.
   - Every style has the same layout. The older ones draw icons in colour,
-    and Aqua stripes its lists in pale blue.
+    and Mac OS X Tiger stripes its lists in pale blue. Windows 11 and macOS 27 are flat
+    like **Modern**.
   - In dark mode, the older styles keep their shapes and their own title
     bar and selection colours, and turn the rest dark: Windows 98's bevels
     on dark grey, XP's blue frame around slate, Media Center's blue for
-    Windows 7, and Aqua's blue gel on charcoal.
+    Windows 7, and Mac OS X Tiger's blue gel on charcoal.
   - **Windows 7** blurs what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
@@ -561,15 +568,15 @@ out of date, and each page refreshes when you open it.
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well. The accent
   also tints the background, panels and buttons, and colours the PkgDeck logo
-  in the sidebar and title bar. An older style in the accent it was made with
-  keeps its desktop's own greys.
+  in the sidebar and title bar. Every style but **Modern**, in the accent it was
+  made with, keeps its desktop's own greys.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
   font, or a free copy of it: MS Sans Serif's pixels for Windows 98, Tahoma
-  for XP, Segoe UI for Windows 7 and Lucida Grande for Aqua. Where one isn't installed, the
-  closest font that is.
+  for XP, Segoe UI for Windows 7 and Windows 11, and Lucida Grande for Mac OS X Tiger. Where one isn't
+  installed, the closest font that is. macOS 27 uses Inter.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.
 - **Animations**: turn motion on or off. When the system turns motion off

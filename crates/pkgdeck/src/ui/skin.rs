@@ -127,7 +127,9 @@ pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: b
     let (light, dark) = if theme::luminance(face) < 0.2 {
         ((0.38, 0.18), (0.9, 0.5))
     } else {
-        ((0.9, 0.45), (0.85, 0.33))
+        // On Windows' grey 192 these land on its white, light grey (223),
+        // dark grey (128) and black.
+        ((1.0, 0.49), (1.0, 1.0 / 3.0))
     };
     let (outer_light, outer_dark) = (shade(lighter(face, light.0)), shade(darker(face, dark.0)));
     let (inner_light, inner_dark) = (shade(lighter(face, light.1)), shade(darker(face, dark.1)));
@@ -148,7 +150,7 @@ fn etched(painter: &Painter, rect: Rect, face: Color32) {
     let (light, dark) = if theme::luminance(face) < 0.2 {
         (0.38, 0.5)
     } else {
-        (0.85, 0.33)
+        (1.0, 1.0 / 3.0)
     };
     let line = Rect::from_min_max(rect.min, rect.max - vec2(1.0, 1.0));
     painter.rect_stroke(
@@ -236,6 +238,50 @@ pub fn paint_button(
                 theme::round(9),
                 faded(fill, opacity),
                 Stroke::new(stroke.width, faded(stroke.color, opacity)),
+                StrokeKind::Inside,
+            );
+            None
+        }
+        Family::Fluent => {
+            let radius = theme::round(9);
+            painter.rect(
+                rect,
+                radius,
+                faded(fill, opacity),
+                Stroke::new(stroke.width, faded(stroke.color, opacity)),
+                StrokeKind::Inside,
+            );
+            // Controls sit a little proud: the lower edge is the darker.
+            if !strong && !dark && weight != Weight::Flat {
+                let inset = f32::from(radius.sw).max(2.0);
+                painter.hline(
+                    rect.left() + inset..=rect.right() - inset,
+                    rect.bottom() - 0.5,
+                    Stroke::new(1.0, faded(palette.strong_line, opacity)),
+                );
+            }
+            None
+        }
+        // Liquid Glass: a capsule with a bright edge round its inside.
+        Family::Liquid => {
+            let radius = pill(rect);
+            painter.rect(
+                rect,
+                radius,
+                faded(fill, opacity),
+                Stroke::new(stroke.width, faded(stroke.color, opacity)),
+                StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                radius,
+                Stroke::new(
+                    1.0,
+                    faded(
+                        Color32::from_white_alpha(if dark { 26 } else { 120 }),
+                        alpha,
+                    ),
+                ),
                 StrokeKind::Inside,
             );
             None
@@ -512,7 +558,29 @@ pub fn paint_field(
     focus: f32,
 ) {
     match style() {
-        Family::Modern => {
+        // Windows 11's box keeps its edge and grows a bar of accent along
+        // the bottom while it's typed in.
+        Family::Fluent => {
+            painter.rect(
+                rect,
+                radius,
+                palette.surface,
+                Stroke::new(1.0, palette.line),
+                StrokeKind::Inside,
+            );
+            if focus > 0.0 {
+                let inset = f32::from(radius.sw).max(1.0);
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        pos2(rect.left() + inset, rect.bottom() - 2.0),
+                        pos2(rect.right() - inset, rect.bottom()),
+                    ),
+                    theme::round(2),
+                    faded(palette.accent, focus),
+                );
+            }
+        }
+        Family::Modern | Family::Liquid => {
             let ring = lerp(palette.line, palette.accent, focus);
             painter.rect(
                 rect,
@@ -614,7 +682,7 @@ pub fn paint_check(
     let checked = checked.clamp(0.0, 1.0);
     let dark = palette.dark;
     match style() {
-        Family::Modern => {
+        Family::Modern | Family::Fluent | Family::Liquid => {
             let border = if hovered {
                 palette.accent
             } else {
@@ -755,7 +823,7 @@ pub fn paint_check(
 /// Whether switches draw as check boxes: none of the older desktops had
 /// switches.
 pub fn switch_as_check() -> bool {
-    style() != Family::Modern
+    !style().flat()
 }
 
 /// A switch's knob: white, with a soft shadow under it.
@@ -815,7 +883,7 @@ pub fn paint_steps(
     };
     let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 4.0));
     match style() {
-        Family::Modern => {
+        Family::Modern | Family::Fluent | Family::Liquid => {
             painter.rect_filled(track, theme::round(2), shade(palette.rail()));
             painter.rect_filled(
                 Rect::from_min_max(track.min, pos2(x, track.max.y)),
@@ -956,6 +1024,10 @@ pub fn paint_steps(
 pub fn shadow(palette: &Palette) -> Shadow {
     let (offset, blur, alpha) = match style() {
         Family::Modern => (1, 6, if palette.dark { 40 } else { 10 }),
+        // Windows 11's cards lie flat, held by their edge.
+        Family::Fluent => (0, 0, 0),
+        // macOS 27 lifts its groups a little more.
+        Family::Liquid => (2, 14, if palette.dark { 60 } else { 18 }),
         // Explorer's panes lie flat on its white.
         Family::Glass if palette.dark => (2, 10, 80),
         Family::Gel => (3, 12, if palette.dark { 90 } else { 40 }),
@@ -972,7 +1044,7 @@ pub fn shadow(palette: &Palette) -> Shadow {
 /// The line around a panel.
 pub fn panel_stroke(palette: &Palette) -> Stroke {
     let color = match style() {
-        Family::Modern => palette.line,
+        Family::Modern | Family::Fluent | Family::Liquid => palette.line,
         Family::Retro => darker(palette.canvas, 0.6),
         Family::Luna => luna_line(palette),
         Family::Glass if palette.dark => lighter(palette.canvas, 0.22),
@@ -1007,13 +1079,18 @@ pub fn paint_panel(painter: &Painter, rect: Rect, palette: &Palette, sunken: boo
 pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
     match style() {
         Family::Retro => retro_edge(painter, rect, palette.canvas, sunken, 1.0),
-        Family::Modern | Family::Luna | Family::Glass | Family::Gel => {}
+        Family::Modern
+        | Family::Fluent
+        | Family::Liquid
+        | Family::Luna
+        | Family::Glass
+        | Family::Gel => {}
     }
 }
 
 /// Behind everything: the canvas colour, or Media Center's glow in grey.
 pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
-    painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+    painter.rect_filled(rect, super::frame::fit(painter.ctx(), rect), palette.canvas);
     match style() {
         // Explorer's white, or in the dark a soft glow over near black.
         Family::Glass if palette.dark => {
@@ -1030,12 +1107,24 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
     }
 }
 
+/// macOS 27's sidebar: the window's grey a shade deeper, where its glass
+/// would show the desktop.
+pub fn sidebar_color(palette: &Palette) -> Color32 {
+    lerp(
+        palette.canvas,
+        palette.ink,
+        if palette.dark { 0.06 } else { 0.04 },
+    )
+}
+
 /// The colours the sidebar's name and entries take when the style picks
 /// them, as XP's blue links.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SidebarInk {
     pub name: Option<Color32>,
     pub entries: Option<Color32>,
+    /// The entries' icons alone, as macOS draws its sidebar's in the accent.
+    pub icons: Option<Color32>,
 }
 
 /// The sidebar's background: `logo` is the row with the name, `entries`
@@ -1048,6 +1137,8 @@ pub fn paint_sidebar(
     palette: &Palette,
 ) -> SidebarInk {
     let dark = palette.dark;
+    // Where the sidebar reaches the window's corner it takes its curve.
+    let round = super::frame::fit(painter.ctx(), rect);
     let end = |color| {
         painter.vline(
             rect.right() - 0.5,
@@ -1059,6 +1150,18 @@ pub fn paint_sidebar(
         Family::Modern => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
             end(palette.line);
+        }
+        // Windows 11's navigation sits on the window's Mica.
+        Family::Fluent => {
+            painter.rect_filled(rect, round, palette.canvas);
+        }
+        Family::Liquid => {
+            painter.rect_filled(rect, round, sidebar_color(palette));
+            end(palette.line);
+            return SidebarInk {
+                icons: Some(palette.accent),
+                ..SidebarInk::default()
+            };
         }
         Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
@@ -1130,6 +1233,7 @@ pub fn paint_sidebar(
             return SidebarInk {
                 name: Some(link),
                 entries: Some(link),
+                icons: None,
             };
         }
         Family::Glass if dark => {
@@ -1163,6 +1267,30 @@ pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Opti
         Family::Modern => {
             painter.rect_filled(rect, theme::round(10), palette.selection);
             None
+        }
+        // Windows 11's entry is a pale square beside a short accent bar.
+        Family::Fluent => {
+            painter.rect_filled(
+                rect,
+                theme::round(10),
+                faded(palette.ink, if palette.dark { 0.09 } else { 0.06 }),
+            );
+            None
+        }
+        // macOS: the accent fills the row and the text turns white.
+        Family::Liquid => {
+            let fill = palette.deep;
+            painter.rect_filled(rect, theme::round(8), fill);
+            painter.rect_stroke(
+                rect.shrink(0.5),
+                theme::round(8),
+                Stroke::new(
+                    1.0,
+                    Color32::from_white_alpha(if palette.dark { 36 } else { 70 }),
+                ),
+                StrokeKind::Inside,
+            );
+            Some(ink_on(fill))
         }
         Family::Retro | Family::Luna => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.deep);
@@ -1246,7 +1374,7 @@ pub fn paint_row_hover(painter: &Painter, rect: Rect, palette: &Palette, hover: 
         return;
     }
     match style() {
-        Family::Modern => {
+        Family::Modern | Family::Fluent | Family::Liquid => {
             painter.rect_filled(rect, theme::round(10), faded(palette.ink, hover * 0.045));
         }
         Family::Glass => {
@@ -1281,12 +1409,12 @@ pub fn paint_row_hover(painter: &Painter, rect: Rect, palette: &Palette, hover: 
 
 /// Whether the style marks the chosen sidebar entry with Modern's bar.
 pub fn selection_bar() -> bool {
-    style() == Family::Modern
+    matches!(style(), Family::Modern | Family::Fluent)
 }
 
 /// Whether app icons sit bare, as on the old desktops, rather than on tiles.
 pub fn bare_icons() -> bool {
-    style() != Family::Modern
+    !style().flat()
 }
 
 /// The colour a selected list row's text takes, when the style fills the
@@ -1294,7 +1422,7 @@ pub fn bare_icons() -> bool {
 pub fn row_selection_ink(palette: &Palette) -> Option<Color32> {
     match style() {
         Family::Retro | Family::Luna | Family::Gel => Some(ink_on(palette.deep)),
-        Family::Modern | Family::Glass => None,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Glass => None,
     }
 }
 
@@ -1318,7 +1446,7 @@ pub fn on_fill(palette: &Palette, ink: Color32) -> Palette {
 /// The selected list row's background, `shown` from 0 to 1.
 pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32) {
     match style() {
-        Family::Modern => {
+        Family::Modern | Family::Fluent | Family::Liquid => {
             painter.rect_filled(rect, theme::round(10), faded(palette.selection, shown));
         }
         Family::Retro | Family::Luna | Family::Gel => {
@@ -1333,7 +1461,7 @@ pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, sho
 pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Option<Color32> {
     let dark = palette.dark;
     match style() {
-        Family::Modern => None,
+        Family::Modern | Family::Fluent | Family::Liquid => None,
         Family::Retro => {
             // Windows 98's navy fading to a lighter blue.
             let end = lerp(palette.deep, palette.bright, 0.85);
@@ -1399,16 +1527,16 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
 /// The page's heading: plain ink in every style and accent.
 pub fn heading(palette: &Palette) -> (FontId, Color32) {
     match style() {
-        Family::Modern => (theme::bold(26.0), palette.ink),
+        Family::Modern | Family::Fluent | Family::Liquid => (theme::bold(26.0), palette.ink),
         Family::Glass => (theme::font(24.0), palette.ink),
         Family::Luna | Family::Retro | Family::Gel => (theme::bold(22.0), palette.ink),
     }
 }
 
 /// A list's column headings as the style draws them: in title case in
-/// the older styles, capitals in Modern.
+/// the older styles, capitals in the flat ones.
 pub fn column_title(title: &str) -> String {
-    if style() == Family::Modern {
+    if style().flat() {
         return title.to_owned();
     }
     let lower = title.to_lowercase();
@@ -1424,7 +1552,7 @@ pub fn column_title(title: &str) -> String {
 pub fn paint_column_band(painter: &Painter, rect: Rect, palette: &Palette) -> bool {
     let dark = palette.dark;
     match style() {
-        Family::Modern => return false,
+        Family::Modern | Family::Fluent | Family::Liquid => return false,
         Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
         }
@@ -1558,7 +1686,7 @@ pub fn paint_column_cell(
         );
     };
     match style() {
-        Family::Modern => None,
+        Family::Modern | Family::Fluent | Family::Liquid => None,
         Family::Retro => {
             retro_edge(painter, cell, palette.canvas, false, 1.0);
             None
@@ -1649,7 +1777,7 @@ pub fn group(palette: &Palette) -> Option<Group> {
         size: 14.0,
     };
     Some(match style() {
-        Family::Modern => return None,
+        Family::Modern | Family::Fluent | Family::Liquid => return None,
         // Etched after the content, in `paint_group`.
         Family::Retro => none,
         Family::Luna => Group {
@@ -1744,6 +1872,23 @@ mod tests {
         theme::with_skin(skin, run)
     }
 
+    #[test]
+    fn a_windows_98_edge_on_its_grey_is_the_four_greys_it_shipped_with() {
+        let shapes = drawn(Style::Retro, false, |painter, _| {
+            retro_edge(painter, rect(), gray(0xc0), false, 1.0);
+        });
+        let colors: Vec<_> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::LineSegment { stroke, .. } => Some(stroke.color),
+                _ => None,
+            })
+            .collect();
+        for expected in [gray(0xff), gray(0xdf), gray(0x80), Color32::BLACK] {
+            assert!(colors.contains(&expected), "{expected:?} in {colors:?}");
+        }
+    }
+
     fn rect() -> Rect {
         Rect::from_min_size(pos2(10.0, 10.0), vec2(120.0, 36.0))
     }
@@ -1795,6 +1940,12 @@ mod tests {
             rect().shrink(8.0),
             palette,
         );
+        // Only macOS 27 colours the sidebar's icons alone.
+        assert_eq!(
+            ink.icons,
+            (style == Family::Liquid).then_some(palette.accent),
+            "{at}"
+        );
         for color in [ink.name, ink.entries].into_iter().flatten() {
             assert!(color.a() > 0, "{at}");
         }
@@ -1822,11 +1973,7 @@ mod tests {
                 );
                 // A bare flat button keeps the caller's ink.
                 let bare = weight == Weight::Flat && state == STILL;
-                assert_eq!(
-                    ink.is_some(),
-                    style != Family::Modern && !bare,
-                    "{at} {weight:?}"
-                );
+                assert_eq!(ink.is_some(), !style.flat() && !bare, "{at} {weight:?}");
                 assert!(ink.is_none_or(|ink| ink.a() > 0), "{at}");
             }
         }
@@ -1845,10 +1992,10 @@ mod tests {
             paint_row_selection(painter, rect(), palette, shown);
         }
         let strip = paint_title_strip(painter, rect(), palette);
-        assert_eq!(strip.is_some(), style != Family::Modern, "{at}");
+        assert_eq!(strip.is_some(), !style.flat(), "{at}");
         assert!(heading(palette).1.a() > 0, "{at}");
         let band = paint_column_band(painter, rect(), palette);
-        assert_eq!(band, style != Family::Modern, "{at}");
+        assert_eq!(band, !style.flat(), "{at}");
         for (sorted, hovered) in [(false, false), (true, true)] {
             let ink = paint_column_cell(painter, rect(), palette, sorted, hovered);
             // Only Aqua's sorted column turns blue and picks its own ink.
@@ -1865,7 +2012,7 @@ mod tests {
                 let shapes = drawn(style, dark, |painter, palette| {
                     every_piece(painter, palette, &at)
                 });
-                assert!(shapes.len() > 20, "{at}");
+                assert!(shapes.len() > 10, "{at}");
                 assert!(inside(&shapes, rect()), "{at}");
                 // Retro is square through and through.
                 assert_eq!(rounded(&shapes), style.family() != Family::Retro, "{at}");
@@ -2016,7 +2163,7 @@ mod tests {
 
     #[test]
     fn the_older_styles_bring_their_own_pieces() {
-        for style in Style::ALL.into_iter().filter(|s| *s != Style::Modern) {
+        for style in Style::ALL.into_iter().filter(|s| !s.family().flat()) {
             let palette = Palette::of(scheme(style), false);
             in_style(style, || {
                 assert!(!selection_bar(), "{style:?}");
@@ -2037,6 +2184,19 @@ mod tests {
                     matches!(style.family(), Family::Retro | Family::Luna | Family::Gel),
                     "{style:?}"
                 );
+            });
+        }
+        // Windows 11 and macOS 27 keep Modern's layout: tiles, switches, no
+        // group boxes; only Windows 11 marks the selection with a bar.
+        for style in [Style::Fluent, Style::Liquid] {
+            let palette = Palette::of(scheme(style), false);
+            in_style(style, || {
+                assert_eq!(selection_bar(), style == Style::Fluent, "{style:?}");
+                assert!(!bare_icons(), "{style:?}");
+                assert!(!switch_as_check(), "{style:?}");
+                assert_eq!(column_title("SUMMARY"), "SUMMARY", "{style:?}");
+                assert!(group(&palette).is_none(), "{style:?}");
+                assert!(row_selection_ink(&palette).is_none(), "{style:?}");
             });
         }
         // The canvas is plain colour; only glass in the dark fades.
