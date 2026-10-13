@@ -70,16 +70,38 @@ impl WorktreeProtection {
             Self::EditedTrackedFiles => "Loses new and ignored files, like .env",
         }
     }
+    /// `git status` arguments that list what this choice keeps. Submodules
+    /// are always looked at, whatever `.gitmodules` says.
     fn status_args(self) -> &'static [&'static str] {
         match self {
             Self::AnyLocalFiles => &[
                 "status",
                 "--porcelain",
+                "--ignore-submodules=none",
                 "--untracked-files=all",
                 "--ignored",
             ],
-            Self::UncommittedChanges => &["status", "--porcelain", "--untracked-files=all"],
-            Self::EditedTrackedFiles => &["status", "--porcelain", "--untracked-files=no"],
+            Self::UncommittedChanges => &[
+                "status",
+                "--porcelain",
+                "--ignore-submodules=none",
+                "--untracked-files=all",
+            ],
+            // New files in a submodule don't count either.
+            Self::EditedTrackedFiles => &[
+                "status",
+                "--porcelain",
+                "--ignore-submodules=untracked",
+                "--untracked-files=no",
+            ],
+        }
+    }
+    /// What a worktree has that this choice keeps, as the end of a sentence.
+    fn kept_files(self) -> &'static str {
+        match self {
+            Self::AnyLocalFiles => "local files",
+            Self::UncommittedChanges => "new or edited files",
+            Self::EditedTrackedFiles => "edited files",
         }
     }
 }
@@ -393,11 +415,135 @@ impl Projects {
     }
 
     fn git(&self, repository: &Path, args: &[&str], cancel: &Cancellation) -> Option<String> {
-        let git = self.host.resolve("git").ok().flatten()?;
+        self.git_run(repository, args, cancel).ok()
+    }
+    /// What Git printed, or what it said when it failed.
+    fn git_run(
+        &self,
+        repository: &Path,
+        args: &[&str],
+        cancel: &Cancellation,
+    ) -> Result<String, String> {
+        let git = self
+            .host
+            .resolve("git")
+            .ok()
+            .flatten()
+            .ok_or("Git isn't installed")?;
         let mut all: Vec<OsString> = vec!["-C".into(), repository.into()];
         all.extend(args.iter().map(OsString::from));
-        let done = self.host.read(&git, &all, Limits::default(), cancel).ok()?;
-        (done.code == Some(0)).then(|| String::from_utf8_lossy(&done.stdout).into_owned())
+        let done = self
+            .host
+            .read(&git, &all, Limits::default(), cancel)
+            .map_err(|error| error.to_string())?;
+        if done.code == Some(0) {
+            return Ok(String::from_utf8_lossy(&done.stdout).into_owned());
+        }
+        // Git's last line is the reason, as in "fatal: <reason>".
+        let said = String::from_utf8_lossy(&done.stderr);
+        let reason = said
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map(|line| line.strip_prefix("fatal: ").unwrap_or(line))
+            .unwrap_or("Git kept it");
+        Err(reason.to_owned())
+    }
+
+    /// Why the worktree at `path` stays under the chosen protection, if it
+    /// does. Its submodules count too: their history lives in the worktree,
+    /// so commits only they have would go with it.
+    fn kept_because(&self, path: &Path, cancel: &Cancellation) -> Option<String> {
+        let protection = self.settings().worktree_protection;
+        let unchecked = || Some("Git couldn't check it".to_owned());
+        let has = |dir: &Path, args: &[&str]| {
+            self.git(dir, args, cancel)
+                .map(|found| !found.trim().is_empty())
+        };
+        match has(path, protection.status_args()) {
+            Some(false) => {}
+            Some(true) => return Some(format!("it has {}", protection.kept_files())),
+            None => return unchecked(),
+        }
+        let Some(submodules) = self.submodules(path, cancel) else {
+            return unchecked();
+        };
+        for submodule in submodules {
+            match has(&submodule, protection.status_args()) {
+                Some(false) => {}
+                Some(true) => return Some(format!("a submodule has {}", protection.kept_files())),
+                None => return unchecked(),
+            }
+            let local = [
+                "rev-list",
+                "-n",
+                "1",
+                "HEAD",
+                "--branches",
+                "--glob=refs/stash",
+                "--not",
+                "--remotes",
+            ];
+            match has(&submodule, &local) {
+                Some(false) => {}
+                Some(true) => return Some("a submodule has commits that aren't pushed".into()),
+                None => return unchecked(),
+            }
+        }
+        None
+    }
+
+    /// The checked-out submodules under `path`, nested ones too. None when
+    /// Git can't list them.
+    fn submodules(&self, path: &Path, cancel: &Cancellation) -> Option<Vec<PathBuf>> {
+        let mut found = vec![];
+        let mut pending = vec![path.to_owned()];
+        while let Some(dir) = pending.pop() {
+            let list = self.git(&dir, &["ls-files", "-z", "--stage"], cancel)?;
+            // "<mode> <object> <stage>\t<path>"; mode 160000 is a submodule.
+            for entry in list.split('\0') {
+                let Some(("160000", name)) = entry
+                    .split_once('\t')
+                    .map(|(meta, name)| (meta.split(' ').next().unwrap_or_default(), name))
+                else {
+                    continue;
+                };
+                // A name Git printed in another encoding can't be looked at.
+                if name.contains(char::REPLACEMENT_CHARACTER) {
+                    return None;
+                }
+                let submodule = dir.join(name);
+                if submodule.join(".git").exists() {
+                    pending.push(submodule.clone());
+                    found.push(submodule);
+                }
+            }
+        }
+        Some(found)
+    }
+
+    /// Removes one finished worktree if the chosen protection lets it go.
+    /// Git refuses some that are safe, such as any with a submodule, so
+    /// after that check `--force` only skips Git's own.
+    fn remove_worktree(
+        &self,
+        repository: &Path,
+        path: &Path,
+        cancel: &Cancellation,
+    ) -> Result<(), String> {
+        if let Some(reason) = self.kept_because(path, cancel) {
+            return Err(reason);
+        }
+        let path = path.to_string_lossy();
+        self.git_run(repository, &["worktree", "remove", &path], cancel)
+            .or_else(|_| {
+                self.git_run(
+                    repository,
+                    &["worktree", "remove", "--force", &path],
+                    cancel,
+                )
+            })
+            .map(drop)
     }
 
     /// The branch finished work lands on: the remote's default, or a local
@@ -509,14 +655,7 @@ impl Projects {
                 .map(|project| project.newest)
                 .max()
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            let clean = self
-                .git(
-                    &path,
-                    self.settings().worktree_protection.status_args(),
-                    cancel,
-                )
-                .is_some_and(|status| status.trim().is_empty());
-            if newest <= cutoff && clean {
+            if newest <= cutoff && self.kept_because(&path, cancel).is_none() {
                 found.push(Worktree {
                     path,
                     missing: false,
@@ -703,32 +842,21 @@ impl Backend for Projects {
                 self.git(repository, &["worktree", "prune"], cancel)
                     .ok_or_else(|| failed(repository, "git worktree prune failed".into()))?;
             }
+            // One that stays doesn't stop the rest.
+            let mut kept = vec![];
             for worktree in worktrees.iter().filter(|worktree| !worktree.missing) {
                 if cancel.requested() {
                     return Err(EngineError::Cancelled);
                 }
-                // Without --force, Git keeps a worktree that has changes.
-                let path = worktree.path.to_string_lossy();
-                if self
-                    .git(repository, &["worktree", "remove", &path], cancel)
-                    .is_none()
-                {
-                    // Only this explicit choice permits removing untracked files.
-                    // Recheck tracked edits after Git refuses ordinary removal.
-                    let protection = self.settings().worktree_protection;
-                    let clean = self
-                        .git(&worktree.path, protection.status_args(), cancel)
-                        .is_some_and(|status| status.trim().is_empty());
-                    if protection != WorktreeProtection::EditedTrackedFiles || !clean {
-                        return Err(failed(&worktree.path, "Git kept it".into()));
-                    }
-                    self.git(
-                        repository,
-                        &["worktree", "remove", "--force", &path],
-                        cancel,
-                    )
-                    .ok_or_else(|| failed(&worktree.path, "Git kept it".into()))?;
+                if let Err(reason) = self.remove_worktree(repository, &worktree.path, cancel) {
+                    kept.push(format!("{}: {reason}", shown(&self.host, &worktree.path)));
                 }
+            }
+            if !kept.is_empty() {
+                return Err(EngineError::Execution(ExecutionError::Io(format!(
+                    "Couldn't remove {}",
+                    kept.join("; ")
+                ))));
             }
         }
         Ok(OperationOutcome {
@@ -1171,7 +1299,7 @@ mod tests {
         fs::write(
             refusing.join("git"),
             format!(
-                "#!/bin/sh\ncase \"$3 $4\" in 'worktree remove'|'worktree prune') exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\ncase \"$3 $4\" in 'worktree remove'|'worktree prune') echo 'fatal: it is busy' >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
                 real.display()
             ),
         )
@@ -1181,7 +1309,7 @@ mod tests {
         let mut refused = projects(&home, &refusing, vec![repo.clone()], 7);
         let error = refused.execute(&clean, &cancel, &mut ignore).unwrap_err();
         assert!(
-            error.to_string().contains("~/.trees/detached: Git kept it"),
+            error.to_string().contains("~/.trees/detached: it is busy"),
             "{error}"
         );
         // A folder deleted by hand needs a prune first.
@@ -1393,6 +1521,144 @@ mod tests {
                 fs::remove_dir_all(home).unwrap();
             }
         }
+    }
+
+    /// A repository whose `lib` submodule is checked out in the finished
+    /// worktree it returns. Like a real one, the submodule's history lives
+    /// under the worktree's Git folder.
+    fn with_submodule(home: &Path) -> (PathBuf, PathBuf) {
+        let lib = home.join("lib");
+        write(&lib.join("code"), "lib");
+        write(&lib.join(".gitignore"), "ignored\n");
+        git(&lib, &["init", "--quiet", "-b", "main"]);
+        git(&lib, &["add", "."]);
+        git(&lib, &["commit", "--quiet", "-m", "lib"]);
+        let repo = home.join("repo");
+        write(&repo.join("README"), "hi");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        let url = lib.display().to_string();
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                &url,
+                "lib",
+            ],
+        );
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "first"]);
+        let tree = home.join(".trees/finished");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "finished",
+                tree.to_str().unwrap(),
+            ],
+        );
+        git(
+            &tree,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--quiet",
+            ],
+        );
+        (repo, tree)
+    }
+
+    #[test]
+    fn worktrees_with_submodules_go_unless_the_submodule_has_something_to_keep() {
+        for (policy_index, protection) in WorktreeProtection::ALL.into_iter().enumerate() {
+            for state in 0..4 {
+                let home = scratch(&format!("submodule-{policy_index}-{state}"));
+                let (repo, tree) = with_submodule(&home);
+                let lib = tree.join("lib");
+                match state {
+                    0 => {}
+                    1 => write(&lib.join("draft"), "untracked"),
+                    2 => write(&lib.join("ignored"), "built"),
+                    // Merged, but the submodule commit is nowhere else.
+                    _ => {
+                        write(&lib.join("code"), "only here");
+                        git(&lib, &["commit", "--quiet", "-am", "local"]);
+                        git(&tree, &["commit", "--quiet", "-am", "bump lib"]);
+                        git(&repo, &["merge", "--quiet", "--ff-only", "finished"]);
+                    }
+                }
+                age_files(&home, 30);
+                let bin = tools(&home, "");
+                let mut backend = projects(&home, &bin, vec![repo.clone()], 7);
+                backend.settings.as_mut().unwrap().worktree_protection = protection;
+                let cancel = Cancellation::default();
+                let items = backend.cleanup(&cancel).unwrap();
+                let allowed = state == 0
+                    || (state == 1 && protection == WorktreeProtection::EditedTrackedFiles)
+                    || (state == 2 && protection != WorktreeProtection::AnyLocalFiles);
+                assert_eq!(!items.is_empty(), allowed, "{protection:?}, state {state}");
+                if let Some(item) = items.first() {
+                    backend
+                        .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {})
+                        .unwrap();
+                    assert!(!tree.exists(), "{protection:?}, state {state}");
+                    git(&repo, &["rev-parse", "--verify", "refs/heads/finished"]);
+                } else {
+                    assert!(lib.join("code").exists());
+                }
+                fs::remove_dir_all(home).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_worktree_git_keeps_says_why_and_the_rest_still_go() {
+        let home = scratch("partial");
+        let repo = home.join("repo");
+        write(&repo.join("tracked"), "original");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        let tree = |name: &str| home.join(".trees").join(name);
+        for name in ["a", "b", "c"] {
+            let path = tree(name).display().to_string();
+            git(&repo, &["worktree", "add", "--quiet", "-b", name, &path]);
+        }
+        age_files(&home, 30);
+        // Git refuses `b` for a reason of its own, even forced.
+        let bin = tools(&home, "");
+        let real = Host::current().resolve("git").unwrap().expect("git");
+        fs::remove_file(bin.join("git")).unwrap();
+        fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\ncase \"$3 $*\" in worktree*/.trees/b) echo 'error: noise' >&2; echo 'fatal: b is busy' >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut backend = projects(&home, &bin, vec![repo.clone()], 7);
+        let cancel = Cancellation::default();
+        let item = backend.cleanup(&cancel).unwrap().remove(0);
+        assert_eq!(item.summary, "3 finished worktrees");
+        let error = backend
+            .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Couldn't remove ~/.trees/b: b is busy");
+        assert!(!tree("a").exists() && !tree("c").exists());
+        assert!(tree("b").join("tracked").exists());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

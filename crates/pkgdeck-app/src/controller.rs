@@ -1718,10 +1718,10 @@ impl Controller {
     fn foreground_worker(&self) -> bool {
         self.worker.is_some() && !self.background && !self.refreshing
     }
-    /// Display names for the packages these operations change: remembered
-    /// from confirmation, else from the rows on screen.
+    /// Names for what these operations change: remembered from
+    /// confirmation, else from the rows on screen.
     fn names_for(&self, operations: &[Operation]) -> Names {
-        operations
+        let packages = operations
             .iter()
             .filter_map(package_target)
             .filter_map(|id| {
@@ -1737,7 +1737,27 @@ impl Controller {
                     .filter(|name| !name.trim().is_empty())
                     .map(|name| (id.clone(), name))
             })
-            .collect()
+            .collect();
+        let cleanup = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Clean(id) => self
+                    .names
+                    .cleanup
+                    .get(id)
+                    .cloned()
+                    .or_else(|| {
+                        self.cleanup
+                            .iter()
+                            .find(|item| item.id == *id)
+                            .map(|item| item.title.clone())
+                    })
+                    .filter(|title| !title.trim().is_empty())
+                    .map(|title| (id.clone(), title)),
+                _ => None,
+            })
+            .collect();
+        Names { packages, cleanup }
     }
     /// Forget preloaded sections and load them again from scratch.
     fn invalidate_prefetch(&mut self) {
@@ -2525,9 +2545,49 @@ fn merge_retried_packages(
 fn write_error_text(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     plain_error(error, backend, sudo)
 }
-/// Display names of the packages a change targets, remembered when the
-/// change is confirmed so its progress and result can name them.
-type Names = BTreeMap<PackageId, String>;
+/// What people call what a change targets, remembered when the change is
+/// confirmed so its progress and result can name it: packages by display
+/// name (the map itself), cleanup tasks by their row's title.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Names {
+    packages: BTreeMap<PackageId, String>,
+    cleanup: BTreeMap<CleanupId, String>,
+}
+impl Names {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn len(&self) -> usize {
+        self.packages.len() + self.cleanup.len()
+    }
+    fn clear(&mut self) {
+        self.packages.clear();
+        self.cleanup.clear();
+    }
+    fn extend(&mut self, other: Names) {
+        self.packages.extend(other.packages);
+        self.cleanup.extend(other.cleanup);
+    }
+}
+impl std::ops::Deref for Names {
+    type Target = BTreeMap<PackageId, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.packages
+    }
+}
+impl std::ops::DerefMut for Names {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.packages
+    }
+}
+impl<const N: usize> From<[(PackageId, String); N]> for Names {
+    fn from(packages: [(PackageId, String); N]) -> Self {
+        Self {
+            packages: BTreeMap::from(packages),
+            ..Self::default()
+        }
+    }
+}
 fn is_denied(error: &EngineError) -> bool {
     matches!(
         error,
@@ -2797,6 +2857,11 @@ fn short_name(operation: &Operation, names: &Names) -> String {
             display_name_for(id, names)
         }
         Operation::UpgradeAll { backend } => source_display_name(backend),
+        Operation::Clean(id) => names
+            .cleanup
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| operation_title_named(operation, names)),
         _ => operation_title_named(operation, names),
     }
 }
@@ -3323,6 +3388,10 @@ fn operation_title_named(operation: &Operation, names: &Names) -> String {
             display_name_for(id, names),
             source_display_name(&id.backend)
         ),
+        // The row's title already names what it cleans.
+        Operation::Clean(id) if names.cleanup.contains_key(id) => {
+            format!("Clean {}", names.cleanup[id])
+        }
         _ => operation_label(operation)
             .lines()
             .next()
@@ -12776,6 +12845,52 @@ mod tests {
         );
         assert_eq!(notice["title"], "Clean cache (APT) failed");
         assert_eq!(notice["detail"], "Clean cache (APT): disk full");
+    }
+    #[test]
+    fn a_failed_cleanup_is_named_by_its_row_not_its_key() {
+        let item = CleanupItem {
+            id: CleanupId {
+                backend: "projects".into(),
+                key: "worktrees:/home/user/code/app".into(),
+            },
+            kind: CleanupKind::Worktree,
+            title: "app worktrees".into(),
+            summary: "3 finished worktrees".into(),
+            preview: "Removes these worktrees.".into(),
+            bytes: None,
+        };
+        let clean = Operation::Clean(item.id.clone());
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().cleanup = vec![item];
+        let names = controller.rust().names_for(std::slice::from_ref(&clean));
+        // Remembered at confirmation, so a refresh that drops the row
+        // still names it.
+        controller.as_mut().rust_mut().names.extend(names);
+        controller.as_mut().rust_mut().cleanup.clear();
+        let names = controller.rust().names_for(std::slice::from_ref(&clean));
+        let notice = write_notice(
+            &Job::CleanAll(vec![clean.clone()]),
+            &Ok(Payload::Batch(
+                format!(
+                    "Completed 0 of 1 cleanup tasks.\n{}: Couldn't remove ~/.trees/b: b is busy",
+                    operation_title(&clean)
+                ),
+                vec![Outcome::Failed],
+            )),
+            false,
+            &names,
+        );
+        assert_eq!(notice["title"], "Clean app worktrees failed");
+        assert_eq!(
+            notice["detail"],
+            "app worktrees: Couldn't remove ~/.trees/b: b is busy"
+        );
+        // Without its row, the key still says which one.
+        assert_eq!(
+            operation_title(&clean),
+            "Clean worktrees:/home/user/code/app (Old projects)"
+        );
     }
     #[test]
     fn automatic_runs_skip_updates_that_failed() {
