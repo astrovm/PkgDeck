@@ -517,6 +517,52 @@ fn main() {
             {"id": 2, "operations": [{"upgrade_all": {"backend": "apt"}}], "labels": ["Update all (APT)"], "started_at": model::now() - 60, "state": "running", "outcomes": []}
         ])).unwrap();
     });
+    for (name, confirmation) in [
+        (
+            "confirm-update",
+            json!({"action": "Update", "summary": "Update 7 selected packages\nIf one update fails, the others can still finish.", "items": [
+                {"group": "npm", "icon_name": "npm", "title": "@anthropic-ai/claude-code", "from": "2.1.3", "to": "2.1.4"},
+                {"group": "Flatpak", "icon_name": "flatpak", "title": "Krita", "from": "5.2.9", "to": "5.2.11"},
+                {"group": "Flatpak", "icon_name": "flatpak", "title": "Telegram Desktop", "from": "5.6.3", "to": "5.6.4"},
+                {"group": "APT", "icon_name": "apt", "title": "libssl3", "from": "3.0.13-1", "to": "3.0.15-1"},
+                {"group": "APT", "icon_name": "apt", "title": "openssh-client", "from": "1:9.6p1-3", "to": "1:9.6p1-4"},
+                {"group": "APT", "icon_name": "apt", "title": "curl", "from": "8.5.0-2", "to": "8.5.0-3"},
+                {"group": "Firmware", "icon_name": "fwupd", "title": "UEFI dbx", "from": "371", "to": "417", "note": "Revokes old boot loaders"}
+            ]}),
+        ),
+        (
+            "confirm-update-short",
+            json!({"action": "Update", "summary": "Update 2 selected packages", "items": [
+                {"group": "npm", "icon_name": "npm", "title": "@anthropic-ai/claude-code", "from": "2.1.3", "to": "2.1.4"},
+                {"group": "Flatpak", "icon_name": "flatpak", "title": "Telegram Desktop", "from": "5.6.3", "to": "5.6.4"}
+            ]}),
+        ),
+        (
+            "confirm-refresh",
+            json!({"action": "Refresh", "summary": "Refresh 3 sources", "items": [
+                {"icon_name": "apt", "title": "APT"}, {"icon_name": "flatpak", "title": "Flatpak"}, {"icon_name": "fwupd", "title": "Firmware"}
+            ]}),
+        ),
+        (
+            "confirm-clean",
+            json!({"action": "Clean 2 tasks", "summary": "Clean 2 tasks\nFrees about 4.2 GB.\nFinished tasks cannot be undone.", "items": [
+                {"group": "APT", "icon_name": "apt", "title": "Package cache", "size": "3.1 GB", "preview": "Would remove 412 files in /var/cache/apt/archives"},
+                {"group": "Docker", "icon_name": "docker", "title": "Unused images", "size": "1.1 GB", "preview": "Deleted Images:\nuntagged: nginx:1.25"}
+            ]}),
+        ),
+    ] {
+        render(name, [1180.0, 780.0], true, |app| {
+            offline(app, Page::Installed);
+            app.confirmation = Some(serde_json::from_value(confirmation).unwrap());
+            app.confirm_open = true;
+        });
+    }
+    render("notice-error", [1000.0, 420.0], true, |app| {
+        offline(app, Page::Updates);
+        app.c().set_notice(json!({"kind": "error", "title": "2 of 6 changes failed", "detail": "Refresh Firmware package lists: Firmware couldn't run: Error executing command as another user: Not authorized.\nRefresh Snap package lists: Snap couldn't run: Error executing command as another user: Not authorized.", "output": "Refresh Firmware package lists\nError executing command as another user: Not authorized\n\nThis incident has been reported.", "retry": true}).to_string().into());
+        app.react();
+        app.ui.notice_output = true;
+    });
     render("confirm", [1180.0, 780.0], false, |app| {
         offline(app, Page::Installed);
         app.confirmation = Some(serde_json::from_value(json!({"action": "Remove GIMP", "summary": "Remove GIMP\nFrom APT, System", "details": "The following packages will be REMOVED:\n  gimp gimp-data"})).unwrap());

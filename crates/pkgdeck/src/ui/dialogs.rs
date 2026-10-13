@@ -98,7 +98,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
     let text = app.confirmation_text();
     let mut answer: Option<bool> = None;
     let mut scope: Option<bool> = None;
-    let mut details = app.ui.confirm_details;
+    let mut flipped = app.ui.confirm_details_flipped;
     if open {
         let verb = data.verb();
         ctx.input_mut(|i| {
@@ -190,8 +190,9 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                     });
                 });
             });
-        if !data.details.is_empty() {
+        if data.has_details() {
             ui.add_space(6.0);
+            let details = data.short() != flipped;
             if Button::new(
                 Look::Flat,
                 if details {
@@ -201,10 +202,11 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                 },
             )
             .small()
+            .icon(if details { "up" } else { "down" })
             .show(ui)
             .clicked()
             {
-                details = !details;
+                flipped = !flipped;
             }
             if details {
                 egui::Frame::new()
@@ -217,14 +219,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                             .max_height(260.0)
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&data.details)
-                                            .font(theme::mono(12.5))
-                                            .color(palette.ink),
-                                    )
-                                    .selectable(true),
-                                );
+                                detail_list(ui, &data, &palette);
                             });
                     });
             }
@@ -254,7 +249,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
             }
         });
     });
-    app.ui.confirm_details = details && open;
+    app.ui.confirm_details_flipped = flipped && open;
     if let Some(system) = scope {
         app.c().set_open_flatpak_scope(system);
         app.react();
@@ -263,8 +258,159 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
         answer = Some(false);
     }
     if let Some(approved) = answer {
-        app.ui.confirm_details = false;
+        app.ui.confirm_details_flipped = false;
         app.confirm(approved);
+    }
+}
+
+/// What a confirmation changes: rows grouped by source, each with its
+/// version change and size, then any text that goes with them.
+fn detail_list(ui: &mut Ui, data: &model::Confirmation, palette: &Palette) {
+    ui.spacing_mut().item_spacing.y = 3.0;
+    let mut groups: Vec<(&str, Vec<&model::ConfirmItem>)> = Vec::new();
+    for item in &data.items {
+        match groups.iter_mut().find(|(name, _)| *name == item.group) {
+            Some((_, rows)) => rows.push(item),
+            None => groups.push((&item.group, vec![item])),
+        }
+    }
+    for (index, (group, rows)) in groups.iter().enumerate() {
+        if index > 0 {
+            ui.add_space(8.0);
+        }
+        if !group.is_empty() {
+            ui.horizontal(|ui| {
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                theme::paint_icon(ui.painter(), icon, &rows[0].icon_name, palette.muted);
+                ui.label(
+                    egui::RichText::new(*group)
+                        .font(theme::bold(13.0))
+                        .color(palette.ink),
+                );
+                ui.label(
+                    egui::RichText::new(format!("· {}", rows.len()))
+                        .font(theme::font(12.5))
+                        .color(palette.muted),
+                );
+            });
+            ui.add_space(2.0);
+        }
+        for item in rows {
+            detail_row(ui, item, !group.is_empty(), palette);
+        }
+    }
+    let text = data.details.trim();
+    if !text.is_empty() {
+        if !data.items.is_empty() {
+            ui.add_space(8.0);
+        }
+        let font = if data.details_mono {
+            theme::mono(12.5)
+        } else {
+            theme::font(13.0)
+        };
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .font(font)
+                    .color(if data.details_mono {
+                        palette.ink
+                    } else {
+                        palette.muted
+                    }),
+            )
+            .selectable(true),
+        );
+    }
+}
+
+fn detail_row(ui: &mut Ui, item: &model::ConfirmItem, grouped: bool, palette: &Palette) {
+    egui::Sides::new().shrink_left().truncate().show(
+        ui,
+        |ui| {
+            if grouped {
+                ui.add_space(22.0);
+            }
+            if let Some(icon) = item.icon.as_deref().filter(|icon| !icon.is_empty()) {
+                let uri = if icon.starts_with("https://") || icon.starts_with("file://") {
+                    icon.to_owned()
+                } else {
+                    format!("file://{icon}")
+                };
+                ui.add(
+                    egui::Image::new(uri)
+                        .fit_to_exact_size(Vec2::splat(18.0))
+                        .corner_radius(theme::round(4)),
+                );
+            } else if !grouped && !item.icon_name.is_empty() {
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                theme::paint_icon(ui.painter(), icon, &item.icon_name, palette.muted);
+            }
+            ui.add(
+                egui::Label::new(egui::RichText::new(&item.title).color(palette.ink)).truncate(),
+            );
+        },
+        |ui| {
+            if let Some(size) = &item.size {
+                ui.label(
+                    egui::RichText::new(size)
+                        .font(theme::font(12.5))
+                        .color(palette.muted),
+                );
+            }
+            match (item.from.as_deref(), item.to.as_deref()) {
+                (Some(from), Some(to)) if from != to => {
+                    ui.label(
+                        egui::RichText::new(to)
+                            .font(theme::mono(12.5))
+                            .color(palette.accent),
+                    );
+                    ui.label(
+                        egui::RichText::new("→")
+                            .font(theme::mono(12.5))
+                            .color(palette.muted),
+                    );
+                    ui.label(
+                        egui::RichText::new(from)
+                            .font(theme::mono(12.5))
+                            .color(palette.muted),
+                    );
+                }
+                (_, Some(version)) | (Some(version), None) => {
+                    ui.label(
+                        egui::RichText::new(version)
+                            .font(theme::mono(12.5))
+                            .color(palette.muted),
+                    );
+                }
+                (None, None) => {}
+            }
+        },
+    );
+    let indent = if grouped { 22.0 } else { 0.0 };
+    if !item.note.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.label(
+                egui::RichText::new(&item.note)
+                    .font(theme::font(12.5))
+                    .color(palette.muted),
+            );
+        });
+    }
+    if !item.preview.trim().is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(item.preview.trim())
+                        .font(theme::mono(12.0))
+                        .color(palette.muted),
+                )
+                .selectable(true),
+            );
+        });
+        ui.add_space(4.0);
     }
 }
 

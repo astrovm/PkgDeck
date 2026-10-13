@@ -48,7 +48,8 @@ pub struct State {
     pub checks_open: bool,
     pub setup_open: bool,
     pub screenshot: Option<(String, String)>,
-    pub confirm_details: bool,
+    /// The person flipped the details from how they start (open when short).
+    pub confirm_details_flipped: bool,
     pub notice_output: bool,
     pub dependencies_open: bool,
     pub launch_draft: Option<page::LaunchDraft>,
@@ -840,20 +841,25 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                theme::paint_icon(ui.painter(), icon, "warning", color);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(&notice.title)
-                            .font(theme::bold(14.5))
-                            .color(palette.ink),
-                    );
-                    if !notice.detail.is_empty() {
-                        ui.label(egui::RichText::new(&notice.detail).color(palette.muted));
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The buttons claim their width first, so a long message wraps
+            // beside them instead of running under them.
+            egui::containers::Sides::new().shrink_left().wrap().show(
+                ui,
+                |ui| {
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), icon, "warning", color);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(&notice.title)
+                                .font(theme::bold(14.5))
+                                .color(palette.ink),
+                        );
+                        if !notice.detail.is_empty() {
+                            ui.label(egui::RichText::new(&notice.detail).color(palette.muted));
+                        }
+                    });
+                },
+                |ui| {
                     if icon_button(ui, "cancel", "Dismiss", palette.muted, true).clicked() {
                         app.c().dismiss_notice();
                         app.react();
@@ -880,8 +886,8 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                             app.ui.notice_output = !app.ui.notice_output;
                         }
                     }
-                });
-            });
+                },
+            );
             if app.ui.notice_output && !notice.output.is_empty() {
                 ui.add_space(4.0);
                 egui::Frame::new()

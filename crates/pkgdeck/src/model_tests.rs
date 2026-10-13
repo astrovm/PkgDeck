@@ -1198,3 +1198,21 @@ fn cleanup_previews_split_into_a_note_and_items() {
     );
     assert_eq!(cleanup_preview(""), ("", vec![]));
 }
+
+#[test]
+fn only_short_confirmation_details_start_open() {
+    let item = |n: usize| {
+        (0..n)
+            .map(|i| json!({"title": format!("pkg{i}")}))
+            .collect::<Vec<_>>()
+    };
+    let confirmation =
+        |value: serde_json::Value| -> Confirmation { serde_json::from_value(value).unwrap() };
+    assert!(confirmation(json!({"items": item(5)})).short());
+    assert!(!confirmation(json!({"items": item(6)})).short());
+    assert!(confirmation(json!({"details": "a\n\nb"})).short());
+    assert!(!confirmation(json!({"details": "1\n2\n3\n4\n5\n6"})).short());
+    assert!(!confirmation(json!({})).has_details());
+    assert!(!confirmation(json!({"details": " \n"})).has_details());
+    assert!(confirmation(json!({"items": item(1)})).has_details());
+}
