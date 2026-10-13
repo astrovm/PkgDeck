@@ -88,7 +88,7 @@ pub fn window_corners(maximized: bool) -> CornerRadius {
     match skin.family() {
         Family::Gel => super::skin::top_corners(scaled(5.0)),
         Family::Fluent => scaled(8.0),
-        Family::Liquid => scaled(20.0),
+        Family::Liquid => scaled(26.0),
         _ => CornerRadius::ZERO,
     }
 }
@@ -987,7 +987,7 @@ mod tests {
         assert_eq!((tiger.nw, tiger.ne), (5, 5));
         assert_eq!((tiger.sw, tiger.se), (0, 0));
         assert_eq!(corners(Style::Fluent, false), CornerRadius::same(8));
-        assert_eq!(corners(Style::Liquid, false), CornerRadius::same(20));
+        assert_eq!(corners(Style::Liquid, false), CornerRadius::same(26));
         // Maximized, or with no rounded corners to speak of, they're square.
         for style in Style::ALL {
             assert_eq!(corners(style, true), CornerRadius::ZERO, "{style:?}");
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn the_app_follows_the_window_into_its_corners_and_only_there() {
-        for (style, radius) in [(Style::Fluent, 8), (Style::Liquid, 20)] {
+        for (style, radius) in [(Style::Fluent, 8), (Style::Liquid, 26)] {
             let palette = palette(style, false);
             in_style(style, || {
                 theme::painted(|ui| {
