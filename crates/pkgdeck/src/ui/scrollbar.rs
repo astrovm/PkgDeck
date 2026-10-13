@@ -14,6 +14,7 @@ use super::{
     theme::{self, Palette},
 };
 use crate::settings::Family;
+use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, pos2, scroll_area::ScrollAreaOutput, vec2, Color32, CornerRadius, Id, Painter, Rect,
     Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui,
@@ -110,6 +111,9 @@ impl Scroll {
             let offset = self.offset;
             return self.area(offset).show_viewport(ui, add);
         };
+        // A whole number of pixels, or the strip's edge lands between two.
+        let ppp = ctx.pixels_per_point();
+        let thick = whole_pixels(thick, ppp);
         let family = skin.family();
         let (vertical, max_height) = (self.vertical, self.max_height);
         let last: Option<Last> = ctx.data(|d| d.get_temp(key));
@@ -132,12 +136,12 @@ impl Scroll {
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
         if reserved {
             area = if vertical {
-                area.max_width(available.width() - thick)
+                area.max_width((available.width() - thick).round_ui())
             } else {
                 area.max_height(
                     max_height
                         .unwrap_or(f32::INFINITY)
-                        .min(available.height() - thick),
+                        .min((available.height() - thick).round_ui()),
                 )
             };
         }
@@ -199,6 +203,11 @@ impl Scroll {
         }
         area
     }
+}
+
+/// `points` rounded to the nearest whole pixel.
+fn whole_pixels(points: f32, ppp: f32) -> f32 {
+    (points * ppp).round() / ppp
 }
 
 /// A stretch along an axis.
@@ -263,15 +272,21 @@ struct Parts {
 impl Parts {
     fn of(family: Family, vertical: bool, at: Last, thick: f32, ppp: f32) -> Self {
         // On whole pixels, so edges stay crisp and the dither lines up.
-        let snap = |v: f32| (v * ppp).round() / ppp;
+        let snap = |v: f32| whole_pixels(v, ppp);
         let inner = Rect::from_min_max(
             pos2(snap(at.inner.left()), snap(at.inner.top())),
             pos2(snap(at.inner.right()), snap(at.inner.bottom())),
         );
         let strip = if vertical {
-            Rect::from_min_size(inner.right_top(), vec2(thick, inner.height()))
+            Rect::from_min_max(
+                inner.right_top(),
+                pos2((inner.right() + thick).round_ui(), at.inner.bottom()),
+            )
         } else {
-            Rect::from_min_size(inner.left_bottom(), vec2(inner.width(), thick))
+            Rect::from_min_max(
+                inner.left_bottom(),
+                pos2(at.inner.right(), (inner.bottom() + thick).round_ui()),
+            )
         };
         let whole = span(vertical, strip);
         let button = thick.min((whole.len() - 4.0).max(0.0) / 2.0);
@@ -1131,18 +1146,36 @@ mod tests {
         time: f64,
         inner: Rect,
         offset: f32,
+        /// Whether egui's debug check flagged a rect off the pixel grid.
+        unaligned: bool,
+    }
+
+    /// Whether `shape` is egui's orange "Unaligned" label.
+    fn is_unaligned(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.text() == "Unaligned",
+            egui::Shape::Vec(shapes) => shapes.iter().any(is_unaligned),
+            _ => false,
+        }
     }
 
     impl Window {
         fn new(style: Style, vertical: bool, content: f32) -> Self {
+            Self::scaled(style, vertical, content, 1.0)
+        }
+
+        fn scaled(style: Style, vertical: bool, content: f32, ppp: f32) -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(ppp);
             let mut window = Self {
-                ctx: egui::Context::default(),
+                ctx,
                 style,
                 vertical,
                 content,
                 time: 0.0,
                 inner: Rect::NOTHING,
                 offset: 0.0,
+                unaligned: false,
             };
             // The bar's room is settled over a few frames.
             for _ in 0..4 {
@@ -1154,13 +1187,14 @@ mod tests {
         fn frame(&mut self, events: Vec<Event>) {
             self.time += 1.0 / 60.0;
             let input = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(397.3, 300.0))),
                 time: Some(self.time),
                 events,
                 ..RawInput::default()
             };
             let (style, vertical, content) = (self.style, self.vertical, self.content);
             let (mut inner, mut offset) = (self.inner, self.offset);
+            let mut unaligned = self.unaligned;
             theme::with_skin(skin(style), || {
                 let mut output = self.ctx.run_ui(input, |ui| {
                     let scroll = if vertical {
@@ -1187,8 +1221,12 @@ mod tests {
                 });
                 // Nothing here draws, so nobody takes the textures.
                 output.textures_delta.clear();
+                unaligned |= output
+                    .shapes
+                    .iter()
+                    .any(|clipped| is_unaligned(&clipped.shape));
             });
-            (self.inner, self.offset) = (inner, offset);
+            (self.inner, self.offset, self.unaligned) = (inner, offset, unaligned);
         }
 
         fn last(&self) -> Last {
@@ -1200,8 +1238,9 @@ mod tests {
         }
 
         fn thick(&self) -> f32 {
-            theme::scroll_bar(self.style, &Palette::current(&self.ctx))
-                .map_or(0.0, |(width, _)| width)
+            theme::scroll_bar(self.style, &Palette::current(&self.ctx)).map_or(0.0, |(width, _)| {
+                whole_pixels(width, self.ctx.pixels_per_point())
+            })
         }
 
         fn parts(&self) -> Parts {
@@ -1267,6 +1306,27 @@ mod tests {
         let long = Window::new(Style::Modern, true, 2000.0);
         let short = Window::new(Style::Modern, true, 50.0);
         assert_eq!(long.inner.width(), short.inner.width());
+    }
+
+    #[test]
+    fn nothing_is_left_off_the_pixel_grid() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            for style in [
+                Style::Modern,
+                Style::Retro,
+                Style::Luna,
+                Style::Glass,
+                Style::Aqua,
+            ] {
+                for vertical in [true, false] {
+                    let window = Window::scaled(style, vertical, 2000.0, ppp);
+                    assert!(
+                        !window.unaligned,
+                        "{style:?} at {ppp}x, vertical {vertical}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
