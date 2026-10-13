@@ -1642,6 +1642,90 @@ mod tests {
         }
     }
 
+    /// Swaps the `git` the backend finds for one that runs `rules` first.
+    /// A rule sees Git's arguments: `$2` is the folder, `$3` the command.
+    fn git_with_rules(bin: &Path, rules: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let real = Host::current().resolve("git").unwrap().expect("git");
+        let _ = fs::remove_file(bin.join("git"));
+        fs::write(
+            bin.join("git"),
+            format!("#!/bin/sh\n{rules}\nexec '{}' \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_worktree_stays_when_git_cant_check_it_or_its_submodules() {
+        let rules = [
+            // The worktree's own status.
+            "if [ \"$3\" = status ]; then case \"$2\" in */finished) exit 1;; esac; fi",
+            // Listing its submodules.
+            "if [ \"$3\" = ls-files ]; then exit 1; fi",
+            // A submodule Git listed under a name that isn't valid text.
+            "if [ \"$3\" = ls-files ]; then printf '160000 0000000000000000000000000000000000000000 0\\tbad\\377\\0'; exit 0; fi",
+            // Each of the three looks inside a submodule.
+            "if [ \"$3\" = status ]; then case \"$2\" in */lib) exit 1;; esac; fi",
+            "if [ \"$3\" = rev-list ]; then case \"$2\" in */lib) exit 1;; esac; fi",
+            "if [ \"$3\" = stash ]; then case \"$2\" in */lib) exit 1;; esac; fi",
+        ];
+        for (index, rule) in rules.into_iter().enumerate() {
+            let home = scratch(&format!("unchecked-{index}"));
+            let (repo, tree) = with_submodule(&home);
+            age_files(&home, 30);
+            let bin = tools(&home, "");
+            git_with_rules(&bin, rule);
+            let mut backend = projects(&home, &bin, vec![repo], 7);
+            let items = backend.cleanup(&Cancellation::default()).unwrap();
+            assert!(items.is_empty(), "rule {index}: {items:?}");
+            assert!(tree.join("lib/code").exists());
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_worktree_that_stops_being_checkable_after_the_plan_stays_and_says_why() {
+        let home = scratch("unchecked-later");
+        let repo = home.join("repo");
+        write(&repo.join("tracked"), "original");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        let tree = home.join(".trees/a");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "a",
+                tree.to_str().unwrap(),
+            ],
+        );
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        // Its fourth status check fails: after the look, the plan and the list.
+        git_with_rules(
+            &bin,
+            // The PATH holds only this folder, so count with the shell's own.
+            "if [ \"$3\" = status ]; then n=0; while [ -e \"$0.$n\" ]; do n=$((n+1)); done; : > \"$0.$n\"; if [ $n = 3 ]; then echo 'fatal: gone' >&2; exit 1; fi; fi",
+        );
+        let mut backend = projects(&home, &bin, vec![repo], 7);
+        let cancel = Cancellation::default();
+        let item = backend.cleanup(&cancel).unwrap().remove(0);
+        let error = backend
+            .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Couldn't remove ~/.trees/a: Git couldn't check it"
+        );
+        assert!(tree.join("tracked").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn a_worktree_git_keeps_says_why_and_the_rest_still_go() {
         let home = scratch("partial");

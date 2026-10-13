@@ -13019,13 +13019,12 @@ mod tests {
         let mut controller = synthetic_controller();
         let mut controller = controller.pin_mut();
         controller.as_mut().rust_mut().prefetch.clear();
-        let clean = |key: &str| {
-            Operation::Clean(CleanupId {
-                backend: "projects".into(),
-                key: key.into(),
-            })
+        let id = |key: &str| CleanupId {
+            backend: "projects".into(),
+            key: key.into(),
         };
-        let (kept, gone) = (clean("worktrees:/code/kept"), clean("worktrees:/code/gone"));
+        let (kept_id, gone_id) = (id("worktrees:/code/kept"), id("worktrees:/code/gone"));
+        let (kept, gone) = (Operation::Clean(kept_id.clone()), Operation::Clean(gone_id));
         let status = format!(
             "Completed 0 of 2 cleanup tasks.\n{}: Couldn't remove ~/kept: b is busy\n{}: Couldn't remove ~/gone: it is busy",
             operation_title(&kept),
@@ -13056,11 +13055,8 @@ mod tests {
         assert_ne!(controller.failure().to_string(), "{}");
         assert!(controller.rust().retry_job.is_some());
         // Cleaned some other way: its row and, once both are, the failure go.
-        let item = |id: &Operation| CleanupItem {
-            id: match id {
-                Operation::Clean(id) => id.clone(),
-                _ => unreachable!(),
-            },
+        let item = |id: &CleanupId| CleanupItem {
+            id: id.clone(),
             kind: CleanupKind::Worktree,
             title: "worktrees".into(),
             summary: String::new(),
@@ -13074,7 +13070,7 @@ mod tests {
                 .as_mut()
                 .apply(Ok(Payload::Cleanup(CleanupReport { items, failures })));
         };
-        look(&mut controller, vec![item(&kept)], vec![]);
+        look(&mut controller, vec![item(&kept_id)], vec![]);
         assert_eq!(
             parsed(controller.failed_rows()).as_array().unwrap().len(),
             1
@@ -13097,6 +13093,67 @@ mod tests {
         assert_eq!(controller.failed_rows().to_string(), "[]");
         assert_eq!(controller.failure().to_string(), "{}");
         assert!(controller.rust().retry_job.is_none());
+    }
+    #[test]
+    fn a_cancelled_step_is_no_failure_and_a_removal_seen_gone_clears_its_row() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let clean = Operation::Clean(CleanupId {
+            backend: "projects".into(),
+            key: "worktrees:/code/app".into(),
+        });
+        finish_write(
+            &mut controller,
+            Job::CleanAll(vec![clean]),
+            Ok(Payload::Batch(
+                "Completed 0 of 1 cleanup tasks.\nCancelled".into(),
+                vec![Outcome::Cancelled],
+            )),
+        );
+        assert_eq!(controller.failed_rows().to_string(), "[]");
+        assert_eq!(controller.failure().to_string(), "{}");
+        let package = synthetic_package("htop", "htop");
+        finish_write(
+            &mut controller,
+            Job::Write(Operation::Remove(package.id.clone()), None),
+            Err(EngineError::NotFound),
+        );
+        assert_eq!(
+            parsed(controller.failed_rows()).as_array().unwrap().len(),
+            1
+        );
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        let look = |controller: &mut Pin<&mut ffi::PackageController>, packages: Vec<Package>| {
+            controller
+                .as_mut()
+                .apply(Ok(Payload::Packages(PackageReport {
+                    packages,
+                    failures: vec![],
+                    successful_sources: vec!["apt".into()],
+                })));
+        };
+        // Still installed: the removal didn't happen.
+        look(&mut controller, vec![package]);
+        assert_eq!(
+            parsed(controller.failed_rows()).as_array().unwrap().len(),
+            1
+        );
+        // Gone from a complete look at Installed: the row and failure clear.
+        look(&mut controller, vec![]);
+        assert_eq!(controller.failed_rows().to_string(), "[]");
+        assert_eq!(controller.failure().to_string(), "{}");
+    }
+    #[test]
+    fn a_step_outside_a_package_or_task_is_named_by_its_title() {
+        let refresh = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        assert_eq!(
+            short_name(&refresh, &Names::new()),
+            operation_title_named(&refresh, &Names::new())
+        );
+        assert!(!short_name(&refresh, &Names::new()).is_empty());
     }
     #[test]
     fn a_refused_password_is_urgent_and_a_step_that_works_clears_its_row() {
