@@ -217,6 +217,9 @@ fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
     let mut app = app();
     prepare(&mut app);
     app.invalidate();
+    // The older styles draw their own title bar; only Modern leaves it to
+    // the system, so only there does the harness add one.
+    let framed = app.settings.style.family() != pkgdeck::settings::Family::Modern;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(size[0], size[1] + TITLE_BAR))
         .with_pixels_per_point(2.0)
@@ -229,6 +232,10 @@ fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
                     return;
                 }
                 let full = ui.max_rect();
+                if framed {
+                    pkgdeck::ui::show(app, ui);
+                    return;
+                }
                 let bar = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TITLE_BAR));
                 let body =
                     egui::Rect::from_min_max(egui::pos2(full.left(), bar.bottom()), full.max);
