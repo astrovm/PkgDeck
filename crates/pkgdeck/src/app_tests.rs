@@ -1188,6 +1188,10 @@ fn a_clean_filter_with_no_usable_source_reads_nothing() {
         {"source":"dev-caches", "available":true, "capabilities":["clean"]}
     ]))
     .unwrap();
+    // Sources turned off for updates still count on Clean.
+    app.enabled = ["apt".into()].into();
+    assert_eq!(app.sources_csv(Page::Clean), "");
+    assert_eq!(app.sources_csv(Page::Updates), "apt");
     app.set_page_sources(Page::Clean, ["dev-caches".into()].into());
     assert_eq!(app.sources_csv(Page::Clean), "dev-caches");
     // Choosing every source is the same as no filter.

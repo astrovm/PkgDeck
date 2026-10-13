@@ -1289,3 +1289,66 @@ fn clean_settings_use_the_clean_page_list_and_say_what_they_need() {
 fn switch_disabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
     !switch_enabled(harness, label)
 }
+
+#[test]
+fn a_failed_list_offers_retry_and_details_and_retry_reloads() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.c().set_rows("[]".into());
+    app.react();
+    app.report.phase = "finished".into();
+    app.report.failures = serde_json::from_value(json!([
+        {"source": "apt", "kind": "failed", "detail": "APT broke"}
+    ]))
+    .unwrap();
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    for label in ["Retry", "Details"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, label)
+                .is_some(),
+            "{label}"
+        );
+    }
+    assert!(harness.query_by_label("Check again").is_none());
+    harness
+        .get_by_role_and_label(Role::Button, "Details")
+        .click();
+    harness.run_steps(3);
+    assert!(harness.state().1.ui.checks_open);
+    harness.state_mut().1.ui.checks_open = false;
+    harness.run_steps(3);
+    harness.get_by_role_and_label(Role::Button, "Retry").click();
+    harness.run_steps(3);
+    assert!(harness
+        .state_mut()
+        .1
+        .c()
+        .report_state()
+        .to_string()
+        .contains(r#""phase":"loading""#));
+}
+
+#[test]
+fn nothing_to_select_offers_no_select_button() {
+    for page in [Page::Updates, Page::Clean] {
+        let mut app = app();
+        app.page = page;
+        // Only a task Clean all leaves alone, or no updates at all.
+        let rows = if page == Page::Clean {
+            json!([{"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data"}])
+        } else {
+            json!([])
+        };
+        app.c().set_rows(rows.to_string().into());
+        app.react();
+        app.invalidate();
+        let mut harness = harness(app);
+        harness.run_steps(4);
+        for label in ["Select all", "Select none"] {
+            assert!(harness.query_by_label(label).is_none(), "{page:?} {label}");
+        }
+    }
+}
