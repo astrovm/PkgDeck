@@ -1203,7 +1203,7 @@ mod tests {
                         horizontal()
                     };
                     let out = scroll
-                        .id_salt("test")
+                        .id_salt(style)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.allocate_space(if vertical {
