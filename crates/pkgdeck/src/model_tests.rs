@@ -1170,10 +1170,7 @@ fn automatic_cleaning_says_what_it_freed() {
     };
     assert_eq!(said(0, 0, 0), None);
     assert_eq!(said(3, 0, 4_200_000_000).as_deref(), Some("Freed 4.2 GB"));
-    assert_eq!(
-        said(1, 0, 0).as_deref(),
-        Some("Cleaned up caches and build files")
-    );
+    assert_eq!(said(1, 0, 0).as_deref(), Some("Finished automatic cleanup"));
     assert_eq!(
         said(2, 1, 900).as_deref(),
         Some("Freed 900 bytes, 1 task failed")

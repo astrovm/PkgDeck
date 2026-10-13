@@ -12,7 +12,10 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{self, vec2, Id, Sense, Stroke, Ui, Vec2};
-use pkgdeck_core::{backends::ProjectSettings, host::Host};
+use pkgdeck_core::{
+    backends::{ProjectSettings, WorktreeProtection},
+    host::Host,
+};
 use std::path::{Path, PathBuf};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -29,7 +32,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.add_space(8.0);
             sources(app, ui);
             ui.add_space(8.0);
-            clean(ui);
+            clean(app, ui);
             ui.add_space(8.0);
             about(app, ui);
             ui.add_space(8.0);
@@ -997,7 +1000,7 @@ fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
     shown
 }
 
-fn clean(ui: &mut Ui) {
+fn clean(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let id = Id::new("project-settings");
     let mut projects = ui
@@ -1029,6 +1032,27 @@ fn clean(ui: &mut Ui) {
                 }
             },
         );
+        setting_row(
+            ui,
+            "Clean finished worktrees automatically",
+            "Once a day after a background check. Keeps branches",
+            SWITCH,
+            |ui| {
+                let mut on = app.settings.auto_clean_worktrees;
+                if switch(
+                    ui,
+                    &mut on,
+                    app.settings.background_mode,
+                    "Clean finished worktrees automatically",
+                )
+                .changed()
+                {
+                    app.settings.auto_clean_worktrees = on;
+                    app.c().set_auto_clean_worktrees(on);
+                }
+            },
+        );
+        worktree_protection_row(ui, &mut projects);
         ui.label(egui::RichText::new("Look for projects in").color(palette.muted));
         let mut removed = None;
         for (index, folder) in projects.folders.iter().enumerate() {
@@ -1070,7 +1094,7 @@ fn clean(ui: &mut Ui) {
         let error = projects
             .save(&Host::current())
             .err()
-            .map(|error| format!("Couldn't save the folders: {error}"));
+            .map(|error| format!("Couldn't save Clean settings: {error}"));
         ui.data_mut(|data| match error {
             Some(error) => {
                 data.insert_temp(Id::new("project-settings-error"), error);
@@ -1079,6 +1103,40 @@ fn clean(ui: &mut Ui) {
         });
     }
     ui.data_mut(|data| data.insert_temp(id, projects));
+}
+
+fn worktree_protection_row(ui: &mut Ui, projects: &mut ProjectSettings) {
+    setting_row(
+        ui,
+        "Keep worktrees with local changes",
+        projects.worktree_protection.description(),
+        vec2(240.0, 34.0),
+        |ui| {
+            let response = Button::new(Look::Secondary, projects.worktree_protection.name())
+                .icon("down")
+                .min_width(240.0)
+                .show(ui);
+            egui::Popup::menu(&response).show(|ui| {
+                for choice in WorktreeProtection::ALL {
+                    if Button::new(
+                        if choice == projects.worktree_protection {
+                            Look::Primary
+                        } else {
+                            Look::Flat
+                        },
+                        choice.name(),
+                    )
+                    .min_width(240.0)
+                    .show(ui)
+                    .clicked()
+                    {
+                        projects.worktree_protection = choice;
+                        ui.close();
+                    }
+                }
+            });
+        },
+    );
 }
 
 fn about(app: &mut App, ui: &mut Ui) {
@@ -1218,6 +1276,42 @@ fn shortcuts(ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_protection_menu_sets_every_choice_and_explains_deleted_files() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let mut harness = Harness::builder()
+            .with_size(vec2(760.0, 220.0))
+            .build_ui_state(
+                |ui, (ready, projects)| {
+                    if !*ready {
+                        crate::setup(ui.ctx(), Path::new("/"), None);
+                        *ready = true;
+                        return;
+                    }
+                    worktree_protection_row(ui, projects);
+                },
+                (false, ProjectSettings::default()),
+            );
+        harness.run_steps(4);
+        for choice in [
+            WorktreeProtection::UncommittedChanges,
+            WorktreeProtection::EditedTrackedFiles,
+            WorktreeProtection::AnyLocalFiles,
+        ] {
+            let current = harness.state().1.worktree_protection.name();
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, current)
+                .click();
+            harness.run_steps(3);
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, choice.name())
+                .click();
+            harness.run_steps(3);
+            assert_eq!(harness.state().1.worktree_protection, choice);
+            assert!(harness.query_by_label(choice.description()).is_some());
+        }
+    }
 
     #[test]
     fn project_waits_snap_to_steps_and_read_naturally() {

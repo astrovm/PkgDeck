@@ -44,7 +44,7 @@ pub use mas::MacAppStore;
 pub use nix::Nix;
 pub use oh_my_zsh::OhMyZsh;
 pub use pixi::Pixi;
-pub use projects::ProjectSettings;
+pub use projects::{ProjectSettings, WorktreeProtection};
 pub use rustup::Rustup;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};

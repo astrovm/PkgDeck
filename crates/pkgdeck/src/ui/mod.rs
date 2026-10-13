@@ -1097,7 +1097,7 @@ fn clean_all_frees(app: &App) -> u64 {
     app.items
         .iter()
         .filter_map(|item| rows.get(item.raw))
-        .filter(|row| row.kind == "cleanup" && row.cleanup_kind != "data")
+        .filter(|row| row.batch_cleanable() && !app.unchecked.contains(&row.check_identity()))
         .filter_map(|row| row.bytes)
         .sum()
 }
@@ -1110,7 +1110,10 @@ fn page_actions_height(app: &App) -> f32 {
                 .any(|i| app.shown_rows()[i.raw].is_package())
                 || !app.refreshable_sources().is_empty()
         }
-        Page::Clean => app.items.len() > 1,
+        Page::Clean => app
+            .items
+            .iter()
+            .any(|item| app.shown_rows()[item.raw].batch_cleanable()),
         _ => false,
     };
     if any {
@@ -1196,17 +1199,57 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             }
         }
         Page::Clean => {
-            let label = match clean_all_frees(app) {
-                0 => "Clean all".to_owned(),
-                bytes => format!("Clean all ({})", model::size(bytes)),
+            let rows = app.shown_rows();
+            let selectable: Vec<_> = app
+                .items
+                .iter()
+                .filter_map(|item| rows.get(item.raw))
+                .filter(|row| row.batch_cleanable())
+                .map(|row| row.check_identity())
+                .collect();
+            let total = selectable.len();
+            let selected = selectable
+                .iter()
+                .filter(|identity| !app.unchecked.contains(*identity))
+                .count();
+            let bytes = clean_all_frees(app);
+            let action = if selected == total {
+                "Clean all"
+            } else {
+                "Clean selected"
             };
-            if Button::new(Look::Solid(Tone::Danger), &label)
-                .icon("remove")
-                .enabled(app.can_act() && app.retained.is_none())
-                .show(ui)
-                .clicked()
+            let label = if bytes == 0 {
+                action.to_owned()
+            } else {
+                format!("{action} ({})", model::size(bytes))
+            };
+            if selected > 0
+                && Button::new(Look::Solid(Tone::Danger), &label)
+                    .icon("remove")
+                    .enabled(app.can_act() && app.retained.is_none())
+                    .show(ui)
+                    .clicked()
             {
-                app.propose("clean-all");
+                app.clean_selected();
+            }
+            let narrow = width < 420.0;
+            if selected < total
+                && Button::new(Look::Secondary, "Select all")
+                    .icon("installed")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
+                app.unchecked.clear();
+            }
+            if selected > 0
+                && Button::new(Look::Secondary, "Select none")
+                    .icon("cancel")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
+                app.unchecked = selectable.into_iter().collect();
             }
         }
         _ => {}

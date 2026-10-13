@@ -261,7 +261,7 @@ impl Shares {
 
 fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) -> Columns {
     let mut x = row.left() + 14.0;
-    let tick = (page == Page::Updates).then(|| {
+    let tick = matches!(page, Page::Updates | Page::Clean).then(|| {
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(26.0, row.height()));
         x += 32.0;
         r
@@ -337,13 +337,21 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     if let Some(s) = cols.summary {
         titles.push((Column::Summary, "SUMMARY", s));
     }
-    if let (Some(tick), Page::Updates) = (cols.tick, app.page) {
+    if let Some(tick) = cols.tick {
         let rows = app.shown_rows();
-        let all_checked = app.unchecked.is_empty();
-        let none_checked = app
+        let selectable: Vec<_> = app
             .items
             .iter()
-            .all(|i| app.unchecked.contains(&rows[i.raw].identity()));
+            .filter_map(|i| rows.get(i.raw))
+            .filter(|row| app.page != Page::Clean || row.batch_cleanable())
+            .collect();
+        let all_checked = !selectable.is_empty()
+            && selectable
+                .iter()
+                .all(|row| !app.unchecked.contains(&row.check_identity()));
+        let none_checked = selectable
+            .iter()
+            .all(|row| app.unchecked.contains(&row.check_identity()));
         let id = Id::new("tick-all");
         let response = ui
             .interact(
@@ -357,6 +365,14 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             } else {
                 "Select all"
             });
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                !selectable.is_empty(),
+                all_checked,
+                "Select all tasks",
+            )
+        });
         paint_tick(
             ui,
             Rect::from_center_size(tick.center(), Vec2::splat(22.0)),
@@ -368,7 +384,11 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         if response.clicked() {
             if all_checked {
                 let rows = app.shown_rows();
-                app.unchecked = app.items.iter().map(|i| rows[i.raw].identity()).collect();
+                app.unchecked = app
+                    .items
+                    .iter()
+                    .map(|i| rows[i.raw].check_identity())
+                    .collect();
             } else {
                 app.unchecked.clear();
             }
@@ -871,19 +891,29 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     let compact = width == Width::Compact;
 
-    // Check box on Updates.
+    // Checkboxes on Updates and Clean. Data tasks are cleaned individually.
     if let Some(tick) = cols.tick {
-        let checked = !app.unchecked.contains(&identity);
+        let check_id = row.check_identity();
+        let enabled = app.page != Page::Clean || row.batch_cleanable();
+        let checked = enabled && !app.unchecked.contains(&check_id);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
         let response = ui
             .interact(tick_rect, id.with("tick"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
-        paint_tick(ui, tick_rect, id, checked, true, response.hovered());
-        if response.clicked() {
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                enabled,
+                checked,
+                format!("Select {}", row.title()),
+            )
+        });
+        paint_tick(ui, tick_rect, id, checked, enabled, response.hovered());
+        if enabled && response.clicked() {
             if checked {
-                app.unchecked.insert(identity.clone());
+                app.unchecked.insert(check_id);
             } else {
-                app.unchecked.remove(&identity);
+                app.unchecked.remove(&check_id);
             }
         }
     }

@@ -201,15 +201,28 @@ that failed are shown separately.
 - Unused volumes hold data. **Clean all** leaves them alone, and their row
   says **Not in Clean all**. Clean them on their own.
 - A worktree counts as finished when its branch was merged or deleted on the
-  remote, and it has no changes. Removing it keeps the branch.
+  remote, and its local files meet your chosen protection rule. Removing it keeps the branch.
 - Old project build files wait while something is being built.
 - APT finds unused dependencies and sizes its download cache without a
   password. Cleaning the cache deletes every cached download, so a package
   you reinstall downloads again. Both ask for your password when they run.
 
+Select cleanup tasks with their checkboxes, then choose **Clean selected**.
+Its button shows the space those tasks free. **Select all** and **Select none**
+work like on Updates. Volumes are cleaned individually.
+
 ### Clean settings
 
 - **Old projects**: how long a project must stay untouched. A week by default.
+- **Clean finished worktrees automatically**: off by default. When enabled,
+  cleans finished, old worktrees once a day after a background check. Needs
+  **Background checks**, and works independently of automatic cache cleaning.
+- **Keep worktrees with local changes**: applies to automatic and manual worktree cleanup.
+  **Any local files** (the default) keeps tracked edits, untracked files and
+  ignored files. **Uncommitted changes** keeps edits and untracked files but
+  deletes ignored files, including `.env`. **Edited tracked files** keeps
+  tracked edits but deletes untracked and ignored files, including `.env`.
+  Locked worktrees and unfinished branches stay with every choice.
 - **Look for projects in**: the folders PkgDeck searches. Your home folder by
   default, without hidden folders and, on macOS, without Library. **Add
   folder** adds another one.
@@ -222,8 +235,8 @@ checks**.
 - At most once a day, after a background check.
 - Only what comes back on its own: download caches, unused images, build
   caches, and build files of old projects.
-- Never unused dependencies, extra copies, worktrees, stopped containers or
-  volumes. Those stay in **Clean** for you to review.
+- Never unused dependencies, extra copies, stopped containers or volumes.
+  Worktrees have their own opt-in setting under **Clean** in Settings.
 - Only sources that run as you, so it never asks for a password.
 - Like automatic updates, it waits for the charger, for builds, and for other
   changes to finish.

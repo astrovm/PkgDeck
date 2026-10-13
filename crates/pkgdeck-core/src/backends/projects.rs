@@ -41,11 +41,60 @@ const GRADLE: &[&str] = &[
 
 /// Where to look for projects, and how long one stays untouched before its
 /// build files count as old.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeProtection {
+    #[default]
+    AnyLocalFiles,
+    UncommittedChanges,
+    EditedTrackedFiles,
+}
+
+impl WorktreeProtection {
+    pub const ALL: [Self; 3] = [
+        Self::AnyLocalFiles,
+        Self::UncommittedChanges,
+        Self::EditedTrackedFiles,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AnyLocalFiles => "Any local files",
+            Self::UncommittedChanges => "Uncommitted changes",
+            Self::EditedTrackedFiles => "Edited tracked files",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::AnyLocalFiles => "Keeps edits, untracked files and ignored files, including .env",
+            Self::UncommittedChanges => {
+                "Keeps edits and untracked files. Deletes ignored files, including .env"
+            }
+            Self::EditedTrackedFiles => {
+                "Keeps tracked edits. Deletes untracked and ignored files, including .env"
+            }
+        }
+    }
+    fn status_args(self) -> &'static [&'static str] {
+        match self {
+            Self::AnyLocalFiles => &[
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored",
+            ],
+            Self::UncommittedChanges => &["status", "--porcelain", "--untracked-files=all"],
+            Self::EditedTrackedFiles => &["status", "--porcelain", "--untracked-files=no"],
+        }
+    }
+}
+
+/// Where to look for old projects and which worktrees to keep.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ProjectSettings {
     pub folders: Vec<PathBuf>,
     pub days: u32,
+    pub worktree_protection: WorktreeProtection,
 }
 
 impl ProjectSettings {
@@ -54,6 +103,7 @@ impl ProjectSettings {
         Self {
             folders: home(host).into_iter().collect(),
             days: 7,
+            worktree_protection: WorktreeProtection::default(),
         }
     }
     /// `~/.config/pkgdeck/clean.json`, or under `XDG_CONFIG_HOME`.
@@ -94,6 +144,7 @@ impl Default for ProjectSettings {
         Self {
             folders: vec![],
             days: 7,
+            worktree_protection: WorktreeProtection::default(),
         }
     }
 }
@@ -465,7 +516,7 @@ impl Projects {
             let clean = self
                 .git(
                     &path,
-                    &["status", "--porcelain", "--untracked-files=normal"],
+                    self.settings().worktree_protection.status_args(),
                     cancel,
                 )
                 .is_some_and(|status| status.trim().is_empty());
@@ -580,8 +631,7 @@ impl Backend for Projects {
         })
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
-        // One read of the settings for the whole scan.
-        self.settings = Some(self.settings());
+        // Read saved settings again so a choice applies to the next scan.
         let items = self.items(&self.settings().folders, cancel);
         if cancel.requested() {
             return Err(EngineError::Cancelled);
@@ -663,8 +713,26 @@ impl Backend for Projects {
                 }
                 // Without --force, Git keeps a worktree that has changes.
                 let path = worktree.path.to_string_lossy();
-                self.git(repository, &["worktree", "remove", &path], cancel)
+                if self
+                    .git(repository, &["worktree", "remove", &path], cancel)
+                    .is_none()
+                {
+                    // Only this explicit choice permits removing untracked files.
+                    // Recheck tracked edits after Git refuses ordinary removal.
+                    let protection = self.settings().worktree_protection;
+                    let clean = self
+                        .git(&worktree.path, protection.status_args(), cancel)
+                        .is_some_and(|status| status.trim().is_empty());
+                    if protection != WorktreeProtection::EditedTrackedFiles || !clean {
+                        return Err(failed(&worktree.path, "Git kept it".into()));
+                    }
+                    self.git(
+                        repository,
+                        &["worktree", "remove", "--force", &path],
+                        cancel,
+                    )
                     .ok_or_else(|| failed(&worktree.path, "Git kept it".into()))?;
+                }
             }
         }
         Ok(OperationOutcome {
@@ -838,7 +906,11 @@ mod tests {
         Host::new(Runtime::Native, env)
     }
     fn projects(home: &Path, bin: &Path, folders: Vec<PathBuf>, days: u32) -> Projects {
-        Projects::new(host(home, bin, &[])).with_settings(ProjectSettings { folders, days })
+        Projects::new(host(home, bin, &[])).with_settings(ProjectSettings {
+            folders,
+            days,
+            ..ProjectSettings::default()
+        })
     }
     fn keys(items: &[CleanupItem]) -> Vec<String> {
         items.iter().map(|item| item.id.key.clone()).collect()
@@ -1267,6 +1339,114 @@ mod tests {
     }
 
     #[test]
+    fn worktree_protection_checks_real_git_files_and_removal_for_every_choice() {
+        // Exhaust the local-file states for each policy, using real repositories.
+        for (policy_index, protection) in WorktreeProtection::ALL.into_iter().enumerate() {
+            for state in 0..6 {
+                let home = scratch(&format!("protection-{policy_index}-{state}"));
+                let repo = home.join("repo");
+                write(&repo.join("tracked"), "original");
+                write(&repo.join(".gitignore"), ".env\nignored/\n");
+                git(&repo, &["init", "--quiet", "-b", "main"]);
+                git(&repo, &["add", "."]);
+                git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+                let tree = home.join(".trees/finished");
+                git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "--quiet",
+                        "-b",
+                        "finished",
+                        tree.to_str().unwrap(),
+                    ],
+                );
+                match state {
+                    0 => {}
+                    1 => write(&tree.join(".env"), "fake config"),
+                    2 => write(&tree.join("draft"), "untracked"),
+                    3 => write(&tree.join("tracked"), "edited"),
+                    4 => {
+                        write(&tree.join("tracked"), "staged");
+                        git(&tree, &["add", "tracked"]);
+                    }
+                    _ => {
+                        fs::remove_file(tree.join("tracked")).unwrap();
+                    }
+                }
+                age_files(&home, 30);
+                let bin = tools(&home, "");
+                let mut backend = projects(&home, &bin, vec![repo.clone()], 7);
+                backend.settings.as_mut().unwrap().worktree_protection = protection;
+                let cancel = Cancellation::default();
+                let items = backend.cleanup(&cancel).unwrap();
+                let allowed = state == 0
+                    || (state == 1 && protection != WorktreeProtection::AnyLocalFiles)
+                    || (state == 2 && protection == WorktreeProtection::EditedTrackedFiles);
+                assert_eq!(!items.is_empty(), allowed, "{protection:?}, state {state}");
+                if let Some(item) = items.first() {
+                    backend
+                        .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {})
+                        .unwrap();
+                    assert!(!tree.exists(), "{protection:?}, state {state}");
+                    git(&repo, &["rev-parse", "--verify", "refs/heads/finished"]);
+                } else {
+                    assert!(tree.exists());
+                }
+                fs::remove_dir_all(home).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn changed_settings_and_new_edits_are_checked_before_worktree_removal() {
+        let home = scratch("settings-recheck");
+        let repo = home.join("repo");
+        write(&repo.join("tracked"), "original");
+        write(&repo.join(".gitignore"), ".env\n");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        let tree = home.join(".trees/finished");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "finished",
+                tree.to_str().unwrap(),
+            ],
+        );
+        write(&tree.join(".env"), "fake config");
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let host = host(&home, &bin, &[]);
+        let mut settings = ProjectSettings {
+            folders: vec![repo.clone()],
+            ..ProjectSettings::default()
+        };
+        settings.save(&host).unwrap();
+        let mut backend = Projects::new(host.clone());
+        let cancel = Cancellation::default();
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        settings.worktree_protection = WorktreeProtection::UncommittedChanges;
+        settings.save(&host).unwrap();
+        let item = backend.cleanup(&cancel).unwrap().remove(0);
+        write(&tree.join("tracked"), "new edit");
+        assert!(backend
+            .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .is_err());
+        assert_eq!(
+            fs::read_to_string(tree.join("tracked")).unwrap(),
+            "new edit"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn settings_default_to_the_home_and_a_week_and_survive_bad_files() {
         let home = scratch("settings");
         let bin = home.join("bin");
@@ -1275,7 +1455,8 @@ mod tests {
             ProjectSettings::load(&host),
             ProjectSettings {
                 folders: vec![home.clone()],
-                days: 7
+                days: 7,
+                ..ProjectSettings::default()
             }
         );
         let path = ProjectSettings::path(&host).unwrap();
@@ -1283,6 +1464,7 @@ mod tests {
         let saved = ProjectSettings {
             folders: vec![home.join("code"), PathBuf::from("/srv/projects")],
             days: 30,
+            worktree_protection: WorktreeProtection::UncommittedChanges,
         };
         saved.save(&host).unwrap();
         assert_eq!(ProjectSettings::load(&host), saved);
@@ -1292,7 +1474,8 @@ mod tests {
             ProjectSettings::load(&host),
             ProjectSettings {
                 folders: vec![PathBuf::from("/abs")],
-                days: 7
+                days: 7,
+                ..ProjectSettings::default()
             }
         );
         fs::write(&path, "{").unwrap();

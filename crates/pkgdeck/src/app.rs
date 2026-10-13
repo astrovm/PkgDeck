@@ -344,6 +344,8 @@ impl App {
         self.c().set_auto_update(auto);
         self.c().set_allow_removals(removals);
         self.c().set_auto_clean(clean, cleaned_at);
+        let worktrees = self.settings.auto_clean_worktrees;
+        self.c().set_auto_clean_worktrees(worktrees);
     }
 
     pub fn save_settings(&mut self) {
@@ -1541,6 +1543,36 @@ impl App {
         self.active_rows = checked.iter().map(|row| row.identity()).collect();
         let json = Value::Array(identities).to_string();
         self.c().propose_checked(json.into());
+        self.react();
+    }
+
+    /// Review precisely the checked cleanup tasks shown on this page.
+    pub fn clean_selected(&mut self) {
+        if self.retained.is_some() {
+            return;
+        }
+        let rows = self.shown_rows();
+        let checked: Vec<&Row> = self
+            .items
+            .iter()
+            .filter_map(|item| rows.get(item.raw))
+            .filter(|row| row.batch_cleanable() && !self.unchecked.contains(&row.check_identity()))
+            .collect();
+        if checked.is_empty() {
+            return;
+        }
+        let ids: Vec<_> = checked
+            .iter()
+            .map(|row| pkgdeck_core::package::CleanupId {
+                backend: row.source.clone(),
+                key: row.cleanup_key.clone(),
+            })
+            .collect();
+        let active = checked.iter().map(|row| row.identity()).collect();
+        let json = serde_json::to_string(&ids).unwrap_or_default();
+        self.review_on = ReviewOn::Dialog;
+        self.active_rows = active;
+        self.c().propose_clean_checked(json.into());
         self.react();
     }
 
