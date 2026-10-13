@@ -6,11 +6,13 @@ use super::frame::{Caption, Press, WindowState};
 use super::skin::{darker, gray, rgb};
 use eframe::egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 
-/// The light's diameter and the distance between two lights' centres.
-const DIAMETER: f32 = 12.0;
-const PITCH: f32 = 20.0;
-/// How far the first light's centre is from the window's left edge.
-const INSET: f32 = 19.0;
+/// The light's diameter and the distance between two lights' centres, as
+/// measured on a macOS 26 window at 2x.
+const DIAMETER: f32 = 14.0;
+const PITCH: f32 = 23.0;
+/// How far the first light's centre is from the window's left edge. It is
+/// as far from the top, so the bar is twice this tall.
+const INSET: f32 = 26.0;
 
 /// Close, minimize and zoom at the left of `bar`, level with its middle.
 pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
@@ -22,7 +24,7 @@ pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
             let x = bar.left() + INSET + index as f32 * PITCH;
             (
                 caption,
-                Rect::from_center_size(pos2(x, y), vec2(16.0, 16.0)),
+                Rect::from_center_size(pos2(x, y), vec2(18.0, 18.0)),
             )
         })
         .collect()
@@ -31,9 +33,9 @@ pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
 /// A light's colour.
 fn hue(caption: Caption) -> Color32 {
     match caption {
-        Caption::Close => rgb(0xff5f57),
-        Caption::Minimize => rgb(0xfebc2e),
-        Caption::Maximize => rgb(0x28c840),
+        Caption::Close => rgb(0xec6765),
+        Caption::Minimize => rgb(0xf2ca44),
+        Caption::Maximize => rgb(0x65c466),
     }
 }
 
@@ -128,19 +130,19 @@ mod tests {
 
     #[test]
     fn the_lights_sit_in_a_row_inside_a_narrow_sidebar() {
-        let bar = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 30.0));
+        let bar = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 52.0));
         let lights = captions(bar);
         let order: Vec<_> = lights.iter().map(|(caption, _)| *caption).collect();
         assert_eq!(
             order,
             [Caption::Close, Caption::Minimize, Caption::Maximize]
         );
-        // Level with the bar's middle, and the last clear of the 68 pixel
+        // Level with the bar's middle, and the last clear of the 96 pixel
         // rail the sidebar shrinks to.
         for (_, rect) in &lights {
             assert_eq!(rect.center().y, bar.center().y);
         }
-        assert!(lights[2].1.right() < 68.0);
+        assert!(lights[2].1.right() < 96.0);
         assert!(lights[0].1.right() < lights[1].1.left());
     }
 }

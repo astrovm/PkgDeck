@@ -64,7 +64,7 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         Family::Fluent => (1.0, 1.0, 32.0, 0.0),
         // macOS 27: no edge but a hairline, the lights in a short bar the
         // sidebar runs up behind.
-        Family::Liquid => (0.0, 0.0, 30.0, 0.0),
+        Family::Liquid => (0.0, 0.0, 52.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -820,7 +820,7 @@ mod tests {
                     assert!(close.left() > at(Caption::Maximize).right() - 0.5);
                 }
                 // The Mac closes at the left.
-                _ => assert!(close.left() < bar.left() + 12.0, "{style:?}"),
+                _ => assert!(close.left() < bar.left() + 20.0, "{style:?}"),
             }
         }
     }

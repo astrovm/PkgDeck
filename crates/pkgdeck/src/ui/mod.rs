@@ -73,9 +73,19 @@ pub struct State {
 pub const RAIL_BELOW: f32 = 820.0;
 /// The sidebar's width with icons only, by default, and as far as it drags.
 const RAIL_WIDTH: f32 = 68.0;
+/// macOS 27's rail is wider, so its traffic lights, which sit in it, fit.
+const LIQUID_RAIL_WIDTH: f32 = 96.0;
 const SIDEBAR_DEFAULT: f32 = 224.0;
 const SIDEBAR_FLOOR: f32 = 168.0;
 const SIDEBAR_MAX: f32 = 360.0;
+/// The sidebar's width with icons only, in the style being drawn.
+fn rail_width() -> f32 {
+    if theme::skin().style.family() == crate::settings::Family::Liquid {
+        LIQUID_RAIL_WIDTH
+    } else {
+        RAIL_WIDTH
+    }
+}
 /// Dragged thinner than this, the sidebar drops to icons only.
 const RAIL_SNAP: f32 = 120.0;
 pub const MEDIUM_BELOW: f32 = 640.0;
@@ -117,7 +127,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     skin::paint_canvas(ui.painter(), full, &palette);
     // A narrow window shows icons only; so does a sidebar dragged thin.
     let narrow = full.width() < RAIL_BELOW;
-    let stored = app.settings.sidebar_width.clamp(RAIL_WIDTH, SIDEBAR_MAX);
+    let rail_width = rail_width();
+    let stored = app.settings.sidebar_width.clamp(rail_width, SIDEBAR_MAX);
     let rail = narrow || stored < RAIL_SNAP;
     let splitter = Id::new("sidebar-splitter");
     let dragging = ctx.dragged_id() == Some(splitter);
@@ -125,7 +136,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         &ctx,
         Id::new("sidebar-width"),
         if rail {
-            RAIL_WIDTH
+            rail_width
         } else {
             stored.max(SIDEBAR_FLOOR)
         },
@@ -175,7 +186,7 @@ fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) {
     if response.dragged() {
         if let Some(pointer) = ctx.pointer_interact_pos() {
             app.settings.sidebar_width =
-                (pointer.x - sidebar.left()).clamp(RAIL_WIDTH, SIDEBAR_MAX);
+                (pointer.x - sidebar.left()).clamp(rail_width(), SIDEBAR_MAX);
         }
     }
     if response.double_clicked() {
