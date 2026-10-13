@@ -412,6 +412,8 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             pill_ink.unwrap_or(palette.accent)
         } else if let Some(link) = ink.entries {
             link
+        } else if let Some(icons) = ink.icons {
+            icons
         } else {
             mix(palette.muted, palette.ink, hover)
         };

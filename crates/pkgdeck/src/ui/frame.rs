@@ -74,6 +74,72 @@ pub fn metrics(style: Style) -> Option<Metrics> {
     })
 }
 
+/// The radius the window's own corners take, as on its desktop: Tiger
+/// rounds the title bar only, Windows 11 all four, macOS 27 more. Square
+/// maximized, and in the styles that draw their corners some other way.
+pub fn window_corners(maximized: bool) -> CornerRadius {
+    if maximized {
+        return CornerRadius::ZERO;
+    }
+    // The desktop's own radius, in pixels, times the person's roundness.
+    let skin = theme::skin();
+    let scaled =
+        |radius: f32| CornerRadius::same((radius * skin.roundness.clamp(0.0, 2.0)).round() as u8);
+    match skin.family() {
+        Family::Gel => super::skin::top_corners(scaled(5.0)),
+        Family::Fluent => scaled(8.0),
+        Family::Liquid => scaled(20.0),
+        _ => CornerRadius::ZERO,
+    }
+}
+
+/// Tells the app's own painting where the window's corners are.
+fn publish_corners(ctx: &egui::Context, full: Rect, maximized: bool) {
+    let corners = window_corners(maximized);
+    ctx.data_mut(|data| data.insert_temp(Id::new("window-corners"), (full, corners)));
+}
+
+/// The corners a rectangle of the app's own painting must take where it
+/// reaches a corner of the window, so it doesn't poke out of the rounded
+/// frame.
+pub fn fit(ctx: &egui::Context, rect: Rect) -> CornerRadius {
+    let Some((full, corners)) =
+        ctx.data(|data| data.get_temp::<(Rect, CornerRadius)>(Id::new("window-corners")))
+    else {
+        return CornerRadius::ZERO;
+    };
+    // A corner of `rect` at (x, y) from the window's, inside the same corner.
+    let corner = |radius: u8, dx: f32, dy: f32| {
+        if dx.abs() <= 1.5 && dy.abs() <= 1.5 {
+            radius.saturating_sub(dx.abs().max(dy.abs()).round() as u8)
+        } else {
+            0
+        }
+    };
+    CornerRadius {
+        nw: corner(
+            corners.nw,
+            rect.left() - full.left(),
+            rect.top() - full.top(),
+        ),
+        ne: corner(
+            corners.ne,
+            full.right() - rect.right(),
+            rect.top() - full.top(),
+        ),
+        sw: corner(
+            corners.sw,
+            rect.left() - full.left(),
+            full.bottom() - rect.bottom(),
+        ),
+        se: corner(
+            corners.se,
+            full.right() - rect.right(),
+            full.bottom() - rect.bottom(),
+        ),
+    }
+}
+
 /// Whether the window is maximized and whether it's the one in front.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowState {
@@ -120,9 +186,11 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     let metrics = metrics(style);
     decorate(&ctx, metrics.is_none());
     let Some(metrics) = metrics else {
+        publish_corners(&ctx, full, true);
         return full;
     };
     let state = WindowState::of(&ctx);
+    publish_corners(&ctx, full, state.maximized);
     let (bar, inner) = layout(metrics, full, state.maximized);
     let painter = ui.painter().clone();
     paint_frame(&painter, full, bar, inner, palette, state);
@@ -182,7 +250,7 @@ pub fn edges(ui: &mut Ui, full: Rect) {
         };
         ui.painter().rect_stroke(
             full,
-            CornerRadius::ZERO,
+            window_corners(false),
             Stroke::new(1.0, edge),
             StrokeKind::Inside,
         );
@@ -349,7 +417,7 @@ pub fn paint_frame(
         Family::Modern => {}
         Family::Fluent => super::fluent::paint_frame(painter, full, palette, state),
         Family::Liquid => {
-            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
+            painter.rect_filled(full, window_corners(state.maximized), palette.canvas);
             // The sidebar runs up behind the lights, as far as the page.
             let sidebar = painter.ctx().data(|data| {
                 data.get_temp::<f32>(Id::new("sidebar-extent"))
@@ -361,7 +429,7 @@ pub fn paint_frame(
             );
             painter.rect_filled(
                 behind,
-                CornerRadius::ZERO,
+                fit(painter.ctx(), behind),
                 super::skin::sidebar_color(palette),
             );
         }
@@ -382,10 +450,13 @@ pub fn paint_frame(
                 (false, true) => (gray(0xe8), gray(0xc0), gray(0x86)),
                 (false, false) => (gray(0xf2), gray(0xe0), gray(0xa8)),
             };
-            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
-            gradient(painter, bar, CornerRadius::ZERO, top, bottom, false);
+            let corners = window_corners(state.maximized);
+            painter.rect_filled(full, corners, palette.canvas);
+            gradient(painter, bar, corners, top, bottom, false);
+            // The highlight stops where the corners turn.
+            let lit = bar.x_range().shrink(f32::from(corners.nw));
             painter.hline(
-                bar.x_range(),
+                lit,
                 bar.top() + 0.5,
                 Stroke::new(1.0, Color32::from_white_alpha(if dark { 30 } else { 200 })),
             );
@@ -393,7 +464,7 @@ pub fn paint_frame(
             if open {
                 painter.rect_stroke(
                     full,
-                    CornerRadius::ZERO,
+                    corners,
                     Stroke::new(1.0, if dark { Color32::BLACK } else { gray(0x7c) }),
                     StrokeKind::Inside,
                 );
@@ -905,6 +976,63 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn windows_round_the_corners_their_desktop_does() {
+        let corners = |style, maximized| in_style(style, || window_corners(maximized));
+        // Tiger rounds the title bar and keeps the bottom square.
+        let tiger = corners(Style::Aqua, false);
+        assert_eq!((tiger.nw, tiger.ne), (5, 5));
+        assert_eq!((tiger.sw, tiger.se), (0, 0));
+        assert_eq!(corners(Style::Fluent, false), CornerRadius::same(8));
+        assert_eq!(corners(Style::Liquid, false), CornerRadius::same(20));
+        // Maximized, or with no rounded corners to speak of, they're square.
+        for style in Style::ALL {
+            assert_eq!(corners(style, true), CornerRadius::ZERO, "{style:?}");
+        }
+        for style in [Style::Modern, Style::Retro] {
+            assert_eq!(corners(style, false), CornerRadius::ZERO, "{style:?}");
+        }
+        // The person's roundness reaches them: none is none.
+        let flat = theme::Skin {
+            style: Style::Liquid,
+            roundness: 0.0,
+            ..theme::Skin::default()
+        };
+        assert_eq!(
+            theme::with_skin(flat, || window_corners(false)),
+            CornerRadius::ZERO
+        );
+    }
+
+    #[test]
+    fn the_app_follows_the_window_into_its_corners_and_only_there() {
+        for (style, radius) in [(Style::Fluent, 8), (Style::Liquid, 20)] {
+            let palette = palette(style, false);
+            in_style(style, || {
+                theme::painted(|ui| {
+                    // Nothing published yet: nothing is rounded.
+                    let ctx = ui.ctx().clone();
+                    assert_eq!(fit(&ctx, window()), CornerRadius::ZERO);
+                    show(ui, window(), "PkgDeck", &palette);
+                    let whole = fit(&ctx, window());
+                    assert_eq!(whole, CornerRadius::same(radius), "{style:?}");
+                    // One pixel in, as under Windows 11's edge, a pixel less.
+                    let inset = fit(&ctx, window().shrink(1.0));
+                    assert_eq!(inset, CornerRadius::same(radius - 1), "{style:?}");
+                    // The bottom-left of the window only: its sidebar.
+                    let sidebar =
+                        Rect::from_min_max(pos2(0.0, 100.0), pos2(200.0, window().bottom()));
+                    let sidebar = fit(&ctx, sidebar);
+                    assert_eq!((sidebar.sw, sidebar.nw), (radius, 0), "{style:?}");
+                    assert_eq!((sidebar.se, sidebar.ne), (0, 0), "{style:?}");
+                    // Away from every corner there is nothing to follow.
+                    let middle = Rect::from_min_max(pos2(100.0, 100.0), pos2(300.0, 300.0));
+                    assert_eq!(fit(&ctx, middle), CornerRadius::ZERO, "{style:?}");
+                })
+            });
         }
     }
 

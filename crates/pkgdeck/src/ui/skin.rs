@@ -1088,7 +1088,7 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
 
 /// Behind everything: the canvas colour, or Media Center's glow in grey.
 pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
-    painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+    painter.rect_filled(rect, super::frame::fit(painter.ctx(), rect), palette.canvas);
     match style() {
         // Explorer's white, or in the dark a soft glow over near black.
         Family::Glass if palette.dark => {
@@ -1121,6 +1121,8 @@ pub fn sidebar_color(palette: &Palette) -> Color32 {
 pub struct SidebarInk {
     pub name: Option<Color32>,
     pub entries: Option<Color32>,
+    /// The entries' icons alone, as macOS draws its sidebar's in the accent.
+    pub icons: Option<Color32>,
 }
 
 /// The sidebar's background: `logo` is the row with the name, `entries`
@@ -1133,6 +1135,8 @@ pub fn paint_sidebar(
     palette: &Palette,
 ) -> SidebarInk {
     let dark = palette.dark;
+    // Where the sidebar reaches the window's corner it takes its curve.
+    let round = super::frame::fit(painter.ctx(), rect);
     let end = |color| {
         painter.vline(
             rect.right() - 0.5,
@@ -1147,11 +1151,15 @@ pub fn paint_sidebar(
         }
         // Windows 11's navigation sits on the window's Mica.
         Family::Fluent => {
-            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            painter.rect_filled(rect, round, palette.canvas);
         }
         Family::Liquid => {
-            painter.rect_filled(rect, CornerRadius::ZERO, sidebar_color(palette));
+            painter.rect_filled(rect, round, sidebar_color(palette));
             end(palette.line);
+            return SidebarInk {
+                icons: Some(palette.accent),
+                ..SidebarInk::default()
+            };
         }
         Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
@@ -1223,6 +1231,7 @@ pub fn paint_sidebar(
             return SidebarInk {
                 name: Some(link),
                 entries: Some(link),
+                icons: None,
             };
         }
         Family::Glass if dark => {
@@ -1911,6 +1920,12 @@ mod tests {
             rect().shrink(4.0),
             rect().shrink(8.0),
             palette,
+        );
+        // Only macOS 27 colours the sidebar's icons alone.
+        assert_eq!(
+            ink.icons,
+            (style == Family::Liquid).then_some(palette.accent),
+            "{at}"
         );
         for color in [ink.name, ink.entries].into_iter().flatten() {
             assert!(color.a() > 0, "{at}");

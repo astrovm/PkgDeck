@@ -25,19 +25,15 @@ pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
 
 /// The window's Mica and its edge.
 pub fn paint_frame(painter: &Painter, full: Rect, palette: &Palette, state: WindowState) {
-    painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
+    let corners = super::frame::window_corners(state.maximized);
+    painter.rect_filled(full, corners, palette.canvas);
     if !state.maximized {
         let edge = if state.active {
             palette.strong_line
         } else {
             palette.line
         };
-        painter.rect_stroke(
-            full,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, edge),
-            StrokeKind::Inside,
-        );
+        painter.rect_stroke(full, corners, Stroke::new(1.0, edge), StrokeKind::Inside);
     }
 }
 
@@ -54,9 +50,14 @@ pub fn paint_caption(
     let red = caption == Caption::Close && (press.hovered || press.pressed);
     if red {
         let fill = rgb(0xc42b1c);
+        // The close button sits in the window's corner and turns with it.
+        let corner = super::frame::window_corners(state.maximized).ne;
         painter.rect_filled(
             rect,
-            CornerRadius::ZERO,
+            CornerRadius {
+                ne: corner.saturating_sub(1),
+                ..CornerRadius::ZERO
+            },
             if press.pressed {
                 faded(fill, 0.9)
             } else {

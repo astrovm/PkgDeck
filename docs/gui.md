@@ -541,10 +541,13 @@ out of date, and each page refreshes when you open it.
   - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
     on the side and the flat minimise, maximise and close buttons.
-  - **macOS 27**: a sidebar that runs up to the top edge, Liquid Glass
-    traffic lights at the top left and large soft corners.
+  - **macOS 27**: a sidebar that runs up to the top edge, with icons in the
+    accent, Liquid Glass traffic lights at the top left and large soft
+    corners.
   - Every style but **Modern** draws its own title bar and window buttons,
-    measured from screenshots of the real desktop.
+    measured from screenshots of the real desktop. The window's corners are
+    round where its desktop's are: the title bar's on Mac OS X Tiger, all
+    four on Windows 11 and macOS 27, and none when maximized.
   - Every style has the same layout. The older ones draw icons in colour,
     and Mac OS X Tiger stripes its lists in pale blue. Windows 11 and macOS 27 are flat
     like **Modern**.
