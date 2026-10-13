@@ -127,7 +127,9 @@ pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: b
     let (light, dark) = if theme::luminance(face) < 0.2 {
         ((0.38, 0.18), (0.9, 0.5))
     } else {
-        ((0.9, 0.45), (0.85, 0.33))
+        // On Windows' grey 192 these land on its white, light grey (223),
+        // dark grey (128) and black.
+        ((1.0, 0.49), (1.0, 1.0 / 3.0))
     };
     let (outer_light, outer_dark) = (shade(lighter(face, light.0)), shade(darker(face, dark.0)));
     let (inner_light, inner_dark) = (shade(lighter(face, light.1)), shade(darker(face, dark.1)));
@@ -148,7 +150,7 @@ fn etched(painter: &Painter, rect: Rect, face: Color32) {
     let (light, dark) = if theme::luminance(face) < 0.2 {
         (0.38, 0.5)
     } else {
-        (0.85, 0.33)
+        (1.0, 1.0 / 3.0)
     };
     let line = Rect::from_min_max(rect.min, rect.max - vec2(1.0, 1.0));
     painter.rect_stroke(
@@ -1868,6 +1870,23 @@ mod tests {
             ..theme::Skin::default()
         };
         theme::with_skin(skin, run)
+    }
+
+    #[test]
+    fn a_windows_98_edge_on_its_grey_is_the_four_greys_it_shipped_with() {
+        let shapes = drawn(Style::Retro, false, |painter, _| {
+            retro_edge(painter, rect(), gray(0xc0), false, 1.0);
+        });
+        let colors: Vec<_> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::LineSegment { stroke, .. } => Some(stroke.color),
+                _ => None,
+            })
+            .collect();
+        for expected in [gray(0xff), gray(0xdf), gray(0x80), Color32::BLACK] {
+            assert!(colors.contains(&expected), "{expected:?} in {colors:?}");
+        }
     }
 
     fn rect() -> Rect {

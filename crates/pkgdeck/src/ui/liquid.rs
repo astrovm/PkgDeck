@@ -1,6 +1,6 @@
-//! macOS 27's traffic lights, drawn as Liquid Glass: a coloured lens with
-//! a bright rim and a highlight across its top, grey while the window is
-//! behind another. Their symbols show when the pointer is over the group.
+//! macOS 27's traffic lights, as macOS 26 draws them: flat coloured discs
+//! with a deeper rim, grey while the window is behind another. Their
+//! symbols show when the pointer is over the group.
 
 use super::frame::{Caption, Press, WindowState};
 use super::skin::{darker, gray, rgb};
@@ -28,6 +28,18 @@ pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
             )
         })
         .collect()
+}
+
+/// How wide the deeper rim around a light's colour is.
+const RIM: f32 = 0.5;
+
+/// The rim around a light's colour.
+fn rim_hue(caption: Caption) -> Color32 {
+    match caption {
+        Caption::Close => rgb(0xe63835),
+        Caption::Minimize => rgb(0xeebb0b),
+        Caption::Maximize => rgb(0x34b237),
+    }
 }
 
 /// A light's colour.
@@ -63,26 +75,26 @@ pub fn paint_light(
     } else {
         base
     };
-    // The lens: a darker body with the colour sitting a little high,
-    // so the lower rim reads as glass thickness.
-    painter.circle_filled(center, radius, darker(base, 0.22));
-    painter.circle_filled(center - vec2(0.0, 0.6), radius - 0.9, base);
-    // The light collecting along the top.
-    let sheen = Rect::from_center_size(center - vec2(0.0, 2.7), vec2(7.2, 3.4));
-    painter.rect_filled(
-        sheen,
-        eframe::egui::CornerRadius::same(2),
-        Color32::from_white_alpha(if lit { 105 } else { 70 }),
-    );
+    // A flat disc: the colour inside a rim one shade deeper, and a faint
+    // ring just outside it that keeps the light apart from the bar.
+    let rim = if !lit {
+        darker(base, 0.08)
+    } else if press.pressed {
+        darker(rim_hue(caption), 0.2)
+    } else {
+        rim_hue(caption)
+    };
+    painter.circle_filled(center, radius, rim);
+    painter.circle_filled(center, radius - RIM, base);
     painter.circle_stroke(
         center,
-        radius - 0.25,
+        radius + 0.25,
         Stroke::new(
-            0.75,
+            0.5,
             if dark {
-                Color32::from_white_alpha(46)
+                Color32::from_white_alpha(36)
             } else {
-                Color32::from_black_alpha(46)
+                Color32::from_black_alpha(26)
             },
         ),
     );
@@ -144,5 +156,55 @@ mod tests {
         }
         assert!(lights[2].1.right() < 96.0);
         assert!(lights[0].1.right() < lights[1].1.left());
+    }
+
+    /// The circles one light paints, in order.
+    fn circles(caption: Caption, press: Press, dark: bool, active: bool) -> Vec<(f32, Color32)> {
+        let rect = Rect::from_center_size(pos2(26.0, 26.0), vec2(18.0, 18.0));
+        let state = WindowState {
+            maximized: false,
+            active,
+        };
+        super::super::theme::painted(|ui| {
+            paint_light(ui.painter(), rect, caption, press, dark, state);
+        })
+        .into_iter()
+        .filter_map(|shape| match shape {
+            Shape::Circle(circle) => Some((circle.radius, circle.fill)),
+            _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_light_is_a_flat_disc_in_a_deeper_rim() {
+        let rest = Press::default();
+        for caption in [Caption::Close, Caption::Minimize, Caption::Maximize] {
+            let discs = circles(caption, rest, false, true);
+            // The rim, then the colour inside it, then a bare ring around
+            // both: no lens, no sheen.
+            assert_eq!(
+                discs[..2],
+                [(7.0, rim_hue(caption)), (6.5, hue(caption))],
+                "{caption:?}"
+            );
+            assert_eq!(discs.len(), 3);
+            assert_eq!(discs[2].0, 7.25);
+        }
+        // Behind another window the lights go grey, rim and all.
+        for (dark, grey) in [(false, 0xcf), (true, 0x59)] {
+            let discs = circles(Caption::Close, rest, dark, false);
+            assert_eq!(discs[1].1, gray(grey));
+            assert_eq!(discs[0].1, darker(gray(grey), 0.08));
+        }
+        // Pressed, both shades deepen.
+        let pressed = Press {
+            pressed: true,
+            group: true,
+            ..rest
+        };
+        let discs = circles(Caption::Close, pressed, false, true);
+        assert_eq!(discs[0].1, darker(rim_hue(Caption::Close), 0.2));
+        assert_eq!(discs[1].1, darker(hue(Caption::Close), 0.2));
     }
 }

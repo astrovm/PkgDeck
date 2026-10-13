@@ -542,8 +542,7 @@ out of date, and each page refreshes when you open it.
     on the side and the flat minimise, maximise and close buttons.
   - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **macOS 27**: a sidebar that runs up to the top edge, with icons in the
-    accent, Liquid Glass traffic lights at the top left and large soft
-    corners.
+    accent, traffic lights at the top left and large soft corners.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop. The window's corners are
     round where its desktop's are: the title bar's on Mac OS X Tiger, all
@@ -569,8 +568,8 @@ out of date, and each page refreshes when you open it.
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well. The accent
   also tints the background, panels and buttons, and colours the PkgDeck logo
-  in the sidebar and title bar. An older style in the accent it was made with
-  keeps its desktop's own greys.
+  in the sidebar and title bar. Every style but **Modern**, in the accent it was
+  made with, keeps its desktop's own greys.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

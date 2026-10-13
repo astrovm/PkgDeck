@@ -59,7 +59,7 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         // the title on the glass.
         Family::Glass => (10.0, 0.0, 30.0, 2.0),
         // Aqua: a hairline and the grey title bar.
-        Family::Gel => (1.0, 1.0, 23.0, 0.0),
+        Family::Gel => (1.0, 1.0, 22.0, 0.0),
         // Windows 11: a one pixel edge and a 32 pixel title bar of Mica.
         Family::Fluent => (1.0, 1.0, 32.0, 0.0),
         // macOS 27: no edge but a hairline, the lights in a short bar the
@@ -447,7 +447,7 @@ pub fn paint_frame(
             // A plain grey title bar, lit along its top edge.
             let (top, bottom, line) = match (dark, state.active) {
                 (true, _) => (gray(0x4a), gray(0x2e), Color32::BLACK),
-                (false, true) => (gray(0xe8), gray(0xc0), gray(0x86)),
+                (false, true) => (gray(0xe8), gray(0xca), gray(0x8c)),
                 (false, false) => (gray(0xf2), gray(0xe0), gray(0xa8)),
             };
             let corners = window_corners(state.maximized);

@@ -368,6 +368,7 @@ impl Palette {
         let hue = custom.unwrap_or(rgb(on_light));
         let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
+            (Family::Fluent | Family::Liquid, _) if own => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
             _ if own => 0.0,
@@ -1448,7 +1449,7 @@ mod tests {
                     Accent::Green
                 };
                 let green = wearing(other);
-                if style.family().flat() {
+                if style == Style::Modern {
                     assert!(own.tint_amount > 0.0, "{at}");
                 } else {
                     // The desktop's own greys, as it drew them.
@@ -1463,6 +1464,15 @@ mod tests {
                 );
             }
         }
+        // Windows 11 in its own blue is Mica's plain #f3f3f3.
+        let mica = Palette::of(
+            Scheme {
+                style: Style::Fluent,
+                ..Scheme::default()
+            },
+            false,
+        );
+        assert_eq!(mica.canvas, rgb(0xf3f3f3));
         // OLED black stays black whatever the accent.
         let black = Palette::of(
             Scheme {
