@@ -103,13 +103,15 @@ impl Scroll {
         let skin = theme::skin();
         let ctx = ui.ctx().clone();
         let palette = Palette::current(&ctx);
+        let key = ui.make_persistent_id(self.salt).with("skinned-bar");
         let Some((thick, _)) = theme::scroll_bar(skin.style, &palette) else {
+            // A bar from another style must not answer clicks here.
+            forget(&ctx, key);
             let offset = self.offset;
             return self.area(offset).show_viewport(ui, add);
         };
         let family = skin.family();
         let (vertical, max_height) = (self.vertical, self.max_height);
-        let key = ui.make_persistent_id(self.salt).with("skinned-bar");
         let last: Option<Last> = ctx.data(|d| d.get_temp(key));
         let reserved = last.is_some_and(|l| l.needed(vertical));
 
@@ -120,6 +122,8 @@ impl Scroll {
         if let Some(last) = last.filter(|_| reserved) {
             let parts = Parts::of(family, vertical, last, thick, ctx.pixels_per_point());
             (touch, offset) = drive(ui, key, vertical, &parts, last, offset);
+        } else {
+            release(&ctx, key);
         }
 
         let available = ui.available_rect_before_wrap();
@@ -155,7 +159,8 @@ impl Scroll {
         ctx.data_mut(|d| d.insert_temp(key, now));
         let needed = now.needed(vertical);
         if needed != reserved {
-            // The room for the bar changes next frame.
+            // The content must be laid out again with or without the bar's room.
+            ctx.request_discard("scroll bar appeared or went away");
             ctx.request_repaint();
         }
         if needed && reserved {
@@ -379,6 +384,22 @@ fn push(ctx: &egui::Context, id: Id, down: bool, step: f32, speed: f32) -> f32 {
     }
 }
 
+/// Forgets a held button or grab, for a bar that is no longer there.
+fn release(ctx: &egui::Context, key: Id) {
+    ctx.data_mut(|d| {
+        for held in ["back-held", "forward-held", "track-held"] {
+            d.remove::<f64>(key.with(held));
+        }
+        d.remove::<f32>(key.with("grab"));
+    });
+}
+
+/// Forgets everything stored for the bar.
+fn forget(ctx: &egui::Context, key: Id) {
+    release(ctx, key);
+    ctx.data_mut(|d| d.remove::<Last>(key));
+}
+
 /// Reads the bar's pieces for clicks and drags, and returns what they are
 /// doing and the offset they ask for.
 fn drive(
@@ -419,6 +440,16 @@ fn drive(
         STEP,
         SPEED,
     ));
+
+    // The wheel scrolls over the bar too, as it does on a native one.
+    if ctx
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|pos| parts.strip.contains(pos))
+    {
+        let wheel = ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta));
+        let by = if vertical { wheel.y } else { wheel.x };
+        ask(-by);
+    }
 
     // A click on the track pages towards it, until the thumb gets there.
     let view = span(vertical, last.inner).len();
@@ -1236,6 +1267,25 @@ mod tests {
         let long = Window::new(Style::Modern, true, 2000.0);
         let short = Window::new(Style::Modern, true, 50.0);
         assert_eq!(long.inner.width(), short.inner.width());
+    }
+
+    #[test]
+    fn the_wheel_scrolls_over_the_bar() {
+        for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
+            let mut window = Window::new(style, true, 2000.0);
+            let at = window.parts().track.center();
+            window.frame(vec![Event::PointerMoved(at)]);
+            window.frame(vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            }]);
+            for _ in 0..30 {
+                window.frame(vec![]);
+            }
+            assert!(window.offset > 60.0, "{style:?}: {}", window.offset);
+        }
     }
 
     #[test]
