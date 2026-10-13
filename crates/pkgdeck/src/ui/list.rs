@@ -125,8 +125,9 @@ fn search_prompt(app: &mut App, ui: &mut Ui, rect: Rect) {
 
 fn heading_text(app: &App) -> String {
     let count = app.items.len();
+    // The card above says what is running.
     if app.writing {
-        return "Applying changes…".into();
+        return String::new();
     }
     if app.busy {
         return match app.page {

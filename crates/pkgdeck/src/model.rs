@@ -473,7 +473,7 @@ impl Progress {
         self.fraction
             .map(|fraction| fraction.clamp(0.0, 1.0) as f32)
     }
-    /// "45%" or "2 of 5".
+    /// "45%" or "2 of 5", the item under way included.
     pub fn count(&self) -> String {
         match self.transfer_total {
             Some(total) if total > 0 => format!(
@@ -482,7 +482,16 @@ impl Progress {
                     .round()
                     .min(100.0)
             ),
-            _ if self.total > 1 => format!("{} of {}", self.done, self.total),
+            // The one being worked on counts: "2 of 5" beside "Updating ripgrep"
+            // when ripgrep is the second.
+            _ if self.total > 1 => {
+                let running = self.current.is_some() || self.current_source.is_some();
+                format!(
+                    "{} of {}",
+                    (self.done + u64::from(running)).min(self.total),
+                    self.total
+                )
+            }
             _ => String::new(),
         }
     }

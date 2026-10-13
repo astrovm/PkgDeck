@@ -158,6 +158,17 @@ fn progress_measures_bytes_then_steps_then_fractions() {
     };
     assert_eq!(steps.bar(), Some(0.25));
     assert_eq!(steps.count(), "1 of 4");
+    let running = Progress {
+        current: Some(json!({"source": "apt", "name": "a"})),
+        ..steps.clone()
+    };
+    assert_eq!(running.count(), "2 of 4");
+    let by_source = Progress {
+        current_source: Some("apt".into()),
+        done: 4,
+        ..steps.clone()
+    };
+    assert_eq!(by_source.count(), "4 of 4");
     let fraction = Progress {
         total: 1,
         fraction: Some(1.5),
