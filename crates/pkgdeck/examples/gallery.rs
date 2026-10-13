@@ -457,6 +457,28 @@ fn main() {
     if std::env::args().any(|arg| arg == "--accents") {
         return accents();
     }
+    // Update all part way: one done, one running, one waiting. Only the
+    // card moves; each row carries a quiet mark.
+    for dark in [false, true] {
+        let mode = if dark { "dark" } else { "light" };
+        render(
+            &format!("batch-progress-{mode}"),
+            [1180.0, 640.0],
+            dark,
+            |app| {
+                let id = |name: &str, source: &str| json!({"source": source, "name": name, "architecture": "x86_64", "scope": "system"});
+                offline(app, Page::Updates);
+                app.writing = true;
+                app.progress = serde_json::from_value(json!({
+                "label": "Updating ripgrep", "total": 5, "done": 2,
+                "targets": [id("org.mozilla.firefox", "flatpak"), id("gimp", "apt"), id("ripgrep", "cargo"), id("node", "homebrew"), id("htop", "apt")],
+                "finished": [id("org.mozilla.firefox", "flatpak"), id("gimp", "apt")],
+                "current": id("ripgrep", "cargo"),
+            }))
+            .unwrap();
+            },
+        );
+    }
     // Each style, light and dark, on a list and on Settings. Only these
     // with `--styles`.
     for style in pkgdeck::settings::Style::ALL {
