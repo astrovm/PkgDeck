@@ -1237,6 +1237,7 @@ mod tests {
             })
             .to_vec();
         app.page = page;
+        app.rows_page = Some(page);
         app.invalidate();
         app.refresh_items();
         open_picker(&mut app);

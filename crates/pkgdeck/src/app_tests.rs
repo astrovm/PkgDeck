@@ -122,6 +122,41 @@ fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
 }
 
 #[test]
+fn another_section_never_shows_the_rows_of_the_one_left() {
+    for (from, to) in [
+        (Page::Installed, Page::Updates),
+        (Page::Updates, Page::Installed),
+        (Page::Installed, Page::Clean),
+        (Page::Installed, Page::Search),
+    ] {
+        let mut app = app();
+        app.page = from;
+        rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+        assert_eq!(app.shown_rows().len(), 2);
+        // Something still loads, so the new section waits for its rows.
+        app.c().set_busy(true);
+        app.react();
+        if to == Page::Search {
+            app.query = "a".into();
+        }
+        app.open_page(to);
+        app.react();
+        assert!(
+            app.retained.is_none(),
+            "{from:?} -> {to:?} kept the rows it left"
+        );
+        // Its own first rows are shown, even fewer than the old page had.
+        rows(&mut app, json!([row("c", json!({"update": "available"}))]));
+        let shown: Vec<_> = app
+            .shown_rows()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
+        assert_eq!(shown, ["c"], "{from:?} -> {to:?}");
+    }
+}
+
+#[test]
 fn rows_stay_on_screen_while_the_same_list_reloads() {
     let mut app = app();
     app.page = Page::Installed;

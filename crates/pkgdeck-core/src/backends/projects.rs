@@ -439,13 +439,23 @@ impl Projects {
         if done.code == Some(0) {
             return Ok(String::from_utf8_lossy(&done.stdout).into_owned());
         }
-        // Git's last line is the reason, as in "fatal: <reason>".
+        // Git's reason is its last "fatal:" or "error:" line. A hint, such
+        // as one to force harder, may follow it.
         let said = String::from_utf8_lossy(&done.stderr);
-        let reason = said
+        let lines: Vec<&str> = said
             .lines()
             .map(str::trim)
-            .rfind(|line| !line.is_empty())
-            .map(|line| line.strip_prefix("fatal: ").unwrap_or(line))
+            .filter(|line| !line.is_empty())
+            .collect();
+        let reason = ["fatal: ", "error: "]
+            .into_iter()
+            .find_map(|prefix| {
+                lines
+                    .iter()
+                    .rev()
+                    .find_map(|line| line.strip_prefix(prefix))
+            })
+            .or(lines.last().copied())
             .unwrap_or("Git kept it");
         Err(reason.to_owned())
     }
@@ -480,13 +490,18 @@ impl Projects {
                 "1",
                 "HEAD",
                 "--branches",
-                "--glob=refs/stash",
                 "--not",
                 "--remotes",
             ];
             match has(&submodule, &local) {
                 Some(false) => {}
                 Some(true) => return Some("a submodule has commits that aren't pushed".into()),
+                None => return unchecked(),
+            }
+            // Every stash, not only the newest `refs/stash` names.
+            match has(&submodule, &["stash", "list"]) {
+                Some(false) => {}
+                Some(true) => return Some("a submodule has stashed changes".into()),
                 None => return unchecked(),
             }
         }
@@ -1580,7 +1595,7 @@ mod tests {
     #[test]
     fn worktrees_with_submodules_go_unless_the_submodule_has_something_to_keep() {
         for (policy_index, protection) in WorktreeProtection::ALL.into_iter().enumerate() {
-            for state in 0..4 {
+            for state in 0..5 {
                 let home = scratch(&format!("submodule-{policy_index}-{state}"));
                 let (repo, tree) = with_submodule(&home);
                 let lib = tree.join("lib");
@@ -1588,6 +1603,13 @@ mod tests {
                     0 => {}
                     1 => write(&lib.join("draft"), "untracked"),
                     2 => write(&lib.join("ignored"), "built"),
+                    // Two stashes: the older one lives only in the reflog.
+                    3 => {
+                        for change in ["first", "second"] {
+                            write(&lib.join("code"), change);
+                            git(&lib, &["stash", "--quiet"]);
+                        }
+                    }
                     // Merged, but the submodule commit is nowhere else.
                     _ => {
                         write(&lib.join("code"), "only here");
@@ -1641,7 +1663,7 @@ mod tests {
         fs::write(
             bin.join("git"),
             format!(
-                "#!/bin/sh\ncase \"$3 $*\" in worktree*/.trees/b) echo 'error: noise' >&2; echo 'fatal: b is busy' >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\ncase \"$3 $*\" in worktree*/.trees/b) echo 'error: noise' >&2; echo 'fatal: b is busy' >&2; echo \"use 'remove -f -f' to override\" >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
                 real.display()
             ),
         )

@@ -116,6 +116,8 @@ pub struct App {
     parsed: Vec<(u64, Vec<Row>)>,
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
+    /// The page `rows` were loaded for. Another page never keeps them.
+    pub rows_page: Option<Page>,
     pub selected: Option<String>,
     /// Where the selection was last found in `items`.
     selected_hint: std::cell::Cell<usize>,
@@ -269,6 +271,7 @@ impl App {
             items_stale: true,
             parsed: vec![],
             retained: None,
+            rows_page: None,
             selected: None,
             selected_hint: Default::default(),
             selected_group: None,
@@ -536,6 +539,7 @@ impl App {
                     self.retained = None;
                 }
                 self.rows = rows;
+                self.rows_page = Some(self.page);
                 if !self.writing {
                     self.flash_changed_rows();
                 }
@@ -1192,8 +1196,9 @@ impl App {
         } else {
             String::new()
         };
-        let same = query == self.result_query || page != Page::Search;
-        if !self.rows.is_empty() && (same || page == Page::Search) {
+        // Only a reload of the list on screen keeps its rows meanwhile. A
+        // search keeps them for any query, narrowed by what's typed.
+        if !self.rows.is_empty() && self.rows_page == Some(page) {
             self.retained = Some(self.rows.clone());
         }
         if page == Page::Search && query.is_empty() {
