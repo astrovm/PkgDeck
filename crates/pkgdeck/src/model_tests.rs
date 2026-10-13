@@ -108,7 +108,35 @@ fn notices_choose_toast_or_banner_and_undo() {
         json!({"kind": "error", "title": "Failed", "undo": true, "undo_action": "install"}),
     )
     .unwrap();
-    assert!(!error.is_toast() && !error.can_undo());
+    // A failure is a toast too, unless it needs the person now.
+    assert!(error.is_toast() && !error.can_undo());
+    let urgent: Notice =
+        serde_json::from_value(json!({"kind": "error", "title": "Denied", "urgent": true}))
+            .unwrap();
+    assert!(!urgent.is_toast());
+}
+
+#[test]
+fn failed_rows_match_their_package_or_cleanup_task() {
+    let package: FailedRow = serde_json::from_value(json!({
+        "target": {"source": "apt", "name": "htop", "architecture": "x86_64", "remote": null,
+            "scope": "system", "reference": null},
+        "reason": "Disk full",
+    }))
+    .unwrap();
+    let row: Row = serde_json::from_value(json!({"kind": "package", "name": "htop",
+        "source": "apt", "architecture": "x86_64", "scope": "system"}))
+    .unwrap();
+    assert_eq!(package.key(), row.failure_key());
+    let task: FailedRow = serde_json::from_value(
+        json!({"target": {"source": "projects", "cleanup_key": "worktrees:/a"}, "reason": "busy"}),
+    )
+    .unwrap();
+    let cleanup: Row = serde_json::from_value(json!({"kind": "cleanup", "name": "a worktrees",
+        "source": "projects", "cleanup_key": "worktrees:/a"}))
+    .unwrap();
+    assert_eq!(task.key(), cleanup.failure_key());
+    assert_ne!(task.key(), row.failure_key());
 }
 
 #[test]

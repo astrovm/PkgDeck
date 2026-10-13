@@ -184,6 +184,8 @@ pub mod ffi {
         details, set_details, on_details_changed: QString;
         status, set_status, on_status_changed: QString;
         notice, set_notice, on_notice_changed: QString;
+        failure, set_failure, on_failure_changed: QString;
+        failed_rows, set_failed_rows, on_failed_rows_changed: QString;
         progress, set_progress, on_progress_changed: QString;
         repositories, set_repositories, on_repositories_changed: QString;
         source_catalog, set_source_catalog, on_source_catalog_changed: QString;
@@ -1382,6 +1384,11 @@ pub struct Controller {
     details: QString,
     status: QString,
     notice: QString,
+    /// The last change that failed, as its notice said, until it is
+    /// dismissed, retried, or a later look shows it fixed. Activity shows it.
+    failure: QString,
+    /// The rows a change failed on, with why: `[{target, reason}]`.
+    failed_rows: QString,
     progress: QString,
     confirmation: QString,
     confirmation_data: QString,
@@ -1463,8 +1470,11 @@ pub struct Controller {
     failed_updates: FailedUpdates,
     /// The version each cask of the queued automatic run updates to.
     cask_versions: BTreeMap<PackageId, String>,
-    /// The change the banner's Retry runs again.
+    /// The change the failure's Retry runs again.
     retry_job: Option<Job>,
+    /// Each step that failed on a row, with why, until it works or a later
+    /// look shows it done anyway. See `failed_rows`.
+    failed: Vec<(Operation, String)>,
     last_rewarm: Instant,
     /// Scope, elevation, and detection time of `engine`, so searches can
     /// reuse detected managers instead of rediscovering on every query.
@@ -1526,6 +1536,8 @@ impl Default for Controller {
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             notice: "{}".into(),
+            failure: "{}".into(),
+            failed_rows: "[]".into(),
             progress: "{}".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
@@ -1614,6 +1626,7 @@ impl Default for Controller {
             },
             cask_versions: BTreeMap::new(),
             retry_job: None,
+            failed: vec![],
             last_rewarm: Instant::now(),
             engine_scope: None,
             reused_engine_born: None,
@@ -2638,6 +2651,7 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
         "kind": "error",
         "title": format!("{title} couldn't be prepared"),
         "detail": write_error_text(error, job_backend(&operations), sudo),
+        "urgent": is_denied(error),
     }))
 }
 /// A batch reports each error as text on its own line. A denial keeps the
@@ -4485,25 +4499,138 @@ impl ffi::PackageController {
         }
         self.publish_held_updates();
     }
-    /// A failure banner goes away once every update it reports is no longer
-    /// waiting, such as after updating them some other way.
-    fn clear_settled_failure(self: Pin<&mut Self>) {
-        let Some(job) = &self.rust().retry_job else {
-            return;
+    /// Forgets the failed rows a complete look shows done anyway, such as
+    /// an update made some other way or a cleanup task that is gone. The
+    /// failure goes too once none of its steps is left.
+    fn settle_failures(mut self: Pin<&mut Self>, cleanup: Option<&CleanupReport>) {
+        let view = self.rust().active_view.clone();
+        let updates = self.rust().updates_view;
+        let packages = &self.rust().packages;
+        let answered = |backend: &str| {
+            !self
+                .rust()
+                .failures
+                .iter()
+                .any(|failure| failure.backend == backend)
         };
-        let operations = job.operations();
-        let settled = !operations.is_empty()
-            && operations.iter().all(|operation| match operation {
-                Operation::Upgrade(id) => !self
-                    .rust()
-                    .packages
-                    .iter()
-                    .any(|p| p.id == *id && p.update == UpdateAvailability::Available),
-                _ => false,
-            });
-        if settled {
-            self.dismiss_notice();
+        let done = |operation: &Operation| match operation {
+            Operation::Clean(id) => cleanup.is_some_and(|report| {
+                answered(&id.backend) && !report.items.iter().any(|item| item.id == *id)
+            }),
+            _ if cleanup.is_some() => false,
+            Operation::Upgrade(id) => {
+                updates
+                    && answered(&id.backend)
+                    && !packages
+                        .iter()
+                        .any(|p| p.id == *id && p.update == UpdateAvailability::Available)
+            }
+            Operation::Install(id) => packages
+                .iter()
+                .any(|p| p.id == *id && p.installed_version.is_some()),
+            Operation::Remove(id) => {
+                view == "Installed"
+                    && answered(&id.backend)
+                    && !packages.iter().any(|p| p.id == *id)
+            }
+            _ => false,
+        };
+        let failed: Vec<_> = self
+            .rust()
+            .failed
+            .iter()
+            .filter(|(operation, _)| !done(operation))
+            .cloned()
+            .collect();
+        let settled = self.rust().retry_job.as_ref().is_some_and(|job| {
+            let operations = job.operations();
+            !operations.is_empty() && operations.iter().all(&done)
+        });
+        if failed.len() != self.rust().failed.len() {
+            self.as_mut().rust_mut().failed = failed;
+            self.as_mut().publish_failed_rows();
         }
+        if settled {
+            self.dismiss_failure();
+        }
+    }
+    fn publish_failed_rows(self: Pin<&mut Self>) {
+        let rows: Vec<Value> = self
+            .rust()
+            .failed
+            .iter()
+            .filter_map(|(operation, reason)| {
+                let target = match operation {
+                    Operation::Clean(id) => {
+                        json!({"source": id.backend, "cleanup_key": id.key})
+                    }
+                    _ => target_row(package_target(operation)?),
+                };
+                Some(json!({"target": target, "reason": reason}))
+            })
+            .collect();
+        self.set_failed_rows(encoded(rows));
+    }
+    /// Which rows this finished change failed on, and why; the ones that
+    /// worked are forgotten.
+    fn remember_failed_rows(
+        mut self: Pin<&mut Self>,
+        job: &Job,
+        result: &Result<Payload, EngineError>,
+    ) {
+        let operations = job.operations();
+        let sudo = self.rust().sudo;
+        let outcomes: Vec<(Operation, Option<String>)> = match result {
+            Err(
+                EngineError::Cancelled
+                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
+            ) => return,
+            Err(error) => operations
+                .into_iter()
+                .map(|operation| {
+                    let reason = write_error_text(error, Some(operation.backend()), sudo);
+                    (operation, Some(reason))
+                })
+                .collect(),
+            // One status line per step, after the summary.
+            Ok(Payload::Batch(status, outcomes)) => operations
+                .into_iter()
+                .zip(outcomes)
+                .zip(status.lines().skip(1).chain(std::iter::repeat("")))
+                .filter_map(|((operation, outcome), line)| match outcome {
+                    Outcome::Finished => Some((operation, None)),
+                    Outcome::Failed => {
+                        let reason = line
+                            .strip_prefix(&format!("{}: ", operation_title(&operation)))
+                            .unwrap_or(line);
+                        Some((operation, Some(batch_status_text(reason, sudo))))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Ok(_) => operations
+                .into_iter()
+                .map(|operation| (operation, None))
+                .collect(),
+        };
+        let mut failed = self.rust().failed.clone();
+        for (operation, reason) in outcomes {
+            if !matches!(
+                operation,
+                Operation::Install(_)
+                    | Operation::Remove(_)
+                    | Operation::Upgrade(_)
+                    | Operation::Clean(_)
+            ) {
+                continue;
+            }
+            failed.retain(|(old, _)| *old != operation);
+            if let Some(reason) = reason {
+                failed.push((operation, reason));
+            }
+        }
+        self.as_mut().rust_mut().failed = failed;
+        self.publish_failed_rows();
     }
     /// The updates the Updates page marks: ones that failed last time, and
     /// casks that need the password. Each still waits at that version.
@@ -4615,9 +4742,18 @@ impl ffi::PackageController {
         };
         self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": available, "failures": failures, "notify": false})));
     }
-    pub fn dismiss_notice(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().retry_job = None;
+    /// Hides the notice. A failure stays in Activity, with its Retry.
+    pub fn dismiss_notice(self: Pin<&mut Self>) {
         self.set_notice("{}".into());
+    }
+    /// Forgets the last failure, its Retry, and the notice still showing it.
+    pub fn dismiss_failure(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().retry_job = None;
+        let notice: Value = serde_json::from_str(&self.notice().to_string()).unwrap_or_default();
+        if notice["kind"] == "error" {
+            self.as_mut().set_notice("{}".into());
+        }
+        self.set_failure("{}".into());
     }
     /// Run again what the banner reports as failed. The change was already
     /// confirmed, and it is reviewed again before it runs, like any other.
@@ -4626,6 +4762,7 @@ impl ffi::PackageController {
             return;
         };
         self.as_mut().set_notice("{}".into());
+        self.as_mut().set_failure("{}".into());
         self.as_mut().accept_confirmed(job);
         self.sync_needs_poll();
     }
@@ -6406,8 +6543,8 @@ impl ffi::PackageController {
                 self.as_mut().set_rows(rows.as_str().into());
                 self.as_mut().set_status(status.as_str().into());
                 self.as_mut().publish_held_updates();
-                if self.rust().updates_view && self.rust().worker.is_none() {
-                    self.clear_settled_failure();
+                if self.rust().worker.is_none() {
+                    self.settle_failures(None);
                 }
             }
             Ok(Payload::Cleanup(mut report)) => {
@@ -6443,6 +6580,8 @@ impl ffi::PackageController {
                 let last_success = self.rust().last_success.clone();
                 self.as_mut().set_report_state(encoded(json!({"phase": if incomplete { if empty { "failed" } else { "partial" } } else { "complete" }, "failures": failures, "last_success": last_success, "checked_at": epoch_seconds()})));
                 let frees: u64 = report.items.iter().filter_map(|item| item.bytes).sum();
+                self.as_mut().rust_mut().failures = report.failures.clone();
+                self.as_mut().settle_failures(Some(&report));
                 self.as_mut().rust_mut().cleanup = report.items;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
@@ -7223,6 +7362,8 @@ impl ffi::PackageController {
                                 self.rust().sudo,
                                 &self.rust().names_for(&job.operations()),
                             ) {
+                                self.as_mut().rust_mut().retry_job = None;
+                                self.as_mut().set_failure(encoded(notice.clone()));
                                 self.as_mut().set_notice(encoded(notice));
                             }
                         }
@@ -7265,7 +7406,15 @@ impl ffi::PackageController {
                                 None
                             };
                             notice["retry"] = json!(retry.is_some());
-                            self.as_mut().rust_mut().retry_job = retry;
+                            // Only a failure replaces the last one, and its Retry.
+                            if notice["kind"] == "error" {
+                                // Only a password refused needs the person now.
+                                notice["urgent"] =
+                                    json!(matches!(&result, Err(error) if is_denied(error)));
+                                self.as_mut().rust_mut().retry_job = retry;
+                                self.as_mut().set_failure(encoded(notice.clone()));
+                            }
+                            self.as_mut().remember_failed_rows(&job, &result);
                             self.as_mut().set_notice(encoded(notice));
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
                                 if let Some(store) = self.rust().activity_store.clone() {
@@ -12845,6 +12994,172 @@ mod tests {
         );
         assert_eq!(notice["title"], "Clean cache (APT) failed");
         assert_eq!(notice["detail"], "Clean cache (APT): disk full");
+    }
+    /// Lets `job` finish with `result`, as its worker would.
+    fn finish_write(
+        controller: &mut Pin<&mut ffi::PackageController>,
+        job: Job,
+        result: Result<Payload, EngineError>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Reply::Done(result)).unwrap();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job,
+        });
+        wait_until(controller, |c| c.rust().worker.is_none());
+    }
+    fn parsed(text: &QString) -> Value {
+        serde_json::from_str(&text.to_string()).unwrap()
+    }
+    #[test]
+    fn a_failed_step_marks_its_row_until_a_later_look_shows_it_done() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let clean = |key: &str| {
+            Operation::Clean(CleanupId {
+                backend: "projects".into(),
+                key: key.into(),
+            })
+        };
+        let (kept, gone) = (clean("worktrees:/code/kept"), clean("worktrees:/code/gone"));
+        let status = format!(
+            "Completed 0 of 2 cleanup tasks.\n{}: Couldn't remove ~/kept: b is busy\n{}: Couldn't remove ~/gone: it is busy",
+            operation_title(&kept),
+            operation_title(&gone)
+        );
+        finish_write(
+            &mut controller,
+            Job::CleanAll(vec![kept.clone(), gone.clone()]),
+            Ok(Payload::Batch(
+                status,
+                vec![Outcome::Failed, Outcome::Failed],
+            )),
+        );
+        let rows = parsed(controller.failed_rows());
+        assert_eq!(
+            rows[0],
+            json!({"target": {"source": "projects", "cleanup_key": "worktrees:/code/kept"},
+                "reason": "Couldn't remove ~/kept: b is busy"})
+        );
+        assert_eq!(rows.as_array().unwrap().len(), 2);
+        let failure = parsed(controller.failure());
+        assert_eq!(failure["kind"], "error");
+        assert_eq!(failure["urgent"], false);
+        assert_eq!(failure["retry"], true);
+        // The toast going away leaves the failure and its Retry.
+        controller.as_mut().dismiss_notice();
+        assert_eq!(controller.notice().to_string(), "{}");
+        assert_ne!(controller.failure().to_string(), "{}");
+        assert!(controller.rust().retry_job.is_some());
+        // Cleaned some other way: its row and, once both are, the failure go.
+        let item = |id: &Operation| CleanupItem {
+            id: match id {
+                Operation::Clean(id) => id.clone(),
+                _ => unreachable!(),
+            },
+            kind: CleanupKind::Worktree,
+            title: "worktrees".into(),
+            summary: String::new(),
+            preview: String::new(),
+            bytes: None,
+        };
+        let look = |controller: &mut Pin<&mut ffi::PackageController>,
+                    items: Vec<CleanupItem>,
+                    failures| {
+            controller
+                .as_mut()
+                .apply(Ok(Payload::Cleanup(CleanupReport { items, failures })));
+        };
+        look(&mut controller, vec![item(&kept)], vec![]);
+        assert_eq!(
+            parsed(controller.failed_rows()).as_array().unwrap().len(),
+            1
+        );
+        assert_ne!(controller.failure().to_string(), "{}");
+        // A source that couldn't be checked tells nothing.
+        look(
+            &mut controller,
+            vec![],
+            vec![BackendFailure {
+                backend: "projects".into(),
+                error: EngineError::NotFound,
+            }],
+        );
+        assert_eq!(
+            parsed(controller.failed_rows()).as_array().unwrap().len(),
+            1
+        );
+        look(&mut controller, vec![], vec![]);
+        assert_eq!(controller.failed_rows().to_string(), "[]");
+        assert_eq!(controller.failure().to_string(), "{}");
+        assert!(controller.rust().retry_job.is_none());
+    }
+    #[test]
+    fn a_refused_password_is_urgent_and_a_step_that_works_clears_its_row() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let package = synthetic_package("htop", "htop");
+        let install = Operation::Install(package.id.clone());
+        finish_write(
+            &mut controller,
+            Job::Write(install.clone(), None),
+            Err(EngineError::Execution(
+                pkgdeck_core::process::ExecutionError::AuthorizationDenied,
+            )),
+        );
+        assert_eq!(parsed(controller.failure())["urgent"], true);
+        let rows = parsed(controller.failed_rows());
+        assert_eq!(rows[0]["target"]["name"], "htop");
+        assert!(!rows[0]["reason"].as_str().unwrap().is_empty());
+        // Another failure replaces it; a later success leaves it alone.
+        finish_write(
+            &mut controller,
+            Job::Write(install.clone(), None),
+            Err(EngineError::NotFound),
+        );
+        assert_eq!(parsed(controller.failure())["urgent"], false);
+        finish_write(
+            &mut controller,
+            Job::Write(Operation::Remove(synthetic_package("vim", "vim").id), None),
+            Ok(Payload::Written(OperationOutcome::default())),
+        );
+        assert_ne!(controller.failure().to_string(), "{}");
+        assert_eq!(
+            parsed(controller.failed_rows()).as_array().unwrap().len(),
+            1
+        );
+        // Installed after all: the row and the failure clear.
+        let mut installed = package.clone();
+        installed.installed_version = Some("1".into());
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport {
+                packages: vec![installed],
+                failures: vec![],
+                successful_sources: vec!["apt".into()],
+            })));
+        assert_eq!(controller.failed_rows().to_string(), "[]");
+        assert_eq!(controller.failure().to_string(), "{}");
+        // Retrying runs it again and forgets the failure.
+        finish_write(
+            &mut controller,
+            Job::Write(install.clone(), None),
+            Err(EngineError::NotFound),
+        );
+        controller.as_mut().retry_change();
+        assert_eq!(controller.failure().to_string(), "{}");
+        // Once it works, its row clears.
+        finish_write(
+            &mut controller,
+            Job::Write(install, None),
+            Ok(Payload::Written(OperationOutcome::default())),
+        );
+        assert_eq!(controller.failed_rows().to_string(), "[]");
     }
     #[test]
     fn a_failed_cleanup_is_named_by_its_row_not_its_key() {

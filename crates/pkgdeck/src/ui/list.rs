@@ -789,6 +789,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     };
     let identity = row.identity();
     let retaining = app.retained.is_some();
+    // Why the last change failed here: it shows in place of the summary.
+    let failed = app.row_failure(&row).map(str::to_owned);
     // An update that failed last time or needs the password.
     let held = (app.page == Page::Updates && row.has_update())
         .then(|| app.held.iter().find(|held| held.matches(&row)).cloned())
@@ -969,7 +971,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         let used = version.size().x;
         let gap = if used > 0.0 { 12.0 } else { 0.0 };
         painter.galley(at, version, version_color);
-        if !row.summary.is_empty() && width - used > 40.0 {
+        if let Some(reason) = failed.as_deref().filter(|_| width - used > 40.0) {
+            let place =
+                Rect::from_min_size(at + vec2(used + gap, 0.0), vec2(width - used - gap, 16.0));
+            failed_summary(ui, &painter, place, reason, id);
+        } else if !row.summary.is_empty() && width - used > 40.0 {
             let summary = one_line(
                 ui,
                 &row.summary,
@@ -1035,18 +1041,24 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     if let Some(s) = cols.summary {
-        let galley = one_line(
-            ui,
-            &row.summary,
-            theme::font(13.0),
-            palette.muted,
-            s.width(),
-        );
-        painter.galley(
-            pos2(s.left(), rect.center().y - galley.size().y / 2.0),
-            galley,
-            palette.muted,
-        );
+        if let Some(reason) = &failed {
+            let place =
+                Rect::from_min_size(pos2(s.left(), rect.center().y - 9.0), vec2(s.width(), 18.0));
+            failed_summary(ui, &painter, place, reason, id);
+        } else {
+            let galley = one_line(
+                ui,
+                &row.summary,
+                theme::font(13.0),
+                palette.muted,
+                s.width(),
+            );
+            painter.galley(
+                pos2(s.left(), rect.center().y - galley.size().y / 2.0),
+                galley,
+                palette.muted,
+            );
+        }
     }
     // Buttons.
     let mut x = cols.actions.right();
@@ -1281,6 +1293,31 @@ fn skeleton_rows(ui: &mut Ui, body: Rect, palette: &Palette) {
             color,
         );
     }
+}
+
+/// A warning mark and why the last change failed on the row, in `place`.
+/// The whole reason shows on hover.
+fn failed_summary(ui: &Ui, painter: &egui::Painter, place: Rect, reason: &str, id: Id) {
+    let palette = Palette::current(ui.ctx());
+    let mark = Rect::from_min_size(
+        pos2(place.left(), place.center().y - 7.0),
+        Vec2::splat(14.0),
+    );
+    theme::paint_icon(painter, mark, "warning", palette.warning);
+    let text = one_line(
+        ui,
+        reason,
+        theme::font(12.5),
+        palette.warning,
+        (place.width() - 20.0).max(0.0),
+    );
+    painter.galley(
+        pos2(place.left() + 20.0, place.center().y - text.size().y / 2.0),
+        text,
+        palette.warning,
+    );
+    ui.interact(place, id.with("failed"), Sense::hover())
+        .on_hover_text(reason);
 }
 
 fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {

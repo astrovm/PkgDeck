@@ -153,6 +153,14 @@ impl Row {
     }
     /// What identifies a row across loads, as the controller reads it back
     /// in `propose_checked`.
+    /// What a failed change names this row by; see `FailedRow::key`.
+    pub fn failure_key(&self) -> String {
+        if self.kind == "cleanup" {
+            cleanup_row_key(&self.source, &self.cleanup_key)
+        } else {
+            self.identity()
+        }
+    }
     pub fn identity(&self) -> String {
         // The same text as `identity_of(&self.identity_value())`, without
         // building a JSON value first: lists ask for it often.
@@ -388,14 +396,42 @@ pub struct Notice {
     pub target: Option<Value>,
     pub undo: bool,
     pub undo_action: String,
+    /// It needs the person now, such as a password refused: a banner,
+    /// not a toast.
+    pub urgent: bool,
+}
+/// `failed_rows`: a row a change failed on, and why.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FailedRow {
+    pub target: Value,
+    pub reason: String,
+}
+impl FailedRow {
+    /// What it matches a row by: the package, or the cleanup task.
+    pub fn key(&self) -> String {
+        match self.target.get("cleanup_key").and_then(Value::as_str) {
+            Some(key) => cleanup_row_key(
+                self.target
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                key,
+            ),
+            None => identity_of_row_value(&self.target),
+        }
+    }
+}
+pub fn cleanup_row_key(source: &str, key: &str) -> String {
+    format!("cleanup\n{source}\n{key}")
 }
 impl Notice {
     pub fn is_empty(&self) -> bool {
         self.title.is_empty() && self.kind.is_empty()
     }
-    /// Success and information go in a toast; the rest in a banner.
+    /// Only what needs the person now is a banner; the rest is a toast.
     pub fn is_toast(&self) -> bool {
-        matches!(self.kind.as_str(), "success" | "info")
+        !self.urgent
     }
     pub fn can_undo(&self) -> bool {
         self.undo
