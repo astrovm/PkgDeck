@@ -60,6 +60,11 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         Family::Glass => (10.0, 0.0, 30.0, 2.0),
         // Aqua: a hairline and the grey title bar.
         Family::Gel => (1.0, 1.0, 23.0, 0.0),
+        // Windows 11: a one pixel edge and a 32 pixel title bar of Mica.
+        Family::Fluent => (1.0, 1.0, 32.0, 0.0),
+        // macOS 27: no edge but a hairline, the lights in a short bar the
+        // sidebar runs up behind.
+        Family::Liquid => (0.0, 0.0, 30.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -247,6 +252,8 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
     let y = bar.center().y;
     match style.family() {
         Family::Modern => vec![],
+        Family::Fluent => super::fluent::captions(bar),
+        Family::Liquid => super::liquid::captions(bar),
         Family::Retro => {
             // 16 by 14, 2 in from the bar: minimize and maximize side by
             // side, close 2 apart.
@@ -324,6 +331,37 @@ pub fn paint_frame(
     let open = !state.maximized;
     match theme::skin().family() {
         Family::Modern => {}
+        Family::Fluent => super::fluent::paint_frame(painter, full, palette, state),
+        Family::Liquid => {
+            painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
+            // The sidebar runs up behind the lights, as far as the page.
+            let sidebar = painter.ctx().data(|data| {
+                data.get_temp::<f32>(Id::new("sidebar-extent"))
+                    .unwrap_or(0.0)
+            });
+            let behind = Rect::from_min_max(
+                full.min,
+                pos2((full.left() + sidebar).min(full.right()), bar.bottom()),
+            );
+            painter.rect_filled(
+                behind,
+                CornerRadius::ZERO,
+                super::skin::sidebar_color(palette),
+            );
+            if !state.maximized {
+                let edge = if state.active {
+                    palette.strong_line
+                } else {
+                    palette.line
+                };
+                painter.rect_stroke(
+                    full,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, edge),
+                    StrokeKind::Inside,
+                );
+            }
+        }
         Family::Retro => {
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
             if open {
@@ -373,6 +411,10 @@ pub fn paint_caption(
     let dark = palette.dark;
     match theme::skin().family() {
         Family::Modern => {}
+        Family::Fluent => {
+            super::fluent::paint_caption(painter, rect, caption, press, palette, state)
+        }
+        Family::Liquid => super::liquid::paint_light(painter, rect, caption, press, dark, state),
         Family::Retro => {
             let face = palette.canvas;
             painter.rect_filled(rect, CornerRadius::ZERO, face);
@@ -471,7 +513,16 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
     let style = theme::skin().family();
     let (from, _) = title_colors(palette, state.active);
     let (font, ink, centered) = match style {
-        Family::Modern => return,
+        Family::Modern | Family::Liquid => return,
+        Family::Fluent => (
+            theme::font(12.0),
+            if state.active {
+                palette.ink
+            } else {
+                palette.muted
+            },
+            false,
+        ),
         Family::Retro => (
             theme::bold(12.0),
             if state.active {
@@ -513,7 +564,12 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         // Windows 7's icon sits 8 pixels in from the window's edge,
         // or the screen's when maximized.
         let glass = style == Family::Glass && bar.left() > 0.5;
-        let left = bar.left() + if glass { -2.0 } else { 4.0 };
+        let left = bar.left()
+            + match style {
+                _ if glass => -2.0,
+                Family::Fluent => 12.0,
+                _ => 4.0,
+            };
         let icon_rect =
             Rect::from_center_size(pos2(left + icon / 2.0, bar.center().y), vec2(icon, icon));
         (
@@ -560,7 +616,14 @@ mod tests {
     use eframe::egui::Shape;
 
     /// Every style but Modern draws its frame.
-    const FRAMED: [Style; 4] = [Style::Retro, Style::Luna, Style::Glass, Style::Aqua];
+    const FRAMED: [Style; 6] = [
+        Style::Retro,
+        Style::Luna,
+        Style::Glass,
+        Style::Aqua,
+        Style::Fluent,
+        Style::Liquid,
+    ];
 
     fn in_style<R>(style: Style, run: impl FnOnce() -> R) -> R {
         let skin = theme::Skin {
@@ -620,7 +683,13 @@ mod tests {
             let metrics = metrics(style).unwrap();
             // Windows 98's 18 is the shortest.
             assert!(metrics.title >= 18.0, "{style:?}");
-            assert!(metrics.side >= 1.0, "{style:?}");
+            // macOS 27 has no border: its sidebar runs to the edge.
+            let border = if style.family() == Family::Liquid {
+                0.0
+            } else {
+                1.0
+            };
+            assert!(metrics.side >= border, "{style:?}");
         }
     }
 
@@ -672,7 +741,7 @@ mod tests {
             let close = at(Caption::Close);
             match style.family() {
                 // Windows closes at the far right.
-                Family::Retro | Family::Luna | Family::Glass => {
+                Family::Retro | Family::Luna | Family::Glass | Family::Fluent => {
                     assert!(close.right() > bar.right() - 8.0, "{style:?}");
                     assert!(close.left() > at(Caption::Maximize).right() - 0.5);
                 }

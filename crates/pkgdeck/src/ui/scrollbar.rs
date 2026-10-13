@@ -651,7 +651,7 @@ fn paint(
     let can_back = parts.scrolled > 0.5;
     let can_forward = parts.scrolled < parts.max - 0.5;
     match family {
-        Family::Modern => {}
+        Family::Modern | Family::Fluent | Family::Liquid => {}
         Family::Retro => retro(
             painter,
             ctx,

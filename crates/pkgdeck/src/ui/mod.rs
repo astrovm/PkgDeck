@@ -5,9 +5,11 @@
 mod activity;
 mod aero;
 mod dialogs;
+mod fluent;
 mod frame;
 mod gel;
 pub mod icons;
+mod liquid;
 mod list;
 mod luna;
 mod page;
@@ -129,6 +131,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         },
         if dragging { 0.0 } else { LAYOUT },
     );
+    // The frame's title bar paints the sidebar's colour that far, where the
+    // sidebar runs up behind the window's buttons.
+    ctx.data_mut(|data| data.insert_temp(Id::new("sidebar-extent"), sidebar_width));
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);

@@ -539,10 +539,15 @@ out of date, and each page refreshes when you open it.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
   - **Aqua**: gel buttons and plain grey title bars, after Mac OS X Tiger.
+  - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
+    on the side and the flat minimise, maximise and close buttons.
+  - **macOS 27**: a sidebar that runs up to the top edge, Liquid Glass
+    traffic lights at the top left and large soft corners.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop.
   - Every style has the same layout. The older ones draw icons in colour,
-    and Aqua stripes its lists in pale blue.
+    and Aqua stripes its lists in pale blue. Windows 11 and macOS 27 are flat
+    like **Modern**.
   - In dark mode, the older styles keep their shapes and their own title
     bar and selection colours, and turn the rest dark: Windows 98's bevels
     on dark grey, XP's blue frame around slate, Media Center's blue for

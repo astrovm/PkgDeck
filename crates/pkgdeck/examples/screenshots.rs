@@ -250,19 +250,22 @@ fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
     harness.render().expect("render")
 }
 
-/// The README's grid: Settings in six looks, three across and two down,
+/// The README's grid: Settings in eight looks, four across and two down,
 /// each shrunk to the same width with a clear gap between them.
 fn themes() {
     use pkgdeck::settings::{Accent, Style};
-    const TILE: u32 = 1000;
+    const TILE: u32 = 800;
     const GAP: u32 = 32;
+    const COLUMNS: u32 = 4;
     let looks = [
         (Style::Modern, true, None),
         (Style::Retro, false, None),
         (Style::Luna, false, None),
+        (Style::Fluent, true, None),
         (Style::Glass, true, Some(Accent::Pink)),
         (Style::Glass, false, None),
         (Style::Aqua, true, None),
+        (Style::Liquid, false, None),
     ];
     let tiles: Vec<image::RgbaImage> = looks
         .into_iter()
@@ -283,9 +286,10 @@ fn themes() {
         })
         .collect();
     let row_height = tiles.iter().map(|tile| tile.height()).max().unwrap();
-    let mut grid = image::RgbaImage::new(3 * TILE + 2 * GAP, 2 * row_height + GAP);
+    let mut grid =
+        image::RgbaImage::new(COLUMNS * TILE + (COLUMNS - 1) * GAP, 2 * row_height + GAP);
     for (index, tile) in tiles.iter().enumerate() {
-        let (column, row) = (index as u32 % 3, index as u32 / 3);
+        let (column, row) = (index as u32 % COLUMNS, index as u32 / COLUMNS);
         image::imageops::replace(
             &mut grid,
             tile,
