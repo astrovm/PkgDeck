@@ -158,6 +158,17 @@ fn progress_measures_bytes_then_steps_then_fractions() {
     };
     assert_eq!(steps.bar(), Some(0.25));
     assert_eq!(steps.count(), "1 of 4");
+    let running = Progress {
+        current: Some(json!({"source": "apt", "name": "a"})),
+        ..steps.clone()
+    };
+    assert_eq!(running.count(), "2 of 4");
+    let by_source = Progress {
+        current_source: Some("apt".into()),
+        done: 4,
+        ..steps.clone()
+    };
+    assert_eq!(by_source.count(), "4 of 4");
     let fraction = Progress {
         total: 1,
         fraction: Some(1.5),
@@ -178,14 +189,11 @@ fn progress_tells_each_row_how_far_it_is() {
         fraction: Some(0.5),
         ..Progress::default()
     };
-    assert_eq!(single.for_row(&identity("a"), "apt"), Some(Some(0.5)));
+    assert_eq!(
+        single.for_row(&identity("a"), "apt"),
+        Some(RowState::Running)
+    );
     assert_eq!(single.for_row(&identity("b"), "apt"), None);
-    let unknown = Progress {
-        targets: vec![id("a")],
-        total: 1,
-        ..Progress::default()
-    };
-    assert_eq!(unknown.for_row(&identity("a"), "apt"), Some(None));
     let batch = Progress {
         targets: vec![id("a"), id("b"), id("c")],
         finished: vec![id("a")],
@@ -195,16 +203,26 @@ fn progress_tells_each_row_how_far_it_is() {
         transfer_total: Some(4),
         ..Progress::default()
     };
-    assert_eq!(batch.for_row(&identity("a"), "apt"), Some(Some(1.0)));
-    assert_eq!(batch.for_row(&identity("b"), "apt"), Some(Some(0.25)));
-    assert_eq!(batch.for_row(&identity("c"), "apt"), Some(Some(0.0)));
+    assert_eq!(batch.for_row(&identity("a"), "apt"), Some(RowState::Done));
+    assert_eq!(
+        batch.for_row(&identity("b"), "apt"),
+        Some(RowState::Running)
+    );
+    assert_eq!(batch.for_row(&identity("c"), "apt"), Some(RowState::Queued));
     let by_source = Progress {
         targets: vec![id("a"), id("b")],
         current_source: Some("apt".into()),
         total: 2,
         ..Progress::default()
     };
-    assert_eq!(by_source.for_row(&identity("a"), "apt"), Some(None));
+    assert_eq!(
+        by_source.for_row(&identity("a"), "apt"),
+        Some(RowState::Running)
+    );
+    assert_eq!(
+        by_source.for_row(&identity("a"), "flatpak"),
+        Some(RowState::Queued)
+    );
 }
 
 #[test]

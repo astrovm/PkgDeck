@@ -473,7 +473,7 @@ impl Progress {
         self.fraction
             .map(|fraction| fraction.clamp(0.0, 1.0) as f32)
     }
-    /// "45%" or "2 of 5".
+    /// "45%" or "2 of 5", the item under way included.
     pub fn count(&self) -> String {
         match self.transfer_total {
             Some(total) if total > 0 => format!(
@@ -482,36 +482,50 @@ impl Progress {
                     .round()
                     .min(100.0)
             ),
-            _ if self.total > 1 => format!("{} of {}", self.done, self.total),
+            // The one being worked on counts: "2 of 5" beside "Updating ripgrep"
+            // when ripgrep is the second.
+            _ if self.total > 1 => {
+                let running = self.current.is_some() || self.current_source.is_some();
+                format!(
+                    "{} of {}",
+                    (self.done + u64::from(running)).min(self.total),
+                    self.total
+                )
+            }
             _ => String::new(),
         }
     }
-    /// A row's own progress: `None` when the row isn't part of the change,
-    /// `Some(None)` when it runs without a known amount.
-    pub fn for_row(&self, identity: &str, source: &str) -> Option<Option<f32>> {
+    /// Where a row stands in the change: `None` when it isn't part of it.
+    /// A lone change is just `Running`; only a batch tells rows apart.
+    pub fn for_row(&self, identity: &str, source: &str) -> Option<RowState> {
         let has = |list: &[Value]| list.iter().any(|id| identity_of_row_value(id) == identity);
         if !has(&self.targets) {
             return None;
         }
         if self.total <= 1 {
-            return Some(self.fraction.map(|f| f as f32).or(self.bar()));
+            return Some(RowState::Running);
         }
         if has(&self.finished) {
-            return Some(Some(1.0));
+            return Some(RowState::Done);
         }
         let running = match &self.current {
             Some(current) => identity_of_row_value(current) == identity,
             None => self.current_source.as_deref() == Some(source),
         };
-        if running {
-            let transfer = match self.transfer_total {
-                Some(total) if total > 0 => Some(self.transferred as f32 / total as f32),
-                _ => None,
-            };
-            return Some(transfer);
-        }
-        Some(Some(0.0))
+        Some(if running {
+            RowState::Running
+        } else {
+            RowState::Queued
+        })
     }
+}
+
+/// A row's part in the running change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowState {
+    Queued,
+    Running,
+    Done,
 }
 
 /// One entry of `activity`.

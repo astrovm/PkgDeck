@@ -595,7 +595,29 @@ fn header(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
         let (font, ink) = skin::heading(&palette);
-        ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
+            if app.page != Page::Settings && app.opened.is_none() {
+                let (line, hover) = list::subtitle(app);
+                ui.horizontal(|ui| {
+                    // The line's place is kept when it is empty, so the
+                    // page doesn't jump when the list appears.
+                    let response = ui.label(
+                        egui::RichText::new(if line.is_empty() { " " } else { &line })
+                            .font(theme::font(13.0))
+                            .color(palette.muted),
+                    );
+                    if let Some(hover) = hover {
+                        response.on_hover_text(hover);
+                    }
+                    let (slot, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    if (app.busy && !app.writing || app.refreshing) && !app.items.is_empty() {
+                        paint_spinner(ui, slot, palette.accent);
+                    }
+                });
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
@@ -677,6 +699,22 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
             if response.clicked() {
                 app.toggle_activity();
+            }
+            if list::list_shown(app) {
+                if !app.busy || app.writing {
+                    if icon_button(ui, "refresh", "Reload (Ctrl+R)", palette.muted, true).clicked()
+                    {
+                        app.reload(true, true);
+                    }
+                } else if Button::new(Look::Flat, "Cancel")
+                    .small()
+                    .icon("cancel")
+                    .icon_only(compact)
+                    .show(ui)
+                    .clicked()
+                {
+                    app.cancel();
+                }
             }
             source_checks_button(app, ui, compact);
             let adoptable = adoptable_appimages(app);
