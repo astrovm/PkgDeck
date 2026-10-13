@@ -789,7 +789,6 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             },
         );
         auto_update_row(app, ui);
-        auto_clean_row(app, ui);
         setting_row(
             ui,
             "Allow updates that remove packages",
@@ -994,6 +993,13 @@ fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
     let mut shown: Vec<model::Source> = catalog
         .iter()
         .filter(|entry| entry.available || entry.check_failed)
+        .filter(|entry| {
+            entry.capabilities.is_empty()
+                || entry
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability != "clean")
+        })
         .cloned()
         .collect();
     shown.sort_by_key(|entry| model::source_name(&entry.source).to_lowercase());
@@ -1009,6 +1015,8 @@ fn clean(app: &mut App, ui: &mut Ui) {
     let before = projects.clone();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     section(ui, "Clean", |ui| {
+        auto_clean_row(app, ui);
+        caption(ui, "Worktrees and old projects");
         let step = project_step(projects.days);
         setting_row(
             ui,
@@ -1053,6 +1061,9 @@ fn clean(app: &mut App, ui: &mut Ui) {
             },
         );
         worktree_protection_row(ui, &mut projects);
+        ui.add_space(4.0);
+        cleanup_choices(app, ui);
+        caption(ui, "Project folders");
         ui.label(egui::RichText::new("Look for projects in").color(palette.muted));
         let mut removed = None;
         for (index, folder) in projects.folders.iter().enumerate() {
@@ -1103,6 +1114,87 @@ fn clean(app: &mut App, ui: &mut Ui) {
         });
     }
     ui.data_mut(|data| data.insert_temp(id, projects));
+}
+
+fn cleanup_choices(app: &mut App, ui: &mut Ui) {
+    let id = Id::new("cleanup-choices-open");
+    let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+    if Button::new(
+        Look::Secondary,
+        if open {
+            "Hide cleanup choices"
+        } else {
+            "Choose what to clean"
+        },
+    )
+    .icon(if open { "up" } else { "down" })
+    .small()
+    .show(ui)
+    .clicked()
+    {
+        ui.data_mut(|data| data.insert_temp(id, !open));
+    }
+    if !open {
+        return;
+    }
+    caption(ui, "Cleanup sources");
+    let sources: Vec<_> = app
+        .catalog
+        .iter()
+        .filter(|source| {
+            (source.available || source.check_failed)
+                && source
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "clean")
+        })
+        .cloned()
+        .collect();
+    for source in sources {
+        setting_row(ui, model::source_name(&source.source), "", SWITCH, |ui| {
+            let mut on = !app
+                .settings
+                .cleanup
+                .disabled_sources
+                .contains(&source.source);
+            if switch(
+                ui,
+                &mut on,
+                !app.writing,
+                &format!("Clean {}", model::source_name(&source.source)),
+            )
+            .changed()
+            {
+                app.set_cleanup_source_enabled(&source.source, on);
+            }
+        });
+    }
+    caption(ui, "Developer caches");
+    ui.label(
+        egui::RichText::new("Remembered for Clean all and automatic cleaning")
+            .color(Palette::current(ui.ctx()).muted),
+    );
+    let choices = pkgdeck_core::backends::developer_cleanup_choices(Host::current());
+    for (id, title) in choices {
+        setting_row(
+            ui,
+            title,
+            if id.key == "sccache" {
+                "Manages its own size limit. Cleaning it makes builds slower"
+            } else {
+                ""
+            },
+            SWITCH,
+            |ui| {
+                let mut on = !app.settings.cleanup.excluded.contains(&id);
+                let enabled = !app.settings.cleanup.disabled_sources.contains(&id.backend);
+                if switch(ui, &mut on, enabled, &format!("Include {title} in cleanup")).changed() {
+                    app.settings.cleanup.set_included(id, on);
+                    app.sync_cleanup_preferences();
+                }
+            },
+        );
+    }
 }
 
 fn worktree_protection_row(ui: &mut Ui, projects: &mut ProjectSettings) {

@@ -208,12 +208,17 @@ that failed are shown separately.
   you reinstall downloads again. Both ask for your password when they run.
 
 Select cleanup tasks with their checkboxes, then choose **Clean selected**.
+Choices are remembered for future batches and automatic cleaning. sccache is
+unchecked by default because it manages its own size limit.
 Its button shows the space those tasks free. **Select all** and **Select none**
 work like on Updates. Volumes are cleaned individually.
 
 ### Clean settings
 
 - **Old projects**: how long a project must stay untouched. A week by default.
+- **Clean caches automatically**: independent of automatic updates.
+- **Choose what to clean**: cleanup sources and individual developer caches,
+  with separate choices from package and update sources.
 - **Clean finished worktrees automatically**: off by default. When enabled,
   cleans finished, old worktrees once a day after a background check. Needs
   **Background checks**, and works independently of automatic cache cleaning.
@@ -229,7 +234,7 @@ work like on Updates. Volumes are cleaned individually.
 
 ### Clean caches automatically
 
-Turn on **Clean caches automatically** in Settings. It needs **Background
+Turn on **Clean caches automatically** under **Clean** in Settings. It needs **Background
 checks**.
 
 - At most once a day, after a background check.

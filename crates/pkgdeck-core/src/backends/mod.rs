@@ -44,6 +44,11 @@ pub use mas::MacAppStore;
 pub use nix::Nix;
 pub use oh_my_zsh::OhMyZsh;
 pub use pixi::Pixi;
+/// Developer cache choices, available even when a cache is currently empty.
+pub fn developer_cleanup_choices(host: Host) -> Vec<(CleanupId, &'static str)> {
+    dev_caches::DevCaches::new(host).choices()
+}
+
 pub use projects::{ProjectSettings, WorktreeProtection};
 pub use rustup::Rustup;
 use serde::Deserialize;

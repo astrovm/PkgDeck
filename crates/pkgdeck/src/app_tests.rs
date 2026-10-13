@@ -1126,3 +1126,36 @@ fn the_tray_is_idle_only_with_nothing_running_or_waiting() {
     app.c().set_confirmation(QString::default());
     assert!(app.idle());
 }
+
+#[test]
+fn cleanup_choices_survive_navigation_and_do_not_change_update_sources() {
+    let mut app = app();
+    app.catalog = serde_json::from_value(json!([
+        {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
+        {"source":"dev-caches", "available":true, "capabilities":["clean"]}
+    ]))
+    .unwrap();
+    app.enabled = ["apt".into()].into();
+    assert!(app.effective_sources(Page::Clean).contains("dev-caches"));
+    assert!(!app.effective_sources(Page::Updates).contains("dev-caches"));
+    let row: Row = serde_json::from_value(json!({"kind":"cleanup", "source":"dev-caches", "name":"Compiler cache", "cleanup_key":"sccache", "cleanup_kind":"package_cache"})).unwrap();
+    assert!(!app.row_checked(&row));
+    app.set_row_checked(&row, true);
+    assert!(app.row_checked(&row));
+    app.set_row_checked(&row, false);
+    app.unchecked.clear();
+    assert!(!app.row_checked(&row));
+    let saved = serde_json::to_string(&app.settings).unwrap();
+    app.settings = serde_json::from_str(&saved).unwrap();
+    assert!(!app.row_checked(&row));
+    app.set_cleanup_source_enabled("apt", false);
+    assert!(!app.effective_sources(Page::Clean).contains("apt"));
+    assert!(app.effective_sources(Page::Updates).contains("apt"));
+    app.set_cleanup_source_enabled("dev-caches", false);
+    assert_eq!(app.sources_csv(Page::Clean), "__none__");
+    app.set_cleanup_source_enabled("dev-caches", true);
+    assert_eq!(app.sources_csv(Page::Clean), "dev-caches");
+    assert!(!app.row_checked(&row));
+    app.set_cleanup_source_enabled("apt", true);
+    assert_eq!(app.sources_csv(Page::Clean), "");
+}

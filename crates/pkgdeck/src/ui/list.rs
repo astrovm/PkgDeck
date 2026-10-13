@@ -345,13 +345,9 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             .filter_map(|i| rows.get(i.raw))
             .filter(|row| app.page != Page::Clean || row.batch_cleanable())
             .collect();
-        let all_checked = !selectable.is_empty()
-            && selectable
-                .iter()
-                .all(|row| !app.unchecked.contains(&row.check_identity()));
-        let none_checked = selectable
-            .iter()
-            .all(|row| app.unchecked.contains(&row.check_identity()));
+        let all_checked =
+            !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
+        let none_checked = selectable.iter().all(|row| !app.row_checked(row));
         let id = Id::new("tick-all");
         let response = ui
             .interact(
@@ -366,12 +362,18 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
                 "Select all"
             });
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
+            let mut info = egui::WidgetInfo::selected(
                 egui::WidgetType::Checkbox,
                 !selectable.is_empty(),
                 all_checked,
                 "Select all tasks",
-            )
+            );
+            info.selected = if !all_checked && !none_checked {
+                None
+            } else {
+                Some(all_checked)
+            };
+            info
         });
         paint_tick(
             ui,
@@ -382,16 +384,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             response.hovered(),
         );
         if response.clicked() {
-            if all_checked {
-                let rows = app.shown_rows();
-                app.unchecked = app
-                    .items
-                    .iter()
-                    .map(|i| rows[i.raw].check_identity())
-                    .collect();
-            } else {
-                app.unchecked.clear();
-            }
+            app.set_all_checked(!all_checked);
         }
     }
     // The older styles draw each heading as a cell of a header bar.
@@ -893,9 +886,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
 
     // Checkboxes on Updates and Clean. Data tasks are cleaned individually.
     if let Some(tick) = cols.tick {
-        let check_id = row.check_identity();
         let enabled = app.page != Page::Clean || row.batch_cleanable();
-        let checked = enabled && !app.unchecked.contains(&check_id);
+        let checked = enabled && app.row_checked(&row);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
         let response = ui
             .interact(tick_rect, id.with("tick"), Sense::click())
@@ -910,11 +902,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         });
         paint_tick(ui, tick_rect, id, checked, enabled, response.hovered());
         if enabled && response.clicked() {
-            if checked {
-                app.unchecked.insert(check_id);
-            } else {
-                app.unchecked.remove(&check_id);
-            }
+            app.set_row_checked(&row, !checked);
         }
     }
     // Icon.

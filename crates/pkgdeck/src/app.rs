@@ -346,6 +346,7 @@ impl App {
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
         self.c().set_auto_clean_worktrees(worktrees);
+        self.sync_cleanup_preferences();
     }
 
     pub fn save_settings(&mut self) {
@@ -935,9 +936,80 @@ impl App {
         }
     }
 
+    pub fn enabled_cleanup_sources(&self) -> HashSet<String> {
+        all_sources(&self.catalog)
+            .into_iter()
+            .filter(|id| !self.settings.cleanup.disabled_sources.contains(id))
+            .collect()
+    }
+    pub fn set_cleanup_source_enabled(&mut self, id: &str, enabled: bool) {
+        self.settings
+            .cleanup
+            .disabled_sources
+            .retain(|source| source != id);
+        if !enabled {
+            self.settings.cleanup.disabled_sources.push(id.to_owned());
+        }
+        self.sync_cleanup_preferences();
+        self.page_sources.remove(&Page::Clean);
+        if self.page == Page::Clean {
+            self.reload(false, false);
+        }
+    }
+    pub fn sync_cleanup_preferences(&mut self) {
+        let json = serde_json::to_string(&self.settings.cleanup).unwrap_or_default();
+        self.c().set_cleanup_preferences(json.into());
+    }
+    pub fn row_checked(&self, row: &Row) -> bool {
+        if row.kind == "cleanup" {
+            row.batch_cleanable()
+                && self
+                    .settings
+                    .cleanup
+                    .includes(&pkgdeck_core::package::CleanupId {
+                        backend: row.source.clone(),
+                        key: row.cleanup_key.clone(),
+                    })
+        } else {
+            !self.unchecked.contains(&row.check_identity())
+        }
+    }
+    pub fn set_row_checked(&mut self, row: &Row, checked: bool) {
+        if row.kind == "cleanup" {
+            self.settings.cleanup.set_included(
+                pkgdeck_core::package::CleanupId {
+                    backend: row.source.clone(),
+                    key: row.cleanup_key.clone(),
+                },
+                checked,
+            );
+            self.sync_cleanup_preferences();
+        } else if checked {
+            self.unchecked.remove(&row.check_identity());
+        } else {
+            self.unchecked.insert(row.check_identity());
+        }
+    }
+    pub fn set_all_checked(&mut self, checked: bool) {
+        let rows: Vec<_> = self
+            .items
+            .iter()
+            .filter_map(|item| self.shown_rows().get(item.raw))
+            .filter(|row| self.page != Page::Clean || row.batch_cleanable())
+            .cloned()
+            .collect();
+        for row in rows {
+            self.set_row_checked(&row, checked);
+        }
+    }
+
     /// The sources this page reads.
     pub fn effective_sources(&self, page: Page) -> HashSet<String> {
-        let enabled = self.enabled_sources();
+        let enabled = if page == Page::Clean {
+            self.enabled_cleanup_sources()
+        } else {
+            self.enabled_sources()
+        };
         match self.page_sources.get(&page) {
             Some(chosen) => chosen.intersection(&enabled).cloned().collect(),
             None => enabled,
@@ -945,7 +1017,12 @@ impl App {
     }
 
     fn sources_csv(&self, page: Page) -> String {
-        if self.enabled.is_empty() && !self.page_sources.contains_key(&page) {
+        if (if page == Page::Clean {
+            self.settings.cleanup.disabled_sources.is_empty()
+        } else {
+            self.enabled.is_empty()
+        }) && !self.page_sources.contains_key(&page)
+        {
             return String::new();
         }
         let sources = self.effective_sources(page);
@@ -954,7 +1031,11 @@ impl App {
             .filter(|id| sources.contains(id))
             .collect();
         list.dedup();
-        list.join(",")
+        if list.is_empty() && page == Page::Clean {
+            "__none__".into()
+        } else {
+            list.join(",")
+        }
     }
 
     pub fn available(&self, id: &str) -> bool {
@@ -1000,7 +1081,7 @@ impl App {
 
     pub fn set_page_sources(&mut self, page: Page, sources: HashSet<String>) {
         let all: HashSet<String> = self
-            .enabled_sources()
+            .effective_sources(page)
             .into_iter()
             .filter(|id| self.usable(id, page))
             .collect();
@@ -1556,7 +1637,7 @@ impl App {
             .items
             .iter()
             .filter_map(|item| rows.get(item.raw))
-            .filter(|row| row.batch_cleanable() && !self.unchecked.contains(&row.check_identity()))
+            .filter(|row| row.batch_cleanable() && self.row_checked(row))
             .collect();
         if checked.is_empty() {
             return;

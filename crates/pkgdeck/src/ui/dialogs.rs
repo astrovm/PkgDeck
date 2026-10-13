@@ -899,11 +899,14 @@ fn apply_picker(app: &mut App, page: Page) {
 pub fn clear_filter(app: &mut App) {
     let page = app.page;
     app.ui.picker_duplicates = false;
-    app.ui.picker_draft = app
-        .enabled_sources()
-        .into_iter()
-        .filter(|id| app.usable(id, page))
-        .collect();
+    app.ui.picker_draft = (if page == Page::Clean {
+        app.enabled_cleanup_sources()
+    } else {
+        app.enabled_sources()
+    })
+    .into_iter()
+    .filter(|id| app.usable(id, page))
+    .collect();
     if page == Page::Installed && app.duplicates_only {
         app.duplicates_only = false;
         app.invalidate();
@@ -1048,7 +1051,11 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                         ui.separator();
                     }
                     let search = app.ui.picker_search.trim().to_lowercase();
-                    let enabled = app.enabled_sources();
+                    let enabled = if page == Page::Clean {
+                        app.enabled_cleanup_sources()
+                    } else {
+                        app.enabled_sources()
+                    };
                     let ids = model::all_sources(&app.catalog);
                     super::scrollbar::vertical()
                         // Full width, so the bar sits on the card's edge.

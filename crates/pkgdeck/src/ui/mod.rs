@@ -1097,7 +1097,7 @@ fn clean_all_frees(app: &App) -> u64 {
     app.items
         .iter()
         .filter_map(|item| rows.get(item.raw))
-        .filter(|row| row.batch_cleanable() && !app.unchecked.contains(&row.check_identity()))
+        .filter(|row| row.batch_cleanable() && app.row_checked(row))
         .filter_map(|row| row.bytes)
         .sum()
 }
@@ -1205,13 +1205,10 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 .iter()
                 .filter_map(|item| rows.get(item.raw))
                 .filter(|row| row.batch_cleanable())
-                .map(|row| row.check_identity())
+                .map(|row| app.row_checked(row))
                 .collect();
             let total = selectable.len();
-            let selected = selectable
-                .iter()
-                .filter(|identity| !app.unchecked.contains(*identity))
-                .count();
+            let selected = selectable.iter().filter(|checked| **checked).count();
             let bytes = clean_all_frees(app);
             let action = if selected == total {
                 "Clean all"
@@ -1240,7 +1237,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     .show(ui)
                     .clicked()
             {
-                app.unchecked.clear();
+                app.set_all_checked(true);
             }
             if selected > 0
                 && Button::new(Look::Secondary, "Select none")
@@ -1249,7 +1246,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     .show(ui)
                     .clicked()
             {
-                app.unchecked = selectable.into_iter().collect();
+                app.set_all_checked(false);
             }
         }
         _ => {}

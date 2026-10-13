@@ -241,6 +241,7 @@ enum Job {
     AutoClean {
         caches: bool,
         worktrees: bool,
+        preferences: CleanupPreferences,
     },
     CleanAll(Vec<Operation>),
     /// Download the latest package lists of several sources, one after
@@ -912,12 +913,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
-        Job::AutoClean { caches, worktrees } => {
+        Job::AutoClean { caches, worktrees, preferences } => {
             let items: Vec<_> = engine
                 .cleanup(cancel)
                 .items
                 .into_iter()
-                .filter(|item| (caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects"))
+                .filter(|item| preferences.includes(&item.id) && ((caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects")))
                 .collect();
             let operations: Vec<_> = items
                 .iter()
@@ -1494,6 +1495,7 @@ pub struct Controller {
     /// Clean once a day after a background check.
     auto_clean: bool,
     auto_clean_worktrees: bool,
+    cleanup_preferences: CleanupPreferences,
     /// When automatic cleaning last ran, in seconds since 1970.
     auto_cleaned_at: u64,
     /// A window shows the sections; see `set_window_open`.
@@ -1629,6 +1631,7 @@ impl Default for Controller {
             allow_removals: true,
             auto_clean: false,
             auto_clean_worktrees: false,
+            cleanup_preferences: CleanupPreferences::default(),
             auto_cleaned_at: 0,
             source_filter: Vec::new(),
             window_open: true,
@@ -1890,7 +1893,7 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
-        Job::OpenInput(_) | Job::ImportRepository(_) => vec![],
+        Job::OpenInput(_) | Job::ImportRepository(_) | Job::AutoClean { .. } => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::RetryFailedUpdates(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
@@ -4144,6 +4147,11 @@ impl ffi::PackageController {
     pub fn set_auto_clean_worktrees(mut self: Pin<&mut Self>, enabled: bool) {
         self.as_mut().rust_mut().auto_clean_worktrees = enabled;
     }
+    pub fn set_cleanup_preferences(mut self: Pin<&mut Self>, preferences: QString) {
+        if let Ok(preferences) = serde_json::from_str(&preferences.to_string()) {
+            self.as_mut().rust_mut().cleanup_preferences = preferences;
+        }
+    }
     pub fn auto_clean_worktrees(&self) -> bool {
         self.rust().auto_clean_worktrees
     }
@@ -4169,6 +4177,7 @@ impl ffi::PackageController {
         let job = Job::AutoClean {
             caches: rust.auto_clean,
             worktrees: rust.auto_clean_worktrees,
+            preferences: rust.cleanup_preferences.clone(),
         };
         self.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
             job,
@@ -5792,7 +5801,11 @@ impl ffi::PackageController {
         let cleanup = self.rust().cleanup.clone();
         let items: Vec<_> = cleanup
             .iter()
-            .filter(|item| item.kind.in_clean_all() && wanted.contains(&item.id))
+            .filter(|item| {
+                item.kind.in_clean_all()
+                    && wanted.contains(&item.id)
+                    && self.rust().cleanup_preferences.includes(&item.id)
+            })
             .collect();
         if items.is_empty() {
             self.as_mut().set_confirmation(QString::default());
@@ -17205,6 +17218,7 @@ mod tests {
             Job::AutoClean {
                 caches: true,
                 worktrees: false,
+                preferences: CleanupPreferences::default(),
             },
             &Cancellation::default(),
         );
@@ -17237,7 +17251,8 @@ mod tests {
                 &mut idle,
                 Job::AutoClean {
                     caches: true,
-                    worktrees: false
+                    worktrees: false,
+                    preferences: CleanupPreferences::default()
                 },
                 &Cancellation::default()
             )
@@ -17251,12 +17266,14 @@ mod tests {
         assert_eq!(ran.lock().unwrap().len(), 3);
         assert!(Job::AutoClean {
             caches: true,
-            worktrees: false
+            worktrees: false,
+            preferences: CleanupPreferences::default()
         }
         .writes());
         assert!(Job::AutoClean {
             caches: true,
-            worktrees: false
+            worktrees: false,
+            preferences: CleanupPreferences::default()
         }
         .operations()
         .is_empty());
@@ -17282,7 +17299,11 @@ mod tests {
                 }
                 let replies = run_job(
                     &mut engine,
-                    Job::AutoClean { caches, worktrees },
+                    Job::AutoClean {
+                        caches,
+                        worktrees,
+                        preferences: CleanupPreferences::default(),
+                    },
                     &Cancellation::default(),
                 );
                 let cleaned = usize::from(caches) * 2 + usize::from(worktrees);
@@ -17337,6 +17358,126 @@ mod tests {
             controller.as_mut().propose_clean_checked(input.into());
             assert!(controller.rust().pending.is_none());
             assert!(controller.confirmation().to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn excluded_tasks_and_sources_never_run_automatically_or_in_batches() {
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut engine = Engine::default();
+        let items = vec![
+            sized("dev-caches", "sccache", CleanupKind::PackageCache, Some(10)),
+            sized("dev-caches", "cargo", CleanupKind::PackageCache, Some(20)),
+        ];
+        engine
+            .register(Cleaner {
+                backend: "dev-caches",
+                items: items.clone(),
+                ran: ran.clone(),
+            })
+            .unwrap();
+        let preferences = CleanupPreferences::default();
+        run_job(
+            &mut engine,
+            Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences: preferences.clone(),
+            },
+            &Cancellation::default(),
+        );
+        assert_eq!(*ran.lock().unwrap(), vec!["cargo"]);
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: items.clone(),
+                failures: vec![],
+            })));
+        let ids =
+            serde_json::to_string(&items.iter().map(|item| item.id.clone()).collect::<Vec<_>>())
+                .unwrap();
+        controller
+            .as_mut()
+            .propose_clean_checked(ids.as_str().into());
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::CleanAll(ops)) if ops == &vec![Operation::Clean(items[1].id.clone())])
+        );
+        let preferences = CleanupPreferences {
+            disabled_sources: vec!["dev-caches".into()],
+            ..preferences
+        };
+        controller
+            .as_mut()
+            .set_cleanup_preferences(serde_json::to_string(&preferences).unwrap().into());
+        controller
+            .as_mut()
+            .set_cleanup_preferences("bad json".into());
+        controller
+            .as_mut()
+            .propose_clean_checked(ids.as_str().into());
+        assert!(controller.rust().pending.is_none());
+        ran.lock().unwrap().clear();
+        run_job(
+            &mut engine,
+            Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences,
+            },
+            &Cancellation::default(),
+        );
+        assert!(ran.lock().unwrap().is_empty());
+        assert!(engine_source(
+            &Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences: CleanupPreferences::default()
+            },
+            &["apt".into()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn worktree_only_cleaning_respects_interval_power_and_pending_work() {
+        for case in 0..5 {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            assert!(!controller.auto_clean_worktrees());
+            controller.as_mut().set_auto_clean_worktrees(true);
+            assert!(controller.auto_clean_worktrees());
+            controller.as_mut().rust_mut().natives.hold = never_hold;
+            let now = epoch_seconds();
+            controller
+                .as_mut()
+                .set_auto_clean(false, now - 25 * 60 * 60);
+            match case {
+                0 => {}
+                1 => controller
+                    .as_mut()
+                    .set_auto_clean(false, now - 23 * 60 * 60),
+                2 => controller.as_mut().rust_mut().natives.hold = on_battery,
+                3 => controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![])),
+                _ => controller.as_mut().set_auto_clean_worktrees(false),
+            }
+            controller.as_mut().schedule_auto_clean();
+            let scheduled = controller
+                .rust()
+                .validated_confirmed
+                .as_ref()
+                .is_some_and(|entry| {
+                    matches!(
+                        entry.job,
+                        Job::AutoClean {
+                            caches: false,
+                            worktrees: true,
+                            ..
+                        }
+                    )
+                });
+            assert_eq!(scheduled, case == 0, "case {case}");
         }
     }
 

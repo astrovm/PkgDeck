@@ -1163,6 +1163,7 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     assert!(harness.query_by_label("Clean all (3 MB)").is_some());
     assert!(harness
         .get_by_role_and_label(Role::CheckBox, "Select Volume")
+        .accesskit_node()
         .is_disabled());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
     assert!(harness.query_by_label("Clean all (3 MB)").is_none());
@@ -1186,4 +1187,49 @@ fn automatic_worktree_cleanup_can_be_enabled_independently_of_caches() {
         "Clean finished worktrees automatically",
     );
     assert!(!harness.state().1.settings.auto_clean_worktrees);
+}
+
+#[test]
+fn cleanup_settings_have_their_own_sources_and_sccache_choice() {
+    let mut app = app();
+    app.page = Page::Settings;
+    app.catalog = serde_json::from_value(json!([
+        {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
+        {"source":"dev-caches", "available":true, "capabilities":["clean"]},
+        {"source":"projects", "available":true, "capabilities":["clean"]}
+    ]))
+    .unwrap();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_role_and_label(Role::CheckBox, "Developer caches")
+        .is_none());
+    click_in_view(&mut harness, None, "Choose what to clean");
+    click_in_view(&mut harness, Some(Role::CheckBox), "Clean APT");
+    assert!(!harness
+        .state()
+        .1
+        .effective_sources(Page::Clean)
+        .contains("apt"));
+    assert!(harness
+        .state()
+        .1
+        .effective_sources(Page::Updates)
+        .contains("apt"));
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Include sccache compiler cache in cleanup",
+    );
+    let id = pkgdeck_core::package::CleanupId {
+        backend: "dev-caches".into(),
+        key: "sccache".into(),
+    };
+    assert!(harness.state().1.settings.cleanup.includes(&id));
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Include sccache compiler cache in cleanup",
+    );
+    assert!(!harness.state().1.settings.cleanup.includes(&id));
 }
