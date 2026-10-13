@@ -122,6 +122,65 @@ fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
 }
 
 #[test]
+fn a_failed_row_says_why_until_the_controller_forgets_it() {
+    let mut app = app();
+    app.page = Page::Clean;
+    rows(
+        &mut app,
+        json!([
+            {"kind": "cleanup", "name": "a worktrees", "source": "projects", "cleanup_key": "worktrees:/a"},
+            {"kind": "cleanup", "name": "b worktrees", "source": "projects", "cleanup_key": "worktrees:/b"},
+        ]),
+    );
+    app.c().set_failed_rows(
+        json!([{"target": {"source": "projects", "cleanup_key": "worktrees:/a"}, "reason": "b is busy"}])
+            .to_string()
+            .into(),
+    );
+    app.react();
+    assert_eq!(app.row_failure(&app.rows[0]), Some("b is busy"));
+    assert_eq!(app.row_failure(&app.rows[1]), None);
+    app.c().set_failed_rows("[]".into());
+    app.react();
+    assert_eq!(app.row_failure(&app.rows[0]), None);
+}
+
+#[test]
+fn another_section_never_shows_the_rows_of_the_one_left() {
+    for (from, to) in [
+        (Page::Installed, Page::Updates),
+        (Page::Updates, Page::Installed),
+        (Page::Installed, Page::Clean),
+        (Page::Installed, Page::Search),
+    ] {
+        let mut app = app();
+        app.page = from;
+        rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+        assert_eq!(app.shown_rows().len(), 2);
+        // Something still loads, so the new section waits for its rows.
+        app.c().set_busy(true);
+        app.react();
+        if to == Page::Search {
+            app.query = "a".into();
+        }
+        app.open_page(to);
+        app.react();
+        assert!(
+            app.retained.is_none(),
+            "{from:?} -> {to:?} kept the rows it left"
+        );
+        // Its own first rows are shown, even fewer than the old page had.
+        rows(&mut app, json!([row("c", json!({"update": "available"}))]));
+        let shown: Vec<_> = app
+            .shown_rows()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
+        assert_eq!(shown, ["c"], "{from:?} -> {to:?}");
+    }
+}
+
+#[test]
 fn rows_stay_on_screen_while_the_same_list_reloads() {
     let mut app = app();
     app.page = Page::Installed;
@@ -256,14 +315,54 @@ fn notices_become_toasts_banners_and_undo() {
     app.tick(Instant::now() + Duration::from_secs(6));
     assert!(app.toast.is_none());
     assert!(app.notice.is_empty());
-    // An error is a banner, not a toast; clearing it clears a notice toast.
+    // A failure is a calm toast whose Details opens Activity, which keeps it.
+    app.c().set_failure(
+        json!({"kind": "error", "title": "Failed", "retry": true})
+            .to_string()
+            .into(),
+    );
     app.c().set_notice(
         json!({"kind": "error", "title": "Failed"})
             .to_string()
             .into(),
     );
     app.react();
+    let toast = app.toast.clone().unwrap();
+    assert_eq!(
+        (toast.tone, toast.action, toast.lasts),
+        (
+            Tone::Warning,
+            Some(ToastAction::Details),
+            Duration::from_secs(8)
+        )
+    );
+    assert!(app.failure_unseen);
+    app.toast_action(ToastAction::Details);
+    assert!(app.drawer_open && !app.failure_unseen);
+    assert!(app.toast.is_none() && app.notice.is_empty());
+    assert_eq!(app.failure.title, "Failed");
+    // Seen with Activity open, it raises no dot.
+    app.c().set_failure(
+        json!({"kind": "error", "title": "Again"})
+            .to_string()
+            .into(),
+    );
+    app.react();
+    assert!(!app.failure_unseen);
+    app.toggle_activity();
+    app.c().set_failure("{}".into());
+    app.react();
+    assert!(app.failure.is_empty() && !app.failure_unseen);
+    // Only what needs the person now is a banner, and only on its page.
+    app.c().set_notice(
+        json!({"kind": "error", "title": "Denied", "urgent": true})
+            .to_string()
+            .into(),
+    );
+    app.react();
     assert!(app.toast.is_none());
+    assert_eq!(app.notice_page, Page::Installed);
+    // Clearing a notice clears its toast.
     app.toast = Some(Toast {
         text: "x".into(),
         tone: Tone::Success,

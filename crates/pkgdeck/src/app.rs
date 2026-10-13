@@ -47,6 +47,8 @@ pub struct Toast {
 pub enum ToastAction {
     Undo,
     Restart,
+    /// Opens Activity, where the failure waits with its Retry.
+    Details,
 }
 
 /// How the window asked to be launched.
@@ -116,6 +118,8 @@ pub struct App {
     parsed: Vec<(u64, Vec<Row>)>,
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
+    /// The page `rows` were loaded for. Another page never keeps them.
+    pub rows_page: Option<Page>,
     pub selected: Option<String>,
     /// Where the selection was last found in `items`.
     selected_hint: std::cell::Cell<usize>,
@@ -140,6 +144,14 @@ pub struct App {
     pub toast: Option<Toast>,
     pub restart_toast: Option<Toast>,
     pub drawer_open: bool,
+    /// The last change that failed, as Activity shows it.
+    pub failure: model::Notice,
+    /// A failure Activity holds that nobody looked at yet.
+    pub failure_unseen: bool,
+    /// The page an urgent notice came from; only that page shows it.
+    pub notice_page: Page,
+    /// Why a change failed on a row, by `Row::failure_key`.
+    pub failed_rows: HashMap<String, String>,
     pub expanded: HashSet<u64>,
     pub scope_choices: HashMap<String, String>,
     pub details_loaded: Instant,
@@ -203,6 +215,8 @@ impl App {
             on_rows_changed: "rows",
             on_details_changed: "details",
             on_notice_changed: "notice",
+            on_failure_changed: "failure",
+            on_failed_rows_changed: "failed_rows",
             on_progress_changed: "progress",
             on_repositories_changed: "repositories",
             on_source_catalog_changed: "source_catalog",
@@ -269,6 +283,7 @@ impl App {
             items_stale: true,
             parsed: vec![],
             retained: None,
+            rows_page: None,
             selected: None,
             selected_hint: Default::default(),
             selected_group: None,
@@ -288,6 +303,10 @@ impl App {
             toast: None,
             restart_toast: None,
             drawer_open: false,
+            failure: model::Notice::default(),
+            failure_unseen: false,
+            notice_page: Page::Search,
+            failed_rows: HashMap::new(),
             expanded: HashSet::new(),
             scope_choices,
             details_loaded: now,
@@ -536,6 +555,7 @@ impl App {
                     self.retained = None;
                 }
                 self.rows = rows;
+                self.rows_page = Some(self.page);
                 if !self.writing {
                     self.flash_changed_rows();
                 }
@@ -557,7 +577,20 @@ impl App {
         }
         if has("notice") {
             self.notice = model::parse(self.ctl.notice().as_str());
+            self.notice_page = self.page;
             self.show_notice();
+        }
+        if has("failure") {
+            let failure: model::Notice = model::parse(self.ctl.failure().as_str());
+            self.failure_unseen = !failure.is_empty() && !self.drawer_open;
+            self.failure = failure;
+        }
+        if has("failed_rows") {
+            let rows: Vec<model::FailedRow> = model::parse(self.ctl.failed_rows().as_str());
+            self.failed_rows = rows
+                .into_iter()
+                .map(|row| (row.key(), row.reason))
+                .collect();
         }
         if has("busy") && was_busy && !self.busy {
             self.opening = self.opening && self.confirmation.is_some();
@@ -792,16 +825,23 @@ impl App {
             return;
         }
         if self.notice.is_toast() {
+            // A failure says so calmly, a little longer, and Details opens
+            // Activity, which keeps it.
+            let failed = self.notice.kind == "error";
             self.toast = Some(Toast {
                 text: self.notice.title.clone(),
-                tone: if self.notice.kind == "success" {
-                    Tone::Success
-                } else {
-                    Tone::Accent
+                tone: match self.notice.kind.as_str() {
+                    "success" => Tone::Success,
+                    "error" => Tone::Warning,
+                    _ => Tone::Accent,
                 },
-                action: self.notice.can_undo().then_some(ToastAction::Undo),
+                action: if failed {
+                    Some(ToastAction::Details)
+                } else {
+                    self.notice.can_undo().then_some(ToastAction::Undo)
+                },
                 shown: Instant::now(),
-                lasts: Duration::from_secs(5),
+                lasts: Duration::from_secs(if failed { 8 } else { 5 }),
                 from_notice: true,
             });
         }
@@ -822,6 +862,24 @@ impl App {
         {
             self.restart_toast = None;
         }
+    }
+
+    /// Opens or closes Activity. Opening it shows any failure it holds.
+    pub fn toggle_activity(&mut self) {
+        self.drawer_open = !self.drawer_open;
+        if self.drawer_open {
+            self.failure_unseen = false;
+            self.c().refresh_activity();
+            self.react();
+        }
+    }
+
+    /// Why the last change failed on this row, if it did.
+    pub fn row_failure(&self, row: &Row) -> Option<&str> {
+        if self.failed_rows.is_empty() {
+            return None;
+        }
+        self.failed_rows.get(&row.failure_key()).map(String::as_str)
     }
 
     pub fn hide_toast(&mut self) {
@@ -852,6 +910,12 @@ impl App {
             ToastAction::Restart => {
                 self.restart_toast = None;
                 self.restart();
+            }
+            ToastAction::Details => {
+                self.hide_toast();
+                if !self.drawer_open {
+                    self.toggle_activity();
+                }
             }
         }
     }
@@ -1192,8 +1256,9 @@ impl App {
         } else {
             String::new()
         };
-        let same = query == self.result_query || page != Page::Search;
-        if !self.rows.is_empty() && (same || page == Page::Search) {
+        // Only a reload of the list on screen keeps its rows meanwhile. A
+        // search keeps them for any query, narrowed by what's typed.
+        if !self.rows.is_empty() && self.rows_page == Some(page) {
             self.retained = Some(self.rows.clone());
         }
         if page == Page::Search && query.is_empty() {

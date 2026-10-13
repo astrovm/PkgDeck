@@ -144,6 +144,83 @@ fn offline(app: &mut App, page: Page) {
     app.invalidate();
 }
 
+/// Cleanup tasks, biggest first, as Clean lists them.
+fn clean_rows(app: &mut App) {
+    let task = |name: &str, display: &str, source: &str, kind: &str, summary: &str, bytes: u64| {
+        serde_json::from_value::<model::Row>(json!({
+                "kind": "cleanup", "name": name, "display_name": display, "source": source,
+                "cleanup_key": name, "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
+            }))
+            .unwrap()
+    };
+    app.rows = vec![
+        task(
+            "sccache",
+            "sccache compiler cache",
+            "dev-caches",
+            "package_cache",
+            "Manages its own size limit",
+            2_000_000_000,
+        ),
+        task(
+            "worktrees:/fake/project",
+            "project worktrees",
+            "projects",
+            "worktree",
+            "2 finished worktrees",
+            3_000_000_000,
+        ),
+        task(
+            "build:~/code/website",
+            "website build files",
+            "projects",
+            "build_files",
+            "Unchanged for 3 months",
+            2_400_000_000,
+        ),
+        task(
+            "cargo",
+            "Cargo downloads",
+            "dev-caches",
+            "package_cache",
+            "Downloaded crates and Git checkouts",
+            1_800_000_000,
+        ),
+        task(
+            "unused-images",
+            "Unused images",
+            "docker",
+            "unused",
+            "4 images no container uses",
+            950_000_000,
+        ),
+        task(
+            "brew-cleanup",
+            "Old Homebrew downloads and versions",
+            "homebrew",
+            "package_cache",
+            "Old files that brew cleanup would remove",
+            310_000_000,
+        ),
+        task(
+            "unused-volumes",
+            "Unused volumes",
+            "docker",
+            "data",
+            "2 volumes no container uses",
+            120_000_000,
+        ),
+        task(
+            "apt-autoremove",
+            "Unused dependencies",
+            "apt",
+            "orphan_dependencies",
+            "3 packages nothing needs",
+            48_000_000,
+        ),
+    ];
+}
+
 fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)) {
     let args: Vec<String> = std::env::args().collect();
     if let Some(only) = args
@@ -475,84 +552,7 @@ fn main() {
         app.invalidate();
     });
     render("clean", [1500.0, 860.0], true, |app| {
-        let task = |name: &str,
-                    display: &str,
-                    source: &str,
-                    kind: &str,
-                    summary: &str,
-                    bytes: u64| {
-            serde_json::from_value::<model::Row>(json!({
-                    "kind": "cleanup", "name": name, "display_name": display, "source": source,
-                    "cleanup_key": name, "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
-                }))
-                .unwrap()
-        };
-        app.rows = vec![
-            task(
-                "sccache",
-                "sccache compiler cache",
-                "dev-caches",
-                "package_cache",
-                "Manages its own size limit",
-                2_000_000_000,
-            ),
-            task(
-                "worktrees:/fake/project",
-                "project worktrees",
-                "projects",
-                "worktree",
-                "2 finished worktrees",
-                3_000_000_000,
-            ),
-            task(
-                "build:~/code/website",
-                "website build files",
-                "projects",
-                "build_files",
-                "Unchanged for 3 months",
-                2_400_000_000,
-            ),
-            task(
-                "cargo",
-                "Cargo downloads",
-                "dev-caches",
-                "package_cache",
-                "Downloaded crates and Git checkouts",
-                1_800_000_000,
-            ),
-            task(
-                "unused-images",
-                "Unused images",
-                "docker",
-                "unused",
-                "4 images no container uses",
-                950_000_000,
-            ),
-            task(
-                "brew-cleanup",
-                "Old Homebrew downloads and versions",
-                "homebrew",
-                "package_cache",
-                "Old files that brew cleanup would remove",
-                310_000_000,
-            ),
-            task(
-                "unused-volumes",
-                "Unused volumes",
-                "docker",
-                "data",
-                "2 volumes no container uses",
-                120_000_000,
-            ),
-            task(
-                "apt-autoremove",
-                "Unused dependencies",
-                "apt",
-                "orphan_dependencies",
-                "3 packages nothing needs",
-                48_000_000,
-            ),
-        ];
+        clean_rows(app);
         app.rows[3].preview =
             "Empties these folders:\n~/.cargo/registry/cache\n~/.cargo/registry/src\n~/.cargo/git/checkouts".into();
         offline(app, Page::Clean);
@@ -649,11 +649,48 @@ fn main() {
                 name.starts_with("confirm-update") && !name.ends_with("short");
         });
     }
-    render("notice-error", [1000.0, 420.0], true, |app| {
+    // Only what needs the person now is a banner.
+    render("notice-urgent", [1000.0, 420.0], true, |app| {
         offline(app, Page::Updates);
-        app.c().set_notice(json!({"kind": "error", "title": "2 of 6 changes failed", "detail": "Refresh Firmware package lists: Firmware couldn't run: Error executing command as another user: Not authorized.\nRefresh Snap package lists: Snap couldn't run: Error executing command as another user: Not authorized.", "output": "Refresh Firmware package lists\nError executing command as another user: Not authorized\n\nThis incident has been reported.", "retry": true}).to_string().into());
+        app.c().set_notice(json!({"kind": "error", "title": "Firmware didn't update", "detail": "Your password wasn't accepted. Try again and enter it when asked.", "retry": true, "urgent": true}).to_string().into());
         app.react();
+    });
+    // Anything else: a calm toast, the reason on its row, a dot on Activity.
+    let failed = || {
+        let failure = json!({"kind": "error", "title": "Clean project worktrees failed", "detail": "project worktrees: Couldn't remove ~/.trees/lyrics-bar: a submodule has commits that aren't pushed", "output": "fatal: working trees containing submodules cannot be moved or removed", "retry": true});
+        let rows = json!([{"target": {"source": "projects", "cleanup_key": "worktrees:/fake/project"}, "reason": "Couldn't remove ~/.trees/lyrics-bar: a submodule has commits that aren't pushed"}]);
+        (failure, rows)
+    };
+    render("failure-toast", [1500.0, 860.0], true, |app| {
+        clean_rows(app);
+        offline(app, Page::Clean);
+        let (failure, rows) = failed();
+        app.c().set_failed_rows(rows.to_string().into());
+        app.c().set_failure(failure.to_string().into());
+        app.c().set_notice(failure.to_string().into());
+        app.react();
+        if let Some(toast) = &mut app.toast {
+            toast.lasts = std::time::Duration::from_secs(60);
+        }
+    });
+    render("failure-activity", [1180.0, 780.0], true, |app| {
+        clean_rows(app);
+        offline(app, Page::Clean);
+        let (failure, rows) = failed();
+        app.c().set_failed_rows(rows.to_string().into());
+        app.c().set_failure(failure.to_string().into());
+        app.react();
+        app.drawer_open = true;
         app.ui.notice_output = true;
+        app.activity = serde_json::from_value(json!([
+            {"id": 1, "operations": [{"clean": {"backend": "projects", "key": "worktrees:/fake/project"}}], "labels": ["Clean project worktrees"], "started_at": model::now() - 120, "finished_at": model::now() - 100, "state": "finished", "outcomes": ["failed"]}
+        ])).unwrap();
+    });
+    // A source that couldn't be checked: one button beside Activity.
+    render("source-check", [1180.0, 500.0], true, |app| {
+        offline(app, Page::Installed);
+        app.rows.push(serde_json::from_value(json!({"kind": "failure", "name": "snap", "source": "snap", "failure_kind": "unavailable", "summary": "snapd isn't running."})).unwrap());
+        app.invalidate();
     });
     render("confirm", [1180.0, 780.0], false, |app| {
         offline(app, Page::Installed);

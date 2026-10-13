@@ -1136,7 +1136,8 @@ fn a_long_error_wraps_beside_its_buttons_not_under_them() {
     app.page = Page::Updates;
     app.invalidate();
     let detail = "Refresh Firmware package lists: Firmware couldn't run: Error executing command as another user: Not authorized.";
-    app.c().set_notice(json!({"kind": "error", "title": "2 of 6 changes failed", "detail": detail, "output": "x", "retry": true}).to_string().into());
+    // Only an urgent failure is a banner.
+    app.c().set_notice(json!({"kind": "error", "title": "2 of 6 changes failed", "detail": detail, "output": "x", "retry": true, "urgent": true}).to_string().into());
     app.react();
     let mut harness = harness_at(app, egui::vec2(1000.0, 600.0));
     harness.run_steps(4);
@@ -1147,6 +1148,48 @@ fn a_long_error_wraps_beside_its_buttons_not_under_them() {
         let rect = harness.get_by_label(button).rect();
         assert!(!rect.intersects(text), "{button} sits on the message");
     }
+}
+
+#[test]
+fn a_failed_clean_is_a_toast_a_marked_row_and_a_card_in_activity() {
+    let mut app = app();
+    app.page = Page::Clean;
+    let rows = json!([
+        {"kind":"cleanup", "name":"app worktrees", "display_name":"app worktrees", "source":"projects", "cleanup_key":"worktrees:/code/app", "cleanup_kind":"worktree", "summary":"2 finished worktrees", "bytes":1_000_000}
+    ]);
+    app.c().set_rows(rows.to_string().into());
+    let failure = json!({"kind": "error", "title": "Clean app worktrees failed", "detail": "app worktrees: Couldn't remove ~/.trees/b: b is busy", "retry": true});
+    app.c().set_failed_rows(
+        json!([{"target": {"source": "projects", "cleanup_key": "worktrees:/code/app"}, "reason": "Couldn't remove ~/.trees/b: b is busy"}])
+            .to_string()
+            .into(),
+    );
+    app.c().set_failure(failure.to_string().into());
+    app.c().set_notice(failure.to_string().into());
+    app.react();
+    app.invalidate();
+    let mut harness = harness_at(app, egui::vec2(1200.0, 700.0));
+    harness.run_steps(4);
+    // No banner: a toast, and the row says why.
+    assert!(harness.query_by_label("Show details").is_none());
+    assert!(harness
+        .query_by_label_contains("Failed: Couldn't remove ~/.trees/b")
+        .is_some());
+    harness.get_by_label("Details").click();
+    harness.run_steps(6);
+    assert!(harness.state().1.drawer_open);
+    assert!(!harness.state().1.failure_unseen);
+    assert!(harness
+        .query_by_label("Clean app worktrees failed")
+        .is_some());
+    assert!(harness.query_by_label("Retry").is_some());
+    // Dismissed there, it's gone everywhere.
+    harness.get_by_label("Dismiss").click();
+    harness.run_steps(4);
+    assert!(harness.state().1.failure.is_empty());
+    assert!(harness
+        .query_by_label("Clean app worktrees failed")
+        .is_none());
 }
 
 #[test]

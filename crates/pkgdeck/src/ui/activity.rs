@@ -91,7 +91,8 @@ fn content(app: &mut App, ui: &mut Ui) {
         });
     });
     ui.add_space(10.0);
-    if app.activity.is_empty() {
+    failure_card(app, ui);
+    if app.activity.is_empty() && app.failure.is_empty() {
         let center = ui.available_rect_before_wrap().center() - vec2(0.0, 60.0);
         theme::paint_icon(
             ui.painter(),
@@ -129,6 +130,105 @@ fn content(app: &mut App, ui: &mut Ui) {
                 app.activity = entries;
             }
         });
+}
+
+/// The last change that failed: why, with Retry and what it printed. It
+/// stays until dismissed, retried, or a later look shows it fixed.
+fn failure_card(app: &mut App, ui: &mut Ui) {
+    let failure = app.failure.clone();
+    if failure.is_empty() {
+        return;
+    }
+    let palette = Palette::current(ui.ctx());
+    egui::Frame::new()
+        .fill(alpha(
+            palette.warning,
+            if palette.dark { 0.10 } else { 0.07 },
+        ))
+        .stroke(Stroke::new(1.0, alpha(palette.warning, 0.3)))
+        .corner_radius(theme::round(12))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                theme::paint_icon(ui.painter(), icon, "warning", palette.warning);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&failure.title)
+                            .font(theme::bold(14.5))
+                            .color(palette.ink),
+                    )
+                    .wrap(),
+                );
+            });
+            if !failure.detail.is_empty() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&failure.detail).color(palette.muted))
+                        .wrap(),
+                );
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if failure.retry
+                    && Button::new(Look::Soft(Tone::Accent), "Retry")
+                        .small()
+                        .icon("refresh")
+                        .enabled(!app.busy)
+                        .show(ui)
+                        .clicked()
+                {
+                    app.c().retry_change();
+                    app.react();
+                }
+                if !failure.output.is_empty() {
+                    let label = if app.ui.notice_output {
+                        "Hide output"
+                    } else {
+                        "Show output"
+                    };
+                    if Button::new(Look::Flat, label).small().show(ui).clicked() {
+                        app.ui.notice_output = !app.ui.notice_output;
+                    }
+                }
+                if Button::new(Look::Flat, "Dismiss")
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    app.c().dismiss_failure();
+                    app.react();
+                    app.ui.notice_output = false;
+                }
+            });
+            if app.ui.notice_output && !failure.output.is_empty() {
+                egui::Frame::new()
+                    .fill(palette.canvas)
+                    .stroke(Stroke::new(1.0, palette.line))
+                    .corner_radius(theme::round(8))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        super::scrollbar::vertical()
+                            .max_height(200.0)
+                            .id_salt("failure-output")
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&failure.output)
+                                            .font(theme::mono(12.5))
+                                            .color(palette.ink),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
+                    });
+                if Button::new(Look::Flat, "Copy").small().show(ui).clicked() {
+                    ui.ctx().copy_text(failure.output.clone());
+                }
+            }
+        });
+    ui.add_space(10.0);
 }
 
 fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {

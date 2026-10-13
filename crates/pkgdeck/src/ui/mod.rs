@@ -222,11 +222,7 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
         app.open_page(Page::Settings);
     }
     if command(Key::J) {
-        app.drawer_open = !app.drawer_open;
-        if app.drawer_open {
-            app.c().refresh_activity();
-            app.react();
-        }
+        app.toggle_activity();
     }
     if command(Key::Q) {
         app.quit();
@@ -539,7 +535,6 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
         }
         progress_line(app, ui);
         notice_banner(app, ui);
-        failure_banner(app, ui);
         let actions = page_actions_height(app);
         let mut rest = ui.available_rect_before_wrap();
         rest.max.x = inner.right();
@@ -666,13 +661,24 @@ fn header(app: &mut App, ui: &mut Ui) {
                     pop,
                 );
             }
-            if response.clicked() {
-                app.drawer_open = !app.drawer_open;
-                if app.drawer_open {
-                    app.c().refresh_activity();
-                    app.react();
-                }
+            // A failure waits in Activity: a dot until it is opened.
+            let dot = ui.ctx().animate_bool_with_time_and_easing(
+                Id::new("activity-failure"),
+                app.failure_unseen && count == 0,
+                secs(ui.ctx(), REVEAL),
+                egui::emath::easing::back_out,
+            );
+            if dot > 0.0 {
+                let center = response.rect.right_top() + vec2(-6.0, 6.0);
+                ui.painter()
+                    .circle_filled(center, 6.0 * dot, palette.surface);
+                ui.painter()
+                    .circle_filled(center, 4.5 * dot, palette.warning);
             }
+            if response.clicked() {
+                app.toggle_activity();
+            }
+            source_checks_button(app, ui, compact);
             let adoptable = adoptable_appimages(app);
             if adoptable > 0 {
                 let label = format!("Manage {adoptable} AppImages");
@@ -851,7 +857,9 @@ pub fn progress_card(app: &mut App, ui: &mut Ui, salt: &str) {
 
 fn notice_banner(app: &mut App, ui: &mut Ui) {
     let notice = app.notice.clone();
-    if notice.is_empty() || notice.is_toast() {
+    // Only what needs the person now, and only where it happened. Activity
+    // keeps it for everywhere else.
+    if notice.is_empty() || notice.is_toast() || app.notice_page != app.page {
         return;
     }
     let palette = Palette::current(ui.ctx());
@@ -944,62 +952,32 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
         });
 }
 
-fn failure_banner(app: &mut App, ui: &mut Ui) {
-    if !app.page.lists() {
+/// Sources this page couldn't check, as one small button beside Activity
+/// instead of a banner. It opens the checks, with Retry and Turn off. An
+/// empty list says so in its place instead.
+fn source_checks_button(app: &mut App, ui: &mut Ui, compact: bool) {
+    if !app.page.lists() || app.opened.is_some() || app.items.is_empty() {
         return;
     }
     let failures = app.read_failures();
-    if failures.is_empty() || app.items.is_empty() {
+    if failures.is_empty() {
         return;
     }
-    let palette = Palette::current(ui.ctx());
-    let mut title = model::failure_title(&failures);
-    if app.page == Page::Updates {
-        title.push_str(". Update all will retry the check.");
+    let title = model::failure_title(&failures);
+    let tooltip = if app.page == Page::Updates {
+        format!("{title}. Update all will retry the check.")
+    } else {
+        title.clone()
+    };
+    if Button::new(Look::Soft(Tone::Warning), &title)
+        .icon("warning")
+        .icon_only(compact)
+        .tooltip(tooltip)
+        .show(ui)
+        .clicked()
+    {
+        app.ui.checks_open = true;
     }
-    egui::Frame::new()
-        .fill(alpha(
-            palette.warning,
-            if palette.dark { 0.10 } else { 0.07 },
-        ))
-        .stroke(Stroke::new(1.0, alpha(palette.warning, 0.3)))
-        .corner_radius(theme::round(12))
-        .inner_margin(egui::Margin::symmetric(14, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (icon, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                theme::paint_icon(ui.painter(), icon, "warning", palette.warning);
-                ui.label(egui::RichText::new(&title).color(palette.ink));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if Button::new(Look::Flat, "Details")
-                        .small()
-                        .show(ui)
-                        .clicked()
-                    {
-                        app.ui.checks_open = true;
-                    }
-                    if let [one] = failures.as_slice() {
-                        if one.kind != "partial" && app.can_turn_off(&one.source) {
-                            let label = format!("Turn off {}", model::source_name(&one.source));
-                            if Button::new(Look::Flat, &label).small().show(ui).clicked() {
-                                let source = one.source.clone();
-                                app.set_source_enabled(&source, false);
-                            }
-                        }
-                    }
-                    if Button::new(Look::Soft(Tone::Accent), "Retry")
-                        .small()
-                        .icon("refresh")
-                        .enabled(!app.busy)
-                        .show(ui)
-                        .clicked()
-                    {
-                        app.reload(true, true);
-                    }
-                });
-            });
-        });
 }
 
 /// The list, with the selected row's page beside or over it.
@@ -1345,6 +1323,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                     let label = match action {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
+                        crate::app::ToastAction::Details => "Details",
                     };
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()
@@ -1504,6 +1483,46 @@ mod header_tests {
             );
         harness.run_steps(3);
         harness
+    }
+
+    #[test]
+    fn a_source_that_failed_is_one_named_button_that_opens_its_checks() {
+        let mut app = app(Page::Installed, 1);
+        app.rows.push(
+            serde_json::from_value(serde_json::json!({"kind": "failure", "name": "apt",
+                "source": "apt", "failure_kind": "unavailable", "summary": "apt is broken"}))
+            .unwrap(),
+        );
+        app.invalidate();
+        app.refresh_items();
+        let mut harness = draw(app, header);
+        harness.get_by_label("Couldn't check APT").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.ui.checks_open);
+        // Nothing failed: no button.
+        let harness = draw(self::app(Page::Installed, 1), header);
+        assert!(harness.query_by_label("Couldn't check APT").is_none());
+    }
+
+    #[test]
+    fn a_failed_row_reads_why_it_failed() {
+        let mut app = app(Page::Installed, 1);
+        let target = serde_json::json!({"source": "apt", "name": "fixture-0",
+            "architecture": "", "remote": null, "scope": "system", "reference": null});
+        app.c().set_failed_rows(
+            serde_json::json!([{"target": target, "reason": "Disk full"}])
+                .to_string()
+                .into(),
+        );
+        app.react();
+        assert_eq!(app.row_failure(&app.rows[0]), Some("Disk full"));
+        let harness = draw(app, |app, ui| {
+            let rect = ui.available_rect_before_wrap();
+            list::list_card(app, ui, rect);
+        });
+        assert!(harness
+            .query_by_label_contains("Failed: Disk full")
+            .is_some());
     }
 
     #[test]
