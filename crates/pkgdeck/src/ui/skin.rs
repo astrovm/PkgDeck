@@ -1396,22 +1396,12 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
     }
 }
 
-/// The page's heading: Windows 7's light blue, the others' plain bold.
+/// The page's heading: plain ink in every style and accent.
 pub fn heading(palette: &Palette) -> (FontId, Color32) {
     match style() {
         Family::Modern => (theme::bold(26.0), palette.ink),
-        // Another accent than its blue: plain ink, not a clashing blue.
-        Family::Glass if palette.tint_amount > 0.0 => (theme::font(24.0), palette.ink),
-        Family::Glass => (
-            theme::font(24.0),
-            if palette.dark {
-                rgb(0x8fb8ff)
-            } else {
-                rgb(0x1e3287)
-            },
-        ),
-        Family::Luna => (theme::bold(22.0), palette.ink),
-        Family::Retro | Family::Gel => (theme::bold(22.0), palette.ink),
+        Family::Glass => (theme::font(24.0), palette.ink),
+        Family::Luna | Family::Retro | Family::Gel => (theme::bold(22.0), palette.ink),
     }
 }
 
@@ -1665,13 +1655,6 @@ pub fn group(palette: &Palette) -> Option<Group> {
         Family::Luna => Group {
             stroke: Stroke::new(1.0, darker(palette.canvas, 0.14)),
             radius: theme::round(8),
-            ink: if palette.tint_amount > 0.0 {
-                palette.ink
-            } else if dark {
-                palette.bright
-            } else {
-                darker(palette.deep, 0.05)
-            },
             ..none
         },
         Family::Glass => Group {
@@ -1679,15 +1662,6 @@ pub fn group(palette: &Palette) -> Option<Group> {
             stroke: panel_stroke(palette),
             radius: theme::round(10),
             shadow: shadow(palette),
-            // Windows 7's dark blue main instruction; plain in another
-            // accent.
-            ink: if palette.tint_amount > 0.0 {
-                palette.ink
-            } else if dark {
-                palette.bright
-            } else {
-                darker(palette.deep, 0.3)
-            },
             on_line: false,
             size: 16.0,
             ..none

@@ -379,6 +379,19 @@ fn main() {
                     offline(app, Page::Settings);
                 },
             );
+            // Nothing to update: the empty state and its button.
+            render(
+                &format!("style-{name}-updates-{mode}"),
+                [900.0, 600.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Updates);
+                    app.rows.clear();
+                    app.invalidate();
+                },
+            );
             render(
                 &format!("style-{name}-settings-{mode}"),
                 [1180.0, 1100.0],

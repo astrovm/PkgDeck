@@ -352,8 +352,9 @@ impl<'a> Button<'a> {
             // grey.
             let ink = match styled {
                 Some(styled) if self.enabled => match self.look {
-                    // Coloured buttons keep their colour on the label.
-                    Look::Soft(_) => ink,
+                    // Warning colours stay on the label; the accent doesn't,
+                    // as these styles' buttons aren't tinted with it.
+                    Look::Soft(tone) if tone != Tone::Accent => ink,
                     _ => styled,
                 },
                 _ => ink,
