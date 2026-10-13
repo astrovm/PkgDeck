@@ -217,6 +217,8 @@ fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
     let mut app = app();
     prepare(&mut app);
     app.invalidate();
+    // Past the page's fade-in, which runs on the wall clock.
+    app.page_changed = std::time::Instant::now() - std::time::Duration::from_secs(1);
     // The older styles draw their own title bar; only Modern leaves it to
     // the system, so only there does the harness add one.
     let framed = app.settings.style.family() != pkgdeck::settings::Family::Modern;
@@ -339,8 +341,14 @@ fn main() {
         app.page = Page::Installed;
         app.rows = firefox_rows();
     });
+    render("settings-clean", [1180.0, 760.0], |app| {
+        app.page = Page::Settings;
+        app.ui.settings_tab = pkgdeck::ui::SettingsTab::Clean;
+        app.rows = vec![];
+    });
     render("repositories", [1180.0, 760.0], |app| {
         app.page = Page::Settings;
+        app.ui.settings_tab = pkgdeck::ui::SettingsTab::Sources;
         app.rows = vec![];
         app.ui.repos_open = true;
         app.repositories = serde_json::from_value(json!({

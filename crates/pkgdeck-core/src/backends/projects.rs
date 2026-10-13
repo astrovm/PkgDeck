@@ -65,7 +65,7 @@ impl WorktreeProtection {
     }
     pub fn description(self) -> &'static str {
         match self {
-            Self::AnyLocalFiles => "Safest",
+            Self::AnyLocalFiles => "Safest. Keeps everything",
             Self::UncommittedChanges => "Loses ignored files, like .env",
             Self::EditedTrackedFiles => "Loses new and ignored files, like .env",
         }
@@ -1513,7 +1513,7 @@ mod tests {
         assert_eq!(
             WorktreeProtection::ALL.map(WorktreeProtection::description),
             [
-                "Safest",
+                "Safest. Keeps everything",
                 "Loses ignored files, like .env",
                 "Loses new and ignored files, like .env"
             ]

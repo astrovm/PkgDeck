@@ -217,6 +217,8 @@ work like on Updates. Volumes are cleaned individually.
 
 ### Clean settings
 
+![Settings, Clean tab: automatic cleaning and old projects](screenshots/settings-clean.png)
+
 **Settings** → **Clean** has two parts.
 
 **Automatic cleaning**
