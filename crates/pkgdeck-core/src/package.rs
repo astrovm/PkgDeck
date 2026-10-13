@@ -161,7 +161,6 @@ impl CleanupItem {
 #[serde(default)]
 pub struct CleanupPreferences {
     pub excluded: Vec<CleanupId>,
-    pub disabled_sources: Vec<String>,
 }
 impl Default for CleanupPreferences {
     fn default() -> Self {
@@ -170,13 +169,12 @@ impl Default for CleanupPreferences {
                 backend: "dev-caches".into(),
                 key: "sccache".into(),
             }],
-            disabled_sources: vec![],
         }
     }
 }
 impl CleanupPreferences {
     pub fn includes(&self, id: &CleanupId) -> bool {
-        !self.disabled_sources.contains(&id.backend) && !self.excluded.contains(id)
+        !self.excluded.contains(id)
     }
     pub fn set_included(&mut self, id: CleanupId, included: bool) {
         self.excluded.retain(|excluded| excluded != &id);
@@ -879,13 +877,17 @@ mod tests {
                     let read: CleanupPreferences =
                         serde_json::from_str(&serde_json::to_string(&choices).unwrap()).unwrap();
                     assert_eq!(read, choices);
-                    choices.disabled_sources.push(source.into());
-                    assert!(!choices.includes(&target));
-                    assert!(choices.includes(&other));
                 }
             }
         }
         let old: CleanupPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(old, CleanupPreferences::default());
+        // Source switches are gone; a saved one is dropped, not an error.
+        let saved: CleanupPreferences =
+            serde_json::from_str(r#"{"excluded":[],"disabled_sources":["apt"]}"#).unwrap();
+        assert!(saved.includes(&CleanupId {
+            backend: "apt".into(),
+            key: "cache".into()
+        }));
     }
 }

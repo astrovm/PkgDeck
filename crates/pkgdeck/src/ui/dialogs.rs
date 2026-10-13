@@ -1310,21 +1310,18 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         };
-        let password = "Update system packages without a password";
+        let password = "Skip the password";
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             assert!(harness
-                .query_by_role_and_label(Role::CheckBox, "Start in background at login")
+                .query_by_role_and_label(Role::CheckBox, "Start at login")
                 .is_some());
         }
         // Without automatic updates, no password setting to pick.
         assert!(disabled(&harness, password));
-        assert!(!disabled(
-            &harness,
-            "Update apps and packages automatically"
-        ));
+        assert!(!disabled(&harness, "Update automatically"));
 
         harness
-            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
+            .get_by_role_and_label(Role::CheckBox, "Update automatically")
             .click();
         harness.run_steps(2);
         assert!(harness.state().1.settings.auto_update);
@@ -1332,7 +1329,7 @@ mod tests {
         assert!(!disabled(&harness, password));
 
         harness
-            .get_by_role_and_label(Role::CheckBox, "Clean caches automatically")
+            .get_by_role_and_label(Role::CheckBox, "Clean automatically")
             .click();
         harness.run_steps(2);
         assert!(harness.state().1.settings.auto_clean);

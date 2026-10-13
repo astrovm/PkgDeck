@@ -936,25 +936,9 @@ impl App {
         }
     }
 
+    /// Clean reads every source; its checkboxes choose what runs.
     pub fn enabled_cleanup_sources(&self) -> HashSet<String> {
-        all_sources(&self.catalog)
-            .into_iter()
-            .filter(|id| !self.settings.cleanup.disabled_sources.contains(id))
-            .collect()
-    }
-    pub fn set_cleanup_source_enabled(&mut self, id: &str, enabled: bool) {
-        self.settings
-            .cleanup
-            .disabled_sources
-            .retain(|source| source != id);
-        if !enabled {
-            self.settings.cleanup.disabled_sources.push(id.to_owned());
-        }
-        self.sync_cleanup_preferences();
-        self.page_sources.remove(&Page::Clean);
-        if self.page == Page::Clean {
-            self.reload(false, false);
-        }
+        all_sources(&self.catalog).into_iter().collect()
     }
     pub fn sync_cleanup_preferences(&mut self) {
         let json = serde_json::to_string(&self.settings.cleanup).unwrap_or_default();
@@ -1017,11 +1001,8 @@ impl App {
     }
 
     fn sources_csv(&self, page: Page) -> String {
-        if (if page == Page::Clean {
-            self.settings.cleanup.disabled_sources.is_empty()
-        } else {
-            self.enabled.is_empty()
-        }) && !self.page_sources.contains_key(&page)
+        if (page == Page::Clean || self.enabled.is_empty())
+            && !self.page_sources.contains_key(&page)
         {
             return String::new();
         }

@@ -44,11 +44,6 @@ pub use mas::MacAppStore;
 pub use nix::Nix;
 pub use oh_my_zsh::OhMyZsh;
 pub use pixi::Pixi;
-/// Developer cache choices, available even when a cache is currently empty.
-pub fn developer_cleanup_choices(host: Host) -> Vec<(CleanupId, &'static str)> {
-    dev_caches::DevCaches::new(host).choices()
-}
-
 pub use projects::{ProjectSettings, WorktreeProtection};
 pub use rustup::Rustup;
 use serde::Deserialize;
@@ -81,12 +76,12 @@ const CLEAN_CAPABILITIES: &[Capability] = &[
     Capability::Clean,
 ];
 
-/// Backend ids accepted by `--from` and the source checklist. Adding a
-/// backend means extending this list, the GUI `sourceIds`, and the CLI
-/// value parser together.
 /// Explicit empty scope for callers whose empty source list means all sources.
 pub const NO_BACKENDS: &str = "__none__";
 
+/// Backend ids accepted by `--from` and the source checklist. Adding a
+/// backend means extending this list, the GUI `sourceIds`, and the CLI
+/// value parser together.
 pub const BACKEND_IDS: &[&str] = &[
     "fwupd",
     "apt",

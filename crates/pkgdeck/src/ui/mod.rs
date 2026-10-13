@@ -31,6 +31,7 @@ use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Modifiers, Rect, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, Vec2,
 };
+pub use settings_page::Tab as SettingsTab;
 use std::collections::HashSet;
 use widgets::*;
 
@@ -67,6 +68,7 @@ pub struct State {
     pub failed_images: HashSet<String>,
     pub hide_progress_for: Option<u64>,
     pub started: bool,
+    pub settings_tab: SettingsTab,
 }
 
 /// Widths the layout switches at.

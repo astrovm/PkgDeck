@@ -30,21 +30,6 @@ impl DevCaches {
         Self { host }
     }
 
-    pub fn choices(&self) -> Vec<(CleanupId, &'static str)> {
-        self.caches()
-            .into_iter()
-            .map(|cache| {
-                (
-                    CleanupId {
-                        backend: "dev-caches".into(),
-                        key: cache.key.into(),
-                    },
-                    cache.title,
-                )
-            })
-            .collect()
-    }
-
     fn caches(&self) -> Vec<Cache> {
         let var = |name: &str| {
             self.host

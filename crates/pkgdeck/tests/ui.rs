@@ -12,6 +12,7 @@ use pkgdeck::{
     model::Page,
     platform::Platform,
     settings::{Accent, Appearance, DarkTheme, LightTheme, Store, TextSize},
+    ui::SettingsTab,
 };
 use pkgdeck_app::controller::ffi::create_synthetic_controller;
 use serde_json::json;
@@ -89,6 +90,15 @@ fn click_in_view(harness: &mut Harness<'static, (bool, App)>, role: Option<Role>
         }
         harness.run_steps(3);
     }
+}
+
+/// Opens a tab of Settings.
+fn settings_tab(harness: &mut Harness<'static, (bool, App)>, tab: SettingsTab) {
+    harness
+        .get_by_role_and_label(Role::RadioButton, tab.name())
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.ui.settings_tab, tab);
 }
 
 fn show(page: Page) -> Harness<'static, (bool, App)> {
@@ -399,13 +409,11 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
 #[test]
 fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
+    settings_tab(&mut harness, SettingsTab::Updates);
     let before = harness.state().1.settings.auto_update;
-    click_in_view(
-        &mut harness,
-        Some(Role::CheckBox),
-        "Update apps and packages automatically",
-    );
+    click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
     assert_ne!(harness.state().1.settings.auto_update, before);
+    settings_tab(&mut harness, SettingsTab::Appearance);
     click_in_view(&mut harness, None, "Light");
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
     // Only the colours of the mode on screen are offered.
@@ -624,12 +632,13 @@ fn switch_enabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
 #[test]
 fn settings_turn_package_managers_on_and_off() {
     let mut harness = show(Page::Settings);
-    harness.run_steps(2);
+    settings_tab(&mut harness, SettingsTab::Sources);
     assert!(harness
         .query_by_label("Looking for package managers…")
         .is_some());
     let mut app = with_sources(app());
     app.page = Page::Settings;
+    app.ui.settings_tab = SettingsTab::Sources;
     app.invalidate();
     let mut harness = harness_at(app, egui::vec2(1200.0, 2400.0));
     harness.run_steps(3);
@@ -727,16 +736,13 @@ fn settings_say_what_automatic_updates_wait_for() {
         );
         app.react();
         app.page = Page::Settings;
+        app.ui.settings_tab = SettingsTab::Updates;
         app.invalidate();
         let mut harness = harness(app);
         harness.run_steps(4);
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
-        click_in_view(
-            &mut harness,
-            Some(Role::CheckBox),
-            "Update apps and packages automatically",
-        );
+        click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
         assert!(harness.query_by_label(text).is_none(), "{text}");
     }
     // A reason this version doesn't know shows nothing.
@@ -1179,11 +1185,12 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
 #[test]
 fn automatic_worktree_cleanup_can_be_enabled_independently_of_caches() {
     let mut harness = show(Page::Settings);
+    settings_tab(&mut harness, SettingsTab::Clean);
     assert!(!harness.state().1.settings.auto_clean_worktrees);
     click_in_view(
         &mut harness,
         Some(Role::CheckBox),
-        "Clean finished worktrees automatically",
+        "Clean finished worktrees",
     );
     assert!(harness.state().1.settings.auto_clean_worktrees);
     assert!(harness.state_mut().1.c().auto_clean_worktrees());
@@ -1191,15 +1198,41 @@ fn automatic_worktree_cleanup_can_be_enabled_independently_of_caches() {
     click_in_view(
         &mut harness,
         Some(Role::CheckBox),
-        "Clean finished worktrees automatically",
+        "Clean finished worktrees",
     );
     assert!(!harness.state().1.settings.auto_clean_worktrees);
 }
 
 #[test]
-fn cleanup_settings_have_their_own_sources_and_sccache_choice() {
+fn settings_tabs_show_one_part_at_a_time() {
+    let mut harness = show(Page::Settings);
+    // Appearance first.
+    assert!(harness.query_by_label("Accent").is_some());
+    assert!(harness.query_by_label("Check every").is_none());
+    let only = [
+        (SettingsTab::Updates, "Check every"),
+        (SettingsTab::Sources, "Looking for package managers…"),
+        (SettingsTab::Clean, "Old after"),
+        (SettingsTab::About, "GitHub"),
+        (SettingsTab::Appearance, "Accent"),
+    ];
+    for (tab, shown) in only {
+        settings_tab(&mut harness, tab);
+        for (_, other) in only.iter().filter(|(other, _)| *other != tab) {
+            assert!(harness.query_by_label(other).is_none(), "{tab:?} {other}");
+        }
+        assert!(harness.query_by_label(shown).is_some(), "{tab:?}");
+    }
+    // Shortcuts are listed without unfolding them.
+    settings_tab(&mut harness, SettingsTab::About);
+    assert!(harness.query_by_label("Update selected").is_some());
+}
+
+#[test]
+fn clean_settings_use_the_clean_page_list_and_say_what_they_need() {
     let mut app = app();
     app.page = Page::Settings;
+    app.ui.settings_tab = SettingsTab::Clean;
     app.catalog = serde_json::from_value(json!([
         {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
         {"source":"dev-caches", "available":true, "capabilities":["clean"]},
@@ -1208,35 +1241,44 @@ fn cleanup_settings_have_their_own_sources_and_sccache_choice() {
     .unwrap();
     let mut harness = harness(app);
     harness.run_steps(4);
+    // No second list of what to clean: Clean's checkboxes are the one.
+    assert!(harness.query_by_label_contains("Clean APT").is_none());
+    assert!(harness.query_by_label_contains("sccache").is_none());
     assert!(harness
-        .query_by_role_and_label(Role::CheckBox, "Developer caches")
+        .query_by_label("Once a day. Cleans what's checked on Clean")
+        .is_some());
+    // Without background checks, each switch says why it is off, and one
+    // button turns them back on.
+    harness.state_mut().1.settings.background_mode = false;
+    harness.run_steps(3);
+    assert!(switch_disabled(&harness, "Clean automatically"));
+    assert!(switch_disabled(&harness, "Clean finished worktrees"));
+    assert_eq!(
+        harness
+            .query_all_by_label("Needs Background checks")
+            .count(),
+        2
+    );
+    harness
+        .get_by_label("Turn on Background checks")
+        .scroll_to_me();
+    harness.run_steps(3);
+    if cfg!(target_os = "macos") {
+        // The menu bar icon can't change off the main thread a test runs on.
+        harness.state_mut().1.settings.background_mode = true;
+        harness.run_steps(3);
+    } else {
+        click_in_view(&mut harness, None, "Turn on Background checks");
+    }
+    assert!(harness.state().1.settings.background_mode);
+    assert!(!switch_disabled(&harness, "Clean automatically"));
+    assert!(harness
+        .query_by_label("Turn on Background checks")
         .is_none());
     click_in_view(&mut harness, None, "Choose what to clean");
-    click_in_view(&mut harness, Some(Role::CheckBox), "Clean APT");
-    assert!(!harness
-        .state()
-        .1
-        .effective_sources(Page::Clean)
-        .contains("apt"));
-    assert!(harness
-        .state()
-        .1
-        .effective_sources(Page::Updates)
-        .contains("apt"));
-    click_in_view(
-        &mut harness,
-        Some(Role::CheckBox),
-        "Include sccache compiler cache in cleanup",
-    );
-    let id = pkgdeck_core::package::CleanupId {
-        backend: "dev-caches".into(),
-        key: "sccache".into(),
-    };
-    assert!(harness.state().1.settings.cleanup.includes(&id));
-    click_in_view(
-        &mut harness,
-        Some(Role::CheckBox),
-        "Include sccache compiler cache in cleanup",
-    );
-    assert!(!harness.state().1.settings.cleanup.includes(&id));
+    assert_eq!(harness.state().1.page, Page::Clean);
+}
+
+fn switch_disabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
+    !switch_enabled(harness, label)
 }

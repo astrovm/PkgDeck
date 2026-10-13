@@ -208,40 +208,53 @@ that failed are shown separately.
   you reinstall downloads again. Both ask for your password when they run.
 
 Select cleanup tasks with their checkboxes, then choose **Clean selected**.
-Choices are remembered for future batches and automatic cleaning. sccache is
-unchecked by default because it manages its own size limit.
+These checkboxes are the one list of what to clean: **Clean all** and
+automatic cleaning use them too. sccache is unchecked by default because it
+manages its own size limit. A task that shows up for the first time starts
+checked.
 Its button shows the space those tasks free. **Select all** and **Select none**
 work like on Updates. Volumes are cleaned individually.
 
 ### Clean settings
 
-- **Old projects**: how long a project must stay untouched. A week by default.
-- **Clean caches automatically**: independent of automatic updates.
-- **Choose what to clean**: cleanup sources and individual developer caches,
-  with separate choices from package and update sources.
-- **Clean finished worktrees automatically**: off by default. When enabled,
-  cleans finished, old worktrees once a day after a background check. Needs
-  **Background checks**, and works independently of automatic cache cleaning.
-- **Keep worktrees with local changes**: applies to automatic and manual worktree cleanup.
-  **Any local files** (the default) keeps tracked edits, untracked files and
-  ignored files. **Uncommitted changes** keeps edits and untracked files but
-  deletes ignored files, including `.env`. **Edited tracked files** keeps
-  tracked edits but deletes untracked and ignored files, including `.env`.
-  Locked worktrees and unfinished branches stay with every choice.
-- **Look for projects in**: the folders PkgDeck searches. Your home folder by
-  default, without hidden folders and, on macOS, without Library. **Add
-  folder** adds another one.
+**Settings** → **Clean** has two parts.
 
-### Clean caches automatically
+**Automatic cleaning**
 
-Turn on **Clean caches automatically** under **Clean** in Settings. It needs **Background
-checks**.
+- **Clean automatically**: once a day, cleans what's checked on Clean.
+- **Clean finished worktrees**: off by default. Once a day, after a
+  background check. Keeps branches. Works on its own, without **Clean
+  automatically**.
+- Both need **Background checks**. While those are off, each switch says so,
+  and **Turn on Background checks** turns them back on.
+- **Choose what to clean** opens Clean.
+
+**Old projects**
+
+- **Old after**: how long a project must stay untouched. A week by default.
+- **Worktrees with uncommitted files**: applies to automatic and manual
+  worktree cleanup.
+  - **Always keep** (the default, safest): keeps any worktree with edits,
+    new files or ignored files.
+  - **Keep if files are new or edited**: loses ignored files, like `.env`.
+  - **Keep only if files are edited**: loses new and ignored files, like
+    `.env`.
+  - Locked worktrees and unfinished branches stay with every choice.
+- **Folders**: where PkgDeck looks for projects. Your home folder by default,
+  without hidden folders and, on macOS, without Library. **Add folder** adds
+  another one.
+
+### Clean automatically
+
+Turn on **Clean automatically** in **Settings** → **Clean**. It needs
+**Background checks**.
 
 - At most once a day, after a background check.
-- Only what comes back on its own: download caches, unused images, build
-  caches, and build files of old projects.
+- Only tasks checked on Clean, and of those only what comes back on its
+  own: download caches, unused images, build caches, and build files of old
+  projects.
 - Never unused dependencies, extra copies, stopped containers or volumes.
-  Worktrees have their own opt-in setting under **Clean** in Settings.
+  Worktrees have their own switch, **Clean finished worktrees**.
 - Only sources that run as you, so it never asks for a password.
 - Like automatic updates, it waits for the charger, for builds, and for other
   changes to finish.
@@ -431,9 +444,8 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 is running. Turn them off in Settings.
 
 The first time the window opens, **Set up PkgDeck** offers the rest, all off
-until you turn them on: **Start in background at login**, **Update apps and
-packages automatically**, **Update system packages without a password** and
-**Clean caches automatically**. Each switch works right away, like in Settings. It shows
+until you turn them on: **Start at login**, **Update automatically**, **Skip
+the password** and **Clean automatically**. Each switch works right away, like in Settings. It shows
 once; change them later in Settings.
 
 - The first check runs about 30 seconds after launch, then at most once per
@@ -441,7 +453,7 @@ once; change them later in Settings.
   Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
-- **Start in background at login** keeps checks running after you log in.
+- **Start at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
   default.
@@ -467,7 +479,7 @@ notification.
 
 ### Automatic updates
 
-Turn on **Update apps and packages automatically**. When a background check
+Turn on **Update automatically** in **Settings** → **Updates**. When a background check
 finds updates, PkgDeck installs them and sends one notification.
 
 It's off by default.
@@ -497,8 +509,7 @@ AppImage or system package), the running copy is still the old one:
 
 #### System packages
 
-To update system packages too, turn on **Update system packages without a
-password**.
+To update system packages too, turn on **Skip the password**.
 
 - It asks for your password once, to turn it on.
 - It only covers automatic updates. Anything you start yourself, **Update
@@ -528,7 +539,7 @@ What it saves:
 
 #### Updates that remove packages
 
-**Allow updates that remove packages** is on by default.
+**Allow removals** is on by default.
 
 - Some updates replace packages, like an old kernel.
 - **Update all** shows them before you confirm.
@@ -547,6 +558,11 @@ Search. Installing, removing, or changing repositories marks saved results as
 out of date, and each page refreshes when you open it.
 
 ## Settings
+
+Settings has five tabs: **Appearance**, **Updates**, **Sources**, **Clean**
+and **About**.
+
+### Appearance
 
 - **Theme**: **System**, **Light** or **Dark**.
 - **Style**: the shape of everything, shown as small previews. Each comes in
@@ -600,21 +616,23 @@ out of date, and each page refreshes when you open it.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
-- **Background checks**, **Check every**, **Update apps and packages
-  automatically**, **Allow updates that remove packages**, **Update system
-  packages without a password** and **Start in background at login**: see
-  [Update notifications](#update-notifications).
+
+### Updates
+
+- **Checks**: **Background checks**, **Check every** and **Start at login**,
+  then when PkgDeck last checked and what it found.
+- **Automatic updates**: **Update automatically**, **Allow removals** and
+  **Skip the password**. See [Update notifications](#update-notifications).
+- **Notifications**: why notifications can't show, when they can't, and
+  **Test notification**.
+
+### Sources, Clean and About
+
 - **Sources**: which package managers PkgDeck uses, and **Repositories**.
   See [Sources](#sources).
-- **Clean caches automatically**: see
-  [Clean caches automatically](#clean-caches-automatically).
-- **Old projects** and **Look for projects in**: see
-  [Clean settings](#clean-settings).
-- **Last check** shows when PkgDeck last checked and what it found.
-- **Test notification** sends a sample notification.
-- **About** shows the version and a link to GitHub.
-- **Keyboard shortcuts**: **Show shortcuts** lists the main ones. The full
-  list is below.
+- **Clean**: see [Clean settings](#clean-settings).
+- **About**: the version, a link to GitHub, and the main keyboard shortcuts.
+  The full list is below.
 
 ## Keyboard shortcuts
 

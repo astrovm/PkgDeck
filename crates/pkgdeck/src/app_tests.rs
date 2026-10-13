@@ -1148,14 +1148,9 @@ fn cleanup_choices_survive_navigation_and_do_not_change_update_sources() {
     let saved = serde_json::to_string(&app.settings).unwrap();
     app.settings = serde_json::from_str(&saved).unwrap();
     assert!(!app.row_checked(&row));
-    app.set_cleanup_source_enabled("apt", false);
-    assert!(!app.effective_sources(Page::Clean).contains("apt"));
-    assert!(app.effective_sources(Page::Updates).contains("apt"));
-    app.set_cleanup_source_enabled("dev-caches", false);
-    assert_eq!(app.sources_csv(Page::Clean), "__none__");
-    app.set_cleanup_source_enabled("dev-caches", true);
-    assert_eq!(app.sources_csv(Page::Clean), "dev-caches");
-    assert!(!app.row_checked(&row));
-    app.set_cleanup_source_enabled("apt", true);
+    // Turning a source off for updates leaves Clean reading it.
+    app.set_source_enabled("apt", false);
+    assert!(app.effective_sources(Page::Clean).contains("apt"));
     assert_eq!(app.sources_csv(Page::Clean), "");
+    assert!(!app.row_checked(&row));
 }

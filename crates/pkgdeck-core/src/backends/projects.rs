@@ -58,20 +58,16 @@ impl WorktreeProtection {
     ];
     pub fn name(self) -> &'static str {
         match self {
-            Self::AnyLocalFiles => "Any local files",
-            Self::UncommittedChanges => "Uncommitted changes",
-            Self::EditedTrackedFiles => "Edited tracked files",
+            Self::AnyLocalFiles => "Always keep",
+            Self::UncommittedChanges => "Keep if files are new or edited",
+            Self::EditedTrackedFiles => "Keep only if files are edited",
         }
     }
     pub fn description(self) -> &'static str {
         match self {
-            Self::AnyLocalFiles => "Keeps edits, untracked files and ignored files, including .env",
-            Self::UncommittedChanges => {
-                "Keeps edits and untracked files. Deletes ignored files, including .env"
-            }
-            Self::EditedTrackedFiles => {
-                "Keeps tracked edits. Deletes untracked and ignored files, including .env"
-            }
+            Self::AnyLocalFiles => "Safest",
+            Self::UncommittedChanges => "Loses ignored files, like .env",
+            Self::EditedTrackedFiles => "Loses new and ignored files, like .env",
         }
     }
     fn status_args(self) -> &'static [&'static str] {
@@ -1509,17 +1505,17 @@ mod tests {
         assert_eq!(
             WorktreeProtection::ALL.map(WorktreeProtection::name),
             [
-                "Any local files",
-                "Uncommitted changes",
-                "Edited tracked files"
+                "Always keep",
+                "Keep if files are new or edited",
+                "Keep only if files are edited"
             ]
         );
         assert_eq!(
             WorktreeProtection::ALL.map(WorktreeProtection::description),
             [
-                "Keeps edits, untracked files and ignored files, including .env",
-                "Keeps edits and untracked files. Deletes ignored files, including .env",
-                "Keeps tracked edits. Deletes untracked and ignored files, including .env"
+                "Safest",
+                "Loses ignored files, like .env",
+                "Loses new and ignored files, like .env"
             ]
         );
     }

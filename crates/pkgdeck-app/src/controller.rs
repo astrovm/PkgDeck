@@ -6023,7 +6023,7 @@ impl ffi::PackageController {
                             })
                             .count();
                         let note = format!(
-                            "\nAPT is left out: it would remove {}. Turn on \"Allow updates that remove packages\" in Settings to include it.",
+                            "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
                             plan.removals.join(", ")
                         );
                         let rest: Vec<_> =
@@ -17362,7 +17362,7 @@ mod tests {
     }
 
     #[test]
-    fn excluded_tasks_and_sources_never_run_automatically_or_in_batches() {
+    fn excluded_tasks_never_run_automatically_or_in_batches() {
         let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let mut engine = Engine::default();
         let items = vec![
@@ -17404,10 +17404,8 @@ mod tests {
         assert!(
             matches!(&controller.rust().pending, Some(Job::CleanAll(ops)) if ops == &vec![Operation::Clean(items[1].id.clone())])
         );
-        let preferences = CleanupPreferences {
-            disabled_sources: vec!["dev-caches".into()],
-            ..preferences
-        };
+        let mut preferences = preferences;
+        preferences.set_included(items[1].id.clone(), false);
         controller
             .as_mut()
             .set_cleanup_preferences(serde_json::to_string(&preferences).unwrap().into());

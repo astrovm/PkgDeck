@@ -18,25 +18,84 @@ use pkgdeck_core::{
 };
 use std::path::{Path, PathBuf};
 
+/// The parts of Settings, one shown at a time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    Appearance,
+    Updates,
+    Sources,
+    Clean,
+    About,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 5] = [
+        Tab::Appearance,
+        Tab::Updates,
+        Tab::Sources,
+        Tab::Clean,
+        Tab::About,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Appearance => "Appearance",
+            Tab::Updates => "Updates",
+            Tab::Sources => "Sources",
+            Tab::Clean => "Clean",
+            Tab::About => "About",
+        }
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut Ui) {
+    let tab = app.ui.settings_tab;
+    let width = ui.available_width().min(760.0);
+    let names = Tab::ALL.map(Tab::name);
+    let widths = label_widths(ui, &names, width);
+    ui.allocate_ui(vec2(width, 34.0), |ui| {
+        if let Some(choice) = segmented_sized(
+            ui,
+            Id::new("settings-tab"),
+            &names,
+            position(&Tab::ALL, tab),
+            &widths,
+        ) {
+            app.ui.settings_tab = Tab::ALL[choice];
+        }
+    });
+    ui.add_space(12.0);
     super::scrollbar::vertical()
-        .id_salt("settings")
+        // Each tab keeps its own place.
+        .id_salt(("settings", tab.name()))
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let width = ui.available_width().min(760.0);
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 6.0;
-            appearance(app, ui);
-            ui.add_space(8.0);
-            update_checks(app, ui);
-            ui.add_space(8.0);
-            sources(app, ui);
-            ui.add_space(8.0);
-            clean(app, ui);
-            ui.add_space(8.0);
-            about(app, ui);
-            ui.add_space(8.0);
-            shortcuts(ui);
+            let gap = 8.0;
+            match tab {
+                Tab::Appearance => {
+                    style_section(app, ui);
+                    ui.add_space(gap);
+                    colours(app, ui);
+                    ui.add_space(gap);
+                    layout(app, ui);
+                }
+                Tab::Updates => {
+                    checks(app, ui);
+                    ui.add_space(gap);
+                    automatic_updates(app, ui);
+                    ui.add_space(gap);
+                    notifications(app, ui);
+                }
+                Tab::Sources => sources(app, ui),
+                Tab::Clean => clean(app, ui),
+                Tab::About => {
+                    about(app, ui);
+                    ui.add_space(gap);
+                    shortcuts(ui);
+                }
+            }
             ui.add_space(20.0);
         });
 }
@@ -51,8 +110,10 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
         show_card(ui, card(&palette).inner_margin(margin), |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.set_width(ui.available_width());
-            caption(ui, title);
-            ui.add_space(4.0);
+            if !title.is_empty() {
+                caption(ui, title);
+                ui.add_space(4.0);
+            }
             content(ui);
         });
         return;
@@ -79,7 +140,7 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.set_width(ui.available_width());
             // Room for the title, drawn once the box's size is known.
-            ui.add_space(if group.on_line {
+            ui.add_space(if group.on_line || title.is_empty() {
                 4.0
             } else {
                 title_height + 8.0
@@ -88,6 +149,9 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
         });
     let rect = shown.response.rect;
     skin::paint_group(ui.painter(), rect, &palette);
+    if title.is_empty() {
+        return;
+    }
     let at = if group.on_line {
         egui::pos2(rect.left() + 12.0, rect.top() - title_height / 2.0)
     } else {
@@ -110,6 +174,8 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
 fn setting_row(ui: &mut Ui, label: &str, hint: &str, size: Vec2, control: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
     let full = ui.available_width();
+    // A control never runs past the card; it narrows instead.
+    let size = vec2(size.x.min(full), size.y);
     let gap = 20.0;
     let beside = full - size.x - gap >= 200.0;
     let text_width = if beside { full - size.x - gap } else { full };
@@ -162,8 +228,12 @@ fn setting_row(ui: &mut Ui, label: &str, hint: &str, size: Vec2, control: impl F
     ui.add_space(14.0);
 }
 
-fn appearance(app: &mut App, ui: &mut Ui) {
-    section(ui, "Appearance", |ui| {
+fn style_section(app: &mut App, ui: &mut Ui) {
+    section(ui, "Style", |ui| styles(app, ui));
+}
+
+fn colours(app: &mut App, ui: &mut Ui) {
+    section(ui, "Colours", |ui| {
         setting_row(ui, "Theme", "", vec2(252.0, 34.0), |ui| {
             let all = [Appearance::System, Appearance::Light, Appearance::Dark];
             if let Some(choice) = segmented(
@@ -175,7 +245,6 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.appearance = all[choice];
             }
         });
-        styles(app, ui);
         // Only the colours of the appearance on screen; the other mode keeps
         // its own choice. The older styles have their own.
         if app.settings.style == Style::Modern {
@@ -203,19 +272,32 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 }
             });
         }
-        setting_row(ui, "Accent", "", vec2(swatches_width(), 34.0), |ui| {
-            if let Some(accent) = swatches(ui, app.settings.accent) {
+        // As many dots in a line as fit, then the next line.
+        let count = Accent::ALL.len() + 1;
+        let columns = (((ui.available_width() + SWATCH_GAP) / (SWATCH + SWATCH_GAP)).floor()
+            as usize)
+            .clamp(1, count);
+        let size = vec2(
+            swatches_width(columns),
+            count.div_ceil(columns) as f32 * SWATCH_ROW,
+        );
+        setting_row(ui, "Accent", "", size, |ui| {
+            if let Some(accent) = swatches(ui, &mut app.settings, columns) {
                 app.settings.accent = accent;
             }
-            custom_swatch(ui, &mut app.settings);
         });
+    });
+}
+
+fn layout(app: &mut App, ui: &mut Ui) {
+    section(ui, "Layout", |ui| {
         // Windows 98 is square whatever the roundness.
         if app.settings.style.family() != Family::Retro {
             // Quarter steps from square to twice the style's own.
             let mut step = (app.settings.roundness * 4.0).round().clamp(0.0, 8.0) as usize;
             let hint = match step {
                 0 => "Square".to_owned(),
-                4 => "As the style draws it".to_owned(),
+                4 => "Default".to_owned(),
                 _ => format!("{}%", step * 25),
             };
             setting_row(ui, "Roundness", &hint, vec2(240.0, 28.0), |ui| {
@@ -264,11 +346,7 @@ fn appearance(app: &mut App, ui: &mut Ui) {
         });
         // The desktop can turn movement off for every app; then it stays off.
         let system = app.platform.reduce_motion();
-        let hint = if system {
-            "Off in system settings"
-        } else {
-            "Movement when things open, close and change"
-        };
+        let hint = if system { "Off in system settings" } else { "" };
         setting_row(ui, "Animations", hint, SWITCH, |ui| {
             let mut on = !app.reduce_motion();
             if switch(ui, &mut on, !system, "Animations").changed() {
@@ -434,10 +512,10 @@ fn preview(painter: &egui::Painter, rect: egui::Rect, palette: &Palette) {
 }
 
 /// The last swatch: a colour picked by hand.
-fn custom_swatch(ui: &mut Ui, settings: &mut crate::settings::Settings) {
+fn custom_swatch(ui: &mut Ui, settings: &mut crate::settings::Settings, cell: egui::Rect) {
     let palette = Palette::current(ui.ctx());
-    let (cell, response) = ui.allocate_exact_size(Vec2::splat(SWATCH), Sense::click());
-    let response = response
+    let response = ui
+        .interact(cell, Id::new("custom-accent"), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Pick a colour");
     let current = settings.accent == Accent::Custom;
@@ -495,24 +573,46 @@ fn position<T: PartialEq>(all: &[T], current: T) -> usize {
 const SWATCH: f32 = 26.0;
 const SWATCH_GAP: f32 = 8.0;
 
-fn swatches_width() -> f32 {
-    // The presets and the custom colour.
-    let count = Accent::ALL.len() as f32 + 1.0;
-    count * SWATCH + (count - 1.0) * SWATCH_GAP
+const SWATCH_ROW: f32 = 34.0;
+
+/// How wide `columns` dots are.
+fn swatches_width(columns: usize) -> f32 {
+    let columns = columns as f32;
+    columns * SWATCH + (columns - 1.0) * SWATCH_GAP
 }
 
 /// A dot of each accent, in this appearance's shade, the current one
-/// ringed. Returns a new choice.
-fn swatches(ui: &mut Ui, current: Accent) -> Option<Accent> {
+/// ringed, `columns` to a line, and last the custom colour. Returns a new
+/// preset choice.
+fn swatches(
+    ui: &mut Ui,
+    settings: &mut crate::settings::Settings,
+    columns: usize,
+) -> Option<Accent> {
     let palette = Palette::current(ui.ctx());
-    let width = swatches_width() - SWATCH - SWATCH_GAP;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    let current = settings.accent;
+    let count = Accent::ALL.len() + 1;
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(
+            swatches_width(columns),
+            count.div_ceil(columns) as f32 * SWATCH_ROW,
+        ),
+        Sense::hover(),
+    );
+    let center_of = |index: usize| {
+        egui::pos2(
+            rect.left() + SWATCH / 2.0 + (index % columns) as f32 * (SWATCH + SWATCH_GAP),
+            rect.top() + SWATCH_ROW / 2.0 + (index / columns) as f32 * SWATCH_ROW,
+        )
+    };
+    custom_swatch(
+        ui,
+        settings,
+        egui::Rect::from_center_size(center_of(Accent::ALL.len()), Vec2::splat(SWATCH)),
+    );
     let mut chosen = None;
     for (index, accent) in Accent::ALL.into_iter().enumerate() {
-        let center = egui::pos2(
-            rect.left() + SWATCH / 2.0 + index as f32 * (SWATCH + SWATCH_GAP),
-            rect.center().y,
-        );
+        let center = center_of(index);
         let cell = egui::Rect::from_center_size(center, Vec2::splat(SWATCH));
         let response = ui
             .interact(cell, Id::new("accent").with(index), Sense::click())
@@ -559,9 +659,46 @@ fn swatches(ui: &mut Ui, current: Accent) -> Option<Accent> {
 
 /// Choices side by side with a sliding marker. Returns a new choice.
 fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usize> {
+    let part = (ui.available_width() / labels.len() as f32).min(84.0);
+    segmented_sized(ui, id, labels, current, &vec![part; labels.len()])
+}
+
+/// Widths for choices sized to their labels, together no wider than `max`.
+fn label_widths(ui: &Ui, labels: &[&str], max: f32) -> Vec<f32> {
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|label| {
+            let galley = ui.painter().layout_no_wrap(
+                label.to_string(),
+                theme::bold(13.5),
+                egui::Color32::WHITE,
+            );
+            (galley.size().x + 32.0).max(84.0)
+        })
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let scale = (max / total).min(1.0);
+    widths.into_iter().map(|width| width * scale).collect()
+}
+
+/// `segmented`, each choice as wide as `widths` says.
+fn segmented_sized(
+    ui: &mut Ui,
+    id: Id,
+    labels: &[&str],
+    current: usize,
+    widths: &[f32],
+) -> Option<usize> {
     let palette = Palette::current(ui.ctx());
-    let part = 84.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(part * labels.len() as f32, 34.0), Sense::hover());
+    let starts: Vec<f32> = widths
+        .iter()
+        .scan(0.0, |at, width| {
+            let start = *at;
+            *at += width;
+            Some(start)
+        })
+        .collect();
+    let (rect, _) = ui.allocate_exact_size(vec2(widths.iter().sum(), 34.0), Sense::hover());
     let modern = theme::skin().family().flat();
     if modern {
         ui.painter()
@@ -572,11 +709,13 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     let x = glide(
         ui.ctx(),
         id.with("knob"),
-        rect.left() + current as f32 * part,
+        rect.left() + starts[current],
         LAYOUT,
     );
+    let knob_width = glide(ui.ctx(), id.with("knob-width"), widths[current], LAYOUT);
     let knob =
-        egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(part, rect.height())).shrink(3.0);
+        egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(knob_width, rect.height()))
+            .shrink(3.0);
     let mut chosen_ink = palette.ink;
     if modern {
         ui.painter().rect(
@@ -612,8 +751,8 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     let mut chosen = None;
     for (index, label) in labels.iter().enumerate() {
         let cell = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + index as f32 * part, rect.top()),
-            vec2(part, rect.height()),
+            egui::pos2(rect.left() + starts[index], rect.top()),
+            vec2(widths[index], rect.height()),
         );
         let response = ui
             .interact(cell, id.with(index), Sense::click())
@@ -631,17 +770,20 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
         } else {
             palette.muted
         };
-        ui.painter().text(
-            cell.center(),
-            egui::Align2::CENTER_CENTER,
-            *label,
+        // A long label shrinks rather than run into its neighbour.
+        let text = fitted(
+            ui.painter(),
+            label,
             if index == current {
                 theme::bold(13.5)
             } else {
                 theme::font(13.5)
             },
             color,
+            widths[index] - 10.0,
         );
+        ui.painter()
+            .galley(cell.center() - text.size() / 2.0, text, color);
         if response.clicked() && index != current {
             chosen = Some(index);
         }
@@ -649,48 +791,42 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     chosen
 }
 
+/// Why a switch that needs background checks is off.
+const NEEDS_BACKGROUND: &str = "Needs Background checks";
+
 /// The switches Settings shares with the first-run dialog. Each needs
 /// background checks.
 pub(super) fn auto_update_row(app: &mut App, ui: &mut Ui) {
     let background = app.settings.background_mode;
-    setting_row(
-        ui,
-        "Update apps and packages automatically",
-        "After each background check",
-        SWITCH,
-        |ui| {
-            let mut on = app.settings.auto_update;
-            if switch(
-                ui,
-                &mut on,
-                background,
-                "Update apps and packages automatically",
-            )
-            .changed()
-            {
-                app.settings.auto_update = on;
-                app.c().set_auto_update(on);
-            }
-        },
-    );
+    let hint = if background {
+        "After each check"
+    } else {
+        NEEDS_BACKGROUND
+    };
+    setting_row(ui, "Update automatically", hint, SWITCH, |ui| {
+        let mut on = app.settings.auto_update;
+        if switch(ui, &mut on, background, "Update automatically").changed() {
+            app.settings.auto_update = on;
+            app.c().set_auto_update(on);
+        }
+    });
 }
 
 pub(super) fn auto_clean_row(app: &mut App, ui: &mut Ui) {
     let background = app.settings.background_mode;
-    setting_row(
-        ui,
-        "Clean caches automatically",
-        "Once a day. Also unused images and build files of old projects",
-        SWITCH,
-        |ui| {
-            let mut on = app.settings.auto_clean;
-            if switch(ui, &mut on, background, "Clean caches automatically").changed() {
-                app.settings.auto_clean = on;
-                let at = app.settings.auto_cleaned_at;
-                app.c().set_auto_clean(on, at);
-            }
-        },
-    );
+    let hint = if background {
+        "Once a day. Cleans what's checked on Clean"
+    } else {
+        NEEDS_BACKGROUND
+    };
+    setting_row(ui, "Clean automatically", hint, SWITCH, |ui| {
+        let mut on = app.settings.auto_clean;
+        if switch(ui, &mut on, background, "Clean automatically").changed() {
+            app.settings.auto_clean = on;
+            let at = app.settings.auto_cleaned_at;
+            app.c().set_auto_clean(on, at);
+        }
+    });
 }
 
 /// Turning it on or off asks for the password, then the result comes back
@@ -699,23 +835,12 @@ pub(super) fn password_row(app: &mut App, ui: &mut Ui, enabled: bool) {
     let palette = Palette::current(ui.ctx());
     setting_row(
         ui,
-        "Update system packages without a password",
-        if cfg!(target_os = "macos") {
-            "Only automatic updates of MacPorts and macOS"
-        } else {
-            "Only automatic updates of APT, Flatpak and other system sources"
-        },
+        "Skip the password",
+        "For automatic updates of system packages",
         SWITCH,
         |ui| {
             let mut on = !app.settings.system_approval.is_empty();
-            if switch(
-                ui,
-                &mut on,
-                enabled,
-                "Update system packages without a password",
-            )
-            .changed()
-            {
+            if switch(ui, &mut on, enabled, "Skip the password").changed() {
                 app.c().allow_system_updates(on);
                 app.react();
             }
@@ -728,41 +853,56 @@ pub(super) fn password_row(app: &mut App, ui: &mut Ui, enabled: bool) {
 }
 
 pub(super) fn login_row(app: &mut App, ui: &mut Ui) {
-    setting_row(ui, "Start in background at login", "", SWITCH, |ui| {
+    let can = app.settings.background_mode && app.platform.tray_available();
+    let hint = if app.settings.background_mode {
+        ""
+    } else {
+        NEEDS_BACKGROUND
+    };
+    setting_row(ui, "Start at login", hint, SWITCH, |ui| {
         let mut on = app.settings.autostart;
-        let can = app.settings.background_mode && app.platform.tray_available();
-        if switch(ui, &mut on, can, "Start in background at login").changed()
-            && app.c().set_autostart(on)
-        {
+        if switch(ui, &mut on, can, "Start at login").changed() && app.c().set_autostart(on) {
             app.settings.autostart = on;
         }
     });
 }
 
-fn update_checks(app: &mut App, ui: &mut Ui) {
+/// Turns background checks on or off. Off also stops starting at login;
+/// false when that couldn't be undone.
+fn set_background(app: &mut App, on: bool) -> bool {
+    if !on && app.settings.autostart && !app.c().set_autostart(false) {
+        return false;
+    }
+    if !on {
+        app.settings.autostart = false;
+    }
+    app.settings.background_mode = on;
+    app.sync_tray();
+    true
+}
+
+/// A line with an icon, for what is happening now.
+fn status_line(ui: &mut Ui, icon: &str, text: &str, color: egui::Color32) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+        theme::paint_icon(ui.painter(), rect, icon, color);
+        ui.label(egui::RichText::new(text).color(color));
+    });
+}
+
+fn checks(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
-    section(ui, "Update checks", |ui| {
+    section(ui, "Checks", |ui| {
         let background = app.settings.background_mode;
         setting_row(
             ui,
             "Background checks",
-            if cfg!(target_os = "macos") {
-                "Keeps checking from the menu bar after the window closes"
-            } else {
-                "Keeps checking from the system tray after the window closes"
-            },
+            "Keeps checking after you close the window",
             SWITCH,
             |ui| {
                 let mut on = background;
                 if switch(ui, &mut on, true, "Background checks").changed() {
-                    if !on && app.settings.autostart && !app.c().set_autostart(false) {
-                        return;
-                    }
-                    if !on {
-                        app.settings.autostart = false;
-                    }
-                    app.settings.background_mode = on;
-                    app.sync_tray();
+                    set_background(app, on);
                 }
             },
         );
@@ -788,90 +928,78 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            login_row(app, ui);
+        }
+        if let Some(at) = app.background.last_check {
+            let count = app.background.available;
+            let text = format!(
+                "Checked {}, {count} update{}",
+                model::short_datetime(at),
+                if count == 1 { "" } else { "s" }
+            );
+            status_line(ui, "refresh", &text, palette.muted);
+        }
+    });
+}
+
+fn automatic_updates(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    section(ui, "Automatic updates", |ui| {
         auto_update_row(app, ui);
         setting_row(
             ui,
-            "Allow updates that remove packages",
+            "Allow removals",
             "Like an old kernel replaced by a new one",
             SWITCH,
             |ui| {
                 let mut on = app.settings.allow_removals;
-                if switch(ui, &mut on, true, "Allow updates that remove packages").changed() {
+                if switch(ui, &mut on, true, "Allow removals").changed() {
                     app.settings.allow_removals = on;
                     app.c().set_allow_removals(on);
                 }
             },
         );
         password_row(app, ui, true);
-        if cfg!(any(target_os = "linux", target_os = "macos")) {
-            login_row(app, ui);
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            let text = match app.background.last_check {
-                Some(at) => {
-                    let count = app.background.available;
-                    format!(
-                        "Last check: {}, {count} update{} found",
-                        model::short_datetime(at),
-                        if count == 1 { "" } else { "s" }
-                    )
-                }
-                None => "Last check: never".into(),
-            };
-            ui.label(egui::RichText::new(text).color(palette.muted));
-        });
-        {
-            let warning = if !app.platform.tray_available() {
-                Some(if cfg!(target_os = "macos") {
-                    "No menu bar icon, so no notifications"
-                } else {
-                    "No system tray, so no notifications"
-                })
-            } else if !app.platform.notifications_available() {
-                Some(if cfg!(target_os = "macos") {
-                    "Notifications are off in System Settings"
-                } else {
-                    "This system tray can't show notifications"
-                })
-            } else if app.platform.permission_needed() {
-                Some("Notifications show Script Editor's icon until you allow PkgDeck")
-            } else {
-                None
-            };
-            // Said, not hidden behind a hover: it is why nothing pops up.
-            if let Some(warning) = warning {
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                    theme::paint_icon(ui.painter(), rect, "warning", palette.warning);
-                    ui.label(egui::RichText::new(warning).color(palette.warning));
-                });
-            }
-        }
         if let Some(waiting) = app
             .background
             .waiting_text()
-            .filter(|_| background && app.settings.auto_update)
+            .filter(|_| app.settings.background_mode && app.settings.auto_update)
         {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                theme::paint_icon(ui.painter(), rect, "clock", palette.muted);
-                ui.label(egui::RichText::new(waiting).color(palette.muted));
-            });
+            status_line(ui, "clock", waiting, palette.muted);
+        }
+    });
+}
+
+fn notifications(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    section(ui, "Notifications", |ui| {
+        let warning = if !app.platform.tray_available() {
+            Some(if cfg!(target_os = "macos") {
+                "No menu bar icon, so no notifications"
+            } else {
+                "No system tray, so no notifications"
+            })
+        } else if !app.platform.notifications_available() {
+            Some(if cfg!(target_os = "macos") {
+                "Off in System Settings"
+            } else {
+                "This system tray can't show notifications"
+            })
+        } else if app.platform.permission_needed() {
+            Some("Allow PkgDeck to show its own icon")
+        } else {
+            None
+        };
+        // Said, not hidden behind a hover: it is why nothing pops up.
+        if let Some(warning) = warning {
+            status_line(ui, "warning", warning, palette.warning);
         }
         ui.horizontal(|ui| {
-            if app.platform.permission_needed()
-                && Button::new(Look::Secondary, "Notification settings")
-                    .small()
-                    .show(ui)
-                    .clicked()
-            {
-                app.platform.open_notification_settings();
-            }
             if Button::new(Look::Soft(Tone::Accent), "Test notification")
                 .icon("bell")
                 .small()
-                .enabled(background && app.platform.notifications_available())
+                .enabled(app.settings.background_mode && app.platform.notifications_available())
                 .show(ui)
                 .clicked()
             {
@@ -879,7 +1007,15 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                     app.platform.request_permission();
                 }
                 app.platform
-                    .notify("PkgDeck test", "Desktop notifications are working.");
+                    .notify("PkgDeck test", "Notifications are working.");
+            }
+            if app.platform.permission_needed()
+                && Button::new(Look::Secondary, "Notification settings")
+                    .small()
+                    .show(ui)
+                    .clicked()
+            {
+                app.platform.open_notification_settings();
             }
         });
     });
@@ -915,8 +1051,6 @@ fn shown_folder(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// Where Clean looks for old projects, kept in PkgDeck's own config file
-/// for the engine and `pkd` to read too.
 /// Package managers that manage repositories in PkgDeck.
 const REPOSITORY_SOURCES: [&str; 5] = ["flatpak", "fwupd", "apt", "dnf", "zypper"];
 
@@ -926,14 +1060,10 @@ fn sources(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let shown = shown_sources(&app.catalog);
     let enabled = app.enabled_sources();
-    section(ui, "Sources", |ui| {
-        let note = if app.catalog.is_empty() {
-            "Looking for package managers…"
-        } else {
-            "PkgDeck uses the package managers that are on."
-        };
-        ui.label(egui::RichText::new(note).color(palette.muted));
-        ui.add_space(4.0);
+    section(ui, "Package managers", |ui| {
+        if app.catalog.is_empty() {
+            ui.label(egui::RichText::new("Looking for package managers…").color(palette.muted));
+        }
         for entry in &shown {
             let on_now = enabled.contains(&entry.source);
             ui.horizontal(|ui| {
@@ -954,20 +1084,22 @@ fn sources(app: &mut App, ui: &mut Ui) {
                 });
             });
             if entry.check_failed {
-                ui.label(
-                    egui::RichText::new(&entry.summary)
-                        .font(theme::font(12.5))
-                        .color(palette.danger),
-                );
-                if Button::new(Look::Flat, "Try again")
-                    .icon("refresh")
-                    .small()
-                    .show(ui)
-                    .clicked()
-                {
-                    app.c().recheck_sources();
-                    app.react();
-                }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&entry.summary)
+                            .font(theme::font(12.5))
+                            .color(palette.danger),
+                    );
+                    if Button::new(Look::Flat, "Retry")
+                        .icon("refresh")
+                        .small()
+                        .show(ui)
+                        .clicked()
+                    {
+                        app.c().recheck_sources();
+                        app.react();
+                    }
+                });
             }
         }
         if REPOSITORY_SOURCES.iter().any(|id| app.available(id)) {
@@ -1006,6 +1138,8 @@ fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
     shown
 }
 
+/// Where Clean looks for old projects, kept in PkgDeck's own config file
+/// for the engine and `pkd` to read too.
 fn clean(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let id = Id::new("project-settings");
@@ -1014,17 +1148,52 @@ fn clean(app: &mut App, ui: &mut Ui) {
         .unwrap_or_else(|| ProjectSettings::load(&Host::current()));
     let before = projects.clone();
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    section(ui, "Clean", |ui| {
+    section(ui, "Automatic cleaning", |ui| {
         auto_clean_row(app, ui);
-        caption(ui, "Worktrees and old projects");
+        let background = app.settings.background_mode;
+        setting_row(
+            ui,
+            "Clean finished worktrees",
+            if background {
+                "Once a day. Keeps branches"
+            } else {
+                NEEDS_BACKGROUND
+            },
+            SWITCH,
+            |ui| {
+                let mut on = app.settings.auto_clean_worktrees;
+                if switch(ui, &mut on, background, "Clean finished worktrees").changed() {
+                    app.settings.auto_clean_worktrees = on;
+                    app.c().set_auto_clean_worktrees(on);
+                }
+            },
+        );
+        ui.horizontal(|ui| {
+            if !background
+                && Button::new(Look::Soft(Tone::Accent), "Turn on Background checks")
+                    .small()
+                    .show(ui)
+                    .clicked()
+            {
+                set_background(app, true);
+            }
+            if Button::new(Look::Secondary, "Choose what to clean")
+                .icon("remove")
+                .small()
+                .show(ui)
+                .clicked()
+            {
+                app.open_page(model::Page::Clean);
+            }
+        });
+    });
+    ui.add_space(8.0);
+    section(ui, "Old projects", |ui| {
         let step = project_step(projects.days);
         setting_row(
             ui,
-            "Old projects",
-            &format!(
-                "Build files and worktrees unchanged for {}",
-                days_text(projects.days)
-            ),
+            "Old after",
+            &format!("{} without changes", days_text(projects.days)),
             vec2(240.0, 28.0),
             |ui| {
                 let mut index = step;
@@ -1040,38 +1209,19 @@ fn clean(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
-        setting_row(
-            ui,
-            "Clean finished worktrees automatically",
-            "Once a day after a background check. Keeps branches",
-            SWITCH,
-            |ui| {
-                let mut on = app.settings.auto_clean_worktrees;
-                if switch(
-                    ui,
-                    &mut on,
-                    app.settings.background_mode,
-                    "Clean finished worktrees automatically",
-                )
-                .changed()
-                {
-                    app.settings.auto_clean_worktrees = on;
-                    app.c().set_auto_clean_worktrees(on);
-                }
-            },
+        worktree_protection(ui, &mut projects);
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Folders")
+                .font(theme::font(14.5))
+                .color(palette.ink),
         );
-        worktree_protection_row(ui, &mut projects);
-        ui.add_space(4.0);
-        cleanup_choices(app, ui);
-        caption(ui, "Project folders");
-        ui.label(egui::RichText::new("Look for projects in").color(palette.muted));
         let mut removed = None;
         for (index, folder) in projects.folders.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(shown_folder(folder, home.as_deref()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, "remove", "Stop looking here", palette.muted, true).clicked()
-                    {
+                    if icon_button(ui, "remove", "Remove folder", palette.muted, true).clicked() {
                         removed = Some(index);
                     }
                 });
@@ -1105,7 +1255,7 @@ fn clean(app: &mut App, ui: &mut Ui) {
         let error = projects
             .save(&Host::current())
             .err()
-            .map(|error| format!("Couldn't save Clean settings: {error}"));
+            .map(|error| format!("Couldn't save: {error}"));
         ui.data_mut(|data| match error {
             Some(error) => {
                 data.insert_temp(Id::new("project-settings-error"), error);
@@ -1116,124 +1266,111 @@ fn clean(app: &mut App, ui: &mut Ui) {
     ui.data_mut(|data| data.insert_temp(id, projects));
 }
 
-fn cleanup_choices(app: &mut App, ui: &mut Ui) {
-    let id = Id::new("cleanup-choices-open");
-    let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
-    if Button::new(
-        Look::Secondary,
-        if open {
-            "Hide cleanup choices"
-        } else {
-            "Choose what to clean"
-        },
-    )
-    .icon(if open { "up" } else { "down" })
-    .small()
-    .show(ui)
-    .clicked()
-    {
-        ui.data_mut(|data| data.insert_temp(id, !open));
-    }
-    if !open {
-        return;
-    }
-    caption(ui, "Cleanup sources");
-    let sources: Vec<_> = app
-        .catalog
-        .iter()
-        .filter(|source| {
-            (source.available || source.check_failed)
-                && source
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == "clean")
-        })
-        .cloned()
-        .collect();
-    for source in sources {
-        setting_row(ui, model::source_name(&source.source), "", SWITCH, |ui| {
-            let mut on = !app
-                .settings
-                .cleanup
-                .disabled_sources
-                .contains(&source.source);
-            if switch(
-                ui,
-                &mut on,
-                !app.writing,
-                &format!("Clean {}", model::source_name(&source.source)),
-            )
-            .changed()
-            {
-                app.set_cleanup_source_enabled(&source.source, on);
-            }
-        });
-    }
-    caption(ui, "Developer caches");
+/// What a finished worktree with uncommitted files needs before it goes:
+/// one choice each, its cost said under it, the safest first.
+fn worktree_protection(ui: &mut Ui, projects: &mut ProjectSettings) {
+    let palette = Palette::current(ui.ctx());
+    ui.add_space(4.0);
     ui.label(
-        egui::RichText::new("Remembered for Clean all and automatic cleaning")
-            .color(Palette::current(ui.ctx()).muted),
+        egui::RichText::new("Worktrees with uncommitted files")
+            .font(theme::font(14.5))
+            .color(palette.ink),
     );
-    let choices = pkgdeck_core::backends::developer_cleanup_choices(Host::current());
-    for (id, title) in choices {
-        setting_row(
+    for choice in WorktreeProtection::ALL {
+        let risky = choice != WorktreeProtection::AnyLocalFiles;
+        if radio(
             ui,
-            title,
-            if id.key == "sccache" {
-                "Manages its own size limit. Cleaning it makes builds slower"
+            choice == projects.worktree_protection,
+            choice.name(),
+            choice.description(),
+            if risky {
+                palette.warning
             } else {
-                ""
+                palette.muted
             },
-            SWITCH,
-            |ui| {
-                let mut on = !app.settings.cleanup.excluded.contains(&id);
-                let enabled = !app.settings.cleanup.disabled_sources.contains(&id.backend);
-                if switch(ui, &mut on, enabled, &format!("Include {title} in cleanup")).changed() {
-                    app.settings.cleanup.set_included(id, on);
-                    app.sync_cleanup_preferences();
-                }
-            },
-        );
+        ) {
+            projects.worktree_protection = choice;
+        }
     }
 }
 
-fn worktree_protection_row(ui: &mut Ui, projects: &mut ProjectSettings) {
-    setting_row(
-        ui,
-        "Keep worktrees with local changes",
-        projects.worktree_protection.description(),
-        vec2(240.0, 34.0),
-        |ui| {
-            let response = Button::new(Look::Secondary, projects.worktree_protection.name())
-                .icon("down")
-                .min_width(240.0)
-                .show(ui);
-            egui::Popup::menu(&response).show(|ui| {
-                for choice in WorktreeProtection::ALL {
-                    if Button::new(
-                        if choice == projects.worktree_protection {
-                            Look::Primary
-                        } else {
-                            Look::Flat
-                        },
-                        choice.name(),
-                    )
-                    .min_width(240.0)
-                    .show(ui)
-                    .clicked()
-                    {
-                        projects.worktree_protection = choice;
-                        ui.close();
-                    }
-                }
-            });
+/// A round choice with a line under it. True when clicked.
+fn radio(ui: &mut Ui, on: bool, label: &str, hint: &str, hint_color: egui::Color32) -> bool {
+    let palette = Palette::current(ui.ctx());
+    let width = ui.available_width();
+    let dot = 18.0;
+    let text_left = dot + 10.0;
+    let title = ui.painter().layout(
+        label.to_owned(),
+        if on {
+            theme::bold(14.0)
+        } else {
+            theme::font(14.0)
         },
+        palette.ink,
+        width - text_left,
     );
+    let note = ui.painter().layout(
+        hint.to_owned(),
+        theme::font(12.5),
+        hint_color,
+        width - text_left,
+    );
+    let height = (title.size().y + 2.0 + note.size().y).max(dot) + 8.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
+    // The line under it is read with it.
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_description(hint.to_owned()));
+    let center = egui::pos2(
+        rect.left() + dot / 2.0,
+        rect.top() + 4.0 + title.size().y / 2.0,
+    );
+    let shown = ease(ui.ctx(), response.id.with("on"), on, FEEDBACK);
+    let hover = ease(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        FEEDBACK,
+    );
+    ui.painter().circle_stroke(
+        center,
+        dot / 2.0 - 1.0,
+        Stroke::new(
+            1.5,
+            mix(
+                mix(palette.strong_line, palette.ink, hover * 0.4),
+                palette.accent,
+                shown,
+            ),
+        ),
+    );
+    if shown > 0.0 {
+        ui.painter()
+            .circle_filled(center, (dot / 2.0 - 5.0) * shown, palette.accent);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            theme::round(6),
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let text = egui::pos2(rect.left() + text_left, rect.top() + 4.0);
+    let title_height = title.size().y;
+    ui.painter().galley(text, title, palette.ink);
+    ui.painter()
+        .galley(text + vec2(0.0, title_height + 2.0), note, hint_color);
+    response.clicked() && !on
 }
 
 fn about(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
-    section(ui, "About", |ui| {
+    // The tab already says what this is.
+    section(ui, "", |ui| {
         ui.horizontal(|ui| {
             let (logo, _) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::hover());
             theme::paint_logo(ui.painter(), logo, &palette);
@@ -1309,28 +1446,6 @@ fn shortcuts(ui: &mut Ui) {
         } else {
             "Ctrl+M"
         };
-        // Folded away: most people never need the list.
-        let open_id = Id::new("shortcuts-open");
-        let open = ui
-            .data(|data| data.get_temp::<bool>(open_id))
-            .unwrap_or(false);
-        let label = if open {
-            "Hide shortcuts"
-        } else {
-            "Show shortcuts"
-        };
-        if Button::new(Look::Secondary, label)
-            .icon(if open { "up" } else { "down" })
-            .small()
-            .show(ui)
-            .clicked()
-        {
-            ui.data_mut(|data| data.insert_temp(open_id, !open));
-        }
-        if !open {
-            return;
-        }
-        ui.add_space(6.0);
         let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
         let after_reload = all
             .iter()
@@ -1370,10 +1485,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worktree_protection_menu_sets_every_choice_and_explains_deleted_files() {
-        use egui_kittest::{kittest::Queryable, Harness};
+    fn worktree_protection_offers_every_choice_and_says_what_each_loses() {
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
         let mut harness = Harness::builder()
-            .with_size(vec2(760.0, 220.0))
+            .with_size(vec2(760.0, 320.0))
             .build_ui_state(
                 |ui, (ready, projects)| {
                     if !*ready {
@@ -1381,37 +1499,39 @@ mod tests {
                         *ready = true;
                         return;
                     }
-                    worktree_protection_row(ui, projects);
+                    worktree_protection(ui, projects);
                 },
                 (false, ProjectSettings::default()),
             );
         harness.run_steps(4);
+        // Every choice and its cost show at once, the safest chosen.
+        for choice in WorktreeProtection::ALL {
+            let node =
+                harness.get_by_role_and_label(egui::accesskit::Role::RadioButton, choice.name());
+            assert_eq!(
+                node.accesskit_node().description(),
+                Some(choice.description().to_owned())
+            );
+        }
+        assert_eq!(
+            harness.state().1.worktree_protection,
+            WorktreeProtection::AnyLocalFiles
+        );
         for choice in [
             WorktreeProtection::UncommittedChanges,
             WorktreeProtection::EditedTrackedFiles,
             WorktreeProtection::AnyLocalFiles,
         ] {
-            let current = harness.state().1.worktree_protection.name();
             harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, current)
-                .click();
-            harness.run_steps(3);
-            harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, choice.name())
+                .get_by_role_and_label(egui::accesskit::Role::RadioButton, choice.name())
                 .click();
             harness.run_steps(3);
             assert_eq!(harness.state().1.worktree_protection, choice);
-            assert!(harness.query_by_label(choice.description()).is_some());
         }
     }
 
     #[test]
-    fn developer_cache_choice_names_are_stable_and_sources_are_separate() {
-        let choices = pkgdeck_core::backends::developer_cleanup_choices(Host::current());
-        assert!(choices
-            .iter()
-            .any(|(id, name)| id.key == "sccache" && *name == "sccache compiler cache"));
-        assert!(choices.iter().all(|(id, _)| id.backend == "dev-caches"));
+    fn sources_leave_out_managers_that_only_clean() {
         let catalog: Vec<model::Source> = serde_json::from_value(serde_json::json!([
             {"source":"apt", "available":true, "capabilities":["clean","upgrade"]},
             {"source":"projects", "available":true, "capabilities":["clean"]},
