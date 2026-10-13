@@ -607,10 +607,9 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     let reveal = std::mem::take(&mut app.ui.reveal_selection)
         .then(|| app.selected_index())
         .flatten();
-    let mut scroll = egui::ScrollArea::vertical()
+    let mut scroll = super::scrollbar::vertical()
         .id_salt(list_id)
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+        .auto_shrink([false, false]);
     if let Some(index) = reveal {
         let state =
             egui::scroll_area::State::load(&ctx, ui.make_persistent_id(list_id).with("scroll"));
@@ -618,9 +617,9 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
         let (row_top, row_bottom) = (offsets[index], offsets[index + 1]);
         let view = body.height();
         if row_top < current {
-            scroll = scroll.vertical_scroll_offset(row_top - 4.0);
+            scroll = scroll.scroll_offset(row_top - 4.0);
         } else if row_bottom > current + view {
-            scroll = scroll.vertical_scroll_offset(row_bottom - view + 4.0);
+            scroll = scroll.scroll_offset(row_bottom - view + 4.0);
         }
     }
     let mut hovered_raw = None;

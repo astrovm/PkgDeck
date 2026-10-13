@@ -368,6 +368,17 @@ fn main() {
                     app.selected = Some(app.rows[app.items[1].raw].identity());
                 },
             );
+            // Short enough that the page scrolls, to see the bar.
+            render(
+                &format!("style-{name}-scroll-{mode}"),
+                [900.0, 420.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Settings);
+                },
+            );
             render(
                 &format!("style-{name}-settings-{mode}"),
                 [1180.0, 1100.0],

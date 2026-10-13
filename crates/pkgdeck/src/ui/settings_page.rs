@@ -16,7 +16,7 @@ use pkgdeck_core::{backends::ProjectSettings, host::Host};
 use std::path::{Path, PathBuf};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
-    egui::ScrollArea::vertical()
+    super::scrollbar::vertical()
         .id_salt("settings")
         .auto_shrink([false, false])
         .show(ui, |ui| {
