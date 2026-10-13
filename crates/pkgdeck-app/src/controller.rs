@@ -13962,6 +13962,19 @@ mod tests {
         );
         assert_eq!(items[0]["title"], "libavcodec62 (amd64)");
         assert_eq!(items[1]["title"], "libavcodec62 (i386)");
+        // Only updates become rows: a refresh or a removal in the batch adds none.
+        let mixed = update_items(
+            &[
+                Operation::Refresh {
+                    backend: "apt".into(),
+                },
+                Operation::Remove(build("amd64").id),
+                Operation::Upgrade(build("i386").id),
+            ],
+            &[build("amd64"), build("i386")],
+        );
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0]["title"], "libavcodec62");
     }
     #[test]
     fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {
