@@ -63,16 +63,6 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         Width::Wide
     };
     let mut top = rect.top();
-    let heading_shown = !app.items.is_empty() || app.busy || app.writing;
-    if heading_shown {
-        let heading = Rect::from_min_size(rect.min, vec2(rect.width(), 48.0));
-        heading_row(app, ui, heading);
-        top = heading.bottom();
-        ui.painter().line_segment(
-            [pos2(rect.left(), top), pos2(rect.right(), top)],
-            Stroke::new(1.0, palette.line),
-        );
-    }
     if width != Width::Compact && !app.items.is_empty() {
         let header = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), 32.0));
         column_titles(app, ui, header, width);
@@ -125,11 +115,8 @@ fn search_prompt(app: &mut App, ui: &mut Ui, rect: Rect) {
 
 fn heading_text(app: &App) -> String {
     let count = app.items.len();
-    // The card above says what is running.
-    if app.writing {
-        return String::new();
-    }
-    if app.busy {
+    // While writing, the card says what runs; the count stays.
+    if app.busy && !app.writing {
         return match app.page {
             Page::Search => "Searching…",
             _ if count > 0 => "Refreshing…",
@@ -163,68 +150,38 @@ fn waiting_text(names: &[String]) -> String {
     }
 }
 
-fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
-    let ctx = ui.ctx().clone();
-    let palette = Palette::current(&ctx);
-    let inner = rect.shrink2(vec2(16.0, 0.0));
-    ui.scope_builder(
-        UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.label(
-                egui::RichText::new(heading_text(app))
-                    .font(theme::font(13.5))
-                    .color(palette.muted),
-            );
-            // The spinner's place is kept when it stops, so the text after
-            // it doesn't jump.
-            let (slot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-            if (app.busy && !app.writing || app.refreshing) && !app.items.is_empty() {
-                paint_spinner(ui, slot, palette.accent);
-            }
-            if app.waiting_shown() {
-                let names: Vec<String> = app
-                    .pending
-                    .iter()
-                    .filter(|id| {
-                        let kind = model::catalog_entry(&app.catalog, id).availability_kind;
-                        kind != "unavailable" && kind != "platform"
-                    })
-                    .map(|id| model::source_name(id).to_owned())
-                    .collect();
-                if !names.is_empty() {
-                    let galley = one_line(
-                        ui,
-                        &waiting_text(&names),
-                        theme::font(13.0),
-                        palette.muted,
-                        ui.available_width() * 0.5,
-                    );
-                    let (r, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
-                    ui.painter().galley(r.min, galley, palette.muted);
-                    if names.len() > 2 {
-                        response.on_hover_text(names.join("\n"));
-                    }
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !app.busy || app.writing {
-                    if icon_button(ui, "refresh", "Reload (Ctrl+R)", palette.muted, true).clicked()
-                    {
-                        app.reload(true, true);
-                    }
-                } else if Button::new(Look::Flat, "Cancel")
-                    .small()
-                    .icon("cancel")
-                    .show(ui)
-                    .clicked()
-                {
-                    app.cancel();
-                }
-            });
-        },
-    );
+/// Whether the page has a list to talk about: its count, status and
+/// reload sit beside the title.
+pub fn list_shown(app: &App) -> bool {
+    app.page != Page::Settings
+        && app.opened.is_none()
+        && (!app.items.is_empty() || app.busy || app.writing)
+}
+
+/// The line under the page title: how many, or what the page is doing,
+/// and which sources it still waits for (named on hover past two).
+pub fn subtitle(app: &App) -> (String, Option<String>) {
+    if !list_shown(app) {
+        return (String::new(), None);
+    }
+    let mut line = heading_text(app);
+    let mut names = Vec::new();
+    if app.waiting_shown() {
+        names = app
+            .pending
+            .iter()
+            .filter(|id| {
+                let kind = model::catalog_entry(&app.catalog, id).availability_kind;
+                kind != "unavailable" && kind != "platform"
+            })
+            .map(|id| model::source_name(id).to_owned())
+            .collect();
+        if !names.is_empty() {
+            line = format!("{line} · {}", waiting_text(&names));
+        }
+    }
+    let hover = (names.len() > 2).then(|| names.join("\n"));
+    (line, hover)
 }
 
 struct Columns {
@@ -919,6 +876,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         let icon_rect =
             Rect::from_center_size(pos2(icon.center().x, rect.center().y), Vec2::splat(size));
         package_icon(app, ui, icon_rect, &row);
+        if let Some(state) = batch_state {
+            paint_batch_state(ui, icon_rect, state, &palette);
+        }
     }
     // Name and source.
     let title = row.title().to_owned();
@@ -1109,9 +1069,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 _ => format!("{} {title} from {line}", action.label()),
             }
         };
-        if let Some(state) = batch_state {
+        if batch_state.is_some() {
             // A batch is cancelled from its one card, not from every row.
-            paint_batch_state(ui, button, state, &palette);
+            // Its marks sit over the icons.
         } else {
             let mut child = ui.new_child(UiBuilder::new().max_rect(button));
             if icon_button(&mut child, icon, &tip, color, enabled).clicked() {
@@ -1191,13 +1151,18 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     response.hovered().then_some(item.raw)
 }
 
-/// Where a row stands in a batch: waiting, working, or done. One quiet mark
-/// per row, so the card's single bar is the only thing that moves.
-fn paint_batch_state(ui: &Ui, button: Rect, state: model::RowState, palette: &Palette) {
-    let mark = Rect::from_center_size(button.center(), Vec2::splat(18.0));
+/// Where a row stands in a batch: waiting, working, or done, over its icon.
+/// One quiet mark per row, so the card's single bar is all that moves.
+fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Palette) {
+    ui.painter().rect_filled(
+        icon,
+        theme::round((icon.width() * 0.27) as u8),
+        palette.surface,
+    );
+    let mark = Rect::from_center_size(icon.center(), Vec2::splat(icon.width() * 0.6));
     match state {
         model::RowState::Queued => {
-            theme::paint_icon(ui.painter(), mark, "clock", alpha(palette.muted, 0.7))
+            theme::paint_icon(ui.painter(), mark, "clock", alpha(palette.muted, 0.8))
         }
         model::RowState::Running => paint_spinner(ui, mark, palette.accent),
         model::RowState::Done => {
