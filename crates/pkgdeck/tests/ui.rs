@@ -382,6 +382,11 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
     assert!(app.confirm_open);
     let mut harness = harness(app);
     harness.run_steps(4);
+    // Short details start open.
+    assert!(harness.query_by_label("Hide details").is_some());
+    harness.get_by_label("Hide details").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Show details").is_some());
     harness.get_by_label("Show details").click();
     harness.run_steps(3);
     assert!(harness.query_by_label("Hide details").is_some());
@@ -1115,4 +1120,23 @@ fn glides_settle_without_overshoot_whatever_the_frame_rate() {
         (offset, speed) = spring_step(offset, speed, omega, 0.017);
     }
     assert!(offset < 5.0, "{offset}");
+}
+
+#[test]
+fn a_long_error_wraps_beside_its_buttons_not_under_them() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.invalidate();
+    let detail = "Refresh Firmware package lists: Firmware couldn't run: Error executing command as another user: Not authorized.";
+    app.c().set_notice(json!({"kind": "error", "title": "2 of 6 changes failed", "detail": detail, "output": "x", "retry": true}).to_string().into());
+    app.react();
+    let mut harness = harness_at(app, egui::vec2(1000.0, 600.0));
+    harness.run_steps(4);
+    let text = harness
+        .get_by_label_contains("Refresh Firmware package lists")
+        .rect();
+    for button in ["Show details", "Retry", "Dismiss"] {
+        let rect = harness.get_by_label(button).rect();
+        assert!(!rect.intersects(text), "{button} sits on the message");
+    }
 }

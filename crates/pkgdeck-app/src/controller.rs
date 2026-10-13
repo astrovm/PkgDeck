@@ -2068,7 +2068,14 @@ fn clean_confirmation(items: &[&CleanupItem]) -> Value {
         "action": format!("Clean {count} {noun}"),
         "body": format!("{labels}\n\nTasks run in order. Finished tasks cannot be undone."),
         "summary": format!("Clean {count} {noun}{frees}\nFinished tasks cannot be undone."),
-        "details": labels,
+        "labels": labels,
+        "items": items.iter().map(|item| json!({
+            "group": source_display_name(&item.id.backend),
+            "icon_name": item.id.backend,
+            "title": item.title,
+            "size": item.bytes.filter(|bytes| *bytes > 0).map(pkgdeck_core::disk::size),
+            "preview": item.preview,
+        })).collect::<Vec<_>>(),
     })
 }
 /// "System" or "User" for people; an environment shows its location.
@@ -2951,6 +2958,7 @@ struct CheckedPlan {
     operations: Vec<Operation>,
     confirmation: String,
     details: String,
+    items: Vec<Value>,
     status: Option<String>,
 }
 fn plan_checked_upgrade(
@@ -2964,6 +2972,7 @@ fn plan_checked_upgrade(
             operations: vec![],
             confirmation: String::new(),
             details: String::new(),
+            items: vec![],
             status: Some("No selected packages can be updated.".into()),
         };
     }
@@ -2974,9 +2983,10 @@ fn plan_checked_upgrade(
         .collect::<Vec<_>>()
         .join("\n\n");
     CheckedPlan {
-        operations,
         confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nOther packages may also change. If one update fails, the others can still finish.", if count == 1 { "package" } else { "packages" }),
-        details: format!("{labels}\n\nOther packages may change."),
+        details: String::new(),
+        items: update_items(&operations, packages),
+        operations,
         status: None,
     }
 }
@@ -3208,6 +3218,80 @@ fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
         }
     }
     label
+}
+/// One row of a confirmation's list: grouped by source, with the version
+/// change, size and a note when known.
+fn confirm_item(package: &Package) -> Value {
+    let name = if package.display_name.is_empty() {
+        package_name(&package.id)
+    } else {
+        &package.display_name
+    };
+    json!({
+        "group": source_display_name(&package.id.backend),
+        "icon_name": package.id.backend,
+        "title": name,
+        "from": package.installed_version,
+        "to": package.candidate_version,
+        "icon": package.icon,
+        "note": if package.id.backend == "fwupd" { package.summary.as_str() } else { "" },
+    })
+}
+/// What an APT plan changes beyond the updates the dialog's rows already
+/// name: extra installs and removals, or nothing.
+fn apt_extra(plan: &AptUpgradePlan) -> String {
+    let extra = [("Install", &plan.installs), ("Remove", &plan.removals)]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(label, names)| format!("{label} ({}): {}", names.len(), names.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if extra.is_empty() {
+        extra
+    } else {
+        format!("\n\n{extra}")
+    }
+}
+/// The packages `operations` update, one row each. A name that appears
+/// more than once (such as an i386 build next to the native one) gets its
+/// architecture so the rows can be told apart.
+fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
+    let mut chosen: Vec<&Package> = Vec::new();
+    for operation in operations {
+        match operation {
+            Operation::Upgrade(id) => chosen.extend(packages.iter().filter(|p| p.id == *id)),
+            Operation::UpgradeAll { backend } => {
+                chosen.extend(packages.iter().filter(|p| {
+                    p.id.backend == *backend && p.update == UpdateAvailability::Available
+                }))
+            }
+            _ => {}
+        }
+    }
+    let title = |package: &Package| -> String {
+        if package.display_name.is_empty() {
+            package_name(&package.id).to_owned()
+        } else {
+            package.display_name.clone()
+        }
+    };
+    chosen
+        .iter()
+        .map(|package| {
+            let mut item = confirm_item(package);
+            let repeated = chosen
+                .iter()
+                .filter(|other| {
+                    other.id.backend == package.id.backend && title(other) == title(package)
+                })
+                .count()
+                > 1;
+            if repeated && !package.id.architecture.is_empty() {
+                item["title"] = json!(format!("{} ({})", title(package), package.id.architecture));
+            }
+            item
+        })
+        .collect()
 }
 /// One line for progress and results, such as "Install htop (APT)".
 fn operation_title(operation: &Operation) -> String {
@@ -3490,10 +3574,14 @@ fn confirmation_preview(
         }
         let mut impact = Vec::new();
         if let Some(bytes) = plan.download_bytes {
-            impact.push(format!("Download: {bytes} bytes"));
+            impact.push(format!("Download: {}", pkgdeck_core::disk::size(bytes)));
         }
         if let Some(bytes) = plan.disk_bytes {
-            impact.push(format!("Disk: {bytes:+} bytes"));
+            impact.push(format!(
+                "Disk: {}{}",
+                if bytes < 0 { "-" } else { "+" },
+                pkgdeck_core::disk::size(bytes.unsigned_abs())
+            ));
         }
         if !impact.is_empty() {
             lines.push(impact.join(", "));
@@ -5684,7 +5772,10 @@ impl ffi::PackageController {
             "action": "Refresh",
             "body": body,
             "summary": format!("Refresh {count} {noun}"),
-            "details": names.join("\n"),
+            "items": operations.iter().map(|operation| json!({
+                "icon_name": operation.backend(),
+                "title": source_display_name(operation.backend()),
+            })).collect::<Vec<_>>(),
         })));
         self.as_mut()
             .set_confirmation(format!("Refresh {count} {noun}?\n\n{body}").as_str().into());
@@ -5709,7 +5800,7 @@ impl ffi::PackageController {
                 ""
             };
             self.as_mut().set_confirmation_data(encoded(
-                json!({"action":"Update", "body": plan.confirmation, "summary": format!("Update {count} selected {noun}{warning}"), "details": plan.details}),
+                json!({"action":"Update", "body": plan.confirmation, "summary": format!("Update {count} selected {noun}{warning}"), "details": plan.details, "items": plan.items}),
             ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
@@ -5901,9 +5992,7 @@ impl ffi::PackageController {
                     .map(|operation| confirmation_label(operation, &self.rust().packages))
                     .collect::<Vec<_>>()
                     .join("\n\n");
-                let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
-                    format!("\n\nAPT changes:\n{}", plan.summary())
-                });
+                let apt = apt_plan.as_ref().map_or_else(String::new, apt_extra);
                 let removals = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     if plan.removals.is_empty() {
                         String::new()
@@ -5933,7 +6022,8 @@ impl ffi::PackageController {
                     };
                     format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
-                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}\n\n{labels}")})));
+                let items = update_items(&operations, &self.rust().packages);
+                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}").trim(), "items": items})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed {noun}?{incomplete}{left_out}{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
@@ -6093,7 +6183,7 @@ impl ffi::PackageController {
                         .map(|item| Operation::Clean(item.id.clone()))
                         .collect();
                     let mut confirmation = clean_confirmation(&selected.iter().collect::<Vec<_>>());
-                    let body = confirmation["details"].clone();
+                    let body = confirmation["labels"].clone();
                     confirmation["body"] = body.clone();
                     self.as_mut().set_confirmation_data(encoded(confirmation));
                     self.as_mut()
@@ -8189,7 +8279,7 @@ mod tests {
         let body = preview["body"].as_str().unwrap();
         assert!(body.contains("Selected: Update anonymous (1 → 2)"));
         assert!(body.contains("Remove anonymous (1)"));
-        assert!(body.contains("Download: 2048 bytes, Disk: -512 bytes"));
+        assert!(body.contains("Download: 2.0 KB, Disk: -512 bytes"));
         assert!(preview["summary"]
             .as_str()
             .unwrap()
@@ -13813,6 +13903,106 @@ mod tests {
         assert!(plan.status.is_none());
         assert!(plan.confirmation.contains("Update 1 selected package?"));
         assert!(plan.confirmation.contains("Update upgradable"));
+        // The dialog lists the package itself, with its versions, not a
+        // repeated sentence.
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0]["title"], "upgradable");
+        assert_eq!(plan.items[0]["group"], "fixture");
+        assert_eq!(plan.items[0]["from"], "1");
+        assert_eq!(plan.items[0]["to"], "2");
+        assert!(plan.details.is_empty());
+        // Update all lists every package its sources would update.
+        let all = update_items(
+            &[Operation::UpgradeAll {
+                backend: "fixture".into(),
+            }],
+            &[package("upgradable"), package("other")],
+        );
+        assert_eq!(all.len(), 2);
+    }
+    #[test]
+    fn an_apt_confirmation_says_only_what_its_rows_do_not() {
+        let mut plan = AptUpgradePlan {
+            preview: String::new(),
+            upgrades: vec!["libavcodec62".into()],
+            installs: vec![],
+            removals: vec![],
+        };
+        assert_eq!(apt_extra(&plan), "");
+        plan.installs = vec!["libnew1".into()];
+        plan.removals = vec!["libold1".into(), "libold2".into()];
+        assert_eq!(
+            apt_extra(&plan),
+            "\n\nInstall (1): libnew1\nRemove (2): libold1, libold2"
+        );
+        let build = |architecture: &str| Package {
+            id: PackageId {
+                backend: "apt".into(),
+                name: "libavcodec62".into(),
+                architecture: architecture.into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: String::new(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        };
+        let items = update_items(
+            &[Operation::UpgradeAll {
+                backend: "apt".into(),
+            }],
+            &[build("amd64"), build("i386")],
+        );
+        assert_eq!(items[0]["title"], "libavcodec62 (amd64)");
+        assert_eq!(items[1]["title"], "libavcodec62 (i386)");
+        // Only updates become rows: a refresh or a removal in the batch adds none.
+        let mixed = update_items(
+            &[
+                Operation::Refresh {
+                    backend: "apt".into(),
+                },
+                Operation::Remove(build("amd64").id),
+                Operation::Upgrade(build("i386").id),
+            ],
+            &[build("amd64"), build("i386")],
+        );
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0]["title"], "libavcodec62");
+    }
+    #[test]
+    fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {
+        let item = |title: &str, bytes: Option<u64>| CleanupItem {
+            id: CleanupId {
+                backend: "fixture".into(),
+                key: title.into(),
+            },
+            kind: CleanupKind::PackageCache,
+            title: title.into(),
+            summary: String::new(),
+            preview: format!("Would empty {title}"),
+            bytes,
+        };
+        let (cache, logs) = (item("cache", Some(2_000_000_000)), item("logs", None));
+        let data = clean_confirmation(&[&cache, &logs]);
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["group"], "fixture");
+        assert_eq!(items[0]["size"], "2.0 GB");
+        assert_eq!(items[0]["preview"], "Would empty cache");
+        assert!(items[1]["size"].is_null());
+        assert!(data["details"].is_null());
+        // The queued-revalidation path reads this as the confirmation text.
+        assert_eq!(
+            data["labels"].as_str().unwrap(),
+            format!("{}\n\n{}", cleanup_label(&cache), cleanup_label(&logs))
+        );
     }
     #[test]
     fn failure_details_carry_backend_error_and_hint() {
@@ -16704,7 +16894,19 @@ mod tests {
         let data: Value =
             serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
         assert_eq!(data["summary"], "Refresh 2 sources");
-        assert_eq!(data["details"], "APT\nFlatpak");
+        let titles: Vec<_> = data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["title"].as_str().unwrap(),
+                    item["icon_name"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(titles, [("APT", "apt"), ("Flatpak", "flatpak")]);
+        assert!(data["details"].is_null());
         assert!(data["body"].as_str().unwrap().contains("for APT, Flatpak."));
         assert!(controller
             .confirmation()

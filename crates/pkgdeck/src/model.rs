@@ -635,6 +635,46 @@ pub struct Confirmation {
     pub review: Option<bool>,
     pub notes: Vec<String>,
     pub changes: Vec<String>,
+    /// What the change touches, one row each. Shown as a list instead of
+    /// `details` text when present.
+    pub items: Vec<ConfirmItem>,
+}
+/// One row of a confirmation: a package, source or cleanup task.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ConfirmItem {
+    /// The source it belongs to; rows without one are not grouped.
+    pub group: String,
+    /// The source's icon name.
+    pub icon_name: String,
+    pub title: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub size: Option<String>,
+    pub note: String,
+    /// Exact command output to inspect, drawn in monospace.
+    pub preview: String,
+    /// The package's own icon file.
+    pub icon: Option<String>,
+}
+/// Lists this short open on their own.
+pub const SHORT_LIST: usize = 5;
+impl Confirmation {
+    /// Whether the details start open: only short ones do.
+    pub fn short(&self) -> bool {
+        if self.items.is_empty() {
+            self.details
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+                <= SHORT_LIST
+        } else {
+            self.items.len() <= SHORT_LIST
+        }
+    }
+    pub fn has_details(&self) -> bool {
+        !self.items.is_empty() || !self.details.trim().is_empty()
+    }
 }
 impl Confirmation {
     /// The apply button's word: "Install", "Remove", "Update"…

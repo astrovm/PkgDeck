@@ -152,7 +152,24 @@ fn start_fresh(args: &[String]) -> std::io::Error {
     command.args(fresh_args(args)).env(FRESH_START, "1").exec()
 }
 
+/// Debug builds have no packaged `pkgdeck-host-runner` beside them, so
+/// they start themselves as the one elevated helper for a confirmed batch
+/// (see `pkgdeck_core::batch::begin`). Release builds never do.
+#[cfg(debug_assertions)]
+fn run_as_batch_runner() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|flag| flag == "--batch-runner") {
+        let args: Vec<_> = args.collect();
+        let failed = pkgdeck_core::unattended::run_runner(&args)
+            .inspect_err(|error| eprintln!("pkgdeck-host-runner: {error}"))
+            .is_err();
+        std::process::exit(i32::from(failed));
+    }
+}
+
 fn main() {
+    #[cfg(debug_assertions)]
+    run_as_batch_runner();
     pkgdeck::memory::tune();
     let args: Vec<String> = std::env::args().collect();
     let fresh = std::env::var_os(FRESH_START).is_some();

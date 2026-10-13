@@ -1,5 +1,6 @@
 //! Renders the screenshots in `docs/screenshots` from sample data, without
-//! a display: `cargo run -p pkgdeck --example screenshots`.
+//! a display: `cargo run -p pkgdeck --example screenshots`. `--themes` draws
+//! only the README grid.
 
 use eframe::egui;
 use egui_kittest::Harness;
@@ -207,9 +208,18 @@ fn title_bar(ui: &egui::Ui, bar: egui::Rect, window: egui::Rect) {
 }
 
 fn render(name: &str, size: [f32; 2], prepare: impl FnOnce(&mut App)) {
+    let image = capture(size, prepare);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshots");
+    image.save(dir.join(format!("{name}.png"))).unwrap();
+}
+
+fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
     let mut app = app();
     prepare(&mut app);
     app.invalidate();
+    // The older styles draw their own title bar; only Modern leaves it to
+    // the system, so only there does the harness add one.
+    let framed = app.settings.style.family() != pkgdeck::settings::Family::Modern;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(size[0], size[1] + TITLE_BAR))
         .with_pixels_per_point(2.0)
@@ -222,6 +232,10 @@ fn render(name: &str, size: [f32; 2], prepare: impl FnOnce(&mut App)) {
                     return;
                 }
                 let full = ui.max_rect();
+                if framed {
+                    pkgdeck::ui::show(app, ui);
+                    return;
+                }
                 let bar = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TITLE_BAR));
                 let body =
                     egui::Rect::from_min_max(egui::pos2(full.left(), bar.bottom()), full.max);
@@ -233,12 +247,60 @@ fn render(name: &str, size: [f32; 2], prepare: impl FnOnce(&mut App)) {
             (false, app),
         );
     harness.run_steps(60);
-    let image = harness.render().expect("render");
+    harness.render().expect("render")
+}
+
+/// The README's grid: Settings in six looks, three across and two down,
+/// each shrunk to the same width with a clear gap between them.
+fn themes() {
+    use pkgdeck::settings::{Accent, Style};
+    const TILE: u32 = 1000;
+    const GAP: u32 = 32;
+    let looks = [
+        (Style::Modern, true, None),
+        (Style::Retro, false, None),
+        (Style::Luna, false, None),
+        (Style::Glass, true, Some(Accent::Pink)),
+        (Style::Glass, false, None),
+        (Style::Aqua, true, None),
+    ];
+    let tiles: Vec<image::RgbaImage> = looks
+        .into_iter()
+        .map(|(style, dark, accent)| {
+            let shot = capture([1000.0, 720.0], |app| {
+                app.page = Page::Settings;
+                app.rows = vec![];
+                app.settings.style = style;
+                app.settings.accent = accent.unwrap_or_else(|| style.accent());
+                app.settings.appearance = if dark {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                };
+            });
+            let height = shot.height() * TILE / shot.width();
+            image::imageops::resize(&shot, TILE, height, image::imageops::FilterType::Lanczos3)
+        })
+        .collect();
+    let row_height = tiles.iter().map(|tile| tile.height()).max().unwrap();
+    let mut grid = image::RgbaImage::new(3 * TILE + 2 * GAP, 2 * row_height + GAP);
+    for (index, tile) in tiles.iter().enumerate() {
+        let (column, row) = (index as u32 % 3, index as u32 / 3);
+        image::imageops::replace(
+            &mut grid,
+            tile,
+            i64::from(column * (TILE + GAP)),
+            i64::from(row * (row_height + GAP)),
+        );
+    }
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshots");
-    image.save(dir.join(format!("{name}.png"))).unwrap();
+    grid.save(dir.join("themes.png")).unwrap();
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--themes") {
+        return themes();
+    }
     render("search", [1180.0, 720.0], |app| {
         app.query = "ripgrep".into();
         app.result_query = "ripgrep".into();
