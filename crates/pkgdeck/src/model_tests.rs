@@ -221,7 +221,7 @@ fn activity_entries_say_what_happened() {
         ("running", "In progress", Tone::Accent),
         ("authorizing", "In progress", Tone::Accent),
         ("finished", "Completed", Tone::Success),
-        ("failed", "Failed", Tone::Danger),
+        ("failed", "Failed", Tone::Warning),
         ("cancelled", "Cancelled", Tone::Muted),
         ("interrupted", "Interrupted", Tone::Muted),
         ("strange", "strange", Tone::Success),
@@ -243,7 +243,7 @@ fn activity_entries_say_what_happened() {
     let mixed =
         entry(json!({"state": "finished", "outcomes": ["ok", {"error": "x"}, "cancelled"]}));
     assert_eq!(mixed.result(), "1 completed, 1 failed, 1 cancelled");
-    assert_eq!(mixed.tone(), Tone::Danger);
+    assert_eq!(mixed.tone(), Tone::Warning);
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");

@@ -590,7 +590,7 @@ impl Activity {
     pub fn tone(&self) -> Tone {
         let (_, failed, _) = self.outcome_counts();
         match self.state.as_str() {
-            _ if failed > 0 || self.state == "failed" => Tone::Danger,
+            _ if failed > 0 || self.state == "failed" => Tone::Warning,
             "cancelled" | "interrupted" | "queued" => Tone::Muted,
             "running" | "authorizing" => Tone::Accent,
             _ => Tone::Success,

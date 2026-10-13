@@ -1486,6 +1486,46 @@ mod header_tests {
     }
 
     #[test]
+    fn a_source_that_failed_is_one_named_button_that_opens_its_checks() {
+        let mut app = app(Page::Installed, 1);
+        app.rows.push(
+            serde_json::from_value(serde_json::json!({"kind": "failure", "name": "apt",
+                "source": "apt", "failure_kind": "unavailable", "summary": "apt is broken"}))
+            .unwrap(),
+        );
+        app.invalidate();
+        app.refresh_items();
+        let mut harness = draw(app, header);
+        harness.get_by_label("Couldn't check APT").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.ui.checks_open);
+        // Nothing failed: no button.
+        let harness = draw(self::app(Page::Installed, 1), header);
+        assert!(harness.query_by_label("Couldn't check APT").is_none());
+    }
+
+    #[test]
+    fn a_failed_row_reads_why_it_failed() {
+        let mut app = app(Page::Installed, 1);
+        let target = serde_json::json!({"source": "apt", "name": "fixture-0",
+            "architecture": "", "remote": null, "scope": "system", "reference": null});
+        app.c().set_failed_rows(
+            serde_json::json!([{"target": target, "reason": "Disk full"}])
+                .to_string()
+                .into(),
+        );
+        app.react();
+        assert_eq!(app.row_failure(&app.rows[0]), Some("Disk full"));
+        let harness = draw(app, |app, ui| {
+            let rect = ui.available_rect_before_wrap();
+            list::list_card(app, ui, rect);
+        });
+        assert!(harness
+            .query_by_label_contains("Failed: Disk full")
+            .is_some());
+    }
+
+    #[test]
     fn the_source_filter_button_says_when_duplicates_are_on() {
         let label = |page: Page, sources: bool| {
             let mut app = app(page, 1);

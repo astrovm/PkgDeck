@@ -1166,7 +1166,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         } else {
             ""
         },
-        row.summary
+        // Screen readers hear why it failed, as the row shows it.
+        failed
+            .as_deref()
+            .map_or_else(|| row.summary.clone(), |reason| format!("Failed: {reason}"))
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(
