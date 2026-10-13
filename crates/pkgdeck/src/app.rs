@@ -344,6 +344,9 @@ impl App {
         self.c().set_auto_update(auto);
         self.c().set_allow_removals(removals);
         self.c().set_auto_clean(clean, cleaned_at);
+        let worktrees = self.settings.auto_clean_worktrees;
+        self.c().set_auto_clean_worktrees(worktrees);
+        self.sync_cleanup_preferences();
     }
 
     pub fn save_settings(&mut self) {
@@ -627,7 +630,7 @@ impl App {
                 "automatic" => self.restart_at = Some(Instant::now() + Duration::from_secs(5)),
                 "manual" => {
                     self.restart_toast = Some(Toast {
-                        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+                        text: "Restart PkgDeck to use the new version.".into(),
                         tone: Tone::Success,
                         action: Some(ToastAction::Restart),
                         shown: Instant::now(),
@@ -933,9 +936,64 @@ impl App {
         }
     }
 
+    /// Clean reads every source; its checkboxes choose what runs.
+    pub fn enabled_cleanup_sources(&self) -> HashSet<String> {
+        all_sources(&self.catalog).into_iter().collect()
+    }
+    pub fn sync_cleanup_preferences(&mut self) {
+        let json = serde_json::to_string(&self.settings.cleanup).unwrap_or_default();
+        self.c().set_cleanup_preferences(json.into());
+    }
+    pub fn row_checked(&self, row: &Row) -> bool {
+        if row.kind == "cleanup" {
+            row.batch_cleanable()
+                && self
+                    .settings
+                    .cleanup
+                    .includes(&pkgdeck_core::package::CleanupId {
+                        backend: row.source.clone(),
+                        key: row.cleanup_key.clone(),
+                    })
+        } else {
+            !self.unchecked.contains(&row.check_identity())
+        }
+    }
+    pub fn set_row_checked(&mut self, row: &Row, checked: bool) {
+        if row.kind == "cleanup" {
+            self.settings.cleanup.set_included(
+                pkgdeck_core::package::CleanupId {
+                    backend: row.source.clone(),
+                    key: row.cleanup_key.clone(),
+                },
+                checked,
+            );
+            self.sync_cleanup_preferences();
+        } else if checked {
+            self.unchecked.remove(&row.check_identity());
+        } else {
+            self.unchecked.insert(row.check_identity());
+        }
+    }
+    pub fn set_all_checked(&mut self, checked: bool) {
+        let rows: Vec<_> = self
+            .items
+            .iter()
+            .filter_map(|item| self.shown_rows().get(item.raw))
+            .filter(|row| self.page != Page::Clean || row.batch_cleanable())
+            .cloned()
+            .collect();
+        for row in rows {
+            self.set_row_checked(&row, checked);
+        }
+    }
+
     /// The sources this page reads.
     pub fn effective_sources(&self, page: Page) -> HashSet<String> {
-        let enabled = self.enabled_sources();
+        let enabled = if page == Page::Clean {
+            self.enabled_cleanup_sources()
+        } else {
+            self.enabled_sources()
+        };
         match self.page_sources.get(&page) {
             Some(chosen) => chosen.intersection(&enabled).cloned().collect(),
             None => enabled,
@@ -943,16 +1001,23 @@ impl App {
     }
 
     fn sources_csv(&self, page: Page) -> String {
-        if self.enabled.is_empty() && !self.page_sources.contains_key(&page) {
+        if (page == Page::Clean || self.enabled.is_empty())
+            && !self.page_sources.contains_key(&page)
+        {
             return String::new();
         }
         let sources = self.effective_sources(page);
         let mut list: Vec<String> = all_sources(&self.catalog)
             .into_iter()
             .filter(|id| sources.contains(id))
+            .filter(|id| page != Page::Clean || self.usable(id, Page::Clean))
             .collect();
         list.dedup();
-        list.join(",")
+        if list.is_empty() && page == Page::Clean {
+            pkgdeck_core::backends::NO_BACKENDS.into()
+        } else {
+            list.join(",")
+        }
     }
 
     pub fn available(&self, id: &str) -> bool {
@@ -987,7 +1052,7 @@ impl App {
             .collect();
         list.dedup();
         self.settings.source_list = list.join(",");
-        self.page_sources.clear();
+        self.page_sources.retain(|page, _| *page == Page::Clean);
         self.settings.search_hint = search_hint(
             &self.catalog,
             &self.enabled_sources(),
@@ -997,11 +1062,14 @@ impl App {
     }
 
     pub fn set_page_sources(&mut self, page: Page, sources: HashSet<String>) {
-        let all: HashSet<String> = self
-            .enabled_sources()
-            .into_iter()
-            .filter(|id| self.usable(id, page))
-            .collect();
+        let all: HashSet<String> = (if page == Page::Clean {
+            self.enabled_cleanup_sources()
+        } else {
+            self.enabled_sources()
+        })
+        .into_iter()
+        .filter(|id| self.usable(id, page))
+        .collect();
         if sources == all || sources.is_empty() {
             self.page_sources.remove(&page);
         } else {
@@ -1541,6 +1609,36 @@ impl App {
         self.active_rows = checked.iter().map(|row| row.identity()).collect();
         let json = Value::Array(identities).to_string();
         self.c().propose_checked(json.into());
+        self.react();
+    }
+
+    /// Review precisely the checked cleanup tasks shown on this page.
+    pub fn clean_selected(&mut self) {
+        if self.retained.is_some() {
+            return;
+        }
+        let rows = self.shown_rows();
+        let checked: Vec<&Row> = self
+            .items
+            .iter()
+            .filter_map(|item| rows.get(item.raw))
+            .filter(|row| row.batch_cleanable() && self.row_checked(row))
+            .collect();
+        if checked.is_empty() {
+            return;
+        }
+        let ids: Vec<_> = checked
+            .iter()
+            .map(|row| pkgdeck_core::package::CleanupId {
+                backend: row.source.clone(),
+                key: row.cleanup_key.clone(),
+            })
+            .collect();
+        let active = checked.iter().map(|row| row.identity()).collect();
+        let json = serde_json::to_string(&ids).unwrap_or_default();
+        self.review_on = ReviewOn::Dialog;
+        self.active_rows = active;
+        self.c().propose_clean_checked(json.into());
         self.react();
     }
 

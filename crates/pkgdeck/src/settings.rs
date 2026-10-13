@@ -311,6 +311,9 @@ pub struct Settings {
     pub allow_removals: bool,
     /// Clean caches and build files once a day, from the background.
     pub auto_clean: bool,
+    pub auto_clean_worktrees: bool,
+    #[serde(deserialize_with = "or_default")]
+    pub cleanup: pkgdeck_core::package::CleanupPreferences,
     /// When that last happened, in seconds since 1970.
     pub auto_cleaned_at: u64,
     pub system_approval: String,
@@ -353,6 +356,8 @@ impl Default for Settings {
             auto_update: false,
             allow_removals: true,
             auto_clean: false,
+            auto_clean_worktrees: false,
+            cleanup: pkgdeck_core::package::CleanupPreferences::default(),
             auto_cleaned_at: 0,
             system_approval: String::new(),
             autostart: false,

@@ -179,6 +179,11 @@ fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)
             },
             (false, app),
         );
+    if name == "cleanup-settings" {
+        harness
+            .ctx
+            .data_mut(|data| data.insert_temp(egui::Id::new("cleanup-choices-open"), true));
+    }
     harness.run_steps(40);
     let image = harness.render().expect("render");
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/gallery");
@@ -470,15 +475,35 @@ fn main() {
         app.invalidate();
     });
     render("clean", [1500.0, 860.0], true, |app| {
-        let task =
-            |name: &str, display: &str, source: &str, kind: &str, summary: &str, bytes: u64| {
-                serde_json::from_value::<model::Row>(json!({
+        let task = |name: &str,
+                    display: &str,
+                    source: &str,
+                    kind: &str,
+                    summary: &str,
+                    bytes: u64| {
+            serde_json::from_value::<model::Row>(json!({
                     "kind": "cleanup", "name": name, "display_name": display, "source": source,
-                    "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
+                    "cleanup_key": name, "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
                 }))
                 .unwrap()
-            };
+        };
         app.rows = vec![
+            task(
+                "sccache",
+                "sccache compiler cache",
+                "dev-caches",
+                "package_cache",
+                "Manages its own size limit",
+                2_000_000_000,
+            ),
+            task(
+                "worktrees:/fake/project",
+                "project worktrees",
+                "projects",
+                "worktree",
+                "2 finished worktrees",
+                3_000_000_000,
+            ),
             task(
                 "build:~/code/website",
                 "website build files",
@@ -528,19 +553,35 @@ fn main() {
                 48_000_000,
             ),
         ];
-        app.rows[1].preview =
+        app.rows[3].preview =
             "Empties these folders:\n~/.cargo/registry/cache\n~/.cargo/registry/src\n~/.cargo/git/checkouts".into();
         offline(app, Page::Clean);
         app.refresh_items();
         app.selected = Some(app.rows[app.items[1].raw].identity());
     });
-    render("settings", [1180.0, 2200.0], true, |app| {
-        offline(app, Page::Settings)
-    });
-    for width in [900.0, 700.0, 460.0] {
-        render(&format!("settings-{width}"), [width, 900.0], true, |app| {
-            offline(app, Page::Settings)
+    for tab in pkgdeck::ui::SettingsTab::ALL {
+        let name = tab.name().to_lowercase();
+        render(&format!("settings-{name}"), [1180.0, 1100.0], true, |app| {
+            offline(app, Page::Settings);
+            app.ui.settings_tab = tab;
         });
+    }
+    for width in [900.0, 700.0, 460.0] {
+        for tab in [
+            pkgdeck::ui::SettingsTab::Appearance,
+            pkgdeck::ui::SettingsTab::Clean,
+        ] {
+            let name = tab.name().to_lowercase();
+            render(
+                &format!("settings-{name}-{width}"),
+                [width, 1700.0],
+                true,
+                |app| {
+                    offline(app, Page::Settings);
+                    app.ui.settings_tab = tab;
+                },
+            );
+        }
     }
     render("narrow", [520.0, 760.0], true, |app| {
         offline(app, Page::Installed)
@@ -639,7 +680,7 @@ fn main() {
         };
         app.toast = Some(toast("Update all Flatpak packages finished", None));
         app.restart_toast = Some(toast(
-            "PkgDeck was updated. Restart it to use the new version.",
+            "Restart PkgDeck to use the new version.",
             Some(ToastAction::Restart),
         ));
     });

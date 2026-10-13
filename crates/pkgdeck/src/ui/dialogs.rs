@@ -628,7 +628,7 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
         if !draft.name.is_empty() && !name_ok {
             ui.label(
                 egui::RichText::new(
-                    "Use letters, numbers, dots, dashes, or underscores. Do not start with a dash.",
+                    "Letters, numbers, dots, dashes or underscores. Can't start with a dash.",
                 )
                 .color(palette.danger),
             );
@@ -899,11 +899,14 @@ fn apply_picker(app: &mut App, page: Page) {
 pub fn clear_filter(app: &mut App) {
     let page = app.page;
     app.ui.picker_duplicates = false;
-    app.ui.picker_draft = app
-        .enabled_sources()
-        .into_iter()
-        .filter(|id| app.usable(id, page))
-        .collect();
+    app.ui.picker_draft = (if page == Page::Clean {
+        app.enabled_cleanup_sources()
+    } else {
+        app.enabled_sources()
+    })
+    .into_iter()
+    .filter(|id| app.usable(id, page))
+    .collect();
     if page == Page::Installed && app.duplicates_only {
         app.duplicates_only = false;
         app.invalidate();
@@ -1048,7 +1051,11 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                         ui.separator();
                     }
                     let search = app.ui.picker_search.trim().to_lowercase();
-                    let enabled = app.enabled_sources();
+                    let enabled = if page == Page::Clean {
+                        app.enabled_cleanup_sources()
+                    } else {
+                        app.enabled_sources()
+                    };
                     let ids = model::all_sources(&app.catalog);
                     super::scrollbar::vertical()
                         // Full width, so the bar sits on the card's edge.
@@ -1303,21 +1310,18 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         };
-        let password = "Update system packages without a password";
+        let password = "Skip the password";
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             assert!(harness
-                .query_by_role_and_label(Role::CheckBox, "Start in background at login")
+                .query_by_role_and_label(Role::CheckBox, "Start at login")
                 .is_some());
         }
         // Without automatic updates, no password setting to pick.
         assert!(disabled(&harness, password));
-        assert!(!disabled(
-            &harness,
-            "Update apps and packages automatically"
-        ));
+        assert!(!disabled(&harness, "Update automatically"));
 
         harness
-            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
+            .get_by_role_and_label(Role::CheckBox, "Update automatically")
             .click();
         harness.run_steps(2);
         assert!(harness.state().1.settings.auto_update);
@@ -1325,7 +1329,7 @@ mod tests {
         assert!(!disabled(&harness, password));
 
         harness
-            .get_by_role_and_label(Role::CheckBox, "Clean caches automatically")
+            .get_by_role_and_label(Role::CheckBox, "Clean automatically")
             .click();
         harness.run_steps(2);
         assert!(harness.state().1.settings.auto_clean);

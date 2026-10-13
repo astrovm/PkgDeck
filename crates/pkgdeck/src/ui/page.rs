@@ -184,7 +184,7 @@ fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &
     if row.cleanup_kind == "data" {
         ui.add(
             egui::Label::new(
-                egui::RichText::new("Clean all leaves this alone. Clean it on its own.")
+                egui::RichText::new("Not in Clean all. Clean it on its own.")
                     .color(palette.warning),
             )
             .wrap(),
@@ -303,189 +303,295 @@ fn app_page(
                 });
     let can_act = app.can_act() && app.retained.is_none() && !app.review_on_page;
     let inner = rect.shrink2(vec2(20.0, 18.0));
-    ui.scope_builder(UiBuilder::new().max_rect(inner).id_salt(("app-page", &identity)), |ui| {
-        let update_waits = row.has_update();
-        let manage = !opened
-            && model::can_adopt(row, &app.catalog)
-            && !matches!(main, Some(Main::Row(model::Action::Adopt)));
-        let scope = item.as_ref().filter(|i| i.variants.len() > 1).map(|i| i.variants.clone());
-        let mut buttons = Vec::new();
-        if launchable {
-            buttons.push(PageButton::Launch);
-        }
-        // Outside Updates the main action is Remove; an update waiting there
-        // gets its own button, so it needn't be found on the Updates page.
-        let running = app.writing && app.active_rows.contains(&identity);
-        if !opened && update_waits && !running && !matches!(main, Some(Main::Row(model::Action::Upgrade))) {
-            buttons.push(PageButton::Update);
-        }
-        if matches!(&main, Some(Main::Opened(_)) if !launchable) || matches!(main, Some(Main::Row(_))) {
-            buttons.push(PageButton::Main);
-        }
-        if manage {
-            buttons.push(PageButton::Manage);
-        }
-        if scope.is_some() {
-            buttons.push(PageButton::Scope);
-        }
-        let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
-            PageButton::Launch => {
-                let look = if update_waits { Look::Secondary } else { Look::Primary };
-                if Button::new(look, "Launch").icon("launch").show(ui).clicked() {
-                    let error = if opened {
-                        app.c().launch_opened().to_string()
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(inner)
+            .id_salt(("app-page", &identity)),
+        |ui| {
+            let update_waits = row.has_update();
+            let manage = !opened
+                && model::can_adopt(row, &app.catalog)
+                && !matches!(main, Some(Main::Row(model::Action::Adopt)));
+            let scope = item
+                .as_ref()
+                .filter(|i| i.variants.len() > 1)
+                .map(|i| i.variants.clone());
+            let mut buttons = Vec::new();
+            if launchable {
+                buttons.push(PageButton::Launch);
+            }
+            // Outside Updates the main action is Remove; an update waiting there
+            // gets its own button, so it needn't be found on the Updates page.
+            let running = app.writing && app.active_rows.contains(&identity);
+            if !opened
+                && update_waits
+                && !running
+                && !matches!(main, Some(Main::Row(model::Action::Upgrade)))
+            {
+                buttons.push(PageButton::Update);
+            }
+            if matches!(&main, Some(Main::Opened(_)) if !launchable)
+                || matches!(main, Some(Main::Row(_)))
+            {
+                buttons.push(PageButton::Main);
+            }
+            if manage {
+                buttons.push(PageButton::Manage);
+            }
+            if scope.is_some() {
+                buttons.push(PageButton::Scope);
+            }
+            let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
+                PageButton::Launch => {
+                    let look = if update_waits {
+                        Look::Secondary
                     } else {
-                        raw.map(|raw| app.c().launch_app(raw as i32).to_string()).unwrap_or_default()
+                        Look::Primary
                     };
-                    app.launch_error = error;
-                }
-            }
-            PageButton::Update => {
-                if Button::new(Look::Primary, "Update").icon("updates").tooltip("Ctrl+U").enabled(can_act).show(ui).clicked() {
-                    app.propose("upgrade");
-                }
-            }
-            PageButton::Main => match &main {
-                Some(Main::Opened(action)) => {
-                    if Button::new(Look::Solid(Tone::Success), action).icon("install").enabled(can_act).show(ui).clicked() {
-                        app.run_page_action();
+                    if Button::new(look, "Launch")
+                        .icon("launch")
+                        .show(ui)
+                        .clicked()
+                    {
+                        let error = if opened {
+                            app.c().launch_opened().to_string()
+                        } else {
+                            raw.map(|raw| app.c().launch_app(raw as i32).to_string())
+                                .unwrap_or_default()
+                        };
+                        app.launch_error = error;
                     }
                 }
-                Some(Main::Row(action)) => {
-                    let look = match action {
-                        model::Action::Remove => Look::Soft(Tone::Danger),
-                        _ if launchable && !update_waits => Look::Soft(action.tone()),
-                        model::Action::Install => Look::Solid(Tone::Success),
-                        _ => Look::Primary,
-                    };
-                    let running = app.writing && app.active_rows.contains(&identity);
-                    if running {
-                        if Button::new(Look::Secondary, "Cancel").icon("cancel").show(ui).clicked() {
-                            app.cancel();
-                        }
-                    } else if Button::new(look, action.label())
-                        .icon(action.icon())
-                        .icon_only(*action == model::Action::Remove && launchable)
+                PageButton::Update => {
+                    if Button::new(Look::Primary, "Update")
+                        .icon("updates")
+                        .tooltip("Ctrl+U")
                         .enabled(can_act)
                         .show(ui)
                         .clicked()
                     {
-                        app.run_page_action();
+                        app.propose("upgrade");
                     }
                 }
-                None => {}
-            },
-            PageButton::Manage => {
-                if let Some(index) = app.selected_index() {
-                    if Button::new(Look::Soft(Tone::Accent), "Manage").icon("install").enabled(can_act).show(ui).clicked() {
-                        app.run_adopt(index);
-                    }
-                }
-            }
-            // System or User, for a Flatpak installed both ways.
-            PageButton::Scope => {
-                if let Some(variants) = scope.clone() {
-                    scope_toggle(app, ui, variants, &identity, can_act);
-                }
-            }
-        };
-        // The buttons sit right of the title when they fit, else below it.
-        let size = if opened && !narrow { 72.0 } else { 52.0 };
-        let back = if opened || narrow { 44.0 } else { 0.0 };
-        let close = if !opened && !narrow { 40.0 } else { 0.0 };
-        let title_room = inner.width() - back - size - close - 12.0 - 120.0 * buttons.len() as f32;
-        let beside = !narrow && title_room >= 200.0;
-        // Header.
-        ui.horizontal(|ui| {
-            if (opened || narrow)
-                && Button::new(Look::Flat, "Back").icon("back").icon_only(true).enabled(!app.review_on_page).tooltip("Back").show(ui).clicked()
-            {
-                app.close_page();
-                app.ui.focus_list = true;
-            }
-            let (icon, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            package_icon(app, ui, icon, row);
-            ui.vertical(|ui| {
-                let reserve = close + if beside { 120.0 * buttons.len() as f32 } else { 0.0 };
-                ui.set_max_width((ui.available_width() - reserve).max(120.0));
-                ui.add(egui::Label::new(egui::RichText::new(row.title()).font(theme::bold(if opened { 24.0 } else { 20.0 })).color(palette.ink)).truncate());
-                let variants = item.as_ref().map(|i| i.variants.clone()).unwrap_or_default();
-                let line = model::source_line(row, variants.len() > 1);
-                ui.add(egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate());
-                let version = row.installed.clone().filter(|v| !v.is_empty()).or(row.candidate.clone()).unwrap_or_default();
-                let new = row.candidate.clone().filter(|new| row.has_update() && !new.is_empty() && *new != version);
-                if let Some(new) = new {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(new).font(theme::mono(12.5)).color(palette.accent));
-                        if !version.is_empty() {
-                            ui.label(egui::RichText::new(format!("from {version}")).font(theme::font(12.0)).color(palette.muted));
+                PageButton::Main => match &main {
+                    Some(Main::Opened(action)) => {
+                        if Button::new(Look::Solid(Tone::Success), action)
+                            .icon("install")
+                            .enabled(can_act)
+                            .show(ui)
+                            .clicked()
+                        {
+                            app.run_page_action();
                         }
-                    });
-                } else if !version.is_empty() {
-                    ui.label(egui::RichText::new(version).font(theme::mono(12.5)).color(palette.muted));
+                    }
+                    Some(Main::Row(action)) => {
+                        let look = match action {
+                            model::Action::Remove => Look::Soft(Tone::Danger),
+                            _ if launchable && !update_waits => Look::Soft(action.tone()),
+                            model::Action::Install => Look::Solid(Tone::Success),
+                            _ => Look::Primary,
+                        };
+                        let running = app.writing && app.active_rows.contains(&identity);
+                        if running {
+                            if Button::new(Look::Secondary, "Cancel")
+                                .icon("cancel")
+                                .show(ui)
+                                .clicked()
+                            {
+                                app.cancel();
+                            }
+                        } else if Button::new(look, action.label())
+                            .icon(action.icon())
+                            .icon_only(*action == model::Action::Remove && launchable)
+                            .enabled(can_act)
+                            .show(ui)
+                            .clicked()
+                        {
+                            app.run_page_action();
+                        }
+                    }
+                    None => {}
+                },
+                PageButton::Manage => {
+                    if let Some(index) = app.selected_index() {
+                        if Button::new(Look::Soft(Tone::Accent), "Manage")
+                            .icon("install")
+                            .enabled(can_act)
+                            .show(ui)
+                            .clicked()
+                        {
+                            app.run_adopt(index);
+                        }
+                    }
                 }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if !opened && !narrow && icon_button(ui, "cancel", "Close", palette.muted, true).clicked() {
+                // System or User, for a Flatpak installed both ways.
+                PageButton::Scope => {
+                    if let Some(variants) = scope.clone() {
+                        scope_toggle(app, ui, variants, &identity, can_act);
+                    }
+                }
+            };
+            // The buttons sit right of the title when they fit, else below it.
+            let size = if opened && !narrow { 72.0 } else { 52.0 };
+            let back = if opened || narrow { 44.0 } else { 0.0 };
+            let close = if !opened && !narrow { 40.0 } else { 0.0 };
+            let title_room =
+                inner.width() - back - size - close - 12.0 - 120.0 * buttons.len() as f32;
+            let beside = !narrow && title_room >= 200.0;
+            // Header.
+            ui.horizontal(|ui| {
+                if (opened || narrow)
+                    && Button::new(Look::Flat, "Back")
+                        .icon("back")
+                        .icon_only(true)
+                        .enabled(!app.review_on_page)
+                        .tooltip("Back")
+                        .show(ui)
+                        .clicked()
+                {
                     app.close_page();
                     app.ui.focus_list = true;
                 }
-                if beside {
-                    // Right to left, so the last button is drawn first.
-                    for &button in buttons.iter().rev() {
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+                package_icon(app, ui, icon, row);
+                ui.vertical(|ui| {
+                    let reserve = close
+                        + if beside {
+                            120.0 * buttons.len() as f32
+                        } else {
+                            0.0
+                        };
+                    ui.set_max_width((ui.available_width() - reserve).max(120.0));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(row.title())
+                                .font(theme::bold(if opened { 24.0 } else { 20.0 }))
+                                .color(palette.ink),
+                        )
+                        .truncate(),
+                    );
+                    let variants = item
+                        .as_ref()
+                        .map(|i| i.variants.clone())
+                        .unwrap_or_default();
+                    let line = model::source_line(row, variants.len() > 1);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate(),
+                    );
+                    let version = row
+                        .installed
+                        .clone()
+                        .filter(|v| !v.is_empty())
+                        .or(row.candidate.clone())
+                        .unwrap_or_default();
+                    let new = row
+                        .candidate
+                        .clone()
+                        .filter(|new| row.has_update() && !new.is_empty() && *new != version);
+                    if let Some(new) = new {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(new)
+                                    .font(theme::mono(12.5))
+                                    .color(palette.accent),
+                            );
+                            if !version.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(format!("from {version}"))
+                                        .font(theme::font(12.0))
+                                        .color(palette.muted),
+                                );
+                            }
+                        });
+                    } else if !version.is_empty() {
+                        ui.label(
+                            egui::RichText::new(version)
+                                .font(theme::mono(12.5))
+                                .color(palette.muted),
+                        );
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if !opened
+                        && !narrow
+                        && icon_button(ui, "cancel", "Close", palette.muted, true).clicked()
+                    {
+                        app.close_page();
+                        app.ui.focus_list = true;
+                    }
+                    if beside {
+                        // Right to left, so the last button is drawn first.
+                        for &button in buttons.iter().rev() {
+                            show(app, ui, button);
+                        }
+                    }
+                });
+            });
+            ui.add_space(10.0);
+            if !beside && !buttons.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for &button in &buttons {
                         show(app, ui, button);
                     }
-                }
-            });
-        });
-        ui.add_space(10.0);
-        if !beside && !buttons.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                for &button in &buttons {
-                    show(app, ui, button);
-                }
-            });
-        }
-        if !opened && model::can_adopt(row, &app.catalog) && row.source == "appimage" {
-            ui.label(egui::RichText::new("Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon.").font(theme::font(13.0)).color(palette.muted));
-        }
-        if !app.launch_error.is_empty() {
-            ui.label(egui::RichText::new(&app.launch_error).color(palette.danger));
-        }
-        if appimage && app.app_file.without_fuse {
-            ui.label(egui::RichText::new("Starts unpacked: this computer doesn't have FUSE 2 (libfuse2), which this AppImage needs to start the usual way.").color(palette.warning));
-        }
-        ui.add_space(6.0);
-        let progress_here = app.writing && (app.active_rows.contains(&identity) || app.progress.for_row(&identity, &row.source).is_some() || opened);
-        if progress_here && !app.progress.label.is_empty() {
-            super::progress_card(app, ui, "page-progress");
-        }
-        ui.painter().line_segment(
-            [pos2(ui.min_rect().left(), ui.cursor().top()), pos2(ui.max_rect().right(), ui.cursor().top())],
-            Stroke::new(1.0, palette.line),
-        );
-        ui.add_space(8.0);
-        // Body.
-        let loaded = details.as_ref().is_some_and(|d| !d.more || opened);
-        let fade = progress_since(&ctx, app.details_loaded.elapsed().as_secs_f32(), 0.14);
-        super::scrollbar::vertical().id_salt(("page-body", &identity)).auto_shrink([false, false]).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if app.review_on_page {
-                review_card(app, ui);
-                ui.add_space(10.0);
+                });
             }
-            match details {
-                Some(details) if loaded || !details.description.is_empty() => {
-                    ui.multiply_opacity(0.55 + 0.45 * fade);
-                    body(app, ui, row, &details, raw, appimage, opened, narrow);
-                    if details.more && !opened {
-                        skeleton(ui, &palette);
+            if !opened && model::can_adopt(row, &app.catalog) && row.source == "appimage" {
+                ui.label(
+                    egui::RichText::new("Manage moves it into PkgDeck, which keeps it updated.")
+                        .font(theme::font(13.0))
+                        .color(palette.muted),
+                );
+            }
+            if !app.launch_error.is_empty() {
+                ui.label(egui::RichText::new(&app.launch_error).color(palette.danger));
+            }
+            if appimage && app.app_file.without_fuse {
+                ui.label(
+                    egui::RichText::new("Starts unpacked: FUSE 2 (libfuse2) is missing.")
+                        .color(palette.warning),
+                );
+            }
+            ui.add_space(6.0);
+            let progress_here = app.writing
+                && (app.active_rows.contains(&identity)
+                    || app.progress.for_row(&identity, &row.source).is_some()
+                    || opened);
+            if progress_here && !app.progress.label.is_empty() {
+                super::progress_card(app, ui, "page-progress");
+            }
+            ui.painter().line_segment(
+                [
+                    pos2(ui.min_rect().left(), ui.cursor().top()),
+                    pos2(ui.max_rect().right(), ui.cursor().top()),
+                ],
+                Stroke::new(1.0, palette.line),
+            );
+            ui.add_space(8.0);
+            // Body.
+            let loaded = details.as_ref().is_some_and(|d| !d.more || opened);
+            let fade = progress_since(&ctx, app.details_loaded.elapsed().as_secs_f32(), 0.14);
+            super::scrollbar::vertical()
+                .id_salt(("page-body", &identity))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if app.review_on_page {
+                        review_card(app, ui);
+                        ui.add_space(10.0);
                     }
-                }
-                _ => skeleton(ui, &palette),
-            }
-        });
-    });
+                    match details {
+                        Some(details) if loaded || !details.description.is_empty() => {
+                            ui.multiply_opacity(0.55 + 0.45 * fade);
+                            body(app, ui, row, &details, raw, appimage, opened, narrow);
+                            if details.more && !opened {
+                                skeleton(ui, &palette);
+                            }
+                        }
+                        _ => skeleton(ui, &palette),
+                    }
+                });
+        },
+    );
 }
 
 fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str, enabled: bool) {

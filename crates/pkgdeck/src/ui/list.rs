@@ -261,7 +261,7 @@ impl Shares {
 
 fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) -> Columns {
     let mut x = row.left() + 14.0;
-    let tick = (page == Page::Updates).then(|| {
+    let tick = matches!(page, Page::Updates | Page::Clean).then(|| {
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(26.0, row.height()));
         x += 32.0;
         r
@@ -337,13 +337,17 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     if let Some(s) = cols.summary {
         titles.push((Column::Summary, "SUMMARY", s));
     }
-    if let (Some(tick), Page::Updates) = (cols.tick, app.page) {
+    if let Some(tick) = cols.tick {
         let rows = app.shown_rows();
-        let all_checked = app.unchecked.is_empty();
-        let none_checked = app
+        let selectable: Vec<_> = app
             .items
             .iter()
-            .all(|i| app.unchecked.contains(&rows[i.raw].identity()));
+            .filter_map(|i| rows.get(i.raw))
+            .filter(|row| app.page != Page::Clean || row.batch_cleanable())
+            .collect();
+        let all_checked =
+            !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
+        let none_checked = selectable.iter().all(|row| !app.row_checked(row));
         let id = Id::new("tick-all");
         let response = ui
             .interact(
@@ -357,6 +361,20 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             } else {
                 "Select all"
             });
+        response.widget_info(|| {
+            let mut info = egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                !selectable.is_empty(),
+                all_checked,
+                "Select all tasks",
+            );
+            info.selected = if !all_checked && !none_checked {
+                None
+            } else {
+                Some(all_checked)
+            };
+            info
+        });
         paint_tick(
             ui,
             Rect::from_center_size(tick.center(), Vec2::splat(22.0)),
@@ -366,12 +384,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             response.hovered(),
         );
         if response.clicked() {
-            if all_checked {
-                let rows = app.shown_rows();
-                app.unchecked = app.items.iter().map(|i| rows[i.raw].identity()).collect();
-            } else {
-                app.unchecked.clear();
-            }
+            app.set_all_checked(!all_checked);
         }
     }
     // The older styles draw each heading as a cell of a header bar.
@@ -871,20 +884,25 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     let compact = width == Width::Compact;
 
-    // Check box on Updates.
+    // Checkboxes on Updates and Clean. Data tasks are cleaned individually.
     if let Some(tick) = cols.tick {
-        let checked = !app.unchecked.contains(&identity);
+        let enabled = app.page != Page::Clean || row.batch_cleanable();
+        let checked = enabled && app.row_checked(&row);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
         let response = ui
             .interact(tick_rect, id.with("tick"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
-        paint_tick(ui, tick_rect, id, checked, true, response.hovered());
-        if response.clicked() {
-            if checked {
-                app.unchecked.insert(identity.clone());
-            } else {
-                app.unchecked.remove(&identity);
-            }
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                enabled,
+                checked,
+                format!("Select {}", row.title()),
+            )
+        });
+        paint_tick(ui, tick_rect, id, checked, enabled, response.hovered());
+        if enabled && response.clicked() {
+            app.set_row_checked(&row, !checked);
         }
     }
     // Icon.
@@ -1312,7 +1330,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .into()
         } else if phase == "unsupported" {
             good_news = false;
-            "None of your enabled sources support this page.".into()
+            "None of your sources work here.".into()
         } else if installed_filters {
             good_news = false;
             "No packages match these filters.".into()
@@ -1367,15 +1385,11 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
         palette.ink,
     );
     let hint = if !failures.is_empty() {
-        let retry = if app.page == Page::Updates {
-            "Retry to check for updates."
-        } else {
-            "Retry to check again."
-        };
+        // The button says what to do; the line only names what failed.
         if good_news {
-            format!("{}. {retry}", model::failure_title(&failures))
+            model::failure_title(&failures)
         } else {
-            retry.to_owned()
+            String::new()
         }
     } else if matches!(app.page, Page::Updates | Page::Clean) {
         app.report
@@ -1407,39 +1421,12 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .max_rect(buttons)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
-            let mut labels: Vec<(&str, &str)> = vec![];
-            if !failures.is_empty() {
-                labels.push((
-                    if failures.len() == 1 {
-                        "Retry"
-                    } else {
-                        "Reload"
-                    },
-                    "refresh",
-                ));
-                labels.push(("Details", "info"));
-            } else if phase == "cancelled" {
-                labels.push((
-                    if app.page == Page::Search {
-                        "Search again"
-                    } else {
-                        "Load again"
-                    },
-                    "refresh",
-                ));
-            } else if app.page != Page::Search {
-                labels.push((
-                    if matches!(app.page, Page::Updates | Page::Clean) {
-                        "Check again"
-                    } else {
-                        "Reload"
-                    },
-                    "refresh",
-                ));
-                if filtered || installed_filters {
-                    labels.push(("Clear filters", "cancel"));
-                }
-            }
+            let labels = empty_actions(
+                app.page,
+                failures.len(),
+                phase == "cancelled",
+                filtered || installed_filters,
+            );
             let total: f32 = labels.len() as f32 * 130.0;
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
             for (label, icon) in labels {
@@ -1455,7 +1442,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
                     .clicked()
                 {
                     match label {
-                        "Retry" => {
+                        "Retry" if failures.len() == 1 => {
                             let source = failures[0].source.clone();
                             app.retry_source(&source);
                         }
@@ -1476,9 +1463,63 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     );
 }
 
+/// The buttons under an empty list, with their icons. Anything that
+/// failed or stopped offers Retry, whatever it was doing.
+fn empty_actions(
+    page: Page,
+    failures: usize,
+    cancelled: bool,
+    filtered: bool,
+) -> Vec<(&'static str, &'static str)> {
+    if failures > 0 {
+        return vec![("Retry", "refresh"), ("Details", "info")];
+    }
+    if cancelled {
+        return vec![("Retry", "refresh")];
+    }
+    if page == Page::Search {
+        return vec![];
+    }
+    let mut labels = vec![(
+        if matches!(page, Page::Updates | Page::Clean) {
+            "Check again"
+        } else {
+            "Reload"
+        },
+        "refresh",
+    )];
+    if filtered {
+        labels.push(("Clear filters", "cancel"));
+    }
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::waiting_text;
+
+    #[test]
+    fn failed_or_stopped_lists_always_offer_retry() {
+        use super::{empty_actions, Page};
+        for page in Page::ALL {
+            for failures in [1, 3] {
+                assert_eq!(
+                    empty_actions(page, failures, false, true),
+                    [("Retry", "refresh"), ("Details", "info")]
+                );
+            }
+            assert_eq!(empty_actions(page, 0, true, true), [("Retry", "refresh")]);
+        }
+        assert!(empty_actions(Page::Search, 0, false, true).is_empty());
+        assert_eq!(
+            empty_actions(Page::Updates, 0, false, false),
+            [("Check again", "refresh")]
+        );
+        assert_eq!(
+            empty_actions(Page::Installed, 0, false, true),
+            [("Reload", "refresh"), ("Clear filters", "cancel")]
+        );
+    }
 
     #[test]
     fn waiting_names_one_or_two_sources_and_counts_more() {

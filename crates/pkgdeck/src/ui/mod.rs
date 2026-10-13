@@ -31,6 +31,7 @@ use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Modifiers, Rect, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, Vec2,
 };
+pub use settings_page::Tab as SettingsTab;
 use std::collections::HashSet;
 use widgets::*;
 
@@ -67,6 +68,7 @@ pub struct State {
     pub failed_images: HashSet<String>,
     pub hide_progress_for: Option<u64>,
     pub started: bool,
+    pub settings_tab: SettingsTab,
 }
 
 /// Widths the layout switches at.
@@ -1097,7 +1099,7 @@ fn clean_all_frees(app: &App) -> u64 {
     app.items
         .iter()
         .filter_map(|item| rows.get(item.raw))
-        .filter(|row| row.kind == "cleanup" && row.cleanup_kind != "data")
+        .filter(|row| row.batch_cleanable() && app.row_checked(row))
         .filter_map(|row| row.bytes)
         .sum()
 }
@@ -1110,7 +1112,7 @@ fn page_actions_height(app: &App) -> f32 {
                 .any(|i| app.shown_rows()[i.raw].is_package())
                 || !app.refreshable_sources().is_empty()
         }
-        Page::Clean => app.items.len() > 1,
+        Page::Clean => !app.items.is_empty(),
         _ => false,
     };
     if any {
@@ -1154,6 +1156,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 app.upgrade_updates();
             }
             let narrow = width < 420.0;
+            // One button: Select all until everything is, then Select none.
             if unchecked > 0
                 && Button::new(Look::Secondary, "Select all")
                     .icon("installed")
@@ -1163,7 +1166,8 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             {
                 app.unchecked.clear();
             }
-            if checked > 0
+            if unchecked == 0
+                && checked > 0
                 && Button::new(Look::Secondary, "Select none")
                     .icon("cancel")
                     .icon_only(narrow)
@@ -1196,17 +1200,55 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             }
         }
         Page::Clean => {
-            let label = match clean_all_frees(app) {
-                0 => "Clean all".to_owned(),
-                bytes => format!("Clean all ({})", model::size(bytes)),
+            let rows = app.shown_rows();
+            let selectable: Vec<_> = app
+                .items
+                .iter()
+                .filter_map(|item| rows.get(item.raw))
+                .filter(|row| row.batch_cleanable())
+                .map(|row| app.row_checked(row))
+                .collect();
+            let total = selectable.len();
+            let selected = selectable.iter().filter(|checked| **checked).count();
+            let bytes = clean_all_frees(app);
+            let action = if selected == total {
+                "Clean all"
+            } else {
+                "Clean selected"
             };
-            if Button::new(Look::Solid(Tone::Danger), &label)
-                .icon("remove")
-                .enabled(app.can_act() && app.retained.is_none())
-                .show(ui)
-                .clicked()
+            let label = if bytes == 0 {
+                action.to_owned()
+            } else {
+                format!("{action} ({})", model::size(bytes))
+            };
+            if (selected > 0 || (total == 0 && !app.items.is_empty()))
+                && Button::new(Look::Solid(Tone::Danger), &label)
+                    .icon("remove")
+                    .enabled(app.can_act() && app.retained.is_none())
+                    .show(ui)
+                    .clicked()
             {
-                app.propose("clean-all");
+                app.clean_selected();
+            }
+            let narrow = width < 420.0;
+            if selected < total
+                && Button::new(Look::Secondary, "Select all")
+                    .icon("installed")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
+                app.set_all_checked(true);
+            }
+            if selected == total
+                && selected > 0
+                && Button::new(Look::Secondary, "Select none")
+                    .icon("cancel")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
+                app.set_all_checked(false);
             }
         }
         _ => {}

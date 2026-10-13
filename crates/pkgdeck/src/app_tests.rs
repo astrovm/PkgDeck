@@ -1126,3 +1126,117 @@ fn the_tray_is_idle_only_with_nothing_running_or_waiting() {
     app.c().set_confirmation(QString::default());
     assert!(app.idle());
 }
+
+#[test]
+fn cleanup_choices_survive_navigation_and_do_not_change_update_sources() {
+    let mut app = app();
+    app.catalog = serde_json::from_value(json!([
+        {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
+        {"source":"dev-caches", "available":true, "capabilities":["clean"]}
+    ]))
+    .unwrap();
+    app.enabled = ["apt".into()].into();
+    assert!(app.effective_sources(Page::Clean).contains("dev-caches"));
+    assert!(!app.effective_sources(Page::Updates).contains("dev-caches"));
+    let row: Row = serde_json::from_value(json!({"kind":"cleanup", "source":"dev-caches", "name":"Compiler cache", "cleanup_key":"sccache", "cleanup_kind":"package_cache"})).unwrap();
+    assert!(!app.row_checked(&row));
+    app.set_row_checked(&row, true);
+    assert!(app.row_checked(&row));
+    app.set_row_checked(&row, false);
+    app.unchecked.clear();
+    assert!(!app.row_checked(&row));
+    let saved = serde_json::to_string(&app.settings).unwrap();
+    app.settings = serde_json::from_str(&saved).unwrap();
+    assert!(!app.row_checked(&row));
+    // Turning a source off for updates leaves Clean reading it.
+    app.set_source_enabled("apt", false);
+    assert!(app.effective_sources(Page::Clean).contains("apt"));
+    assert_eq!(app.sources_csv(Page::Clean), "");
+    assert!(!app.row_checked(&row));
+}
+
+#[test]
+fn package_rows_check_on_their_own_and_cleanup_rows_by_key() {
+    let mut app = app();
+    let package: Row = serde_json::from_value(row("htop", json!({}))).unwrap();
+    assert!(app.row_checked(&package));
+    app.set_row_checked(&package, false);
+    assert!(!app.row_checked(&package));
+    assert!(app.settings.cleanup.excluded.len() == 1, "only sccache");
+    app.set_row_checked(&package, true);
+    assert!(app.row_checked(&package));
+    // Equally named tasks stay apart by key; a task without one uses its name.
+    let task = |name: &str, key: &str| -> Row {
+        serde_json::from_value(
+            json!({"kind":"cleanup", "source":"projects", "name":name, "cleanup_key":key}),
+        )
+        .unwrap()
+    };
+    assert_ne!(
+        task("app", "worktrees:/a").check_identity(),
+        task("app", "worktrees:/b").check_identity()
+    );
+    assert_eq!(task("app", "").check_identity(), r#"["projects","app"]"#);
+    assert_eq!(package.check_identity(), package.identity());
+}
+
+#[test]
+fn a_clean_filter_with_no_usable_source_reads_nothing() {
+    let mut app = app();
+    app.catalog = serde_json::from_value(json!([
+        {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
+        {"source":"dev-caches", "available":true, "capabilities":["clean"]}
+    ]))
+    .unwrap();
+    // Sources turned off for updates still count on Clean.
+    app.enabled = ["apt".into()].into();
+    assert_eq!(app.sources_csv(Page::Clean), "");
+    assert_eq!(app.sources_csv(Page::Updates), "apt");
+    app.set_page_sources(Page::Clean, ["dev-caches".into()].into());
+    assert_eq!(app.sources_csv(Page::Clean), "dev-caches");
+    // Choosing every source is the same as no filter.
+    app.set_page_sources(Page::Clean, ["apt".into(), "dev-caches".into()].into());
+    assert_eq!(app.sources_csv(Page::Clean), "");
+    // A filter that matches nothing here reads nothing, not everything.
+    app.page_sources.insert(Page::Clean, ["gone".into()].into());
+    assert_eq!(
+        app.sources_csv(Page::Clean),
+        pkgdeck_core::backends::NO_BACKENDS
+    );
+}
+
+#[test]
+fn clean_selected_reviews_only_the_checked_batch_tasks() {
+    let mut app = app();
+    app.page = Page::Clean;
+    let rows = json!([
+        {"kind":"cleanup", "name":"one", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache"},
+        {"kind":"cleanup", "name":"two", "source":"dev-caches", "cleanup_key":"two", "cleanup_kind":"package_cache"},
+        {"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data"}
+    ]);
+    app.c().set_rows(rows.to_string().into());
+    app.react();
+    app.refresh_items();
+    let two: Row = serde_json::from_value(rows[1].clone()).unwrap();
+    app.set_row_checked(&two, false);
+    // While an older list is still on screen, nothing is reviewed.
+    app.retained = Some(app.rows.clone());
+    app.clean_selected();
+    assert!(app.active_rows.is_empty());
+    app.retained = None;
+    app.clean_selected();
+    assert_eq!(app.active_rows.len(), 1);
+    assert!(app.active_rows.contains(
+        &serde_json::from_value::<Row>(rows[0].clone())
+            .unwrap()
+            .identity()
+    ));
+    // Nothing checked: nothing to review.
+    let mut app = self::app();
+    app.page = Page::Clean;
+    app.c().set_rows(json!([rows[2]]).to_string().into());
+    app.react();
+    app.refresh_items();
+    app.clean_selected();
+    assert!(app.active_rows.is_empty());
+}

@@ -238,7 +238,11 @@ enum Job {
     AutoUpgrade(Vec<Operation>, bool),
     /// Cleanup that runs with nobody watching, once a day: what is found
     /// then, as long as [`CleanupItem::automatic`] allows it.
-    AutoClean,
+    AutoClean {
+        caches: bool,
+        worktrees: bool,
+        preferences: CleanupPreferences,
+    },
     CleanAll(Vec<Operation>),
     /// Download the latest package lists of several sources, one after
     /// another.
@@ -253,7 +257,7 @@ impl Job {
             Self::Write(..)
                 | Self::UpgradeAll(..)
                 | Self::AutoUpgrade(..)
-                | Self::AutoClean
+                | Self::AutoClean { .. }
                 | Self::CleanAll(_)
                 | Self::RefreshAll(_)
                 | Self::Repositories(Some(_))
@@ -909,12 +913,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
-        Job::AutoClean => {
+        Job::AutoClean { caches, worktrees, preferences } => {
             let items: Vec<_> = engine
                 .cleanup(cancel)
                 .items
                 .into_iter()
-                .filter(CleanupItem::automatic)
+                .filter(|item| preferences.includes(&item.id) && ((caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects")))
                 .collect();
             let operations: Vec<_> = items
                 .iter()
@@ -1490,6 +1494,8 @@ pub struct Controller {
     allow_removals: bool,
     /// Clean once a day after a background check.
     auto_clean: bool,
+    auto_clean_worktrees: bool,
+    cleanup_preferences: CleanupPreferences,
     /// When automatic cleaning last ran, in seconds since 1970.
     auto_cleaned_at: u64,
     /// A window shows the sections; see `set_window_open`.
@@ -1624,6 +1630,8 @@ impl Default for Controller {
             auto_held: None,
             allow_removals: true,
             auto_clean: false,
+            auto_clean_worktrees: false,
+            cleanup_preferences: CleanupPreferences::default(),
             auto_cleaned_at: 0,
             source_filter: Vec::new(),
             window_open: true,
@@ -1885,7 +1893,7 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
-        Job::OpenInput(_) | Job::ImportRepository(_) => vec![],
+        Job::OpenInput(_) | Job::ImportRepository(_) | Job::AutoClean { .. } => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::RetryFailedUpdates(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
@@ -4136,13 +4144,24 @@ impl ffi::PackageController {
     pub fn auto_clean(&self) -> bool {
         self.rust().auto_clean
     }
+    pub fn set_auto_clean_worktrees(mut self: Pin<&mut Self>, enabled: bool) {
+        self.as_mut().rust_mut().auto_clean_worktrees = enabled;
+    }
+    pub fn set_cleanup_preferences(mut self: Pin<&mut Self>, preferences: QString) {
+        if let Ok(preferences) = serde_json::from_str(&preferences.to_string()) {
+            self.as_mut().rust_mut().cleanup_preferences = preferences;
+        }
+    }
+    pub fn auto_clean_worktrees(&self) -> bool {
+        self.rust().auto_clean_worktrees
+    }
     /// Clean after this check when it's been a day, nothing else is
     /// waiting to run, and the computer is plugged in and not building.
     fn schedule_auto_clean(mut self: Pin<&mut Self>) {
         const DAY: u64 = 24 * 60 * 60;
         let now = epoch_seconds();
         let rust = self.rust();
-        if !rust.auto_clean
+        if (!rust.auto_clean && !rust.auto_clean_worktrees)
             || now < rust.auto_cleaned_at.saturating_add(DAY)
             || rust.pending.is_some()
             || rust.queued.is_some()
@@ -4155,8 +4174,13 @@ impl ffi::PackageController {
         if (natives.hold)(&(natives.host)()).is_some() {
             return;
         }
+        let job = Job::AutoClean {
+            caches: rust.auto_clean,
+            worktrees: rust.auto_clean_worktrees,
+            preferences: rust.cleanup_preferences.clone(),
+        };
         self.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
-            job: Job::AutoClean,
+            job,
             activity_id: None,
             cleanup_preview: vec![],
         });
@@ -4959,7 +4983,10 @@ impl ffi::PackageController {
                     if let Some(mode) = batch_mode {
                         engine.set_batch_mode(mode);
                     }
-                    engine.set_unattended(matches!(job, Job::AutoUpgrade(..) | Job::AutoClean));
+                    engine.set_unattended(matches!(
+                        job,
+                        Job::AutoUpgrade(..) | Job::AutoClean { .. }
+                    ));
                     if let Job::Write(_, Some(plan)) = &job {
                         engine.remember_operation_plan((**plan).clone());
                     }
@@ -5601,21 +5628,8 @@ impl ffi::PackageController {
             if items.is_empty() {
                 return;
             }
-            let operations: Vec<_> = items
-                .iter()
-                .map(|item| Operation::Clean(item.id.clone()))
-                .collect();
-            let confirmation = clean_confirmation(&items);
-            let count = operations.len();
-            let noun = if count == 1 { "task" } else { "tasks" };
-            let body = confirmation["body"].as_str().unwrap_or_default().to_owned();
-            self.as_mut().set_confirmation_data(encoded(confirmation));
-            self.as_mut().set_confirmation(
-                format!("Run {count} cleanup {noun}?\n\n{body}")
-                    .as_str()
-                    .into(),
-            );
-            self.rust_mut().pending = Some(Job::CleanAll(operations));
+            let ids: Vec<_> = items.iter().map(|item| item.id.clone()).collect();
+            self.as_mut().propose_clean_checked(encoded(json!(ids)));
             return;
         }
         if action == "adopt-all" {
@@ -5781,6 +5795,41 @@ impl ffi::PackageController {
             .set_confirmation(format!("Refresh {count} {noun}?\n\n{body}").as_str().into());
         self.rust_mut().pending = Some(refresh_job(operations));
     }
+    pub fn propose_clean_checked(mut self: Pin<&mut Self>, identities: QString) {
+        let wanted: Vec<CleanupId> =
+            serde_json::from_str(&identities.to_string()).unwrap_or_default();
+        let cleanup = self.rust().cleanup.clone();
+        let items: Vec<_> = cleanup
+            .iter()
+            .filter(|item| {
+                item.kind.in_clean_all()
+                    && wanted.contains(&item.id)
+                    && self.rust().cleanup_preferences.includes(&item.id)
+            })
+            .collect();
+        if items.is_empty() {
+            self.as_mut().set_confirmation(QString::default());
+            self.as_mut().set_confirmation_data("{}".into());
+            self.rust_mut().pending = None;
+            return;
+        }
+        let operations: Vec<_> = items
+            .iter()
+            .map(|item| Operation::Clean(item.id.clone()))
+            .collect();
+        let confirmation = clean_confirmation(&items);
+        let count = operations.len();
+        let noun = if count == 1 { "task" } else { "tasks" };
+        let body = confirmation["body"].as_str().unwrap_or_default().to_owned();
+        self.as_mut().set_confirmation_data(encoded(confirmation));
+        self.as_mut().set_confirmation(
+            format!("Run {count} cleanup {noun}?\n\n{body}")
+                .as_str()
+                .into(),
+        );
+        self.rust_mut().pending = Some(Job::CleanAll(operations));
+    }
+
     pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
         let plan = plan_checked_upgrade(
             &self.rust().packages,
@@ -5974,7 +6023,7 @@ impl ffi::PackageController {
                             })
                             .count();
                         let note = format!(
-                            "\nAPT is left out: it would remove {}. Turn on \"Allow updates that remove packages\" in Settings to include it.",
+                            "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
                             plan.removals.join(", ")
                         );
                         let rest: Vec<_> =
@@ -16957,6 +17006,7 @@ mod tests {
         let mut engine = Engine::default();
         engine
             .register(Cleaner {
+                backend: "fixture",
                 items: vec![],
                 ran: std::sync::Arc::clone(&ran),
             })
@@ -17102,12 +17152,13 @@ mod tests {
 
     /// Cleanup tasks that run as they're told, and say which ran.
     struct Cleaner {
+        backend: &'static str,
         items: Vec<CleanupItem>,
         ran: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl Backend for Cleaner {
         fn id(&self) -> &str {
-            "fixture"
+            self.backend
         }
         fn capabilities(&self) -> &[Capability] {
             &[Capability::Clean]
@@ -17146,6 +17197,7 @@ mod tests {
         let mut engine = Engine::default();
         engine
             .register(Cleaner {
+                backend: "fixture",
                 items: vec![
                     sized("fixture", "cache", CleanupKind::PackageCache, Some(3_000)),
                     sized(
@@ -17161,7 +17213,15 @@ mod tests {
                 ran: ran.clone(),
             })
             .unwrap();
-        let replies = run_job(&mut engine, Job::AutoClean, &Cancellation::default());
+        let replies = run_job(
+            &mut engine,
+            Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences: CleanupPreferences::default(),
+            },
+            &Cancellation::default(),
+        );
         assert!(matches!(
             replies.last(),
             Some(Reply::Done(Ok(Payload::AutoCleaned {
@@ -17176,6 +17236,7 @@ mod tests {
         // Nothing to clean: nothing runs.
         let mut idle = Engine::default();
         idle.register(Cleaner {
+            backend: "fixture",
             items: vec![sized(
                 "fixture",
                 "worktrees",
@@ -17186,7 +17247,16 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            run_job(&mut idle, Job::AutoClean, &Cancellation::default()).last(),
+            run_job(
+                &mut idle,
+                Job::AutoClean {
+                    caches: true,
+                    worktrees: false,
+                    preferences: CleanupPreferences::default()
+                },
+                &Cancellation::default()
+            )
+            .last(),
             Some(Reply::Done(Ok(Payload::AutoCleaned {
                 cleaned: 0,
                 failed: 0,
@@ -17194,9 +17264,247 @@ mod tests {
             })))
         ));
         assert_eq!(ran.lock().unwrap().len(), 3);
-        assert!(Job::AutoClean.writes());
-        assert!(Job::AutoClean.operations().is_empty());
+        assert!(Job::AutoClean {
+            caches: true,
+            worktrees: false,
+            preferences: CleanupPreferences::default()
+        }
+        .writes());
+        assert!(Job::AutoClean {
+            caches: true,
+            worktrees: false,
+            preferences: CleanupPreferences::default()
+        }
+        .operations()
+        .is_empty());
     }
+    #[test]
+    fn automatic_worktree_cleanup_is_independent_and_only_runs_project_tasks() {
+        for caches in [false, true] {
+            for worktrees in [false, true] {
+                let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+                let mut engine = Engine::default();
+                for backend in ["projects", "fixture"] {
+                    engine
+                        .register(Cleaner {
+                            backend,
+                            items: vec![
+                                sized(backend, "cache", CleanupKind::BuildFiles, Some(10)),
+                                sized(backend, "worktrees", CleanupKind::Worktree, Some(20)),
+                                sized(backend, "volume", CleanupKind::Data, Some(30)),
+                            ],
+                            ran: ran.clone(),
+                        })
+                        .unwrap();
+                }
+                let replies = run_job(
+                    &mut engine,
+                    Job::AutoClean {
+                        caches,
+                        worktrees,
+                        preferences: CleanupPreferences::default(),
+                    },
+                    &Cancellation::default(),
+                );
+                let cleaned = usize::from(caches) * 2 + usize::from(worktrees);
+                assert!(
+                    matches!(replies.last(), Some(Reply::Done(Ok(Payload::AutoCleaned { cleaned: actual, failed: 0, .. }))) if *actual == cleaned)
+                );
+                let keys = ran.lock().unwrap();
+                assert_eq!(
+                    keys.iter().filter(|key| *key == "worktrees").count(),
+                    usize::from(worktrees)
+                );
+                assert!(!keys.contains(&"volume".into()));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_cleanup_uses_current_exact_keys_deduplicates_and_excludes_data() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let items = vec![
+            sized("projects", "one", CleanupKind::Worktree, Some(10)),
+            sized("projects", "two", CleanupKind::Worktree, Some(20)),
+            sized("projects", "volume", CleanupKind::Data, Some(30)),
+        ];
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: items.clone(),
+                failures: vec![],
+            })));
+        let wanted = vec![
+            items[1].id.clone(),
+            items[1].id.clone(),
+            items[2].id.clone(),
+            CleanupId {
+                backend: "projects".into(),
+                key: "gone".into(),
+            },
+        ];
+        controller
+            .as_mut()
+            .propose_clean_checked(serde_json::to_string(&wanted).unwrap().into());
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::CleanAll(ops)) if ops == &vec![Operation::Clean(items[1].id.clone())])
+        );
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Run 1 cleanup task?"));
+        for input in ["[]", "not json", r#"[{"backend":"other","key":"two"}]"#] {
+            controller.as_mut().propose_clean_checked(input.into());
+            assert!(controller.rust().pending.is_none());
+            assert!(controller.confirmation().to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn excluded_tasks_never_run_automatically_or_in_batches() {
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut engine = Engine::default();
+        let items = vec![
+            sized("dev-caches", "sccache", CleanupKind::PackageCache, Some(10)),
+            sized("dev-caches", "cargo", CleanupKind::PackageCache, Some(20)),
+        ];
+        engine
+            .register(Cleaner {
+                backend: "dev-caches",
+                items: items.clone(),
+                ran: ran.clone(),
+            })
+            .unwrap();
+        let preferences = CleanupPreferences::default();
+        run_job(
+            &mut engine,
+            Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences: preferences.clone(),
+            },
+            &Cancellation::default(),
+        );
+        assert_eq!(*ran.lock().unwrap(), vec!["cargo"]);
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: items.clone(),
+                failures: vec![],
+            })));
+        let ids =
+            serde_json::to_string(&items.iter().map(|item| item.id.clone()).collect::<Vec<_>>())
+                .unwrap();
+        controller
+            .as_mut()
+            .propose_clean_checked(ids.as_str().into());
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::CleanAll(ops)) if ops == &vec![Operation::Clean(items[1].id.clone())])
+        );
+        let mut preferences = preferences;
+        preferences.set_included(items[1].id.clone(), false);
+        controller
+            .as_mut()
+            .set_cleanup_preferences(serde_json::to_string(&preferences).unwrap().into());
+        controller
+            .as_mut()
+            .set_cleanup_preferences("bad json".into());
+        controller
+            .as_mut()
+            .propose_clean_checked(ids.as_str().into());
+        assert!(controller.rust().pending.is_none());
+        ran.lock().unwrap().clear();
+        run_job(
+            &mut engine,
+            Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences,
+            },
+            &Cancellation::default(),
+        );
+        assert!(ran.lock().unwrap().is_empty());
+        assert!(engine_source(
+            &Job::AutoClean {
+                caches: true,
+                worktrees: false,
+                preferences: CleanupPreferences::default()
+            },
+            &["apt".into()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn worktree_only_cleaning_respects_interval_power_and_pending_work() {
+        for case in 0..5 {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            assert!(!controller.auto_clean_worktrees());
+            controller.as_mut().set_auto_clean_worktrees(true);
+            assert!(controller.auto_clean_worktrees());
+            controller.as_mut().rust_mut().natives.hold = never_hold;
+            let now = epoch_seconds();
+            controller
+                .as_mut()
+                .set_auto_clean(false, now - 25 * 60 * 60);
+            match case {
+                0 => {}
+                1 => controller
+                    .as_mut()
+                    .set_auto_clean(false, now - 23 * 60 * 60),
+                2 => controller.as_mut().rust_mut().natives.hold = on_battery,
+                3 => controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![])),
+                _ => controller.as_mut().set_auto_clean_worktrees(false),
+            }
+            controller.as_mut().schedule_auto_clean();
+            let scheduled = controller
+                .rust()
+                .validated_confirmed
+                .as_ref()
+                .is_some_and(|entry| {
+                    matches!(
+                        entry.job,
+                        Job::AutoClean {
+                            caches: false,
+                            worktrees: true,
+                            ..
+                        }
+                    )
+                });
+            assert_eq!(scheduled, case == 0, "case {case}");
+        }
+    }
+
+    #[test]
+    fn arbitrary_cleanup_selection_text_never_creates_an_operation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let item = sized("projects", "fixture-key", CleanupKind::Worktree, Some(1));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![item],
+                failures: vec![],
+            })));
+        let mut seed = 12345u64;
+        for length in 0..128 {
+            let text: String = (0..length)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    char::from(32 + (seed % 95) as u8)
+                })
+                .collect();
+            controller.as_mut().propose_clean_checked(text.into());
+            assert!(controller.rust().pending.is_none());
+        }
+    }
+
     #[test]
     fn automatic_updates_read_back_as_set() {
         let mut controller = ffi::create_controller();
@@ -17224,7 +17532,7 @@ mod tests {
                     .validated_confirmed
                     .as_ref()
                     .map(|entry| &entry.job),
-                Some(Job::AutoClean)
+                Some(Job::AutoClean { .. })
             )
         };
         let mut controller = ffi::create_controller();

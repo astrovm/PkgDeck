@@ -12,6 +12,7 @@ use pkgdeck::{
     model::Page,
     platform::Platform,
     settings::{Accent, Appearance, DarkTheme, LightTheme, Store, TextSize},
+    ui::SettingsTab,
 };
 use pkgdeck_app::controller::ffi::create_synthetic_controller;
 use serde_json::json;
@@ -91,6 +92,15 @@ fn click_in_view(harness: &mut Harness<'static, (bool, App)>, role: Option<Role>
     }
 }
 
+/// Opens a tab of Settings.
+fn settings_tab(harness: &mut Harness<'static, (bool, App)>, tab: SettingsTab) {
+    harness
+        .get_by_role_and_label(Role::RadioButton, tab.name())
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.ui.settings_tab, tab);
+}
+
 fn show(page: Page) -> Harness<'static, (bool, App)> {
     let mut app = app();
     app.page = page;
@@ -104,7 +114,7 @@ fn show(page: Page) -> Harness<'static, (bool, App)> {
 fn the_restart_toast_offers_restart_and_closes() {
     let mut harness = show(Page::Installed);
     harness.state_mut().1.restart_toast = Some(Toast {
-        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+        text: "Restart PkgDeck to use the new version.".into(),
         tone: pkgdeck::model::Tone::Success,
         action: Some(ToastAction::Restart),
         shown: std::time::Instant::now(),
@@ -308,10 +318,12 @@ fn a_row_opens_its_page_and_escape_closes_it() {
 fn updates_rows_can_be_unchecked() {
     let mut harness = show(Page::Updates);
     assert!(harness.query_by_label("Update all").is_some());
+    assert!(harness.query_by_label("Select all").is_none());
     harness.get_by_label("Select none").click();
     harness.run_steps(3);
     assert!(!harness.state().1.unchecked.is_empty());
     assert!(harness.query_by_label("Update all").is_none());
+    assert!(harness.query_by_label("Select none").is_none());
     harness.get_by_label("Select all").click();
     harness.run_steps(3);
     assert!(harness.state().1.unchecked.is_empty());
@@ -335,7 +347,7 @@ fn updates_that_failed_or_need_the_password_are_marked() {
     let mut harness = harness(app);
     harness.run_steps(4);
     assert!(harness
-        .query_by_label_contains("Didn't update last time. Update all skips it")
+        .query_by_label_contains("Failed last time. Skipped until")
         .is_some());
     // The cask mark belongs to the cask of that name, not this APT row.
     assert!(harness
@@ -399,13 +411,11 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
 #[test]
 fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
+    settings_tab(&mut harness, SettingsTab::Updates);
     let before = harness.state().1.settings.auto_update;
-    click_in_view(
-        &mut harness,
-        Some(Role::CheckBox),
-        "Update apps and packages automatically",
-    );
+    click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
     assert_ne!(harness.state().1.settings.auto_update, before);
+    settings_tab(&mut harness, SettingsTab::Appearance);
     click_in_view(&mut harness, None, "Light");
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
     // Only the colours of the mode on screen are offered.
@@ -624,12 +634,13 @@ fn switch_enabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
 #[test]
 fn settings_turn_package_managers_on_and_off() {
     let mut harness = show(Page::Settings);
-    harness.run_steps(2);
+    settings_tab(&mut harness, SettingsTab::Sources);
     assert!(harness
         .query_by_label("Looking for package managers…")
         .is_some());
     let mut app = with_sources(app());
     app.page = Page::Settings;
+    app.ui.settings_tab = SettingsTab::Sources;
     app.invalidate();
     let mut harness = harness_at(app, egui::vec2(1200.0, 2400.0));
     harness.run_steps(3);
@@ -727,16 +738,13 @@ fn settings_say_what_automatic_updates_wait_for() {
         );
         app.react();
         app.page = Page::Settings;
+        app.ui.settings_tab = SettingsTab::Updates;
         app.invalidate();
         let mut harness = harness(app);
         harness.run_steps(4);
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
-        click_in_view(
-            &mut harness,
-            Some(Role::CheckBox),
-            "Update apps and packages automatically",
-        );
+        click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
         assert!(harness.query_by_label(text).is_none(), "{text}");
     }
     // A reason this version doesn't know shows nothing.
@@ -1138,5 +1146,209 @@ fn a_long_error_wraps_beside_its_buttons_not_under_them() {
     for button in ["Show details", "Retry", "Dismiss"] {
         let rect = harness.get_by_label(button).rect();
         assert!(!rect.intersects(text), "{button} sits on the message");
+    }
+}
+
+#[test]
+fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
+    let mut app = app();
+    app.page = Page::Clean;
+    let rows = json!([
+        {"kind":"cleanup", "name":"one", "display_name":"First cache", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache", "bytes":1_000_000},
+        {"kind":"cleanup", "name":"two", "display_name":"Second cache", "source":"dev-caches", "cleanup_key":"two", "cleanup_kind":"build_files", "bytes":2_000_000},
+        {"kind":"cleanup", "name":"volume", "display_name":"Volume", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "bytes":9_000_000}
+    ]);
+    app.c().set_rows(rows.to_string().into());
+    app.react();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Select First cache");
+    assert!(harness.query_by_label("Clean selected (2.0 MB)").is_some());
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Select all tasks")
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::Mixed)
+    );
+    // Some checked: one button, to check the rest.
+    assert!(harness.query_by_label("Select none").is_none());
+    click_in_view(&mut harness, None, "Select all");
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    assert!(harness.query_by_label("Select all").is_none());
+    click_in_view(&mut harness, None, "Select none");
+    assert!(harness.query_by_label_contains("Clean selected").is_none());
+    click_in_view(&mut harness, None, "Select all");
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    assert!(harness
+        .get_by_role_and_label(Role::CheckBox, "Select Volume")
+        .accesskit_node()
+        .is_disabled());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_none());
+}
+
+#[test]
+fn automatic_worktree_cleanup_can_be_enabled_independently_of_caches() {
+    let mut harness = show(Page::Settings);
+    settings_tab(&mut harness, SettingsTab::Clean);
+    assert!(!harness.state().1.settings.auto_clean_worktrees);
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Clean finished worktrees",
+    );
+    assert!(harness.state().1.settings.auto_clean_worktrees);
+    assert!(harness.state_mut().1.c().auto_clean_worktrees());
+    assert!(!harness.state().1.settings.auto_clean);
+    click_in_view(
+        &mut harness,
+        Some(Role::CheckBox),
+        "Clean finished worktrees",
+    );
+    assert!(!harness.state().1.settings.auto_clean_worktrees);
+}
+
+#[test]
+fn settings_tabs_show_one_part_at_a_time() {
+    let mut harness = show(Page::Settings);
+    // Appearance first.
+    assert!(harness.query_by_label("Accent").is_some());
+    assert!(harness.query_by_label("Check every").is_none());
+    let only = [
+        (SettingsTab::Updates, "Check every"),
+        (SettingsTab::Sources, "Looking for package managers…"),
+        (SettingsTab::Clean, "Old after"),
+        (SettingsTab::About, "GitHub"),
+        (SettingsTab::Appearance, "Accent"),
+    ];
+    for (tab, shown) in only {
+        settings_tab(&mut harness, tab);
+        for (_, other) in only.iter().filter(|(other, _)| *other != tab) {
+            assert!(harness.query_by_label(other).is_none(), "{tab:?} {other}");
+        }
+        assert!(harness.query_by_label(shown).is_some(), "{tab:?}");
+    }
+    // Shortcuts are listed without unfolding them.
+    settings_tab(&mut harness, SettingsTab::About);
+    assert!(harness.query_by_label("Update selected").is_some());
+}
+
+#[test]
+fn clean_settings_use_the_clean_page_list_and_say_what_they_need() {
+    let mut app = app();
+    app.page = Page::Settings;
+    app.ui.settings_tab = SettingsTab::Clean;
+    app.catalog = serde_json::from_value(json!([
+        {"source":"apt", "available":true, "capabilities":["installed","upgrade","clean"]},
+        {"source":"dev-caches", "available":true, "capabilities":["clean"]},
+        {"source":"projects", "available":true, "capabilities":["clean"]}
+    ]))
+    .unwrap();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    // No second list of what to clean: Clean's checkboxes are the one.
+    assert!(harness.query_by_label_contains("Clean APT").is_none());
+    assert!(harness.query_by_label_contains("sccache").is_none());
+    assert!(harness
+        .query_by_label("Once a day. Cleans what's checked on Clean")
+        .is_some());
+    // Without background checks, each switch says why it is off, and one
+    // button turns them back on.
+    harness.state_mut().1.settings.background_mode = false;
+    harness.run_steps(3);
+    assert!(switch_disabled(&harness, "Clean automatically"));
+    assert!(switch_disabled(&harness, "Clean finished worktrees"));
+    assert_eq!(
+        harness
+            .query_all_by_label("Needs Background checks")
+            .count(),
+        2
+    );
+    harness
+        .get_by_label("Turn on Background checks")
+        .scroll_to_me();
+    harness.run_steps(3);
+    if cfg!(target_os = "macos") {
+        // The menu bar icon can't change off the main thread a test runs on.
+        harness.state_mut().1.settings.background_mode = true;
+        harness.run_steps(3);
+    } else {
+        click_in_view(&mut harness, None, "Turn on Background checks");
+    }
+    assert!(harness.state().1.settings.background_mode);
+    assert!(!switch_disabled(&harness, "Clean automatically"));
+    assert!(harness
+        .query_by_label("Turn on Background checks")
+        .is_none());
+    click_in_view(&mut harness, None, "Choose what to clean");
+    assert_eq!(harness.state().1.page, Page::Clean);
+}
+
+fn switch_disabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
+    !switch_enabled(harness, label)
+}
+
+#[test]
+fn a_failed_list_offers_retry_and_details_and_retry_reloads() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.c().set_rows("[]".into());
+    app.react();
+    app.report.phase = "finished".into();
+    app.report.failures = serde_json::from_value(json!([
+        {"source": "apt", "kind": "failed", "detail": "APT broke"}
+    ]))
+    .unwrap();
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    for label in ["Retry", "Details"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, label)
+                .is_some(),
+            "{label}"
+        );
+    }
+    assert!(harness.query_by_label("Check again").is_none());
+    harness
+        .get_by_role_and_label(Role::Button, "Details")
+        .click();
+    harness.run_steps(3);
+    assert!(harness.state().1.ui.checks_open);
+    harness.state_mut().1.ui.checks_open = false;
+    harness.run_steps(3);
+    harness.get_by_role_and_label(Role::Button, "Retry").click();
+    harness.run_steps(3);
+    assert!(harness
+        .state_mut()
+        .1
+        .c()
+        .report_state()
+        .to_string()
+        .contains(r#""phase":"loading""#));
+}
+
+#[test]
+fn nothing_to_select_offers_no_select_button() {
+    for page in [Page::Updates, Page::Clean] {
+        let mut app = app();
+        app.page = page;
+        // Only a task Clean all leaves alone, or no updates at all.
+        let rows = if page == Page::Clean {
+            json!([{"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data"}])
+        } else {
+            json!([])
+        };
+        app.c().set_rows(rows.to_string().into());
+        app.react();
+        app.invalidate();
+        let mut harness = harness(app);
+        harness.run_steps(4);
+        for label in ["Select all", "Select none"] {
+            assert!(harness.query_by_label(label).is_none(), "{page:?} {label}");
+        }
     }
 }

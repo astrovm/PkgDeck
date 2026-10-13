@@ -155,6 +155,35 @@ impl CleanupItem {
     }
 }
 
+/// Remembered choices for batch and automatic cleanup. Individual cleanup
+/// actions remain available for an explicit one-time removal.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct CleanupPreferences {
+    pub excluded: Vec<CleanupId>,
+}
+impl Default for CleanupPreferences {
+    fn default() -> Self {
+        Self {
+            excluded: vec![CleanupId {
+                backend: "dev-caches".into(),
+                key: "sccache".into(),
+            }],
+        }
+    }
+}
+impl CleanupPreferences {
+    pub fn includes(&self, id: &CleanupId) -> bool {
+        !self.excluded.contains(id)
+    }
+    pub fn set_included(&mut self, id: CleanupId, included: bool) {
+        self.excluded.retain(|excluded| excluded != &id);
+        if !included {
+            self.excluded.push(id);
+        }
+    }
+}
+
 /// One manager-native cleanup plan. `key` is a backend-defined fixed token,
 /// never command text supplied by a frontend.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -822,5 +851,43 @@ mod tests {
             grown,
             item("dev-caches", "cargo", CleanupKind::PackageCache)
         );
+    }
+    #[test]
+    fn cleanup_preferences_round_trip_and_preserve_other_task_choices() {
+        for source in ["dev-caches", "projects"] {
+            for key in ["sccache", "cargo", "worktrees:/fake/project"] {
+                for enabled in [false, true] {
+                    let mut choices = CleanupPreferences::default();
+                    let target = CleanupId {
+                        backend: source.into(),
+                        key: key.into(),
+                    };
+                    let other = CleanupId {
+                        backend: "fixture".into(),
+                        key: "keep".into(),
+                    };
+                    choices.set_included(target.clone(), enabled);
+                    choices.set_included(target.clone(), enabled);
+                    assert_eq!(choices.includes(&target), enabled);
+                    assert!(choices.includes(&other));
+                    assert_eq!(
+                        choices.excluded.iter().filter(|id| *id == &target).count(),
+                        usize::from(!enabled)
+                    );
+                    let read: CleanupPreferences =
+                        serde_json::from_str(&serde_json::to_string(&choices).unwrap()).unwrap();
+                    assert_eq!(read, choices);
+                }
+            }
+        }
+        let old: CleanupPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old, CleanupPreferences::default());
+        // Source switches are gone; a saved one is dropped, not an error.
+        let saved: CleanupPreferences =
+            serde_json::from_str(r#"{"excluded":[],"disabled_sources":["apt"]}"#).unwrap();
+        assert!(saved.includes(&CleanupId {
+            backend: "apt".into(),
+            key: "cache".into()
+        }));
     }
 }

@@ -857,7 +857,7 @@ fn the_search_hint_counts_what_can_search() {
     );
     assert_eq!(
         search_hint(&catalog(), &HashSet::new(), ""),
-        "No enabled source can search. Turn one on in Settings."
+        "No source can search. Turn one on in Settings."
     );
 }
 
@@ -1046,7 +1046,7 @@ fn held_updates_say_why_and_match_their_row() {
     );
     assert!(failed.matches(&row));
     assert_eq!(failed.icon(), "warning");
-    assert!(failed.tip().starts_with("Didn't update last time"));
+    assert!(failed.tip().starts_with("Failed last time"));
     // Another copy of the same name in another scope isn't this row.
     let other = held(
         json!({"reason": "failed", "source": "homebrew-cask", "name": "app",
@@ -1170,10 +1170,7 @@ fn automatic_cleaning_says_what_it_freed() {
     };
     assert_eq!(said(0, 0, 0), None);
     assert_eq!(said(3, 0, 4_200_000_000).as_deref(), Some("Freed 4.2 GB"));
-    assert_eq!(
-        said(1, 0, 0).as_deref(),
-        Some("Cleaned up caches and build files")
-    );
+    assert_eq!(said(1, 0, 0).as_deref(), Some("Finished automatic cleanup"));
     assert_eq!(
         said(2, 1, 900).as_deref(),
         Some("Freed 900 bytes, 1 task failed")

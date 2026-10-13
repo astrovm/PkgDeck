@@ -131,6 +131,26 @@ impl Row {
             &self.display_name
         }
     }
+    /// Only cleanup tasks that can be included in a batch.
+    pub fn batch_cleanable(&self) -> bool {
+        self.kind == "cleanup" && self.cleanup_kind != "data"
+    }
+    /// Checkbox identity uses a cleanup key, so equally named projects stay separate.
+    pub fn check_identity(&self) -> String {
+        if self.kind == "cleanup" {
+            serde_json::to_string(&(
+                &self.source,
+                if self.cleanup_key.is_empty() {
+                    &self.name
+                } else {
+                    &self.cleanup_key
+                },
+            ))
+            .unwrap_or_default()
+        } else {
+            self.identity()
+        }
+    }
     /// What identifies a row across loads, as the controller reads it back
     /// in `propose_checked`.
     pub fn identity(&self) -> String {
@@ -232,7 +252,7 @@ impl Held {
         if self.needs_password() {
             "Needs your password. Automatic updates skip it."
         } else {
-            "Didn't update last time. Update all skips it until there's a newer version."
+            "Failed last time. Skipped until a newer version."
         }
     }
 }
@@ -746,7 +766,7 @@ impl AutoCleaned {
     pub fn message(&self) -> Option<String> {
         let cleaned = match (self.tasks, self.bytes) {
             (0, _) => None,
-            (_, 0) => Some("Cleaned up caches and build files".to_owned()),
+            (_, 0) => Some("Finished automatic cleanup".to_owned()),
             (_, bytes) => Some(format!("Freed {}", size(bytes))),
         };
         match (cleaned, self.failed) {
@@ -1575,7 +1595,7 @@ pub fn search_hint(catalog: &[Source], enabled: &HashSet<String>, saved: &str) -
         })
         .collect();
     match searchable.as_slice() {
-        [] => "No enabled source can search. Turn one on in Settings.".into(),
+        [] => "No source can search. Turn one on in Settings.".into(),
         [one] => format!("Searches {} as you type.", source_name(&one.source)),
         many => format!("Searches {} sources as you type.", many.len()),
     }
