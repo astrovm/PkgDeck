@@ -11,6 +11,7 @@ pub mod icons;
 mod list;
 mod luna;
 mod page;
+mod scrollbar;
 mod settings_page;
 mod shade;
 mod skin;
@@ -889,7 +890,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                     .corner_radius(theme::round(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
+                        scrollbar::vertical()
                             .max_height(200.0)
                             .id_salt("notice-output")
                             .show(ui, |ui| {

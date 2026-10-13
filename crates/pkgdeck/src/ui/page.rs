@@ -142,7 +142,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                 Some(cleanup) => (cleanup.summary.clone(), cleanup.preview.clone()),
                 None => (row.summary.clone(), row.preview.clone()),
             };
-            egui::ScrollArea::vertical()
+            super::scrollbar::vertical()
                 .id_salt("panel-text")
                 .auto_shrink([false, false])
                 .show(ui, |ui| cleanup_body(ui, row, &summary, &preview, &palette));
@@ -154,7 +154,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
         } else {
             text
         };
-        egui::ScrollArea::vertical()
+        super::scrollbar::vertical()
             .id_salt("panel-text")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -468,7 +468,7 @@ fn app_page(
         // Body.
         let loaded = details.as_ref().is_some_and(|d| !d.more || opened);
         let fade = progress_since(&ctx, app.details_loaded.elapsed().as_secs_f32(), 0.14);
-        egui::ScrollArea::vertical().id_salt(("page-body", &identity)).auto_shrink([false, false]).show(ui, |ui| {
+        super::scrollbar::vertical().id_salt(("page-body", &identity)).auto_shrink([false, false]).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if app.review_on_page {
                 review_card(app, ui);
@@ -649,7 +649,7 @@ fn body(
         } else {
             vec2(260.0, 150.0)
         };
-        egui::ScrollArea::horizontal()
+        super::scrollbar::horizontal()
             .id_salt(("shots", row.identity()))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {

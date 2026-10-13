@@ -213,7 +213,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                     .corner_radius(theme::round(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
+                        super::scrollbar::vertical()
                             .max_height(260.0)
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -370,7 +370,7 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
             });
         });
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.62).show(ui, |ui| {
+        super::scrollbar::vertical().max_height(ui.ctx().content_rect().height() * 0.62).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
             let width = (ui.available_width() - 10.0 * (columns - 1) as f32) / columns as f32;
@@ -569,7 +569,7 @@ fn source_checks(app: &mut App, ctx: &egui::Context) {
         if title(ui, "Source checks") {
             close = true;
         }
-        egui::ScrollArea::vertical()
+        super::scrollbar::vertical()
             .max_height(420.0)
             .show(ui, |ui| {
                 for failure in &failures {
@@ -915,7 +915,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                     let search = app.ui.picker_search.trim().to_lowercase();
                     let enabled = app.enabled_sources();
                     let ids = model::all_sources(&app.catalog);
-                    egui::ScrollArea::vertical()
+                    super::scrollbar::vertical()
                         // Full width, so the bar sits on the card's edge.
                         .auto_shrink([false, true])
                         .max_height((ctx.content_rect().height() * 0.6).min(440.0))

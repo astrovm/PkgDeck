@@ -115,7 +115,7 @@ fn content(app: &mut App, ui: &mut Ui) {
         );
         return;
     }
-    egui::ScrollArea::vertical()
+    super::scrollbar::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -284,7 +284,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                             .corner_radius(theme::round(8))
                             .inner_margin(egui::Margin::same(8))
                             .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
+                                super::scrollbar::vertical()
                                     .id_salt(("log", entry.id))
                                     .max_height(220.0)
                                     .show(ui, |ui| {
