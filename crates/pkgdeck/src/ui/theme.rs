@@ -34,6 +34,10 @@ pub struct Palette {
     /// Windows 7's glass colour, its alpha the colour intensity, from the
     /// swatches it shipped.
     pub glass: Color32,
+    /// The accent's hue, which [`Palette::tone`] mixes into greys.
+    pub tint: Color32,
+    /// How much of [`Palette::tint`] the window's greys take.
+    pub tint_amount: f32,
     pub dark: bool,
 }
 /// The glass colour Windows 7 shipped closest to `accent`, its alpha the
@@ -340,16 +344,48 @@ impl Palette {
         let custom = scheme
             .custom_accent
             .filter(|_| scheme.accent == Accent::Custom);
-        let accent = match custom {
-            Some(color) => readable_accent(color, canvas, dark),
-            _ => rgb(if dark { on_dark } else { on_light }),
-        };
         let (deep, bright) = match custom {
             Some(color) => (
                 readable_accent(color, Color32::WHITE, false),
                 readable_accent(color, Color32::BLACK, true),
             ),
             None => (rgb(on_light), rgb(on_dark)),
+        };
+        // The accent tints the window's greys: backgrounds, panels and
+        // buttons. An old style in the accent it shipped with keeps its
+        // own greys, as its desktop drew them.
+        let hue = custom.unwrap_or(rgb(on_light));
+        let own = custom.is_none() && scheme.accent == scheme.style.accent();
+        let tint_amount = match (scheme.style.family(), dark) {
+            (Family::Modern, _) if dark => 0.05,
+            (Family::Modern, _) => 0.04,
+            _ if own => 0.0,
+            (Family::Glass, false) => 0.03,
+            (_, true) => 0.06,
+            (_, false) => 0.08,
+        };
+        let tone = |color: Color32, share: f32| over(color, hue, tint_amount * share);
+        // OLED black stays black.
+        let canvas = if canvas == Color32::BLACK {
+            canvas
+        } else {
+            tone(canvas, 1.0)
+        };
+        let surface = tone(rgb(surface), 0.5);
+        // Media Center's navy and XP's slate are blue walls, so dark goes
+        // near black in every accent, its own blue included. The accent is
+        // left to the frame and selection.
+        let (canvas, surface) = if dark && scheme.style.family() == Family::Glass {
+            (tone(rgb(0x0e0f11), 1.0), tone(rgb(0x17191c), 1.0))
+        } else if dark && scheme.style.family() == Family::Luna {
+            (tone(rgb(0x1f2023), 1.0), tone(rgb(0x2a2b2f), 1.0))
+        } else {
+            (canvas, surface)
+        };
+        // Picked colours are made to read on the tinted canvas.
+        let accent = match custom {
+            Some(color) => readable_accent(color, canvas, dark),
+            _ => rgb(if dark { on_dark } else { on_light }),
         };
         // A grey accent fills title bars and selections as dark as a dark
         // window itself; lift it until the fill stands out, white text
@@ -366,7 +402,7 @@ impl Palette {
         };
         Self {
             canvas,
-            surface: rgb(surface),
+            surface,
             ink,
             muted: rgb(muted),
             accent,
@@ -394,8 +430,14 @@ impl Palette {
             warning: rgb(if dark { 0xf2c56b } else { 0x9a6400 }),
             heart: rgb(0xe34b5f),
             glass: glass_color(scheme.accent, custom, dark),
+            tint: hue,
+            tint_amount,
             dark,
         }
+    }
+    /// A grey the style draws, tinted by the accent as the window is.
+    pub fn tone(&self, color: Color32) -> Color32 {
+        over(color, self.tint, self.tint_amount)
     }
     /// The hover tint laid over the surface, as one opaque colour.
     pub fn hover_solid(&self) -> Color32 {
@@ -863,6 +905,93 @@ pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32
     );
 }
 
+/// The logo's three faces in its 128-unit square: top, left and right.
+const LOGO: [[(f32, f32); 4]; 3] = [
+    [(64.0, 8.0), (112.0, 36.0), (64.0, 64.0), (16.0, 36.0)],
+    [(16.0, 36.0), (64.0, 64.0), (64.0, 120.0), (16.0, 92.0)],
+    [(64.0, 64.0), (112.0, 36.0), (112.0, 92.0), (64.0, 120.0)],
+];
+
+/// The colour the logo is drawn in for an accent.
+pub fn logo_tint(accent: Accent, custom: Option<Color32>) -> Color32 {
+    custom
+        .filter(|_| accent == Accent::Custom)
+        .unwrap_or(rgb(accent_colors(accent).0))
+}
+
+/// The faces' colours: the logo's own blues for blue, shades of `hue`
+/// otherwise.
+fn logo_colors(hue: Color32) -> [Color32; 3] {
+    if hue == rgb(accent_colors(Accent::Blue).0) {
+        [rgb(0x60a5fa), rgb(0x2563eb), rgb(0x3b82f6)]
+    } else {
+        [
+            over(hue, Color32::WHITE, 0.4),
+            hue,
+            over(hue, Color32::WHITE, 0.18),
+        ]
+    }
+}
+
+/// PkgDeck's cube in `rect`, its three faces in shades of the accent.
+pub fn paint_logo(painter: &Painter, rect: Rect, palette: &Palette) {
+    // A dark accent is lifted so the cube shows on a dark window.
+    let hue = if palette.dark && palette.tint != rgb(accent_colors(Accent::Blue).0) {
+        readable_accent(palette.tint, palette.canvas, true)
+    } else {
+        palette.tint
+    };
+    let at = |(x, y): (f32, f32)| rect.min + Vec2::new(x, y) * (rect.width() / 128.0);
+    for (face, color) in LOGO.iter().zip(logo_colors(hue)) {
+        painter.add(Shape::convex_polygon(
+            face.iter().copied().map(at).collect(),
+            color,
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// The cube as `size` by `size` RGBA pixels, for the Dock, tray and window
+/// icons. Each pixel averages 4 by 4 samples, so the edges are smooth.
+pub fn logo_rgba(hue: Color32, size: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let colors = logo_colors(hue);
+    let scale = 128.0 / size as f32;
+    let inside = |face: &[(f32, f32); 4], x: f32, y: f32| {
+        let sides = (0..4).map(|i| {
+            let ((ax, ay), (bx, by)) = (face[i], face[(i + 1) % 4]);
+            (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        });
+        let sides: Vec<f32> = sides.collect();
+        sides.iter().all(|&side| side >= 0.0) || sides.iter().all(|&side| side <= 0.0)
+    };
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let (mut sum, mut hits) = ([0u32; 3], 0u32);
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let px = (x as f32 + (sx as f32 + 0.5) / SAMPLES as f32) * scale;
+                    let py = (y as f32 + (sy as f32 + 0.5) / SAMPLES as f32) * scale;
+                    if let Some(face) = LOGO.iter().position(|face| inside(face, px, py)) {
+                        let [r, g, b, _] = colors[face].to_array();
+                        sum = [sum[0] + r as u32, sum[1] + g as u32, sum[2] + b as u32];
+                        hits += 1;
+                    }
+                }
+            }
+            if hits == 0 {
+                pixels.extend([0; 4]);
+            } else {
+                let alpha = hits * 255 / (SAMPLES * SAMPLES);
+                pixels.extend(sum.map(|channel| (channel / hits) as u8));
+                pixels.push(alpha as u8);
+            }
+        }
+    }
+    pixels
+}
+
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     if skin().family() != Family::Modern && name != "heart" {
@@ -1254,10 +1383,12 @@ mod tests {
     #[test]
     fn modern_keeps_its_colours_whatever_the_new_choices() {
         let modern = Palette::of(Scheme::default(), true);
-        assert_eq!(modern.canvas, rgb(0x121212));
+        // Modern's greys, tinted with its blue.
+        let blue = rgb(accent_colors(Accent::Blue).0);
+        assert_eq!(modern.canvas, over(rgb(0x121212), blue, 0.05));
         assert_eq!(modern.accent, rgb(0x7aa7ff));
         let light = Palette::of(Scheme::default(), false);
-        assert_eq!(light.canvas, rgb(0xe8edf5));
+        assert_eq!(light.canvas, over(rgb(0xe8edf5), blue, 0.04));
         assert_eq!(light.accent_ink, Color32::WHITE);
         let tuned = Scheme {
             roundness: 2.0,
@@ -1280,6 +1411,117 @@ mod tests {
             )
         };
         assert_eq!(retro(DarkTheme::Slate), retro(DarkTheme::Black));
+    }
+
+    #[test]
+    fn the_accent_tints_the_window_unless_a_style_wears_its_own() {
+        for style in Style::ALL {
+            for dark in [false, true] {
+                let at = format!("{style:?} dark={dark}");
+                let wearing = |accent| {
+                    Palette::of(
+                        Scheme {
+                            style,
+                            accent,
+                            ..Scheme::default()
+                        },
+                        dark,
+                    )
+                };
+                let own = wearing(style.accent());
+                let other = if style.accent() == Accent::Green {
+                    Accent::Purple
+                } else {
+                    Accent::Green
+                };
+                let green = wearing(other);
+                if style.family() == Family::Modern {
+                    assert!(own.tint_amount > 0.0, "{at}");
+                } else {
+                    // The desktop's own greys, as it drew them.
+                    assert_eq!(own.tint_amount, 0.0, "{at}");
+                }
+                assert!(green.tint_amount > 0.0, "{at}");
+                assert_ne!(green.canvas, own.canvas, "{at}");
+                assert_ne!(green.surface, own.surface, "{at}");
+                assert_eq!(
+                    green.tone(Color32::WHITE),
+                    over(Color32::WHITE, green.tint, green.tint_amount)
+                );
+            }
+        }
+        // OLED black stays black whatever the accent.
+        let black = Palette::of(
+            Scheme {
+                dark: DarkTheme::Black,
+                accent: Accent::Purple,
+                ..Scheme::default()
+            },
+            true,
+        );
+        assert_eq!(black.canvas, Color32::BLACK);
+        // Windows 7's dark blue gives way to near black.
+        let glass = |accent| {
+            Palette::of(
+                Scheme {
+                    style: Style::Glass,
+                    accent,
+                    ..Scheme::default()
+                },
+                true,
+            )
+            .canvas
+        };
+        let green = glass(Accent::Green);
+        assert!(luminance(green) < 0.01, "{green:?}");
+        // Its own blue too: near black, not Media Center's navy.
+        assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
+    }
+
+    #[test]
+    fn the_drawn_logo_matches_the_shipped_one_and_follows_the_accent() {
+        // In blue, the drawn cube is the logo PkgDeck ships.
+        let shipped = image::load_from_memory(include_bytes!("../../assets/logo-64.png"))
+            .unwrap()
+            .to_rgba8()
+            .into_raw();
+        let blue = logo_tint(Accent::Blue, None);
+        let drawn = logo_rgba(blue, 64);
+        assert_eq!(drawn.len(), shipped.len());
+        let off = drawn
+            .iter()
+            .zip(&shipped)
+            .map(|(a, b)| a.abs_diff(*b) as u64)
+            .sum::<u64>()
+            / drawn.len() as u64;
+        assert!(off <= 2, "{off}");
+        // Corners stay clear; each face takes a shade of the accent.
+        let green = logo_tint(Accent::Green, None);
+        let pixels = logo_rgba(green, 128);
+        let at = |x: usize, y: usize| {
+            let i = (y * 128 + x) * 4;
+            Color32::from_rgba_unmultiplied(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])
+        };
+        assert_eq!(at(0, 0).a(), 0);
+        assert_eq!(at(127, 127).a(), 0);
+        assert_eq!(at(64, 36), logo_colors(green)[0]);
+        assert_eq!(at(40, 78), green);
+        assert_eq!(at(88, 78), logo_colors(green)[2]);
+        // A picked colour counts only once Custom is the accent.
+        let red = Some(Color32::RED);
+        assert_eq!(logo_tint(Accent::Custom, red), Color32::RED);
+        assert_eq!(logo_tint(Accent::Green, red), green);
+        assert_eq!(
+            Palette::of(
+                Scheme {
+                    accent: Accent::Green,
+                    ..Scheme::default()
+                },
+                false
+            )
+            .tint,
+            green
+        );
     }
 
     #[test]

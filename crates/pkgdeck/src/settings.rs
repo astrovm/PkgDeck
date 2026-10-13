@@ -286,6 +286,7 @@ pub struct Settings {
     pub setup_asked: bool,
     pub notification_history: String,
     pub last_background_state: String,
+    /// How wide the sidebar was dragged; narrow enough, it shows icons only.
     pub sidebar_width: f32,
     /// The share of the page the details take, 0 for the default.
     pub details_width: f32,
@@ -325,7 +326,7 @@ impl Default for Settings {
             setup_asked: false,
             notification_history: "{}".into(),
             last_background_state: "{}".into(),
-            sidebar_width: 212.0,
+            sidebar_width: 224.0,
             details_width: 0.0,
             name_column: 0.0,
             version_column: 0.0,
@@ -594,7 +595,7 @@ mod tests {
         assert_eq!(settings.system_approval, "sudoers:automatic-updates");
         assert_eq!(settings.notification_history, "{\"notified\":{}}");
         // Nonsense keeps the default.
-        assert_eq!(settings.sidebar_width, 212.0);
+        assert_eq!(settings.sidebar_width, 224.0);
     }
 
     #[test]

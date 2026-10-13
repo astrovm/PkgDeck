@@ -559,7 +559,10 @@ out of date, and each page refreshes when you open it.
   own choice.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
-  any colour; PkgDeck lightens or darkens it until it reads well.
+  any colour; PkgDeck lightens or darkens it until it reads well. The accent
+  also tints the background, panels and buttons, and colours the PkgDeck logo
+  in the sidebar and title bar. An older style in the accent it was made with
+  keeps its desktop's own greys.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

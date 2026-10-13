@@ -691,23 +691,127 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
     }
+    // Git may remove a file between listing it and dating it. Other errors
+    // must still fail the fixture instead of leaving a file freshly dated.
+    fn if_present<T>(path: &Path, result: std::io::Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("{}: {error}", path.display()),
+        }
+    }
     /// Every file under `dir` last changed `days` ago.
     fn age_files(dir: &Path, days: u64) {
+        age_files_after_metadata(dir, days, |_| {});
+    }
+    // Tests can remove a path at the exact point Git's cleanup would race.
+    fn age_files_after_metadata(dir: &Path, days: u64, mut after_metadata: impl FnMut(&Path)) {
         let when = SystemTime::now() - Duration::from_secs(days * 86_400);
         let mut pending = vec![dir.to_owned()];
         while let Some(path) = pending.pop() {
-            let metadata = fs::symlink_metadata(&path).unwrap();
+            let Some(metadata) = if_present(&path, fs::symlink_metadata(&path)) else {
+                continue;
+            };
+            after_metadata(&path);
             if metadata.is_dir() {
-                pending.extend(
-                    fs::read_dir(&path)
-                        .unwrap()
-                        .map(|entry| entry.unwrap().path()),
-                );
+                if let Some(entries) = if_present(&path, fs::read_dir(&path)) {
+                    pending
+                        .extend(entries.filter_map(|entry| {
+                            if_present(&path, entry).map(|entry| entry.path())
+                        }));
+                }
             } else if metadata.is_file() {
                 // The owner may date a file it can't write, like Git's objects.
-                fs::File::open(&path).unwrap().set_modified(when).unwrap();
+                if_present(
+                    &path,
+                    fs::File::open(&path).and_then(|file| file.set_modified(when)),
+                );
             }
         }
+    }
+
+    #[test]
+    fn aging_files_skips_disappeared_paths_but_reports_other_errors() {
+        let root = scratch("aging-missing");
+        let missing = root.join("gone");
+        age_files(&missing, 30);
+        // The same rule applies if a directory or file vanishes after its
+        // metadata was read, before listing or opening it.
+        assert!(if_present(&missing, fs::read_dir(&missing)).is_none());
+        assert!(if_present(&missing, fs::File::open(&missing)).is_none());
+
+        let file = root.join("file");
+        write(&file, "keep");
+        // A real error that also occurs for root: a file is not a directory.
+        let error = std::panic::catch_unwind(|| if_present(&file, fs::read_dir(&file)))
+            .expect_err("filesystem errors must fail the fixture");
+        let message = error.downcast_ref::<String>().unwrap();
+        assert!(message.contains(file.to_str().unwrap()), "{message}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn aging_files_tolerates_removal_between_metadata_and_listing_or_opening() {
+        let root = scratch("aging-race");
+        let dir = root.join("gone-dir");
+        fs::create_dir(&dir).unwrap();
+        age_files_after_metadata(&dir, 30, |path| fs::remove_dir(path).unwrap());
+        assert!(!dir.exists());
+
+        let file = root.join("gone-file");
+        write(&file, "remove");
+        let survivor = root.join("keep-file");
+        write(&survivor, "keep");
+        age_files_after_metadata(&root, 30, |path| {
+            if path == file {
+                fs::remove_file(path).unwrap();
+            }
+        });
+        assert!(!file.exists());
+        assert_eq!(fs::read_to_string(&survivor).unwrap(), "keep");
+        assert!(
+            SystemTime::now()
+                .duration_since(fs::metadata(&survivor).unwrap().modified().unwrap())
+                .unwrap()
+                >= Duration::from_secs(30 * 86_400)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn aging_files_dates_read_only_files_without_following_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("aging-read-only");
+        let dir = root.join("project");
+        let file = dir.join("objects/object");
+        write(&file, "object");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        let outside = root.join("outside");
+        write(&outside, "keep");
+        let original_time = fs::metadata(&outside).unwrap().modified().unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        age_files(&dir, 30);
+
+        let metadata = fs::metadata(&file).unwrap();
+        assert!(
+            SystemTime::now()
+                .duration_since(metadata.modified().unwrap())
+                .unwrap()
+                >= Duration::from_secs(30 * 86_400)
+        );
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o444);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "object");
+        assert!(fs::symlink_metadata(dir.join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&outside).unwrap().modified().unwrap(),
+            original_time
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     /// Tools for the machine in `root`: the real Git, and a `ps` that lists
     /// `processes`.

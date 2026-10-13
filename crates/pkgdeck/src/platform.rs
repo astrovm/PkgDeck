@@ -4,6 +4,8 @@
 //! notifications over D-Bus. What the person does there arrives as
 //! [`Event`]s the window reads each frame.
 
+use crate::ui::theme;
+use eframe::egui::Color32;
 use std::cell::Cell;
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,6 +55,7 @@ mod native {
         fn pkgdeck_mac_set_tray(visible: c_int, png: *const c_uchar, length: c_ulong);
         fn pkgdeck_mac_activate();
         fn pkgdeck_mac_set_dock_visible(visible: c_int);
+        fn pkgdeck_mac_set_app_icon(png: *const c_uchar, length: c_ulong);
         fn pkgdeck_mac_pump(seconds: f64);
         fn pkgdeck_mac_watch_reopen(watching: c_int);
         fn pkgdeck_mac_tray_titles() -> *mut c_char;
@@ -116,6 +119,9 @@ mod native {
     pub fn set_dock_visible(visible: bool) {
         unsafe { pkgdeck_mac_set_dock_visible(visible.into()) }
     }
+    pub fn set_app_icon(png: &[u8]) {
+        unsafe { pkgdeck_mac_set_app_icon(png.as_ptr(), png.len() as c_ulong) }
+    }
     pub fn pump(seconds: f64) {
         unsafe { pkgdeck_mac_pump(seconds) }
     }
@@ -151,6 +157,9 @@ mod linux {
 
     pub struct Tray {
         pub icon: Vec<ksni::Icon>,
+        /// Whether the desktop's installed icon looks the same: the
+        /// logo's own blue.
+        pub named: bool,
     }
     impl ksni::Tray for Tray {
         fn id(&self) -> String {
@@ -160,7 +169,12 @@ mod linux {
             "PkgDeck".into()
         }
         fn icon_name(&self) -> String {
-            "io.github.astrovm.PkgDeck".into()
+            // Desktops prefer a named icon, so another accent sends none.
+            if self.named {
+                "io.github.astrovm.PkgDeck".into()
+            } else {
+                String::new()
+            }
         }
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
             self.icon.clone()
@@ -266,11 +280,11 @@ mod linux {
         })
     }
 
-    pub fn spawn(icon: Vec<ksni::Icon>) -> Option<Handle> {
+    pub fn spawn(icon: Vec<ksni::Icon>, named: bool) -> Option<Handle> {
         // Flatpak won't let the app own a StatusNotifierItem name, so the
         // icon registers under its connection's own name there instead.
         let sandboxed = std::path::Path::new("/.flatpak-info").exists();
-        Tray { icon }
+        Tray { icon, named }
             .disable_dbus_name(sandboxed)
             .spawn()
             .map_err(|e| eprintln!("pkgdeck: tray icon unavailable: {e}"))
@@ -343,6 +357,8 @@ pub struct Platform {
     tray_visible: bool,
     #[cfg(target_os = "linux")]
     tray: Option<linux::Handle>,
+    /// The accent the Dock and tray icons are drawn in.
+    icon: Color32,
     /// macOS lets PkgDeck post its own notifications.
     authorized: bool,
     /// Notifications kept instead of shown, for tests.
@@ -358,9 +374,10 @@ pub struct Platform {
 /// The logo as the menu bar wants it: black on clear, at twice 18 points.
 #[cfg(target_os = "macos")]
 const TEMPLATE_ICON: &[u8] = include_bytes!("../assets/logo-template.png");
-/// The logo in colour for the tray, ARGB at 64 pixels.
-#[cfg(target_os = "linux")]
-const TRAY_ICON: &[u8] = include_bytes!("../assets/logo-64.png");
+/// The logo's own blue, which the installed icons are drawn in.
+fn blue() -> Color32 {
+    theme::logo_tint(crate::settings::Accent::Blue, None)
+}
 
 impl Platform {
     /// Starts listening; `wake` brings the window back to read events.
@@ -376,6 +393,7 @@ impl Platform {
             tray_visible: false,
             #[cfg(target_os = "linux")]
             tray: None,
+            icon: blue(),
             authorized: false,
             recorded: None,
             motion: Cell::new(None),
@@ -511,7 +529,7 @@ impl Platform {
         #[cfg(target_os = "linux")]
         {
             if visible {
-                self.tray = linux::spawn(tray_icon());
+                self.tray = linux::spawn(tray_icon(self.icon), self.icon == blue());
             } else if let Some(tray) = self.tray.take() {
                 tray.shutdown().wait();
             }
@@ -567,32 +585,69 @@ impl Platform {
     /// Show or hide the Dock icon while the window hides in the menu bar.
     pub fn set_dock_visible(&self, visible: bool) {
         #[cfg(target_os = "macos")]
-        native::set_dock_visible(visible);
+        {
+            native::set_dock_visible(visible);
+            // Coming back, the Dock may show the bundle's icon again.
+            if visible && self.icon != blue() {
+                native::set_app_icon(&logo_png(self.icon, DOCK_SIZE));
+            }
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = visible;
+    }
+
+    /// Draws the Dock icon (macOS) and tray icon (Linux) in `hue`, the
+    /// accent. The menu bar icon stays the system's black or white.
+    pub fn set_icon(&mut self, hue: Color32) {
+        if hue == self.icon {
+            return;
+        }
+        self.icon = hue;
+        #[cfg(target_os = "macos")]
+        native::set_app_icon(&logo_png(hue, DOCK_SIZE));
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            let (icon, named) = (tray_icon(hue), hue == blue());
+            tray.update(move |tray| {
+                tray.icon = icon;
+                tray.named = named;
+            });
+        }
     }
 }
 
 /// The colour logo as the StatusNotifierItem wants it: ARGB, big-endian.
 #[cfg(target_os = "linux")]
-fn tray_icon() -> Vec<ksni::Icon> {
-    let Ok(image) = image::load_from_memory(TRAY_ICON) else {
-        return vec![];
-    };
-    let image = image.to_rgba8();
-    let (width, height) = image.dimensions();
-    let data = image
-        .pixels()
-        .flat_map(|pixel| {
-            let [r, g, b, a] = pixel.0;
-            [a, r, g, b]
-        })
+fn tray_icon(hue: Color32) -> Vec<ksni::Icon> {
+    const SIZE: u32 = 64;
+    let rgba = theme::logo_rgba(hue, SIZE);
+    let data = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|[r, g, b, a]| [*a, *r, *g, *b])
         .collect();
     vec![ksni::Icon {
-        width: width as i32,
-        height: height as i32,
+        width: SIZE as i32,
+        height: SIZE as i32,
         data,
     }]
+}
+
+/// The Dock draws icons up to 256 points, twice that on a Retina screen.
+#[cfg(target_os = "macos")]
+const DOCK_SIZE: u32 = 512;
+
+/// The cube in `hue` as a PNG `size` pixels square.
+#[cfg(any(target_os = "macos", test))]
+fn logo_png(hue: Color32, size: u32) -> Vec<u8> {
+    let mut png = Vec::new();
+    let image = image::RgbaImage::from_raw(size, size, theme::logo_rgba(hue, size))
+        .expect("the logo fills its square");
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("PNG encodes into memory");
+    png
 }
 
 /// Fills the Mac window behind its content and system title bar with
@@ -762,6 +817,15 @@ fn wallpaper_setting(home: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dock_icon_is_the_cube_in_the_accent() {
+        let green = theme::logo_tint(crate::settings::Accent::Green, None);
+        let png = logo_png(green, 32);
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(image.dimensions(), (32, 32));
+        assert_eq!(image.into_raw(), theme::logo_rgba(green, 32));
+    }
 
     #[test]
     fn events_reach_the_window_and_wake_it() {

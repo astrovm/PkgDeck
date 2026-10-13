@@ -1063,10 +1063,8 @@ fn about(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "About", |ui| {
         ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(egui::include_image!("../../assets/logo.svg"))
-                    .fit_to_exact_size(Vec2::splat(40.0)),
-            );
+            let (logo, _) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::hover());
+            theme::paint_logo(ui.painter(), logo, &palette);
             ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(format!("PkgDeck {}", app.ctl.version()))

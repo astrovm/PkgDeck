@@ -191,6 +191,14 @@ void pkgdeck_mac_fill_window(void *view, int fill, unsigned char r, unsigned cha
         : [NSColor clearColor];
 }
 
+// The Dock icon, as PNG bytes, in place of the bundle's own.
+void pkgdeck_mac_set_app_icon(const unsigned char *png, unsigned long length) {
+    NSImage *image = [[NSImage alloc] initWithData:[NSData dataWithBytes:png length:length]];
+    if (!image) return;
+    [NSApp setApplicationIconImage:image];
+    [image release];
+}
+
 // Hide the Dock icon while only the menu bar icon is left, and bring it back.
 void pkgdeck_mac_set_dock_visible(int visible) {
     [NSApp setActivationPolicy:visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];

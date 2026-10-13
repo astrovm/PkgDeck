@@ -1631,7 +1631,15 @@ impl App {
     /// The tray icon follows background checks.
     pub fn sync_tray(&mut self) {
         let visible = self.settings.background_mode;
+        self.sync_icon();
         self.platform.set_tray(visible);
+    }
+
+    /// The Dock and tray icons follow the accent.
+    pub fn sync_icon(&mut self) {
+        let custom = crate::ui::theme::parse_hex(&self.settings.custom_accent);
+        let hue = crate::ui::theme::logo_tint(self.settings.accent, custom);
+        self.platform.set_icon(hue);
     }
 
     /// Whether the "Waiting for …" line should show yet.
