@@ -278,6 +278,23 @@ fn appearance(app: &mut App, ui: &mut Ui) {
 const PREVIEW: Vec2 = vec2(104.0, 74.0);
 const PREVIEW_GAP: f32 = 10.0;
 
+/// `text` laid out in one line, and in a smaller size when it would run
+/// wider than `max`.
+fn fitted(
+    painter: &egui::Painter,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    max: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
+    if galley.size().x <= max {
+        return galley;
+    }
+    let size = (font.size * max / galley.size().x).floor().max(8.0);
+    painter.layout_no_wrap(text.to_owned(), egui::FontId::new(size, font.family), color)
+}
+
 /// A small window drawn in each style, the current one ringed. Picking
 /// one also picks the accent it was made with.
 fn styles(app: &mut App, ui: &mut Ui) {
@@ -332,17 +349,22 @@ fn styles(app: &mut App, ui: &mut Ui) {
             Stroke::new(2.0, ring_color),
             egui::StrokeKind::Inside,
         );
-        ui.painter().text(
-            egui::pos2(card.center().x, card.bottom() + 14.0),
-            egui::Align2::CENTER_CENTER,
+        let ink = if current { palette.ink } else { palette.muted };
+        let font = if current {
+            theme::bold(13.0)
+        } else {
+            theme::font(13.0)
+        };
+        // A long name shrinks rather than run into its neighbour.
+        let name = fitted(
+            ui.painter(),
             style.name(),
-            if current {
-                theme::bold(13.0)
-            } else {
-                theme::font(13.0)
-            },
-            if current { palette.ink } else { palette.muted },
+            font,
+            ink,
+            PREVIEW.x + PREVIEW_GAP,
         );
+        let at = egui::pos2(card.center().x, card.bottom() + 14.0) - name.size() / 2.0;
+        ui.painter().galley(at, name, ink);
         if response.clicked() && !current {
             app.settings.style = style;
             app.settings.accent = style.accent();
@@ -1213,6 +1235,31 @@ mod tests {
             ]
         );
         assert_eq!(days_text(10), "10 days");
+    }
+
+    #[test]
+    fn a_long_style_name_shrinks_to_its_card_and_a_short_one_keeps_its_size() {
+        theme::painted(|ui| {
+            let max = PREVIEW.x + PREVIEW_GAP;
+            let ink = egui::Color32::WHITE;
+            for style in Style::ALL {
+                let name = fitted(ui.painter(), style.name(), theme::bold(13.0), ink, max);
+                assert!(name.size().x <= max, "{style:?}");
+            }
+            let short = fitted(ui.painter(), "Modern", theme::bold(13.0), ink, max);
+            let plain = ui
+                .painter()
+                .layout_no_wrap("Modern".into(), theme::bold(13.0), ink);
+            assert_eq!(short.size(), plain.size());
+            // One that is far too wide for the card comes out smaller.
+            let text = "Mac OS X Tiger and Panther";
+            let wide = fitted(ui.painter(), text, theme::bold(13.0), ink, max);
+            let full = ui
+                .painter()
+                .layout_no_wrap(text.into(), theme::bold(13.0), ink);
+            assert!(full.size().x > max);
+            assert!(wide.size().x <= max && wide.size().y < full.size().y);
+        });
     }
 
     #[test]

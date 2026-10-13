@@ -538,7 +538,7 @@ out of date, and each page refreshes when you open it.
     from navy to blue.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
-  - **Aqua**: gel buttons and plain grey title bars, after Mac OS X Tiger.
+  - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
     on the side and the flat minimise, maximise and close buttons.
   - **macOS 27**: a sidebar that runs up to the top edge, Liquid Glass
@@ -546,12 +546,12 @@ out of date, and each page refreshes when you open it.
   - Every style but **Modern** draws its own title bar and window buttons,
     measured from screenshots of the real desktop.
   - Every style has the same layout. The older ones draw icons in colour,
-    and Aqua stripes its lists in pale blue. Windows 11 and macOS 27 are flat
+    and Mac OS X Tiger stripes its lists in pale blue. Windows 11 and macOS 27 are flat
     like **Modern**.
   - In dark mode, the older styles keep their shapes and their own title
     bar and selection colours, and turn the rest dark: Windows 98's bevels
     on dark grey, XP's blue frame around slate, Media Center's blue for
-    Windows 7, and Aqua's blue gel on charcoal.
+    Windows 7, and Mac OS X Tiger's blue gel on charcoal.
   - **Windows 7** blurs what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
@@ -573,7 +573,7 @@ out of date, and each page refreshes when you open it.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
   font, or a free copy of it: MS Sans Serif's pixels for Windows 98, Tahoma
-  for XP, Segoe UI for Windows 7 and Windows 11, and Lucida Grande for Aqua. Where one isn't
+  for XP, Segoe UI for Windows 7 and Windows 11, and Lucida Grande for Mac OS X Tiger. Where one isn't
   installed, the closest font that is. macOS 27 uses Inter.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.

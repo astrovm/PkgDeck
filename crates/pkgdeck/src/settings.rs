@@ -167,7 +167,7 @@ impl Style {
             Self::Retro => "Windows 98",
             Self::Luna => "Windows XP",
             Self::Glass => "Windows 7",
-            Self::Aqua => "Aqua",
+            Self::Aqua => "Mac OS X Tiger",
             Self::Fluent => "Windows 11",
             Self::Liquid => "macOS 27",
         }
