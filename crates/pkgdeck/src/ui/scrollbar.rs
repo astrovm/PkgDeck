@@ -583,23 +583,24 @@ fn dither(ctx: &egui::Context, a: Color32, b: Color32) -> TextureHandle {
     texture
 }
 
-/// `rect` filled with the dither.
+/// `rect` filled with the dither, a pixel to a cell at any scale.
 fn paint_dither(painter: &Painter, rect: Rect, texture: &TextureHandle) {
+    let tile = TILE / painter.ctx().pixels_per_point();
     let mut y = rect.top();
     while y < rect.bottom() {
-        let high = (rect.bottom() - y).min(TILE);
+        let high = (rect.bottom() - y).min(tile);
         let mut x = rect.left();
         while x < rect.right() {
-            let wide = (rect.right() - x).min(TILE);
+            let wide = (rect.right() - x).min(tile);
             painter.image(
                 texture.id(),
                 Rect::from_min_size(pos2(x, y), vec2(wide, high)),
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(wide / TILE, high / TILE)),
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(wide / tile, high / tile)),
                 Color32::WHITE,
             );
-            x += TILE;
+            x += tile;
         }
-        y += TILE;
+        y += tile;
     }
 }
 
@@ -704,7 +705,7 @@ fn retro(
 ) {
     let face = palette.canvas;
     // The track is a checker of the face and white.
-    let light = lighter(face, if palette.dark { 0.12 } else { 0.9 });
+    let light = lighter(face, if palette.dark { 0.2 } else { 0.9 });
     paint_dither(painter, parts.track, &dither(ctx, face, light));
     let button = |rect: Rect, piece: Piece, enabled: bool, toward: Toward| {
         painter.rect_filled(rect, CornerRadius::ZERO, face);
