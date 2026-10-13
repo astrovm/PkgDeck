@@ -864,6 +864,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let running = app.writing
         && (app.active_rows.contains(&identity)
             || app.progress.for_row(&identity, &row.source).is_some());
+    let batch_state = if app.writing && app.progress.total > 1 {
+        app.progress.for_row(&identity, &row.source)
+    } else {
+        None
+    };
     let pull = matches!(row.source.as_str(), "docker" | "podman")
         && row.is_installed()
         && row.reference.is_some()
@@ -1103,12 +1108,17 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 _ => format!("{} {title} from {line}", action.label()),
             }
         };
-        let mut child = ui.new_child(UiBuilder::new().max_rect(button));
-        if icon_button(&mut child, icon, &tip, color, enabled).clicked() {
-            if running {
-                app.cancel();
-            } else {
-                app.run_row_action(index);
+        if let Some(state) = batch_state {
+            // A batch is cancelled from its one card, not from every row.
+            paint_batch_state(ui, button, state, &palette);
+        } else {
+            let mut child = ui.new_child(UiBuilder::new().max_rect(button));
+            if icon_button(&mut child, icon, &tip, color, enabled).clicked() {
+                if running {
+                    app.cancel();
+                } else {
+                    app.run_row_action(index);
+                }
             }
         }
     }
@@ -1129,20 +1139,6 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             app.active_rows.insert(identity.clone());
             app.c().propose("upgrade".into(), item.raw as i32);
             app.react();
-        }
-    }
-    // Progress along the bottom.
-    if app.writing {
-        if let Some(fraction) = app
-            .progress
-            .for_row(&identity, &row.source)
-            .or_else(|| app.active_rows.contains(&identity).then_some(None))
-        {
-            let bar = Rect::from_min_max(
-                pos2(surface.left() + 10.0, surface.bottom() - 4.0),
-                pos2(surface.right() - 10.0, surface.bottom() - 1.0),
-            );
-            paint_bar(ui, bar, fraction, palette.accent, id.with("progress"));
         }
     }
     // Divider.
@@ -1192,6 +1188,21 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         app.choose(index, true);
     }
     response.hovered().then_some(item.raw)
+}
+
+/// Where a row stands in a batch: waiting, working, or done. One quiet mark
+/// per row, so the card's single bar is the only thing that moves.
+fn paint_batch_state(ui: &Ui, button: Rect, state: model::RowState, palette: &Palette) {
+    let mark = Rect::from_center_size(button.center(), Vec2::splat(18.0));
+    match state {
+        model::RowState::Queued => {
+            theme::paint_icon(ui.painter(), mark, "clock", alpha(palette.muted, 0.7))
+        }
+        model::RowState::Running => paint_spinner(ui, mark, palette.accent),
+        model::RowState::Done => {
+            theme::paint_icon(ui.painter(), mark, "installed", palette.success)
+        }
+    }
 }
 
 /// An app's icon, or its source's mark.
