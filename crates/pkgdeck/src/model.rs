@@ -252,7 +252,7 @@ impl Held {
         if self.needs_password() {
             "Needs your password. Automatic updates skip it."
         } else {
-            "Didn't update last time. Update all skips it until there's a newer version."
+            "Failed last time. Skipped until a newer version."
         }
     }
 }
@@ -1595,7 +1595,7 @@ pub fn search_hint(catalog: &[Source], enabled: &HashSet<String>, saved: &str) -
         })
         .collect();
     match searchable.as_slice() {
-        [] => "No enabled source can search. Turn one on in Settings.".into(),
+        [] => "No source can search. Turn one on in Settings.".into(),
         [one] => format!("Searches {} as you type.", source_name(&one.source)),
         many => format!("Searches {} sources as you type.", many.len()),
     }

@@ -857,7 +857,7 @@ fn the_search_hint_counts_what_can_search() {
     );
     assert_eq!(
         search_hint(&catalog(), &HashSet::new(), ""),
-        "No enabled source can search. Turn one on in Settings."
+        "No source can search. Turn one on in Settings."
     );
 }
 
@@ -1046,7 +1046,7 @@ fn held_updates_say_why_and_match_their_row() {
     );
     assert!(failed.matches(&row));
     assert_eq!(failed.icon(), "warning");
-    assert!(failed.tip().starts_with("Didn't update last time"));
+    assert!(failed.tip().starts_with("Failed last time"));
     // Another copy of the same name in another scope isn't this row.
     let other = held(
         json!({"reason": "failed", "source": "homebrew-cask", "name": "app",

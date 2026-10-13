@@ -109,7 +109,7 @@ fn content(app: &mut App, ui: &mut Ui) {
         ui.painter().text(
             center + vec2(0.0, 26.0),
             egui::Align2::CENTER_CENTER,
-            "Installs, removals and updates you run will appear here.",
+            "Your installs, removals and updates show here.",
             theme::font(13.5),
             palette.muted,
         );

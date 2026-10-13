@@ -630,7 +630,7 @@ impl App {
                 "automatic" => self.restart_at = Some(Instant::now() + Duration::from_secs(5)),
                 "manual" => {
                     self.restart_toast = Some(Toast {
-                        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+                        text: "Restart PkgDeck to use the new version.".into(),
                         tone: Tone::Success,
                         action: Some(ToastAction::Restart),
                         shown: Instant::now(),

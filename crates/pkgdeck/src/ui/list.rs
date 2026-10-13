@@ -1330,7 +1330,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .into()
         } else if phase == "unsupported" {
             good_news = false;
-            "None of your enabled sources support this page.".into()
+            "None of your sources work here.".into()
         } else if installed_filters {
             good_news = false;
             "No packages match these filters.".into()
@@ -1385,15 +1385,11 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
         palette.ink,
     );
     let hint = if !failures.is_empty() {
-        let retry = if app.page == Page::Updates {
-            "Retry to check for updates."
-        } else {
-            "Retry to check again."
-        };
+        // The button says what to do; the line only names what failed.
         if good_news {
-            format!("{}. {retry}", model::failure_title(&failures))
+            model::failure_title(&failures)
         } else {
-            retry.to_owned()
+            String::new()
         }
     } else if matches!(app.page, Page::Updates | Page::Clean) {
         app.report
@@ -1425,39 +1421,12 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .max_rect(buttons)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
-            let mut labels: Vec<(&str, &str)> = vec![];
-            if !failures.is_empty() {
-                labels.push((
-                    if failures.len() == 1 {
-                        "Retry"
-                    } else {
-                        "Reload"
-                    },
-                    "refresh",
-                ));
-                labels.push(("Details", "info"));
-            } else if phase == "cancelled" {
-                labels.push((
-                    if app.page == Page::Search {
-                        "Search again"
-                    } else {
-                        "Load again"
-                    },
-                    "refresh",
-                ));
-            } else if app.page != Page::Search {
-                labels.push((
-                    if matches!(app.page, Page::Updates | Page::Clean) {
-                        "Check again"
-                    } else {
-                        "Reload"
-                    },
-                    "refresh",
-                ));
-                if filtered || installed_filters {
-                    labels.push(("Clear filters", "cancel"));
-                }
-            }
+            let labels = empty_actions(
+                app.page,
+                failures.len(),
+                phase == "cancelled",
+                filtered || installed_filters,
+            );
             let total: f32 = labels.len() as f32 * 130.0;
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
             for (label, icon) in labels {
@@ -1473,7 +1442,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
                     .clicked()
                 {
                     match label {
-                        "Retry" => {
+                        "Retry" if failures.len() == 1 => {
                             let source = failures[0].source.clone();
                             app.retry_source(&source);
                         }
@@ -1494,9 +1463,63 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     );
 }
 
+/// The buttons under an empty list, with their icons. Anything that
+/// failed or stopped offers Retry, whatever it was doing.
+fn empty_actions(
+    page: Page,
+    failures: usize,
+    cancelled: bool,
+    filtered: bool,
+) -> Vec<(&'static str, &'static str)> {
+    if failures > 0 {
+        return vec![("Retry", "refresh"), ("Details", "info")];
+    }
+    if cancelled {
+        return vec![("Retry", "refresh")];
+    }
+    if page == Page::Search {
+        return vec![];
+    }
+    let mut labels = vec![(
+        if matches!(page, Page::Updates | Page::Clean) {
+            "Check again"
+        } else {
+            "Reload"
+        },
+        "refresh",
+    )];
+    if filtered {
+        labels.push(("Clear filters", "cancel"));
+    }
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::waiting_text;
+
+    #[test]
+    fn failed_or_stopped_lists_always_offer_retry() {
+        use super::{empty_actions, Page};
+        for page in Page::ALL {
+            for failures in [1, 3] {
+                assert_eq!(
+                    empty_actions(page, failures, false, true),
+                    [("Retry", "refresh"), ("Details", "info")]
+                );
+            }
+            assert_eq!(empty_actions(page, 0, true, true), [("Retry", "refresh")]);
+        }
+        assert!(empty_actions(Page::Search, 0, false, true).is_empty());
+        assert_eq!(
+            empty_actions(Page::Updates, 0, false, false),
+            [("Check again", "refresh")]
+        );
+        assert_eq!(
+            empty_actions(Page::Installed, 0, false, true),
+            [("Reload", "refresh"), ("Clear filters", "cancel")]
+        );
+    }
 
     #[test]
     fn waiting_names_one_or_two_sources_and_counts_more() {

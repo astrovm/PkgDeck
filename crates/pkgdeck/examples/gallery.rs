@@ -680,7 +680,7 @@ fn main() {
         };
         app.toast = Some(toast("Update all Flatpak packages finished", None));
         app.restart_toast = Some(toast(
-            "PkgDeck was updated. Restart it to use the new version.",
+            "Restart PkgDeck to use the new version.",
             Some(ToastAction::Restart),
         ));
     });

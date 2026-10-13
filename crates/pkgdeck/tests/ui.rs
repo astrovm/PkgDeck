@@ -114,7 +114,7 @@ fn show(page: Page) -> Harness<'static, (bool, App)> {
 fn the_restart_toast_offers_restart_and_closes() {
     let mut harness = show(Page::Installed);
     harness.state_mut().1.restart_toast = Some(Toast {
-        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+        text: "Restart PkgDeck to use the new version.".into(),
         tone: pkgdeck::model::Tone::Success,
         action: Some(ToastAction::Restart),
         shown: std::time::Instant::now(),
@@ -318,10 +318,12 @@ fn a_row_opens_its_page_and_escape_closes_it() {
 fn updates_rows_can_be_unchecked() {
     let mut harness = show(Page::Updates);
     assert!(harness.query_by_label("Update all").is_some());
+    assert!(harness.query_by_label("Select all").is_none());
     harness.get_by_label("Select none").click();
     harness.run_steps(3);
     assert!(!harness.state().1.unchecked.is_empty());
     assert!(harness.query_by_label("Update all").is_none());
+    assert!(harness.query_by_label("Select none").is_none());
     harness.get_by_label("Select all").click();
     harness.run_steps(3);
     assert!(harness.state().1.unchecked.is_empty());
@@ -345,7 +347,7 @@ fn updates_that_failed_or_need_the_password_are_marked() {
     let mut harness = harness(app);
     harness.run_steps(4);
     assert!(harness
-        .query_by_label_contains("Didn't update last time. Update all skips it")
+        .query_by_label_contains("Failed last time. Skipped until")
         .is_some());
     // The cask mark belongs to the cask of that name, not this APT row.
     assert!(harness
@@ -1170,6 +1172,11 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
             .toggled(),
         Some(egui::accesskit::Toggled::Mixed)
     );
+    // Some checked: one button, to check the rest.
+    assert!(harness.query_by_label("Select none").is_none());
+    click_in_view(&mut harness, None, "Select all");
+    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    assert!(harness.query_by_label("Select all").is_none());
     click_in_view(&mut harness, None, "Select none");
     assert!(harness.query_by_label_contains("Clean selected").is_none());
     click_in_view(&mut harness, None, "Select all");

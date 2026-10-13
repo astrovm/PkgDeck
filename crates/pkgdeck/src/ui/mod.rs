@@ -1156,6 +1156,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 app.upgrade_updates();
             }
             let narrow = width < 420.0;
+            // One button: Select all until everything is, then Select none.
             if unchecked > 0
                 && Button::new(Look::Secondary, "Select all")
                     .icon("installed")
@@ -1165,7 +1166,8 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             {
                 app.unchecked.clear();
             }
-            if checked > 0
+            if unchecked == 0
+                && checked > 0
                 && Button::new(Look::Secondary, "Select none")
                     .icon("cancel")
                     .icon_only(narrow)
@@ -1238,7 +1240,8 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             {
                 app.set_all_checked(true);
             }
-            if selected > 0
+            if selected == total
+                && selected > 0
                 && Button::new(Look::Secondary, "Select none")
                     .icon("cancel")
                     .icon_only(narrow)

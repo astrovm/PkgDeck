@@ -628,7 +628,7 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
         if !draft.name.is_empty() && !name_ok {
             ui.label(
                 egui::RichText::new(
-                    "Use letters, numbers, dots, dashes, or underscores. Do not start with a dash.",
+                    "Letters, numbers, dots, dashes or underscores. Can't start with a dash.",
                 )
                 .color(palette.danger),
             );
