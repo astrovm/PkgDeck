@@ -10,7 +10,7 @@ use pkgdeck::{
     app::{Launch, Toast, ToastAction},
     model::{self, Page, Tone},
     platform::Platform,
-    settings::Store,
+    settings::{Accent, Store},
     App,
 };
 use serde_json::json;
@@ -491,7 +491,7 @@ fn main() {
                 dark,
                 |app| {
                     app.settings.style = style;
-                    app.settings.accent = style.accent();
+                    app.settings.accent = Accent::Blue;
                     offline(app, Page::Installed);
                 },
             );
@@ -502,7 +502,7 @@ fn main() {
                 dark,
                 |app| {
                     app.settings.style = style;
-                    app.settings.accent = style.accent();
+                    app.settings.accent = Accent::Blue;
                     offline(app, Page::Installed);
                     app.refresh_items();
                     app.selected = Some(app.rows[app.items[1].raw].identity());
@@ -515,7 +515,7 @@ fn main() {
                 dark,
                 |app| {
                     app.settings.style = style;
-                    app.settings.accent = style.accent();
+                    app.settings.accent = Accent::Blue;
                     offline(app, Page::Settings);
                 },
             );
@@ -526,7 +526,7 @@ fn main() {
                 dark,
                 |app| {
                     app.settings.style = style;
-                    app.settings.accent = style.accent();
+                    app.settings.accent = Accent::Blue;
                     offline(app, Page::Updates);
                     app.rows.clear();
                     app.invalidate();
@@ -538,7 +538,7 @@ fn main() {
                 dark,
                 |app| {
                     app.settings.style = style;
-                    app.settings.accent = style.accent();
+                    app.settings.accent = Accent::Blue;
                     offline(app, Page::Settings);
                 },
             );

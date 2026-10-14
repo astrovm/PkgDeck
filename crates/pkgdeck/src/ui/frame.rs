@@ -699,6 +699,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Accent;
 
     use eframe::egui::Shape;
 
@@ -723,7 +724,7 @@ mod tests {
     fn palette(style: Style, dark: bool) -> Palette {
         let scheme = theme::Scheme {
             style,
-            accent: style.accent(),
+            accent: Accent::Blue,
             ..theme::Scheme::default()
         };
         Palette::of(scheme, dark)
@@ -862,10 +863,20 @@ mod tests {
     #[test]
     fn title_bars_take_the_accent_and_dim_when_the_window_is_behind() {
         // Windows 98's own navy fades to its own light blue.
-        let navy = palette(Style::Retro, false);
+        let navy_scheme = theme::Scheme {
+            style: Style::Retro,
+            accent: Accent::Navy,
+            ..theme::Scheme::default()
+        };
+        let navy = Palette::of(navy_scheme, false);
         assert_eq!(navy.deep, rgb(0x000080));
         let (from, to) = in_style(Style::Retro, || title_colors(&navy, true));
         assert_eq!((from, to), (rgb(0x000080), rgb(0x1084d0)));
+        // Any other accent fades from itself to a lighter shade.
+        let blue = palette(Style::Retro, false);
+        let (from, to) = in_style(Style::Retro, || title_colors(&blue, true));
+        assert_eq!(from, blue.deep);
+        assert_ne!(to, from);
         for style in FRAMED {
             for dark in [false, true] {
                 let palette = palette(style, dark);

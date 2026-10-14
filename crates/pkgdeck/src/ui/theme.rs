@@ -117,7 +117,7 @@ pub struct Scheme {
     /// [`Settings::tint_backgrounds`](crate::settings::Settings::tint_backgrounds).
     pub tint_backgrounds: bool,
     /// Whether the accent colours the older styles' title bars; see
-    /// [`Settings::tint_window_bar`](crate::settings::Settings::tint_window_bar).
+    /// [`Settings::window_bar_tint`](crate::settings::Settings::window_bar_tint).
     pub tint_window_bar: bool,
     pub text_size: TextSize,
     pub style: Style,
@@ -153,7 +153,7 @@ impl Scheme {
             accent: settings.accent,
             custom_accent: parse_hex(&settings.custom_accent),
             tint_backgrounds: settings.tint_backgrounds,
-            tint_window_bar: settings.tint_window_bar,
+            tint_window_bar: settings.window_bar_tint(settings.style),
             text_size: settings.text_size,
             style: settings.style,
             roundness: settings.roundness,
@@ -390,17 +390,14 @@ impl Palette {
             None => (rgb(on_light), rgb(on_dark)),
         };
         // The accent tints the window's greys: backgrounds, panels and
-        // buttons. An old style in the accent it shipped with keeps its
-        // own greys, as its desktop drew them.
+        // buttons. Every accent gets the same amount, so the tint switch
+        // does the same thing whatever colour is picked.
         let hue = custom.unwrap_or(rgb(on_light));
-        let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
             _ if !scheme.tint_backgrounds => 0.0,
-            (Family::Fluent | Family::Liquid, _) if own => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
-            _ if own => 0.0,
-            (Family::Glass, false) => 0.03,
+            (Family::Glass, false) => 0.08,
             (_, true) => 0.06,
             (_, false) => 0.08,
         };
@@ -1365,10 +1362,9 @@ mod tests {
                 dark,
             )
         };
-        // Title bars and selections keep the desktop's own colour: 98's
-        // navy, Aqua's blue gel.
+        // Title bars and selections follow the accent in every style.
         for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
-            for accent in [style.accent(), Accent::Teal] {
+            for accent in [Accent::Blue, Accent::Teal] {
                 assert_eq!(
                     of(style, accent, true).deep,
                     of(style, accent, false).deep,
@@ -1377,6 +1373,10 @@ mod tests {
             }
         }
         assert_eq!(of(Style::Retro, Accent::Navy, true).deep, rgb(0x000080));
+        assert_eq!(
+            of(Style::Retro, Accent::Navy, true).deep,
+            of(Style::Retro, Accent::Navy, false).deep,
+        );
         // Graphite, a grey as dark as the window, lifts off it in the dark.
         for style in Style::ALL {
             let graphite = of(style, Accent::Graphite, true);
@@ -1500,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_tints_the_window_unless_a_style_wears_its_own() {
+    fn the_accent_tints_the_window_in_every_style_and_accent() {
         for style in Style::ALL {
             for dark in [false, true] {
                 let at = format!("{style:?} dark={dark}");
@@ -1515,22 +1515,14 @@ mod tests {
                         dark,
                     )
                 };
-                let own = wearing(style.accent());
-                let other = if style.accent() == Accent::Green {
-                    Accent::Purple
-                } else {
-                    Accent::Green
-                };
-                let green = wearing(other);
-                if style == Style::Modern {
-                    assert!(own.tint_amount > 0.0, "{at}");
-                } else {
-                    // The desktop's own greys, as it drew them.
-                    assert_eq!(own.tint_amount, 0.0, "{at}");
-                }
+                let blue = wearing(Accent::Blue);
+                let green = wearing(Accent::Green);
+                // Blue gets the same tint as any other accent.
+                assert!(blue.tint_amount > 0.0, "{at}");
+                assert_eq!(blue.tint_amount, green.tint_amount, "{at}");
                 assert!(green.tint_amount > 0.0, "{at}");
-                assert_ne!(green.canvas, own.canvas, "{at}");
-                assert_ne!(green.surface, own.surface, "{at}");
+                assert_ne!(green.canvas, blue.canvas, "{at}");
+                assert_ne!(green.surface, blue.surface, "{at}");
                 assert_eq!(
                     green.tone(Color32::WHITE),
                     over(Color32::WHITE, green.tint, green.tint_amount)
@@ -1571,7 +1563,29 @@ mod tests {
         let green = glass(Accent::Green);
         assert!(luminance(green) < 0.01, "{green:?}");
         // Its own blue too: near black, not Media Center's navy.
-        assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
+        assert_eq!(glass(Accent::Blue), rgb(0x0e0f11));
+    }
+
+    #[test]
+    fn windows_7_light_tints_its_white_canvas_visibly() {
+        let canvas = |tint_backgrounds| {
+            Palette::of(
+                Scheme {
+                    style: Style::Glass,
+                    accent: Accent::Blue,
+                    tint_backgrounds,
+                    ..Scheme::default()
+                },
+                false,
+            )
+            .canvas
+        };
+        let plain = canvas(false);
+        assert_eq!(plain, rgb(0xffffff));
+        // Tinted, the white reads as blue, not as white.
+        let tinted = canvas(true);
+        assert!(255 - tinted.r() >= 10, "{tinted:?}");
+        assert!(tinted.b() > tinted.r(), "{tinted:?}");
     }
 
     #[test]

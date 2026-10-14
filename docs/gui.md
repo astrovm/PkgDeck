@@ -570,8 +570,8 @@ and **About**.
 - **Style**: the shape of everything, shown as small previews. Each comes in
   light and dark.
   - **Modern**: flat and rounded, the default.
-  - **Windows 98**: grey 3D bevels, square corners and a title bar fading
-    from navy to blue.
+  - **Windows 98**: grey 3D bevels, square corners and a title bar in the
+    accent, fading to a lighter shade of it.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
   - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
@@ -594,7 +594,7 @@ and **About**.
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
     `PKGDECK_NO_BLUR=1` to never blur.
-  - Picking a style also picks the accent it was made with.
+  - Picking a style never changes the accent, so your choice stays on.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
   blue-grey of earlier versions). In light mode, **Classic** (blue-grey, the
@@ -602,16 +602,21 @@ and **About**.
   own choice.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
-  any colour; PkgDeck lightens or darkens it until it reads well. The accent
+  any colour; PkgDeck lightens or darkens it until it reads well. Blue is the
+  default in every style. The accent
   also tints the background, panels and buttons, and colours the PkgDeck logo
-  in the sidebar and title bar. Every style but **Modern**, in the accent it was
-  made with, keeps its desktop's own greys.
+  in the sidebar and title bar.
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
-  tints the background, panels and buttons. Leave it off to keep those greys
-  neutral. The accent still colours selection, links and controls.
-- **Tint window bar** (on by default, under **Accent**): when on, the accent
-  colours the title bar of the older styles. Turn it off for a neutral grey
-  bar. The accent still colours selection, links and controls.
+  tints the background, panels and buttons, the same way in every accent. Leave
+  it off to keep those greys neutral. The accent still colours selection, links
+  and controls. Picking a style never changes it, so your choice stays on.
+- **Tint window bar** (under **Accent**): only **Windows 98**, **Windows XP**
+  and **Windows 7** draw an accent title bar, so only they show it. When on, the
+  accent colours that title bar. Turn it off for a neutral grey bar. The accent
+  still colours selection, links and controls. Each style keeps its own choice,
+  so changing it in one style doesn't change the others. Picking a style never
+  changes it. It starts on for **Windows 98** and **Windows XP**, and off for
+  **Windows 7**.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

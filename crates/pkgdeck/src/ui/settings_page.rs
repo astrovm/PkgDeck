@@ -292,12 +292,15 @@ fn colours(app: &mut App, ui: &mut Ui) {
                 app.settings.tint_backgrounds = on;
             }
         });
-        setting_row(ui, "Tint window bar", "", SWITCH, |ui| {
-            let mut on = app.settings.tint_window_bar;
-            if switch(ui, &mut on, true, "Tint window bar").changed() {
-                app.settings.tint_window_bar = on;
-            }
-        });
+        if app.settings.style.tints_window_bar() {
+            setting_row(ui, "Tint window bar", "", SWITCH, |ui| {
+                let style = app.settings.style;
+                let mut on = app.settings.window_bar_tint(style);
+                if switch(ui, &mut on, true, "Tint window bar").changed() {
+                    app.settings.set_window_bar_tint(style, on);
+                }
+            });
+        }
     });
 }
 
@@ -388,8 +391,7 @@ fn fitted(
     painter.layout_no_wrap(text.to_owned(), egui::FontId::new(size, font.family), color)
 }
 
-/// A small window drawn in each style, the current one ringed. Picking
-/// one also picks the accent it was made with.
+/// A small window drawn in each style, the current one ringed.
 fn styles(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
@@ -417,9 +419,8 @@ fn styles(app: &mut App, ui: &mut Ui) {
         });
         let mut scheme = theme::Scheme::of(&app.settings);
         scheme.style = style;
-        if !current {
-            scheme.accent = style.accent();
-        }
+        // Each card shows the window bar tint that style keeps.
+        scheme.tint_window_bar = app.settings.window_bar_tint(style);
         let look = Palette::of(scheme, palette.dark);
         let skin = theme::Skin {
             style,
@@ -460,7 +461,6 @@ fn styles(app: &mut App, ui: &mut Ui) {
         ui.painter().galley(at, name, ink);
         if response.clicked() && !current {
             app.settings.style = style;
-            app.settings.accent = style.accent();
         }
     }
 }

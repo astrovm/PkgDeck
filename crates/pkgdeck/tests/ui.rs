@@ -444,12 +444,84 @@ fn tint_backgrounds_switch_turns_the_accent_off_the_greys() {
 
 #[test]
 fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
+    use pkgdeck::settings::Style;
     let mut harness = show(Page::Settings);
-    assert!(harness.state().1.settings.tint_window_bar);
+    // Modern has no accent title bar, so it offers no switch.
+    assert!(harness.query_by_label("Tint window bar").is_none());
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_role_and_label(Role::CheckBox, "Tint window bar")
+        .is_some());
+    assert!(harness.state().1.settings.window_bar_tint(Style::Retro));
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
-    assert!(!harness.state().1.settings.tint_window_bar);
+    assert!(!harness.state().1.settings.window_bar_tint(Style::Retro));
+    // XP keeps its own choice, so it starts on even though 98 is off.
+    harness.get_by_label("Windows XP").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.window_bar_tint(Style::Luna));
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
-    assert!(harness.state().1.settings.tint_window_bar);
+    assert!(!harness.state().1.settings.window_bar_tint(Style::Luna));
+    // Each style remembers its choice when you come back to it.
+    harness.get_by_label("Windows 98").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    assert!(!harness.state().1.settings.window_bar_tint(Style::Retro));
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(harness.state().1.settings.window_bar_tint(Style::Retro));
+    harness.get_by_label("Windows XP").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert!(!harness.state().1.settings.window_bar_tint(Style::Luna));
+}
+
+#[test]
+fn picking_another_style_keeps_the_background_tint_you_set() {
+    use pkgdeck::settings::Style;
+    let mut harness = show(Page::Settings);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.tint_backgrounds);
+    assert!(harness.state().1.settings.window_bar_tint(Style::Luna));
+}
+
+#[test]
+fn windows_7_turns_the_window_bar_off_and_keeps_the_background_tint() {
+    use pkgdeck::settings::Style;
+    let mut harness = show(Page::Settings);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    assert!(harness.state().1.settings.tint_backgrounds);
+    // The card sits past the visible part of the picker, so bring it in first.
+    harness.get_by_label("Windows 7").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 7").click();
+    harness.run_steps(3);
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Glass);
+    assert!(settings.tint_backgrounds);
+    assert!(!settings.window_bar_tint(Style::Glass));
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(harness.state().1.settings.window_bar_tint(Style::Glass));
+    // Leaving and coming back keeps the choice Windows 7 was given.
+    harness.get_by_label("Windows 98").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 7").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 7").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.window_bar_tint(Style::Glass));
+    assert!(harness.state().1.settings.tint_backgrounds);
+    // Re-picking the style already in use changes nothing.
+    harness.get_by_label("Windows 7").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.window_bar_tint(Style::Glass));
 }
 
 #[test]
@@ -465,7 +537,7 @@ fn styles_and_their_choices_change_the_look() {
     harness.run_steps(3);
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Retro);
-    assert_eq!(settings.accent, Accent::Navy);
+    assert_eq!(settings.accent, Accent::Blue);
     // Windows 98 has its own colours and is always square.
     assert!(harness.query_by_label("Charcoal").is_none());
     assert!(harness.query_by_label("Roundness").is_none());
@@ -489,7 +561,7 @@ fn styles_and_their_choices_change_the_look() {
     assert!(harness.query_by_label("Export").is_none());
     assert!(harness.query_by_label("Import").is_none());
     click_in_view(&mut harness, None, "Modern");
-    assert_eq!(harness.state().1.settings.accent, Accent::Blue);
+    assert_eq!(harness.state().1.settings.accent, Accent::Teal);
     assert!(harness.query_by_label("Charcoal").is_some());
 }
 
@@ -519,7 +591,7 @@ fn every_style_mixes_with_every_other_look_option() {
                     settings.roundness = roundness;
                     settings.custom_accent = colour.to_owned();
                     settings.accent = if colour.is_empty() {
-                        style.accent()
+                        Accent::Blue
                     } else {
                         Accent::Custom
                     };

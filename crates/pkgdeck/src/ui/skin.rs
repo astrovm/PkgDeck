@@ -1463,7 +1463,7 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
     match style() {
         Family::Modern | Family::Fluent | Family::Liquid => None,
         Family::Retro => {
-            // Windows 98's navy fading to a lighter blue.
+            // Windows 98's title bar: the accent fading to a lighter shade.
             let end = lerp(palette.deep, palette.bright, 0.85);
             gradient(painter, rect, CornerRadius::ZERO, palette.deep, end, true);
             Some(ink_on(palette.deep))
@@ -1833,7 +1833,7 @@ mod tests {
     fn scheme(style: Style) -> theme::Scheme {
         theme::Scheme {
             style,
-            accent: style.accent(),
+            accent: Accent::Blue,
             ..theme::Scheme::default()
         }
     }
@@ -2036,7 +2036,7 @@ mod tests {
                                 accent: if color.is_some() {
                                     Accent::Custom
                                 } else {
-                                    style.accent()
+                                    Accent::Blue
                                 },
                                 custom_accent: color,
                                 roundness,
