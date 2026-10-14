@@ -96,6 +96,9 @@ pub struct Scheme {
     pub accent: Accent,
     /// The colour [`Accent::Custom`] stands for.
     pub custom_accent: Option<Color32>,
+    /// Whether the accent tints the greys of the window; see
+    /// [`Settings::tint_backgrounds`](crate::settings::Settings::tint_backgrounds).
+    pub tint_backgrounds: bool,
     pub text_size: TextSize,
     pub style: Style,
     /// Times the style's own corner roundness, from 0 to 2.
@@ -110,6 +113,7 @@ impl Default for Scheme {
             light: LightTheme::default(),
             accent: Accent::default(),
             custom_accent: None,
+            tint_backgrounds: false,
             text_size: TextSize::default(),
             style: Style::default(),
             roundness: 1.0,
@@ -127,6 +131,7 @@ impl Scheme {
             light: settings.light_theme,
             accent: settings.accent,
             custom_accent: parse_hex(&settings.custom_accent),
+            tint_backgrounds: settings.tint_backgrounds,
             text_size: settings.text_size,
             style: settings.style,
             roundness: settings.roundness,
@@ -368,6 +373,7 @@ impl Palette {
         let hue = custom.unwrap_or(rgb(on_light));
         let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
+            _ if !scheme.tint_backgrounds => 0.0,
             (Family::Fluent | Family::Liquid, _) if own => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
@@ -1396,12 +1402,16 @@ mod tests {
 
     #[test]
     fn modern_keeps_its_colours_whatever_the_new_choices() {
-        let modern = Palette::of(Scheme::default(), true);
+        let tinted = Scheme {
+            tint_backgrounds: true,
+            ..Scheme::default()
+        };
+        let modern = Palette::of(tinted.clone(), true);
         // Modern's greys, tinted with its blue.
         let blue = rgb(accent_colors(Accent::Blue).0);
         assert_eq!(modern.canvas, over(rgb(0x121212), blue, 0.05));
         assert_eq!(modern.accent, rgb(0x7aa7ff));
-        let light = Palette::of(Scheme::default(), false);
+        let light = Palette::of(tinted.clone(), false);
         assert_eq!(light.canvas, over(rgb(0xe8edf5), blue, 0.04));
         assert_eq!(light.accent_ink, Color32::WHITE);
         let tuned = Scheme {
@@ -1409,7 +1419,7 @@ mod tests {
             density: Density::Roomy,
             typeface: Typeface::System,
             custom_accent: Some(Color32::RED),
-            ..Scheme::default()
+            ..tinted
         };
         // A picked colour counts only once Custom is the accent.
         assert_eq!(Palette::of(tuned, true), modern);
@@ -1437,6 +1447,7 @@ mod tests {
                         Scheme {
                             style,
                             accent,
+                            tint_backgrounds: true,
                             ..Scheme::default()
                         },
                         dark,
@@ -1499,6 +1510,62 @@ mod tests {
         assert!(luminance(green) < 0.01, "{green:?}");
         // Its own blue too: near black, not Media Center's navy.
         assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
+    }
+
+    #[test]
+    fn turning_the_tint_off_keeps_the_greys_neutral_and_the_accent_on_controls() {
+        for style in Style::ALL {
+            for dark in [false, true] {
+                let at = format!("{style:?} dark={dark}");
+                let plain = |accent| {
+                    Palette::of(
+                        Scheme {
+                            style,
+                            accent,
+                            tint_backgrounds: false,
+                            ..Scheme::default()
+                        },
+                        dark,
+                    )
+                };
+                let blue = plain(Accent::Blue);
+                let green = plain(Accent::Green);
+                assert_eq!(green.tint_amount, 0.0, "{at}");
+                // The greys ignore the accent.
+                assert_eq!(green.canvas, blue.canvas, "{at}");
+                assert_eq!(green.surface, blue.surface, "{at}");
+                assert_eq!(green.tone(Color32::WHITE), Color32::WHITE, "{at}");
+                // The accent still colours selection, links and controls.
+                assert_ne!(green.accent, blue.accent, "{at}");
+                assert_ne!(green.selection, blue.selection, "{at}");
+                // And the tint is what changes the greys.
+                let tinted = Palette::of(
+                    Scheme {
+                        style,
+                        accent: Accent::Green,
+                        ..Scheme::default()
+                    },
+                    dark,
+                );
+                if tinted.tint_amount > 0.0 {
+                    assert_ne!(tinted.canvas, green.canvas, "{at}");
+                }
+            }
+        }
+        // Modern in light is Classic's blue-grey, untouched by any accent.
+        for accent in [Accent::Blue, Accent::Red, Accent::Custom] {
+            let light = Palette::of(
+                Scheme {
+                    accent,
+                    custom_accent: Some(Color32::RED),
+                    tint_backgrounds: false,
+                    ..Scheme::default()
+                },
+                false,
+            );
+            assert_eq!(light.canvas, rgb(0xe8edf5), "{accent:?}");
+            assert_eq!(light.surface, rgb(0xf7f9fd), "{accent:?}");
+        }
     }
 
     #[test]

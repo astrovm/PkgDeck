@@ -290,6 +290,10 @@ pub struct Settings {
     pub style: Style,
     /// The accent picked by hand, as `#rrggbb`, for [`Accent::Custom`].
     pub custom_accent: String,
+    /// Whether the accent tints the window's backgrounds, panels and
+    /// buttons' greys. Off, they stay neutral and the accent only colours
+    /// selection, links and controls.
+    pub tint_backgrounds: bool,
     /// How round corners are, from 0 (square) to 2, times the style's own.
     #[serde(deserialize_with = "roundness")]
     pub roundness: f32,
@@ -344,6 +348,7 @@ impl Default for Settings {
             text_size: TextSize::Normal,
             style: Style::Modern,
             custom_accent: String::new(),
+            tint_backgrounds: false,
             roundness: 1.0,
             density: Density::Normal,
             typeface: Typeface::Style,
@@ -761,6 +766,7 @@ mod tests {
         assert_eq!(settings.density, Density::Normal);
         assert_eq!(settings.typeface, Typeface::Style);
         assert_eq!(settings.custom_accent, "");
+        assert!(!settings.tint_backgrounds);
         assert_eq!(
             (settings.dark_theme, settings.light_theme, settings.accent),
             (DarkTheme::Slate, LightTheme::Paper, Accent::Pink)
@@ -794,6 +800,20 @@ mod tests {
             ..Settings::default()
         };
         let read: Settings = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(read, saved);
+    }
+
+    #[test]
+    fn tint_backgrounds_saves_and_reads_back_off() {
+        let read: Settings = serde_json::from_str(r#"{"tintBackgrounds":false}"#).unwrap();
+        assert!(!read.tint_backgrounds);
+        let saved = Settings {
+            tint_backgrounds: false,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&saved).unwrap();
+        assert!(text.contains(r#""tintBackgrounds":false"#), "{text}");
+        let read: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(read, saved);
     }
 

@@ -433,6 +433,16 @@ fn settings_switches_change_settings() {
 }
 
 #[test]
+fn tint_backgrounds_switch_turns_the_accent_off_the_greys() {
+    let mut harness = show(Page::Settings);
+    assert!(!harness.state().1.settings.tint_backgrounds);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    assert!(harness.state().1.settings.tint_backgrounds);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    assert!(!harness.state().1.settings.tint_backgrounds);
+}
+
+#[test]
 fn styles_and_their_choices_change_the_look() {
     use pkgdeck::settings::{Density, Style, Typeface};
     let mut harness = show(Page::Settings);
@@ -453,8 +463,7 @@ fn styles_and_their_choices_change_the_look() {
     harness.run_steps(3);
     assert!(harness.query_by_label("Roundness").is_some());
     for choice in ["Roomy", "Inter", "Teal"] {
-        harness.get_by_label(choice).click();
-        harness.run_steps(3);
+        click_in_view(&mut harness, None, choice);
     }
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Luna);
@@ -469,8 +478,7 @@ fn styles_and_their_choices_change_the_look() {
     // Looks aren't saved to or loaded from files.
     assert!(harness.query_by_label("Export").is_none());
     assert!(harness.query_by_label("Import").is_none());
-    harness.get_by_label("Modern").click();
-    harness.run_steps(3);
+    click_in_view(&mut harness, None, "Modern");
     assert_eq!(harness.state().1.settings.accent, Accent::Blue);
     assert!(harness.query_by_label("Charcoal").is_some());
 }

@@ -606,6 +606,9 @@ and **About**.
   also tints the background, panels and buttons, and colours the PkgDeck logo
   in the sidebar and title bar. Every style but **Modern**, in the accent it was
   made with, keeps its desktop's own greys.
+- **Tint backgrounds** (off by default, under **Accent**): when on, the accent
+  tints the background, panels and buttons. Leave it off to keep those greys
+  neutral. The accent still colours selection, links and controls.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
