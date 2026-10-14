@@ -2,7 +2,9 @@
 //! and follows it the same way either way.
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, PipeWriter};
-use std::os::fd::{AsFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
 
