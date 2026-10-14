@@ -437,6 +437,13 @@ pub fn paint_frame(
                 fit(painter.ctx(), behind),
                 super::skin::sidebar_color(palette),
             );
+            // The sidebar's divider runs up behind the lights too, so the
+            // border has no gap between the title bar and the sidebar.
+            painter.vline(
+                behind.right() - 0.5,
+                full.top()..=bar.bottom(),
+                Stroke::new(1.0, palette.line),
+            );
         }
         Family::Retro => {
             painter.rect_filled(full, CornerRadius::ZERO, palette.canvas);
@@ -1060,6 +1067,30 @@ mod tests {
             }
             other => panic!("the outline should come last, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_mac_sidebar_divider_runs_up_through_the_title_bar() {
+        let palette = palette(Style::Liquid, false);
+        let metrics = metrics(Style::Liquid).expect("Liquid draws a frame");
+        let (bar, _) = layout(metrics, window(), false);
+        let shapes = in_style(Style::Liquid, || {
+            theme::painted(|ui| {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(Id::new("sidebar-extent"), 200.0_f32));
+                show(ui, window(), "PkgDeck", &palette);
+            })
+        });
+        let divider = shapes.iter().any(|shape| match shape {
+            Shape::LineSegment { points, .. } => {
+                (points[0].x - 199.5).abs() < 0.01
+                    && (points[1].x - 199.5).abs() < 0.01
+                    && points[0].y == window().top()
+                    && points[1].y == bar.bottom()
+            }
+            _ => false,
+        });
+        assert!(divider, "no divider through the title bar: {shapes:?}");
     }
 
     #[test]
