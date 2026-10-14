@@ -8,8 +8,8 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2,
+    self, emath::GuiRounding as _, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke,
+    StrokeKind, Ui, UiBuilder, Vec2,
 };
 
 const ROW: f32 = 60.0;
@@ -118,9 +118,9 @@ fn heading_text(app: &App) -> String {
     // While writing, the card says what runs; the count stays.
     if app.busy && !app.writing {
         return match app.page {
-            Page::Search => "Searching…",
-            _ if count > 0 => "Refreshing…",
-            _ => "Loading…",
+            Page::Search => "Searching",
+            _ if count > 0 => "Refreshing",
+            _ => "Loading",
         }
         .into();
     }
@@ -164,7 +164,6 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
     if !list_shown(app) {
         return (String::new(), None);
     }
-    let mut line = heading_text(app);
     let mut names = Vec::new();
     if app.waiting_shown() {
         names = app
@@ -176,12 +175,23 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
             })
             .map(|id| model::source_name(id).to_owned())
             .collect();
-        if !names.is_empty() {
-            line = format!("{line} · {}", waiting_text(&names));
-        }
     }
+    let line = status_line(heading_text(app), app.page == Page::Search, &names);
     let hover = (names.len() > 2).then(|| names.join("\n"));
     (line, hover)
+}
+
+/// While waiting on sources, "Waiting for" already says the list is
+/// loading, so it takes the place of "Refreshing" or "Loading".
+/// "Searching" stays, since the search has its own job to name.
+fn status_line(heading: String, searching: bool, names: &[String]) -> String {
+    if names.is_empty() {
+        heading
+    } else if searching {
+        format!("{heading} · {}", waiting_text(names))
+    } else {
+        waiting_text(names)
+    }
 }
 
 struct Columns {
@@ -354,7 +364,8 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
                 Rect::from_min_max(
                     pos2(area.left() - 4.0, rect.top()),
                     pos2(area.right(), rect.bottom()),
-                ),
+                )
+                .round_ui(),
                 Id::new(("column", title)),
                 Sense::click(),
             )
@@ -434,7 +445,9 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
         }
     }
     for (column, x) in dividers {
-        let handle = Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, rect.height()));
+        // Snap to the UI grid: egui's debug overlay flags off-grid edges as "Unaligned".
+        let handle =
+            Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, rect.height())).round_ui();
         let response = ui
             .interact(
                 handle,
@@ -1513,7 +1526,7 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::waiting_text;
+    use super::{status_line, waiting_text};
 
     #[test]
     fn failed_or_stopped_lists_always_offer_retry() {
@@ -1550,6 +1563,24 @@ mod tests {
             waiting_text(&names(&["APT", "Snap", "npm"])),
             "Waiting for 3 sources"
         );
+    }
+
+    #[test]
+    fn waiting_line_replaces_the_busy_word_but_not_searching() {
+        let apt = vec!["APT".to_owned()];
+        assert_eq!(
+            status_line("Refreshing".into(), false, &apt),
+            "Waiting for APT"
+        );
+        assert_eq!(
+            status_line("Loading".into(), false, &apt),
+            "Waiting for APT"
+        );
+        assert_eq!(
+            status_line("Searching".into(), true, &apt),
+            "Searching · Waiting for APT"
+        );
+        assert_eq!(status_line("Refreshing".into(), false, &[]), "Refreshing");
     }
 }
 
@@ -1724,5 +1755,101 @@ mod icon_tests {
         // The mark takes the middle half: 50 less 24% each side.
         assert_eq!(texts("package"), [("Dn".to_owned(), 26.0 * 0.4)]);
         assert!(texts("failure").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use crate::{
+        app::{App, Launch},
+        platform::Platform,
+        settings::Store,
+    };
+    use crate::{model::Page, settings::Style};
+    use eframe::egui::{self, pos2, vec2, Rect};
+    use egui_kittest::Harness;
+    use pkgdeck_app::controller::ffi::create_synthetic_controller;
+    use serde_json::json;
+
+    /// Every text run drawn in `shape`, recursing into grouped shapes.
+    fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn card_body_stays_on_the_ui_grid_when_the_card_is_off_grid() {
+        // egui flags any Ui edge off the 1/32 grid with an orange "Unaligned" label.
+        // A card can land off the grid while the details panel animates open, and
+        // a long list keeps its scrollbar, whose strip must also stay on the grid.
+        let rows: Vec<_> = (0..200)
+            .map(|i| {
+                json!({ "kind": "package", "name": format!("pkg{i}"), "display_name": format!("Package {i}"),
+                    "source": "apt", "architecture": "x86_64", "scope": "system", "scope_label": "System",
+                    "installed": "1.0", "candidate": null, "update": "current", "summary": "Summary" })
+            })
+            .collect();
+        for style in Style::ALL {
+            for (pixels_per_point, top) in [1.0, 1.25, 1.5, 1.75]
+                .into_iter()
+                .flat_map(|ppp| [20.0, 20.3, 20.7, 20.9].map(|top| (ppp, top)))
+            {
+                let (store, settings) = Store::open(None, None);
+                let mut platform = Platform::start(|| {});
+                platform.record_notifications();
+                let mut app = App::with_controller(
+                    create_synthetic_controller(|_, _, _, _| {
+                        Ok(pkgdeck_core::engine::Engine::default())
+                    }),
+                    settings,
+                    store,
+                    platform,
+                    Launch::default(),
+                );
+                app.settings.style = style;
+                app.page = Page::Installed;
+                app.c()
+                    .set_rows(serde_json::Value::Array(rows.clone()).to_string().into());
+                app.react();
+                let mut harness = Harness::builder()
+                    .with_size(vec2(900.0, 700.0))
+                    .build_ui_state(
+                        |ui, (ready, app): &mut (bool, App)| {
+                            if !*ready {
+                                crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                                *ready = true;
+                                return;
+                            }
+                            // The custom scrollbar only draws once the app has set the theme.
+                            crate::ui::theme::set_scheme(
+                                ui.ctx(),
+                                crate::ui::theme::Scheme::of(&app.settings),
+                            );
+                            let card = Rect::from_min_size(pos2(20.0, top), vec2(600.0, 500.0));
+                            super::list_card(app, ui, card);
+                        },
+                        (false, app),
+                    );
+                harness.set_pixels_per_point(pixels_per_point);
+                harness.run_steps(3);
+                let mut drawn = Vec::new();
+                for clipped in &harness.output().shapes {
+                    texts(&clipped.shape, &mut drawn);
+                }
+                // Without rows the card shows a skeleton, and the test would pass vacuously.
+                assert!(
+                    drawn.iter().any(|t| t == "Package 0"),
+                    "rows were not drawn"
+                );
+                let labels = drawn.iter().filter(|t| *t == "Unaligned").count();
+                assert_eq!(
+                    labels, 0,
+                    "{labels} off-grid edges in the Installed card body, {style:?} at {pixels_per_point} ppp"
+                );
+            }
+        }
     }
 }

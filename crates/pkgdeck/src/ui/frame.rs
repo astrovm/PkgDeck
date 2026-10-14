@@ -381,27 +381,28 @@ pub struct Press {
     pub group: bool,
 }
 
-/// The title bar's colour where the style takes it from the accent.
+/// The title bar's colour where the style takes it from the accent, or a
+/// neutral grey when the window bar is not tinted.
 fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
-    let deep = palette.deep;
+    let bar = palette.bar;
     match theme::skin().family() {
         Family::Retro if active => {
             // Windows 98's navy fades to its light blue; another colour
             // fades to a lighter self.
-            let end = if deep == rgb(0x000080) {
+            let end = if bar == rgb(0x000080) {
                 rgb(0x1084d0)
             } else {
-                lerp(deep, Color32::WHITE, 0.45)
+                lerp(bar, Color32::WHITE, 0.45)
             };
-            (deep, end)
+            (bar, end)
         }
         Family::Retro => {
             let dim = lerp(palette.canvas, palette.ink, 0.35);
             (dim, lerp(dim, palette.canvas, 0.6))
         }
-        _ if active => (deep, deep),
+        _ if active => (bar, bar),
         _ => {
-            let washed = lerp(deep, Color32::WHITE, if palette.dark { 0.25 } else { 0.45 });
+            let washed = lerp(bar, Color32::WHITE, if palette.dark { 0.25 } else { 0.45 });
             (washed, washed)
         }
     }
@@ -453,7 +454,7 @@ pub fn paint_frame(
             let (from, to) = title_colors(palette, state.active);
             gradient(painter, bar, CornerRadius::ZERO, from, to, true);
         }
-        Family::Luna => super::luna::paint_frame(painter, full, bar, palette.deep, state, dark),
+        Family::Luna => super::luna::paint_frame(painter, full, bar, palette.bar, state, dark),
         Family::Glass => super::aero::paint_frame(painter, full, inner, palette, state),
         Family::Gel => {
             // A plain grey title bar, lit along its top edge.
@@ -879,9 +880,35 @@ mod tests {
         // Another accent fades to a lighter self.
         let mut green = palette(Style::Retro, false);
         green.deep = rgb(0x006000);
+        green.bar = green.deep;
         let (from, to) = in_style(Style::Retro, || title_colors(&green, true));
         assert_eq!(from, green.deep);
         assert_eq!(to, lerp(green.deep, Color32::WHITE, 0.45));
+    }
+
+    #[test]
+    fn untinted_title_bars_are_grey_in_every_state() {
+        for style in FRAMED {
+            for dark in [false, true] {
+                let scheme = theme::Scheme {
+                    style,
+                    accent: crate::settings::Accent::Red,
+                    tint_window_bar: false,
+                    ..theme::Scheme::default()
+                };
+                let palette = Palette::of(scheme, dark);
+                in_style(style, || {
+                    for active in [true, false] {
+                        let (from, to) = title_colors(&palette, active);
+                        for color in [from, to] {
+                            let context = format!("{style:?} dark={dark} active={active}");
+                            assert_eq!(color.r(), color.g(), "{context}");
+                            assert_eq!(color.g(), color.b(), "{context}");
+                        }
+                    }
+                });
+            }
+        }
     }
 
     #[test]

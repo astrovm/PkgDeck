@@ -184,14 +184,6 @@ fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) -> bool {
         .interact(handle, id, Sense::click_and_drag())
         .on_hover_cursor(CursorIcon::ResizeHorizontal);
     let active = response.hovered() || response.dragged();
-    let shown = ease(&ctx, response.id.with("hover"), active, FEEDBACK);
-    if shown > 0.0 {
-        ui.painter().rect_filled(
-            Rect::from_center_size(pos2(sidebar.right(), sidebar.center().y), vec2(3.0, 44.0)),
-            theme::round(2),
-            alpha(Palette::current(&ctx).accent, shown),
-        );
-    }
     if response.dragged() {
         if let Some(pointer) = ctx.pointer_interact_pos() {
             app.settings.sidebar_width =
