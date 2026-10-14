@@ -397,7 +397,7 @@ impl Palette {
             _ if !scheme.tint_backgrounds => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
-            (Family::Glass, false) => 0.03,
+            (Family::Glass, false) => 0.08,
             (_, true) => 0.06,
             (_, false) => 0.08,
         };
@@ -1566,6 +1566,28 @@ mod tests {
         assert!(luminance(green) < 0.01, "{green:?}");
         // Its own blue too: near black, not Media Center's navy.
         assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
+    }
+
+    #[test]
+    fn windows_7_light_tints_its_white_canvas_visibly() {
+        let canvas = |tint_backgrounds| {
+            Palette::of(
+                Scheme {
+                    style: Style::Glass,
+                    accent: Accent::Blue,
+                    tint_backgrounds,
+                    ..Scheme::default()
+                },
+                false,
+            )
+            .canvas
+        };
+        let plain = canvas(false);
+        assert_eq!(plain, rgb(0xffffff));
+        // Tinted, the white reads as blue, not as white.
+        let tinted = canvas(true);
+        assert!(255 - tinted.r() >= 10, "{tinted:?}");
+        assert!(tinted.b() > tinted.r(), "{tinted:?}");
     }
 
     #[test]
