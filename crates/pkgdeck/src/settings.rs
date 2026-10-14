@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Light, dark, or whatever the system shows.
@@ -97,13 +98,15 @@ impl Accent {
 /// The shape of everything: corners, borders, depth and shine, after a
 /// desktop from the past, or today's flat look. Names of styles PkgDeck
 /// no longer has read as the closest one left.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Style {
     /// Flat and rounded.
     #[default]
     Modern,
-    /// Windows 98: grey bevels and a navy title bar fading to blue.
+    /// Windows 98: grey bevels and a title bar in the accent.
     #[serde(alias = "win95")]
     Retro,
     /// Windows XP's blue Luna.
@@ -190,6 +193,11 @@ impl Style {
     /// tint does something.
     pub fn tints_window_bar(self) -> bool {
         matches!(self.family(), Family::Retro | Family::Luna | Family::Glass)
+    }
+    /// Whether the window bar tint starts on in this style: Windows 7 starts
+    /// off, the rest start on.
+    pub fn window_bar_tint_default(self) -> bool {
+        !matches!(self, Self::Glass)
     }
 }
 
@@ -287,9 +295,11 @@ pub struct Settings {
     /// buttons' greys. Off, they stay neutral and the accent only colours
     /// selection, links and controls.
     pub tint_backgrounds: bool,
-    /// Whether the accent colours the title bar of the older styles. Off, the
-    /// bar is a neutral grey and the accent stays on the controls.
-    pub tint_window_bar: bool,
+    /// Whether the accent colours the title bar of each style that has one,
+    /// by the style's name. Read it with [`Settings::window_bar_tint`]. A style
+    /// with no entry starts on its default.
+    #[serde(deserialize_with = "window_bar_tints")]
+    pub window_bar_tints: BTreeMap<Style, bool>,
     /// How round corners are, from 0 (square) to 2, times the style's own.
     #[serde(deserialize_with = "roundness")]
     pub roundness: f32,
@@ -345,7 +355,7 @@ impl Default for Settings {
             style: Style::Modern,
             custom_accent: String::new(),
             tint_backgrounds: false,
-            tint_window_bar: true,
+            window_bar_tints: BTreeMap::new(),
             roundness: 1.0,
             density: Density::Normal,
             typeface: Typeface::Style,
@@ -374,6 +384,39 @@ impl Default for Settings {
             search_hint: String::new(),
         }
     }
+}
+
+impl Settings {
+    /// Whether `style`'s title bar takes the accent. Each style keeps its own
+    /// choice, so picking another style doesn't change it.
+    pub fn window_bar_tint(&self, style: Style) -> bool {
+        self.window_bar_tints
+            .get(&style)
+            .copied()
+            .unwrap_or(style.window_bar_tint_default())
+    }
+
+    pub fn set_window_bar_tint(&mut self, style: Style, on: bool) {
+        self.window_bar_tints.insert(style, on);
+    }
+}
+
+/// The window bar choices by style. A style this version doesn't know, or a
+/// choice that isn't on or off, is dropped.
+fn window_bar_tints<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<Style, bool>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let Some(entries) = value.as_object() else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|(style, on)| {
+            let style = serde_json::from_value(Value::String(style.clone())).ok()?;
+            Some((style, on.as_bool()?))
+        })
+        .collect())
 }
 
 /// Where the settings live: `$XDG_CONFIG_HOME/pkgdeck`, else
@@ -764,7 +807,7 @@ mod tests {
         assert_eq!(settings.typeface, Typeface::Style);
         assert_eq!(settings.custom_accent, "");
         assert!(!settings.tint_backgrounds);
-        assert!(settings.tint_window_bar);
+        assert!(settings.window_bar_tint(Style::Retro));
         assert_eq!(
             (settings.dark_theme, settings.light_theme, settings.accent),
             (DarkTheme::Slate, LightTheme::Paper, Accent::Pink)
@@ -816,24 +859,61 @@ mod tests {
     }
 
     #[test]
-    fn tint_window_bar_saves_and_reads_back_in_both_states() {
-        let read: Settings = serde_json::from_str(r#"{"tintWindowBar":false}"#).unwrap();
-        assert!(!read.tint_window_bar);
-        let read: Settings = serde_json::from_str(r#"{"tintWindowBar":true}"#).unwrap();
-        assert!(read.tint_window_bar);
-        for tint_window_bar in [false, true] {
-            let saved = Settings {
-                tint_window_bar,
-                ..Settings::default()
-            };
-            let text = serde_json::to_string(&saved).unwrap();
-            assert!(
-                text.contains(&format!(r#""tintWindowBar":{tint_window_bar}"#)),
-                "{text}"
-            );
-            let read: Settings = serde_json::from_str(&text).unwrap();
-            assert_eq!(read, saved);
+    fn window_bar_tint_starts_on_except_for_windows_7() {
+        let settings = Settings::default();
+        for style in Style::ALL {
+            let on = style != Style::Glass;
+            assert_eq!(settings.window_bar_tint(style), on, "{style:?}");
         }
+    }
+
+    #[test]
+    fn window_bar_tint_is_kept_for_each_style_on_its_own() {
+        let mut settings = Settings::default();
+        settings.set_window_bar_tint(Style::Luna, false);
+        settings.set_window_bar_tint(Style::Glass, true);
+        assert!(!settings.window_bar_tint(Style::Luna));
+        assert!(settings.window_bar_tint(Style::Retro));
+        assert!(settings.window_bar_tint(Style::Glass));
+        assert!(settings.window_bar_tint(Style::Modern));
+    }
+
+    #[test]
+    fn window_bar_tint_saves_and_reads_back_per_style() {
+        let mut saved = Settings::default();
+        saved.set_window_bar_tint(Style::Retro, false);
+        saved.set_window_bar_tint(Style::Glass, true);
+        let text = serde_json::to_string(&saved).unwrap();
+        assert!(
+            text.contains(r#""windowBarTints":{"retro":false,"glass":true}"#),
+            "{text}"
+        );
+        let read: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(read, saved);
+        assert!(!read.window_bar_tint(Style::Retro));
+        assert!(read.window_bar_tint(Style::Luna));
+        assert!(read.window_bar_tint(Style::Glass));
+    }
+
+    #[test]
+    fn window_bar_tint_drops_unknown_styles_and_bad_values() {
+        let read: Settings = serde_json::from_str(
+            r#"{"windowBarTints":{"retro":false,"bubbles":false,"luna":"yes","glass":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(read.window_bar_tints.len(), 2);
+        assert!(!read.window_bar_tint(Style::Retro));
+        assert!(read.window_bar_tint(Style::Luna));
+        assert!(read.window_bar_tint(Style::Glass));
+    }
+
+    #[test]
+    fn old_single_window_bar_setting_is_not_read() {
+        // The one switch used to apply to every style. Those choices are
+        // not carried over, so each style starts on its default.
+        let read: Settings = serde_json::from_str(r#"{"tintWindowBar":false}"#).unwrap();
+        assert!(read.window_bar_tint(Style::Retro));
+        assert!(!read.window_bar_tint(Style::Glass));
     }
 
     #[test]
@@ -845,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn every_style_has_a_name_and_starts_on_the_blue_accent() {
+    fn every_style_has_a_name_and_settings_start_on_the_blue_accent() {
         let names: std::collections::HashSet<_> = Style::ALL.map(Style::name).into();
         assert_eq!(names.len(), Style::ALL.len());
         assert_eq!(Settings::default().accent, Accent::Blue);

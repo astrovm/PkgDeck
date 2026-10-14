@@ -117,7 +117,7 @@ pub struct Scheme {
     /// [`Settings::tint_backgrounds`](crate::settings::Settings::tint_backgrounds).
     pub tint_backgrounds: bool,
     /// Whether the accent colours the older styles' title bars; see
-    /// [`Settings::tint_window_bar`](crate::settings::Settings::tint_window_bar).
+    /// [`Settings::window_bar_tint`](crate::settings::Settings::window_bar_tint).
     pub tint_window_bar: bool,
     pub text_size: TextSize,
     pub style: Style,
@@ -153,7 +153,7 @@ impl Scheme {
             accent: settings.accent,
             custom_accent: parse_hex(&settings.custom_accent),
             tint_backgrounds: settings.tint_backgrounds,
-            tint_window_bar: settings.tint_window_bar,
+            tint_window_bar: settings.window_bar_tint(settings.style),
             text_size: settings.text_size,
             style: settings.style,
             roundness: settings.roundness,
@@ -1362,8 +1362,7 @@ mod tests {
                 dark,
             )
         };
-        // Title bars and selections keep the desktop's own colour: 98's
-        // navy, Aqua's blue gel.
+        // Title bars and selections follow the accent in every style.
         for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
             for accent in [Accent::Blue, Accent::Teal] {
                 assert_eq!(

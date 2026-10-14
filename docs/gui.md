@@ -570,9 +570,8 @@ and **About**.
 - **Style**: the shape of everything, shown as small previews. Each comes in
   light and dark.
   - **Modern**: flat and rounded, the default.
-  - **Windows 98**: grey 3D bevels, square corners and a title bar fading
-    fading from the accent to a lighter shade of it (navy to light blue in
-    Navy).
+  - **Windows 98**: grey 3D bevels, square corners and a title bar in the
+    accent, fading to a lighter shade of it.
   - **Windows XP**: glossy blue bars and rounded buttons.
   - **Windows 7**: sky-blue glass over Explorer's white.
   - **Windows 11**: Mica-grey panels, a small corner radius, a selection bar
@@ -611,11 +610,13 @@ and **About**.
   tints the background, panels and buttons, the same way in every accent. Leave
   it off to keep those greys neutral. The accent still colours selection, links
   and controls. Picking a style never changes it, so your choice stays on.
-- **Tint window bar** (on by default, under **Accent**): only **Windows 98**, **Windows XP**
+- **Tint window bar** (under **Accent**): only **Windows 98**, **Windows XP**
   and **Windows 7** draw an accent title bar, so only they show it. When on, the
   accent colours that title bar. Turn it off for a neutral grey bar. The accent
-  still colours selection, links and controls. Picking **Windows 98** or
-  **Windows XP** turns it on, and picking **Windows 7** turns it off.
+  still colours selection, links and controls. Each style keeps its own choice,
+  so changing it in one style doesn't change the others. Picking a style never
+  changes it. It starts on for **Windows 98** and **Windows XP**, and off for
+  **Windows 7**.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

@@ -294,9 +294,10 @@ fn colours(app: &mut App, ui: &mut Ui) {
         });
         if app.settings.style.tints_window_bar() {
             setting_row(ui, "Tint window bar", "", SWITCH, |ui| {
-                let mut on = app.settings.tint_window_bar;
+                let style = app.settings.style;
+                let mut on = app.settings.window_bar_tint(style);
                 if switch(ui, &mut on, true, "Tint window bar").changed() {
-                    app.settings.tint_window_bar = on;
+                    app.settings.set_window_bar_tint(style, on);
                 }
             });
         }
@@ -390,8 +391,7 @@ fn fitted(
     painter.layout_no_wrap(text.to_owned(), egui::FontId::new(size, font.family), color)
 }
 
-/// A small window drawn in each style, the current one ringed. Picking
-/// one also picks the accent it was made with.
+/// A small window drawn in each style, the current one ringed.
 fn styles(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
@@ -419,10 +419,8 @@ fn styles(app: &mut App, ui: &mut Ui) {
         });
         let mut scheme = theme::Scheme::of(&app.settings);
         scheme.style = style;
-        if !current {
-            // The card shows the tints the style starts with.
-            start_window_bar(style, &mut scheme.tint_window_bar);
-        }
+        // Each card shows the window bar tint that style keeps.
+        scheme.tint_window_bar = app.settings.window_bar_tint(style);
         let look = Palette::of(scheme, palette.dark);
         let skin = theme::Skin {
             style,
@@ -463,19 +461,7 @@ fn styles(app: &mut App, ui: &mut Ui) {
         ui.painter().galley(at, name, ink);
         if response.clicked() && !current {
             app.settings.style = style;
-            start_window_bar(style, &mut app.settings.tint_window_bar);
         }
-    }
-}
-
-/// The window bar tint a style starts with when it is picked. Windows 7
-/// starts with it off, Windows 98 and XP start with it on. The background
-/// tint is left alone, so the user's choice is kept.
-fn start_window_bar(style: Style, window_bar: &mut bool) {
-    match style {
-        Style::Glass => *window_bar = false,
-        Style::Retro | Style::Luna => *window_bar = true,
-        _ => {}
     }
 }
 
