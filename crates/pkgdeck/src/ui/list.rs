@@ -11,6 +11,7 @@ use eframe::egui::{
     self, emath::GuiRounding as _, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, Vec2,
 };
+use std::collections::HashSet;
 
 const ROW: f32 = 60.0;
 /// A wide row's height at the chosen density.
@@ -835,11 +836,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let running = app.writing
         && (app.active_rows.contains(&identity)
             || app.progress.for_row(&identity, &row.source).is_some());
-    let batch_state = if app.writing && app.progress.total > 1 {
-        app.progress.for_row(&identity, &row.source)
-    } else {
-        None
-    };
+    let batch_state = batch_mark(
+        app.writing,
+        &app.progress,
+        &app.done_rows,
+        &identity,
+        &row.source,
+    );
     let pull = matches!(row.source.as_str(), "docker" | "podman")
         && row.is_installed()
         && row.reference.is_some()
@@ -1166,6 +1169,25 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
 
 /// Where a row stands in a batch: waiting, working, or done, over its icon.
 /// One quiet mark per row, so the card's single bar is all that moves.
+/// The batch mark on a row: what the running batch does to it. Once the
+/// batch ends, the rows it finished stay Done until the reload confirms them.
+fn batch_mark(
+    writing: bool,
+    progress: &model::Progress,
+    done: &HashSet<String>,
+    identity: &str,
+    source: &str,
+) -> Option<model::RowState> {
+    if !writing {
+        return done.contains(identity).then_some(model::RowState::Done);
+    }
+    if progress.total > 1 {
+        progress.for_row(identity, source)
+    } else {
+        None
+    }
+}
+
 fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Palette) {
     ui.painter().rect_filled(
         icon,
@@ -1532,7 +1554,41 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{source_badge_shown, status_line, waiting_text};
+    use super::{batch_mark, source_badge_shown, status_line, waiting_text};
+    use crate::model::{identity_of_row_value, Progress, RowState};
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_finished_row_keeps_its_mark_until_the_reload_confirms() {
+        let target = serde_json::json!({
+            "source": "dnf", "name": "fixture", "architecture": "x86_64"
+        });
+        let other = serde_json::json!({
+            "source": "dnf", "name": "other", "architecture": "x86_64"
+        });
+        let identity = identity_of_row_value(&target);
+        let progress: Progress = serde_json::from_value(serde_json::json!({
+            "total": 2, "done": 1,
+            "targets": [target, other],
+            "finished": [target],
+        }))
+        .unwrap();
+        let done = HashSet::from([identity.clone()]);
+        let mark = |writing, done: &HashSet<String>| {
+            batch_mark(writing, &progress, done, &identity, "dnf")
+        };
+        assert_eq!(mark(true, &HashSet::new()), Some(RowState::Done));
+        assert_eq!(mark(false, &done), Some(RowState::Done));
+        assert_eq!(mark(false, &HashSet::new()), None);
+        let other_id = identity_of_row_value(&serde_json::json!({
+            "source": "dnf", "name": "other", "architecture": "x86_64"
+        }));
+        assert_eq!(
+            batch_mark(false, &progress, &done, &other_id, "dnf"),
+            None,
+            "a row the batch didn't finish is not Done"
+        );
+    }
 
     #[test]
     fn batch_mark_replaces_the_source_badge_on_its_row() {

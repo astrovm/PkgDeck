@@ -84,6 +84,10 @@ pub struct App {
     pub details: Details,
     pub notice: Notice,
     pub progress: Progress,
+    /// What the last batch changed, read when `writing` goes false.
+    pub batch: model::BatchResult,
+    /// Rows a batch just finished, shown as Done until the reload confirms.
+    pub done_rows: HashSet<String>,
     pub catalog: Vec<Source>,
     pub report: ReportState,
     pub pending: Vec<String>,
@@ -218,6 +222,7 @@ impl App {
             on_failure_changed: "failure",
             on_failed_rows_changed: "failed_rows",
             on_progress_changed: "progress",
+            on_batch_finished_changed: "batch_finished",
             on_repositories_changed: "repositories",
             on_source_catalog_changed: "source_catalog",
             on_report_state_changed: "report_state",
@@ -291,6 +296,8 @@ impl App {
             cursor_moved: false,
             unchecked: HashSet::new(),
             active_rows: HashSet::new(),
+            done_rows: HashSet::new(),
+            batch: model::BatchResult::default(),
             flashes: HashMap::new(),
             held: Vec::new(),
             snapshot: HashMap::new(),
@@ -537,6 +544,9 @@ impl App {
         if has("progress") {
             self.progress = model::parse(self.ctl.progress().as_str());
         }
+        if has("batch_finished") {
+            self.batch = model::parse(self.ctl.batch_finished().as_str());
+        }
         if has("activity") {
             self.activity = model::parse(self.ctl.activity().as_str());
         }
@@ -598,6 +608,7 @@ impl App {
             self.items_stale = true;
             self.flash_changed_rows();
             self.restore_selection();
+            self.done_rows.clear();
             if !self.post_write_reload && !self.writing {
                 self.snapshot.clear();
             }
@@ -627,10 +638,27 @@ impl App {
                     })
                     .collect();
                 self.flashes.clear();
+                self.done_rows.clear();
             } else if !self.writing && was_writing {
                 self.active_rows.clear();
+                // The rows the batch finished stay Done until the reload
+                // confirms them, which clears them when the job ends.
+                self.done_rows = self
+                    .batch
+                    .finished
+                    .iter()
+                    .map(model::identity_of_row_value)
+                    .collect();
                 if self.page.lists() && !self.close_pending {
-                    self.post_write_reload = true;
+                    // Updates only re-reads the sources the batch ran on.
+                    let refresh = self.page == Page::Updates && !self.batch.sources.is_empty();
+                    if refresh {
+                        let sources = self.batch.sources.join(",");
+                        self.c().refresh_sources(sources.into());
+                    }
+                    if !refresh || !*self.ctl.busy() {
+                        self.post_write_reload = true;
+                    }
                 }
             }
         }

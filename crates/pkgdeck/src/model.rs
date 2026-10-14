@@ -440,6 +440,14 @@ impl Notice {
     }
 }
 
+/// `batch_finished`: what the last batch changed, read when `writing` goes false.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BatchResult {
+    pub sources: Vec<String>,
+    pub finished: Vec<Value>,
+}
+
 /// `progress`: the running change.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]

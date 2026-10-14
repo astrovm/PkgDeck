@@ -187,6 +187,7 @@ pub mod ffi {
         failure, set_failure, on_failure_changed: QString;
         failed_rows, set_failed_rows, on_failed_rows_changed: QString;
         progress, set_progress, on_progress_changed: QString;
+        batch_finished, set_batch_finished, on_batch_finished_changed: QString;
         repositories, set_repositories, on_repositories_changed: QString;
         source_catalog, set_source_catalog, on_source_catalog_changed: QString;
         report_state, set_report_state, on_report_state_changed: QString;
@@ -222,6 +223,7 @@ enum Job {
     BackgroundUpdates(Vec<String>),
     RetrySource(String, String, String),
     RetryFailedUpdates(Vec<String>),
+    RefreshSources(Vec<String>),
     Details(PackageId),
     PlanOperation(Operation),
     /// Resolve the Homebrew cask that can take over a macOS app row and
@@ -371,6 +373,8 @@ struct ProgressState {
     item: Option<PackageId>,
     /// Packages already done, successfully or not.
     finished: Vec<PackageId>,
+    /// Packages whose change succeeded, in the order they finished.
+    succeeded: Vec<PackageId>,
     names: Names,
 }
 impl ProgressState {
@@ -416,7 +420,7 @@ impl ProgressState {
             return false;
         };
         if let Some(previous) = self.item.take().filter(|previous| *previous != id) {
-            self.finish(previous);
+            self.finish(previous, true);
         }
         self.label = format!(
             "Update {}",
@@ -436,8 +440,12 @@ impl ProgressState {
         pkgdeck_core::backends::output_package(&backend, line)
             .is_some_and(|name| self.move_to(&backend, &name))
     }
-    /// Marks a package done and counts it, once.
-    fn finish(&mut self, id: PackageId) {
+    /// Marks a package done and counts it, once. `ok` says whether its
+    /// change succeeded.
+    fn finish(&mut self, id: PackageId, ok: bool) {
+        if ok && !self.succeeded.contains(&id) {
+            self.succeeded.push(id.clone());
+        }
         if !self.finished.contains(&id) {
             self.finished.push(id);
             self.done = (self.done + 1).min(self.total);
@@ -482,6 +490,7 @@ impl ProgressState {
             rows: BTreeMap::new(),
             item: None,
             finished: vec![],
+            succeeded: vec![],
             names: names.clone(),
         }
     }
@@ -507,7 +516,7 @@ impl ProgressState {
                 self.transferred = *completed;
                 self.transfer_total = (*total).filter(|total| *total > 0);
             }
-            Event::Finished { operation, .. } => {
+            Event::Finished { operation, result } => {
                 let rows = match operation {
                     Operation::UpgradeAll { backend } => {
                         self.rows.get(backend).cloned().unwrap_or_default()
@@ -518,7 +527,7 @@ impl ProgressState {
                     self.done = (self.done + 1).min(self.total);
                 }
                 for id in rows {
-                    self.finish(id);
+                    self.finish(id, result.is_ok());
                 }
                 self.item = None;
                 self.transferred = 0;
@@ -578,6 +587,23 @@ impl ProgressState {
             "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
+    }
+    /// What the batch changed, for the Updates list: the sources it ran on
+    /// and the rows that succeeded. Empty for a single change, which has no
+    /// batch marks.
+    fn batch_result(&self) -> QString {
+        if self.total <= 1 {
+            return encoded(json!({"sources": [], "finished": []}));
+        }
+        let mut sources: Vec<&str> = Vec::new();
+        for operation in &self.operations {
+            let backend = operation.backend();
+            if !sources.contains(&backend) {
+                sources.push(backend);
+            }
+        }
+        let finished: Vec<Value> = self.succeeded.iter().map(target_row).collect();
+        encoded(json!({"sources": sources, "finished": finished}))
     }
 }
 /// A Type 2 AppImage, whatever its file is called.
@@ -870,7 +896,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 Ok(Payload::RetryPackages(source, report))
             }
         }
-        Job::RetryFailedUpdates(sources) => {
+        Job::RetryFailedUpdates(sources) | Job::RefreshSources(sources) => {
             let mut report = engine.installed_for_updates(cancel);
             filter_updates(&mut report);
             Ok(Payload::RetryFailedUpdates(sources, report))
@@ -1390,6 +1416,9 @@ pub struct Controller {
     /// The rows a change failed on, with why: `[{target, reason}]`.
     failed_rows: QString,
     progress: QString,
+    /// What the last batch changed, read when `writing` goes false. See
+    /// `ProgressState::batch_result`.
+    batch_finished: QString,
     confirmation: QString,
     confirmation_data: QString,
     opened: QString,
@@ -1539,6 +1568,7 @@ impl Default for Controller {
             failure: "{}".into(),
             failed_rows: "[]".into(),
             progress: "{}".into(),
+            batch_finished: "{}".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
             opened: QString::default(),
@@ -1928,7 +1958,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
         Job::OpenInput(_) | Job::ImportRepository(_) | Job::AutoClean { .. } => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
-        Job::RetryFailedUpdates(sources) => sources.clone(),
+        Job::RetryFailedUpdates(sources) | Job::RefreshSources(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
         // AppImages are taken over by the AppImage source itself.
         Job::PlanAdoption(app) if app.id.backend == "appimage" => vec!["appimage".into()],
@@ -5346,7 +5376,10 @@ impl ffi::PackageController {
             let section = |job: &Job| {
                 matches!(
                     job,
-                    Job::Load(..) | Job::RetrySource(..) | Job::RetryFailedUpdates(..)
+                    Job::Load(..)
+                        | Job::RetrySource(..)
+                        | Job::RetryFailedUpdates(..)
+                        | Job::RefreshSources(..)
                 )
             };
             if self.rust().queued.as_ref().is_some_and(section) {
@@ -5541,6 +5574,28 @@ impl ffi::PackageController {
         }
         self.as_mut().set_phase("loading");
         self.start(Job::RetrySource(view, query, source));
+    }
+    /// Re-read the Updates rows of `sources` (a comma list) after a batch
+    /// wrote to them. Unlike `retry_source`, it never plans upgrades.
+    pub fn refresh_sources(mut self: Pin<&mut Self>, sources: QString) {
+        if self.rust().foreground_worker() || self.rust().pending.is_some() {
+            return;
+        }
+        let sources: Vec<String> = sources
+            .to_string()
+            .split(',')
+            .filter(|source| {
+                pkgdeck_core::backends::BACKEND_IDS.contains(source)
+                    && (self.rust().source_filter.is_empty()
+                        || self.rust().source_filter.iter().any(|f| f == source))
+            })
+            .map(str::to_owned)
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        self.as_mut().set_phase("loading");
+        self.start(Job::RefreshSources(sources));
     }
     /// Snapshot the current table under `key`. Called after a terminal view
     /// report lands; the caller guarantees no newer load superseded it.
@@ -7464,7 +7519,7 @@ impl ffi::PackageController {
                             }
                             // Update all retried failed sources; the merged
                             // report is the current Updates section.
-                            Job::RetryFailedUpdates(_)
+                            Job::RetryFailedUpdates(_) | Job::RefreshSources(_)
                                 if !matches!(self.rust().queued, Some(Job::Load(..))) =>
                             {
                                 Some(cache_key(
@@ -7548,7 +7603,15 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().background = false;
             self.as_mut().rust_mut().discard_revalidation = false;
             let queued = self.as_mut().rust_mut().queued.take();
-            self.as_mut().rust_mut().progress_state = None;
+            // Set before the progress clears, so the frontend can read what
+            // the batch changed when `writing` goes false.
+            let batch = self
+                .as_mut()
+                .rust_mut()
+                .progress_state
+                .take()
+                .map_or_else(|| "{}".into(), |state| state.batch_result());
+            self.as_mut().set_batch_finished(batch);
             self.as_mut().set_progress("{}".into());
             self.as_mut().set_writing(false);
             let awaiting = self.rust().awaiting_prefetch && !self.rust().refreshing;
@@ -8919,6 +8982,58 @@ mod tests {
             .retry_source("Updates".into(), "".into(), "npm".into());
         assert!(controller.rust().worker.is_none());
         assert!(controller.rust().queued.is_none());
+    }
+    #[test]
+    fn refresh_sources_reloads_only_the_listed_sources() {
+        let package = |backend: &str| -> Package {
+            serde_json::from_value(json!({
+                "id": {"backend":backend, "name":"synthetic-tool", "architecture":"all", "scope":"system"},
+                "display_name":"Synthetic tool", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
+            }))
+            .unwrap()
+        };
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().active_view = "Updates".into();
+        controller.as_mut().rust_mut().packages = vec![package("npm")];
+
+        // Unknown, empty, and filtered-out sources start nothing.
+        controller.as_mut().refresh_sources("unknown,,".into());
+        controller.as_mut().rust_mut().source_filter = vec!["apt".into()];
+        controller.as_mut().refresh_sources("npm".into());
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().queued.is_none());
+        controller.as_mut().rust_mut().source_filter.clear();
+
+        // A foreground read keeps its place and nothing queues behind it.
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Updates".into(), String::new()),
+            vec![],
+        ));
+        controller.as_mut().refresh_sources("apt".into());
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(worker.job, Job::Load(..))
+        ));
+        assert!(controller.rust().queued.is_none());
+        controller.as_mut().rust_mut().worker = None;
+
+        // The refresh reads only apt and leaves npm's rows alone. It does
+        // not plan upgrades, so nothing else starts after it lands.
+        controller.as_mut().refresh_sources("apt".into());
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::RefreshSources(sources)
+                if sources == &["apt"])
+        ));
+        settle(&mut controller);
+        assert!(controller
+            .rust()
+            .packages
+            .iter()
+            .any(|p| p.id.backend == "npm"));
+        assert!(controller.rust().queued.is_none());
+        assert!(controller.rust().worker.is_none());
     }
     #[test]
     fn apt_removals_appear_first_in_update_confirmation() {
@@ -15940,6 +16055,62 @@ mod tests {
             receiver.try_iter().collect::<Vec<_>>().as_slice(),
             [Reply::Output(line)] if line == "==> Upgrading beta"
         ));
+    }
+    #[test]
+    fn batch_result_names_the_sources_and_rows_that_succeeded() {
+        let first = synthetic_package("first", "First App").id;
+        let second = synthetic_package("second", "Second App").id;
+        let flatpak = Operation::UpgradeAll {
+            backend: "flatpak".into(),
+        };
+        let job = Job::UpgradeAll(
+            vec![
+                Operation::Upgrade(first.clone()),
+                Operation::Upgrade(second.clone()),
+                flatpak.clone(),
+            ],
+            None,
+        );
+        let mut state = ProgressState::new(&job, None, &Names::new());
+        let result = |state: &ProgressState| -> Value {
+            serde_json::from_str(&state.batch_result().to_string()).unwrap()
+        };
+        assert_eq!(
+            result(&state),
+            json!({"sources": ["apt", "flatpak"], "finished": []})
+        );
+        state.apply(&Event::Started(Operation::Upgrade(first.clone())));
+        state.apply(&Event::Finished {
+            operation: Operation::Upgrade(first.clone()),
+            result: Ok(OperationOutcome::default()),
+        });
+        // A failed row is done, but not a success, so it is not listed.
+        state.apply(&Event::Started(Operation::Upgrade(second.clone())));
+        state.apply(&Event::Finished {
+            operation: Operation::Upgrade(second.clone()),
+            result: Err(EngineError::InvalidResponse {
+                backend: "apt".into(),
+                reason: "failed".into(),
+            }),
+        });
+        state.apply(&Event::Started(flatpak.clone()));
+        state.apply(&Event::Finished {
+            operation: flatpak,
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(
+            result(&state),
+            json!({"sources": ["apt", "flatpak"], "finished": [target_row(&first)]})
+        );
+        // A single change has no batch marks, so it names nothing.
+        let single = Job::Write(Operation::Install(first.clone()), None);
+        let mut state = ProgressState::new(&single, None, &Names::new());
+        state.apply(&Event::Started(Operation::Install(first.clone())));
+        state.apply(&Event::Finished {
+            operation: Operation::Install(first),
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(result(&state), json!({"sources": [], "finished": []}));
     }
     #[test]
     fn followed_output_moves_the_running_update_all_on() {

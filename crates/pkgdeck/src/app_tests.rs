@@ -246,6 +246,83 @@ fn changes_flash_the_rows_they_touched() {
     app.flash_changed_rows();
 }
 
+/// Runs a write and ends it with `batch` as its result. The job is still
+/// busy when the write ends, as it is until the reload it starts finishes.
+fn end_batch(app: &mut App, batch: Value) {
+    app.c().set_busy(true);
+    app.c().set_writing(true);
+    app.react();
+    app.c().set_batch_finished(batch.to_string().into());
+    app.c().set_writing(false);
+    app.react();
+}
+
+#[test]
+fn finished_rows_stay_done_until_the_reload_confirms() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    let (a, b) = (app.rows[0].identity(), app.rows[1].identity());
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(app.done_rows.contains(&a), "the finished row is Done");
+    assert!(!app.done_rows.contains(&b), "an unfinished row is not");
+    assert!(!app.post_write_reload, "a refresh replaces the full reload");
+    // The reload confirms the rows, so the marks go.
+    app.c().set_busy(false);
+    app.react();
+    assert!(app.done_rows.is_empty());
+}
+
+#[test]
+fn a_failed_row_is_never_marked_done() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    let b = app.rows[1].identity();
+    // `b` failed, so the batch lists only `a`.
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(!app.done_rows.contains(&b));
+}
+
+#[test]
+fn a_single_target_batch_marks_nothing_and_reloads_the_page() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({}))]));
+    end_batch(&mut app, json!({"sources": [], "finished": []}));
+    assert!(app.done_rows.is_empty());
+    assert!(app.post_write_reload, "no refresh was planned, so reload");
+}
+
+#[test]
+fn an_empty_first_run_batch_is_safe() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({}))]));
+    end_batch(&mut app, json!({}));
+    assert!(app.done_rows.is_empty());
+}
+
+#[test]
+fn other_pages_reload_instead_of_refreshing_sources() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("a", json!({}))]));
+    let a = app.rows[0].identity();
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(app.done_rows.contains(&a));
+    assert!(app.post_write_reload);
+}
+
 #[test]
 fn a_close_while_busy_waits_for_the_job() {
     let mut app = app();
