@@ -277,6 +277,8 @@ impl Parts {
             pos2(snap(at.inner.left()), snap(at.inner.top())),
             pos2(snap(at.inner.right()), snap(at.inner.bottom())),
         );
+        // The strip joins the card's layout, so it must sit on the UI grid too.
+        // At fractional ppp the whole pixels above are off it.
         let strip = if vertical {
             Rect::from_min_max(
                 inner.right_top(),
@@ -287,7 +289,8 @@ impl Parts {
                 inner.left_bottom(),
                 pos2(at.inner.right(), (inner.bottom() + thick).round_ui()),
             )
-        };
+        }
+        .round_ui();
         let whole = span(vertical, strip);
         let button = thick.min((whole.len() - 4.0).max(0.0) / 2.0);
         let (back, forward, track) = if family == Family::Gel {

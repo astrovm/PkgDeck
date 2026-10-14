@@ -1757,3 +1757,92 @@ mod icon_tests {
         assert!(texts("failure").is_empty());
     }
 }
+
+#[cfg(test)]
+mod grid_tests {
+    use crate::{
+        app::{App, Launch},
+        platform::Platform,
+        settings::Store,
+    };
+    use crate::{model::Page, settings::Style};
+    use eframe::egui::{self, pos2, vec2, Rect};
+    use egui_kittest::Harness;
+    use pkgdeck_app::controller::ffi::create_synthetic_controller;
+    use serde_json::json;
+
+    /// Every text run drawn in `shape`, recursing into grouped shapes.
+    fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn card_body_stays_on_the_ui_grid_when_the_card_is_off_grid() {
+        // egui flags any Ui edge off the 1/32 grid with an orange "Unaligned" label.
+        // A card can land off the grid while the details panel animates open, and
+        // a long list keeps its scrollbar, whose strip must also stay on the grid.
+        let rows: Vec<_> = (0..200)
+            .map(|i| {
+                json!({ "kind": "package", "name": format!("pkg{i}"), "display_name": format!("Package {i}"),
+                    "source": "apt", "architecture": "x86_64", "scope": "system", "scope_label": "System",
+                    "installed": "1.0", "candidate": null, "update": "current", "summary": "Summary" })
+            })
+            .collect();
+        for style in Style::ALL {
+            for (pixels_per_point, top) in [1.0, 1.25, 1.5, 1.75]
+                .into_iter()
+                .flat_map(|ppp| [20.0, 20.3, 20.7, 20.9].map(|top| (ppp, top)))
+            {
+                let (store, settings) = Store::open(None, None);
+                let mut platform = Platform::start(|| {});
+                platform.record_notifications();
+                let mut app = App::with_controller(
+                    create_synthetic_controller(|_, _, _, _| {
+                        Ok(pkgdeck_core::engine::Engine::default())
+                    }),
+                    settings,
+                    store,
+                    platform,
+                    Launch::default(),
+                );
+                app.settings.style = style;
+                app.page = Page::Installed;
+                app.c().set_rows(serde_json::Value::Array(rows.clone()).to_string().into());
+                app.react();
+                let mut harness = Harness::builder()
+                    .with_size(vec2(900.0, 700.0))
+                    .build_ui_state(
+                        |ui, (ready, app): &mut (bool, App)| {
+                            if !*ready {
+                                crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                                *ready = true;
+                                return;
+                            }
+                            // The custom scrollbar only draws once the app has set the theme.
+                            crate::ui::theme::set_scheme(ui.ctx(), crate::ui::theme::Scheme::of(&app.settings));
+                            let card = Rect::from_min_size(pos2(20.0, top), vec2(600.0, 500.0));
+                            super::list_card(app, ui, card);
+                        },
+                        (false, app),
+                    );
+                harness.set_pixels_per_point(pixels_per_point);
+                harness.run_steps(3);
+                let mut drawn = Vec::new();
+                for clipped in &harness.output().shapes {
+                    texts(&clipped.shape, &mut drawn);
+                }
+                // Without rows the card shows a skeleton, and the test would pass vacuously.
+                assert!(drawn.iter().any(|t| t == "Package 0"), "rows were not drawn");
+                let labels = drawn.iter().filter(|t| *t == "Unaligned").count();
+                assert_eq!(
+                    labels, 0,
+                    "{labels} off-grid edges in the Installed card body, {style:?} at {pixels_per_point} ppp"
+                );
+            }
+        }
+    }
+}
