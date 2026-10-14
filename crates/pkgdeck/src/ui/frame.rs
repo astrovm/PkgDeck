@@ -233,7 +233,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 /// Lets the frame's edges resize the window. Called after the app has
 /// drawn. It reads the pointer itself rather than adding widgets, so the
 /// title bar and its buttons next to the edge don't take the press.
-pub fn edges(ui: &mut Ui, full: Rect) {
+pub fn edges(ui: &mut Ui, full: Rect, resizing_sidebar: bool) {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
     let state = WindowState::of(&ctx);
@@ -254,6 +254,11 @@ pub fn edges(ui: &mut Ui, full: Rect) {
             Stroke::new(1.0, edge),
             StrokeKind::Inside,
         );
+    }
+    // At the divider's endpoints the sidebar owns the drag, even where
+    // its handle overlaps the window's outer resize edge.
+    if resizing_sidebar {
+        return;
     }
     let Some(direction) = ctx
         .pointer_hover_pos()
@@ -1045,7 +1050,7 @@ mod tests {
                 // The app fills the room under the bar.
                 ui.painter()
                     .rect_filled(window(), CornerRadius::ZERO, Color32::RED);
-                edges(ui, window());
+                edges(ui, window(), false);
             })
         });
         match shapes.last() {
@@ -1065,7 +1070,7 @@ mod tests {
             in_style(style, || {
                 theme::painted(|ui| {
                     room = show(ui, window(), "PkgDeck", &palette);
-                    edges(ui, window());
+                    edges(ui, window(), false);
                 })
             });
             match metrics(style) {
