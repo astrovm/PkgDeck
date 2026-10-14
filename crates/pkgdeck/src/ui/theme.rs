@@ -2,6 +2,7 @@
 //! style's shapes, the fonts, and its line icons.
 
 use super::icons;
+use super::skin::lerp;
 use crate::settings::{Accent, DarkTheme, Density, Family, LightTheme, Style, TextSize, Typeface};
 use eframe::egui::{
     self, epaint::PathStroke, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
@@ -21,6 +22,9 @@ pub struct Palette {
     /// The accent deep enough for white text on it, as the older styles
     /// fill title bars and selections whatever the appearance.
     pub deep: Color32,
+    /// The older styles' title bar fill: [`Palette::deep`] when the window
+    /// bar is tinted, else a neutral grey white text still reads on.
+    pub bar: Color32,
     /// The accent bright enough to read on black.
     pub bright: Color32,
     pub line: Color32,
@@ -40,6 +44,19 @@ pub struct Palette {
     pub tint_amount: f32,
     pub dark: bool,
 }
+/// The title bar grey when the window bar is not tinted: dark enough for
+/// white text on a light window, a step lighter than a dark one.
+fn neutral_bar(canvas: Color32, dark: bool) -> Color32 {
+    // The canvas's average brightness, with no hue of its own.
+    let average = (u16::from(canvas.r()) + u16::from(canvas.g()) + u16::from(canvas.b())) / 3;
+    let grey = Color32::from_gray(average as u8);
+    if dark {
+        lerp(grey, Color32::WHITE, 0.25)
+    } else {
+        lerp(grey, Color32::BLACK, 0.6)
+    }
+}
+
 /// The glass colour Windows 7 shipped closest to `accent`, its alpha the
 /// colour intensity; dark windows take the deep swatches.
 fn glass_color(accent: Accent, custom: Option<Color32>, dark: bool) -> Color32 {
@@ -99,6 +116,9 @@ pub struct Scheme {
     /// Whether the accent tints the greys of the window; see
     /// [`Settings::tint_backgrounds`](crate::settings::Settings::tint_backgrounds).
     pub tint_backgrounds: bool,
+    /// Whether the accent colours the older styles' title bars; see
+    /// [`Settings::tint_window_bar`](crate::settings::Settings::tint_window_bar).
+    pub tint_window_bar: bool,
     pub text_size: TextSize,
     pub style: Style,
     /// Times the style's own corner roundness, from 0 to 2.
@@ -114,6 +134,7 @@ impl Default for Scheme {
             accent: Accent::default(),
             custom_accent: None,
             tint_backgrounds: false,
+            tint_window_bar: true,
             text_size: TextSize::default(),
             style: Style::default(),
             roundness: 1.0,
@@ -132,6 +153,7 @@ impl Scheme {
             accent: settings.accent,
             custom_accent: parse_hex(&settings.custom_accent),
             tint_backgrounds: settings.tint_backgrounds,
+            tint_window_bar: settings.tint_window_bar,
             text_size: settings.text_size,
             style: settings.style,
             roundness: settings.roundness,
@@ -438,6 +460,11 @@ impl Palette {
                 rgb(0xffffff)
             },
             deep,
+            bar: if scheme.tint_window_bar {
+                deep
+            } else {
+                neutral_bar(canvas, dark)
+            },
             bright,
             line: tint(ink, if dark { 0.12 } else { 0.13 }),
             strong_line: tint(ink, if dark { 0.3 } else { 0.32 }),
@@ -447,7 +474,14 @@ impl Palette {
             success: rgb(if dark { 0x6fd39a } else { 0x1b7a45 }),
             warning: rgb(if dark { 0xf2c56b } else { 0x9a6400 }),
             heart: rgb(0xe34b5f),
-            glass: glass_color(scheme.accent, custom, dark),
+            glass: if scheme.tint_window_bar {
+                glass_color(scheme.accent, custom, dark)
+            } else {
+                // Keep the glass's intensity, lose its hue.
+                let grey = neutral_bar(canvas, dark);
+                let alpha = glass_color(scheme.accent, custom, dark).a();
+                Color32::from_rgba_unmultiplied(grey.r(), grey.g(), grey.b(), alpha)
+            },
             tint: hue,
             tint_amount,
             dark,
@@ -1396,6 +1430,34 @@ mod tests {
                         assert_eq!(a.family(), b.family(), "{a:?} {b:?} dark={dark}");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn an_untinted_window_bar_is_grey_and_readable_and_the_rest_keeps_the_accent() {
+        for style in Style::ALL {
+            for dark in [false, true] {
+                let scheme = |tint_window_bar| Scheme {
+                    style,
+                    accent: Accent::Red,
+                    tint_window_bar,
+                    ..Scheme::default()
+                };
+                let tinted = Palette::of(scheme(true), dark);
+                let grey = Palette::of(scheme(false), dark);
+                let context = format!("{style:?} dark={dark}");
+                assert_eq!(tinted.bar, tinted.deep, "{context}");
+                assert_eq!(grey.bar.r(), grey.bar.g(), "{context}");
+                assert_eq!(grey.bar.g(), grey.bar.b(), "{context}");
+                assert!(contrast(Color32::WHITE, grey.bar) >= 4.5, "{context}");
+                assert_eq!(grey.glass.a(), tinted.glass.a(), "{context}");
+                assert_eq!(grey.glass.r(), grey.glass.g(), "{context}");
+                assert_eq!(grey.glass.g(), grey.glass.b(), "{context}");
+                // Only the bars and the glass lose the accent.
+                assert_eq!(grey.accent, tinted.accent, "{context}");
+                assert_eq!(grey.selection, tinted.selection, "{context}");
+                assert_eq!(grey.canvas, tinted.canvas, "{context}");
             }
         }
     }

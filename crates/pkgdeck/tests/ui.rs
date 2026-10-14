@@ -443,6 +443,16 @@ fn tint_backgrounds_switch_turns_the_accent_off_the_greys() {
 }
 
 #[test]
+fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
+    let mut harness = show(Page::Settings);
+    assert!(harness.state().1.settings.tint_window_bar);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(!harness.state().1.settings.tint_window_bar);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(harness.state().1.settings.tint_window_bar);
+}
+
+#[test]
 fn styles_and_their_choices_change_the_look() {
     use pkgdeck::settings::{Density, Style, Typeface};
     let mut harness = show(Page::Settings);

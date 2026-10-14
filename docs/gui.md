@@ -609,6 +609,9 @@ and **About**.
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
   tints the background, panels and buttons. Leave it off to keep those greys
   neutral. The accent still colours selection, links and controls.
+- **Tint window bar** (on by default, under **Accent**): when on, the accent
+  colours the title bar of the older styles. Turn it off for a neutral grey
+  bar. The accent still colours selection, links and controls.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
