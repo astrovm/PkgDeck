@@ -608,7 +608,7 @@ and **About**.
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
   tints the background, panels and buttons, the same way in every accent. Leave
   it off to keep those greys neutral. The accent still colours selection, links
-  and controls. Picking **Windows 7** turns it off.
+  and controls. Picking a style never changes it, so your choice stays on.
 - **Tint window bar** (on by default, under **Accent**): only **Windows 98**, **Windows XP**
   and **Windows 7** draw an accent title bar, so only they show it. When on, the
   accent colours that title bar. Turn it off for a neutral grey bar. The accent

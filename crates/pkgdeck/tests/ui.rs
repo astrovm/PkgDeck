@@ -481,7 +481,7 @@ fn picking_another_style_keeps_the_background_tint_you_set() {
 }
 
 #[test]
-fn windows_7_turns_both_tints_off() {
+fn windows_7_turns_the_window_bar_off_and_keeps_the_background_tint() {
     use pkgdeck::settings::Style;
     let mut harness = show(Page::Settings);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
@@ -493,7 +493,7 @@ fn windows_7_turns_both_tints_off() {
     harness.run_steps(3);
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Glass);
-    assert!(!settings.tint_backgrounds);
+    assert!(settings.tint_backgrounds);
     assert!(!settings.tint_window_bar);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
     assert!(harness.state().1.settings.tint_window_bar);

@@ -422,11 +422,7 @@ fn styles(app: &mut App, ui: &mut Ui) {
         if !current {
             scheme.accent = style.accent();
             // The card shows the tints the style starts with.
-            start_tints(
-                style,
-                &mut scheme.tint_backgrounds,
-                &mut scheme.tint_window_bar,
-            );
+            start_window_bar(style, &mut scheme.tint_window_bar);
         }
         let look = Palette::of(scheme, palette.dark);
         let skin = theme::Skin {
@@ -469,23 +465,17 @@ fn styles(app: &mut App, ui: &mut Ui) {
         if response.clicked() && !current {
             app.settings.style = style;
             app.settings.accent = style.accent();
-            start_tints(
-                style,
-                &mut app.settings.tint_backgrounds,
-                &mut app.settings.tint_window_bar,
-            );
+            start_window_bar(style, &mut app.settings.tint_window_bar);
         }
     }
 }
 
-/// The tints a style starts with when it is picked. Windows 7 starts
-/// with both off, Windows 98 and XP start with the title bar tinted.
-fn start_tints(style: Style, backgrounds: &mut bool, window_bar: &mut bool) {
+/// The window bar tint a style starts with when it is picked. Windows 7
+/// starts with it off, Windows 98 and XP start with it on. The background
+/// tint is left alone, so the user's choice is kept.
+fn start_window_bar(style: Style, window_bar: &mut bool) {
     match style {
-        Style::Glass => {
-            *backgrounds = false;
-            *window_bar = false;
-        }
+        Style::Glass => *window_bar = false,
         Style::Retro | Style::Luna => *window_bar = true,
         _ => {}
     }
