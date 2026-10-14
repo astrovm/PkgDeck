@@ -134,14 +134,19 @@ impl ProjectSettings {
         Some(config.join("pkgdeck/clean.json"))
     }
     /// The saved settings, or the defaults when there are none or they
-    /// can't be read. Relative folders are dropped.
+    /// can't be read. Relative folders and parent traversals are dropped.
     pub fn load(host: &Host) -> Self {
         let saved = Self::path(host)
             .and_then(|path| fs::read(path).ok())
             .and_then(|text| serde_json::from_slice::<Self>(&text).ok());
         match saved {
             Some(mut settings) => {
-                settings.folders.retain(|folder| folder.is_absolute());
+                settings.folders.retain(|folder| {
+                    folder.is_absolute()
+                        && !folder
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                });
                 settings
             }
             None => Self::defaults(host),
@@ -321,6 +326,33 @@ impl Walk<'_> {
 
 /// Projects under `folder`, and when each last changed.
 fn projects_in(folder: &Path, home: Option<PathBuf>, cancel: &Cancellation) -> Vec<Project> {
+    if folder
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return vec![];
+    }
+    #[cfg(target_os = "macos")]
+    let home = {
+        let Ok(resolved) = fs::canonicalize(folder) else {
+            return vec![];
+        };
+        if resolved.ancestors().any(|parent| {
+            parent
+                .extension()
+                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("app"))
+        }) {
+            return vec![];
+        }
+        // Map the real home back into the selected path spelling. This also
+        // recognizes a symlink to the home folder without changing item keys.
+        home.and_then(|home| fs::canonicalize(home).ok())
+            .and_then(|home| {
+                home.strip_prefix(&resolved)
+                    .ok()
+                    .map(|relative| folder.join(relative))
+            })
+    };
     let Ok(metadata) = fs::metadata(folder) else {
         return vec![];
     };
@@ -390,10 +422,18 @@ impl Projects {
                 // Old cleanup keys must respect the same privacy boundary
                 // as a fresh scan. Selecting a protected root includes it.
                 #[cfg(target_os = "macos")]
-                if let Some(home) = home(&self.host) {
+                if let Some(home) = home(&self.host).and_then(|home| fs::canonicalize(home).ok()) {
+                    let Ok(resolved_path) = fs::canonicalize(path) else {
+                        return false;
+                    };
+                    let Ok(resolved_folder) = fs::canonicalize(folder) else {
+                        return false;
+                    };
                     for name in ["Desktop", "Documents", "Downloads"] {
                         let protected = home.join(name);
-                        if path.starts_with(&protected) && !folder.starts_with(&protected) {
+                        if resolved_path.starts_with(&protected)
+                            && !resolved_folder.starts_with(&protected)
+                        {
                             return false;
                         }
                     }
@@ -1855,17 +1895,26 @@ mod tests {
         age_files(&parent, 30);
         let bin = tools(&home, "");
         let cancel = Cancellation::default();
+        let alias = parent.join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
         // Starting above the home folder must also respect the boundary.
-        for root in [&home, &parent] {
+        for root in [&home, &parent, &alias] {
             let mut backend = projects(&home, &bin, vec![root.clone()], 7);
+            let expected_home = if root == &alias { &alias } else { &home };
             assert_eq!(
                 keys(&backend.cleanup(&cancel).unwrap()),
-                vec![format!("build:{}", home.join("code/project").display())]
+                vec![format!(
+                    "build:{}",
+                    expected_home.join("code/project").display()
+                )]
             );
             for folder in ["Desktop", "Documents", "Downloads"] {
                 let id = CleanupId {
                     backend: "projects".into(),
-                    key: format!("build:{}", home.join(folder).join("project").display()),
+                    key: format!(
+                        "build:{}",
+                        expected_home.join(folder).join("project").display()
+                    ),
                 };
                 assert!(matches!(
                     backend.cleanup_plan(&id, &cancel),
@@ -1878,6 +1927,16 @@ mod tests {
                 assert!(home.join(folder).join("project/node_modules/data").exists());
             }
         }
+        let invalid = home.join("code/..");
+        let mut backend = projects(&home, &bin, vec![invalid.clone()], 7);
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        let settings = ProjectSettings {
+            folders: vec![invalid],
+            ..ProjectSettings::default()
+        };
+        let host = host(&home, &bin, &[]);
+        settings.save(&host).unwrap();
+        assert!(ProjectSettings::load(&host).folders.is_empty());
         for folder in ["Desktop", "Documents", "Downloads"] {
             let root = home.join(folder);
             let mut backend = projects(&home, &bin, vec![root.clone()], 7);
@@ -1906,11 +1965,14 @@ mod tests {
         age_files(&home, 30);
         let bin = tools(&home, "");
         let cancel = Cancellation::default();
+        let alias = home.join("app-alias");
+        std::os::unix::fs::symlink(app.join("Contents/Resources"), &alias).unwrap();
         for root in [
             home.clone(),
             app.clone(),
             home.join("Applications"),
             app.join("Contents/Resources"),
+            alias,
         ] {
             let mut backend = projects(&home, &bin, vec![root], 7);
             assert!(backend.cleanup(&cancel).unwrap().is_empty());
