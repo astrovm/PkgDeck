@@ -908,6 +908,16 @@ mod tests {
     }
 
     #[test]
+    fn window_bar_tints_that_are_not_an_object_start_on_the_defaults() {
+        for text in [r#"{"windowBarTints":null}"#, r#"{"windowBarTints":[true]}"#] {
+            let read: Settings = serde_json::from_str(text).unwrap();
+            assert!(read.window_bar_tints.is_empty(), "{text}");
+            assert!(read.window_bar_tint(Style::Retro), "{text}");
+            assert!(!read.window_bar_tint(Style::Glass), "{text}");
+        }
+    }
+
+    #[test]
     fn old_single_window_bar_setting_is_not_read() {
         // The one switch used to apply to every style. Those choices are
         // not carried over, so each style starts on its default.
