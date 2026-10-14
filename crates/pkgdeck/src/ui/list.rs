@@ -118,9 +118,9 @@ fn heading_text(app: &App) -> String {
     // While writing, the card says what runs; the count stays.
     if app.busy && !app.writing {
         return match app.page {
-            Page::Search => "Searching…",
-            _ if count > 0 => "Refreshing…",
-            _ => "Loading…",
+            Page::Search => "Searching",
+            _ if count > 0 => "Refreshing",
+            _ => "Loading",
         }
         .into();
     }
@@ -181,9 +181,9 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
     (line, hover)
 }
 
-/// While waiting on sources, "Waiting for …" already says the list is
-/// loading, so it takes the place of "Refreshing…" or "Loading…".
-/// "Searching…" stays, since the search has its own job to name.
+/// While waiting on sources, "Waiting for" already says the list is
+/// loading, so it takes the place of "Refreshing" or "Loading".
+/// "Searching" stays, since the search has its own job to name.
 fn status_line(heading: String, searching: bool, names: &[String]) -> String {
     if names.is_empty() {
         heading
@@ -1566,18 +1566,18 @@ mod tests {
     fn waiting_line_replaces_the_busy_word_but_not_searching() {
         let apt = vec!["APT".to_owned()];
         assert_eq!(
-            status_line("Refreshing…".into(), false, &apt),
+            status_line("Refreshing".into(), false, &apt),
             "Waiting for APT"
         );
         assert_eq!(
-            status_line("Loading…".into(), false, &apt),
+            status_line("Loading".into(), false, &apt),
             "Waiting for APT"
         );
         assert_eq!(
-            status_line("Searching…".into(), true, &apt),
-            "Searching… · Waiting for APT"
+            status_line("Searching".into(), true, &apt),
+            "Searching · Waiting for APT"
         );
-        assert_eq!(status_line("Refreshing…".into(), false, &[]), "Refreshing…");
+        assert_eq!(status_line("Refreshing".into(), false, &[]), "Refreshing");
     }
 }
 
