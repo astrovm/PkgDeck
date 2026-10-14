@@ -611,7 +611,7 @@ and **About**.
   neutral. The accent still colours selection, links and controls. Picking
   **Windows 7** turns it off.
 - **Tint window bar** (on by default, under **Accent**): only **Windows 98**,
-  **Windows XP** and **Windows 7** have a title bar to tint, so only they show
+  **Windows XP** and **Windows 7** draw an accent title bar, so only they show
   it. When on, the accent colours that title bar. Turn it off for a neutral
   grey bar. The accent still colours selection, links and controls. Picking
   **Windows 7** turns it off.

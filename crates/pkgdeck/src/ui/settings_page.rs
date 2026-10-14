@@ -421,6 +421,11 @@ fn styles(app: &mut App, ui: &mut Ui) {
         scheme.style = style;
         if !current {
             scheme.accent = style.accent();
+            if style == Style::Glass {
+                // Picking Windows 7 turns both tints off, so the card shows that.
+                scheme.tint_backgrounds = false;
+                scheme.tint_window_bar = false;
+            }
         }
         let look = Palette::of(scheme, palette.dark);
         let skin = theme::Skin {

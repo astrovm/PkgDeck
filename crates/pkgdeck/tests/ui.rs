@@ -447,6 +447,11 @@ fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
     let mut harness = show(Page::Settings);
     // Modern has no accent title bar, so it offers no switch.
     assert!(harness.query_by_label("Tint window bar").is_none());
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_role_and_label(Role::CheckBox, "Tint window bar")
+        .is_some());
     harness.get_by_label("Windows XP").click();
     harness.run_steps(3);
     assert!(harness.state().1.settings.tint_window_bar);
@@ -457,11 +462,24 @@ fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
 }
 
 #[test]
+fn picking_another_style_keeps_the_tints_you_set() {
+    let mut harness = show(Page::Settings);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.tint_backgrounds);
+    assert!(harness.state().1.settings.tint_window_bar);
+}
+
+#[test]
 fn windows_7_turns_both_tints_off() {
     use pkgdeck::settings::Style;
     let mut harness = show(Page::Settings);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
     assert!(harness.state().1.settings.tint_backgrounds);
+    // The card sits past the visible part of the picker, so bring it in first.
+    harness.get_by_label("Windows 7").scroll_to_me();
+    harness.run_steps(3);
     harness.get_by_label("Windows 7").click();
     harness.run_steps(3);
     let settings = &harness.state().1.settings;
@@ -469,6 +487,10 @@ fn windows_7_turns_both_tints_off() {
     assert!(!settings.tint_backgrounds);
     assert!(!settings.tint_window_bar);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(harness.state().1.settings.tint_window_bar);
+    // Re-picking the style already in use changes nothing.
+    harness.get_by_label("Windows 7").click();
+    harness.run_steps(3);
     assert!(harness.state().1.settings.tint_window_bar);
 }
 

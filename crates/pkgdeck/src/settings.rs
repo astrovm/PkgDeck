@@ -849,6 +849,14 @@ mod tests {
     }
 
     #[test]
+    fn only_styles_with_an_accent_title_bar_offer_the_window_bar_tint() {
+        for style in Style::ALL {
+            let tinted = matches!(style, Style::Retro | Style::Luna | Style::Glass);
+            assert_eq!(style.tints_window_bar(), tinted, "{style:?}");
+        }
+    }
+
+    #[test]
     fn every_style_has_a_name_and_an_accent_of_its_own() {
         let names: std::collections::HashSet<_> = Style::ALL.map(Style::name).into();
         assert_eq!(names.len(), Style::ALL.len());
@@ -856,8 +864,6 @@ mod tests {
         assert_eq!(Style::Retro.accent(), Accent::Navy);
         assert_eq!(Style::Aqua.accent(), Accent::Blue);
         for style in Style::ALL {
-            let tinted = matches!(style, Style::Retro | Style::Luna | Style::Glass);
-            assert_eq!(style.tints_window_bar(), tinted, "{style:?}");
             assert!(Accent::ALL.contains(&style.accent()));
             // Versions of one desktop share its accent.
             assert_eq!(
