@@ -18,6 +18,16 @@ security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$password" "$keychain"
 security import "$archive" -f pkcs12 -k "$keychain" -P "$MACOS_SIGNING_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+# Older macOS signing tools also need the keychain in the user search list,
+# even with codesign --keychain. Preserve every existing keychain; deleting
+# this temporary keychain at the end removes only its own search-list entry.
+search=()
+while IFS= read -r entry; do
+    entry=${entry#*\"}
+    entry=${entry%\"*}
+    [[ $entry == "$keychain" ]] || search+=("$entry")
+done < <(security list-keychains -d user)
+security list-keychains -d user -s "${search[@]}" "$keychain"
 identities=$(security find-identity -p codesigning "$keychain" |
     awk '/[0-9]+\) [0-9A-F]{40} / {print $2}' | sort -u)
 [[ -n $identities && $(wc -w <<< "$identities") -eq 1 ]] || {
