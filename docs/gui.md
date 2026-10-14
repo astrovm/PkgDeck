@@ -604,17 +604,16 @@ and **About**.
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well. The accent
   also tints the background, panels and buttons, and colours the PkgDeck logo
-  in the sidebar and title bar. Every style but **Modern**, in the accent it was
-  made with, keeps its desktop's own greys.
+  in the sidebar and title bar.
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
-  tints the background, panels and buttons. Leave it off to keep those greys
-  neutral. The accent still colours selection, links and controls. Picking
-  **Windows 7** turns it off.
-- **Tint window bar** (on by default, under **Accent**): only **Windows 98**,
-  **Windows XP** and **Windows 7** draw an accent title bar, so only they show
-  it. When on, the accent colours that title bar. Turn it off for a neutral
-  grey bar. The accent still colours selection, links and controls. Picking
-  **Windows 7** turns it off.
+  tints the background, panels and buttons, the same way in every accent. Leave
+  it off to keep those greys neutral. The accent still colours selection, links
+  and controls. Picking **Windows 7** turns it off.
+- **Tint window bar** (on by default, under **Accent**): only **Windows 98**, **Windows XP**
+  and **Windows 7** draw an accent title bar, so only they show it. When on, the
+  accent colours that title bar. Turn it off for a neutral grey bar. The accent
+  still colours selection, links and controls. Picking **Windows 98** or
+  **Windows XP** turns it on, and picking **Windows 7** turns it off.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

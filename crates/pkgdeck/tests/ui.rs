@@ -459,10 +459,19 @@ fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
     assert!(!harness.state().1.settings.tint_window_bar);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
     assert!(harness.state().1.settings.tint_window_bar);
+    // Picking Windows 98 starts its title bar tinted, even when it was off.
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(!harness.state().1.settings.tint_window_bar);
+    // The clicks above scrolled the card out of view, so bring it back first.
+    harness.get_by_label("Windows 98").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Windows 98").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.settings.tint_window_bar);
 }
 
 #[test]
-fn picking_another_style_keeps_the_tints_you_set() {
+fn picking_another_style_keeps_the_background_tint_you_set() {
     let mut harness = show(Page::Settings);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
     harness.get_by_label("Windows XP").click();

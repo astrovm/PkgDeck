@@ -390,16 +390,13 @@ impl Palette {
             None => (rgb(on_light), rgb(on_dark)),
         };
         // The accent tints the window's greys: backgrounds, panels and
-        // buttons. An old style in the accent it shipped with keeps its
-        // own greys, as its desktop drew them.
+        // buttons. Every accent gets the same amount, so the tint switch
+        // does the same thing whatever colour is picked.
         let hue = custom.unwrap_or(rgb(on_light));
-        let own = custom.is_none() && scheme.accent == scheme.style.accent();
         let tint_amount = match (scheme.style.family(), dark) {
             _ if !scheme.tint_backgrounds => 0.0,
-            (Family::Fluent | Family::Liquid, _) if own => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
-            _ if own => 0.0,
             (Family::Glass, false) => 0.03,
             (_, true) => 0.06,
             (_, false) => 0.08,
@@ -1500,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_tints_the_window_unless_a_style_wears_its_own() {
+    fn the_accent_tints_the_window_in_every_style_and_accent() {
         for style in Style::ALL {
             for dark in [false, true] {
                 let at = format!("{style:?} dark={dark}");
@@ -1522,12 +1519,9 @@ mod tests {
                     Accent::Green
                 };
                 let green = wearing(other);
-                if style == Style::Modern {
-                    assert!(own.tint_amount > 0.0, "{at}");
-                } else {
-                    // The desktop's own greys, as it drew them.
-                    assert_eq!(own.tint_amount, 0.0, "{at}");
-                }
+                // The style's own accent gets the same tint as any other.
+                assert!(own.tint_amount > 0.0, "{at}");
+                assert_eq!(own.tint_amount, green.tint_amount, "{at}");
                 assert!(green.tint_amount > 0.0, "{at}");
                 assert_ne!(green.canvas, own.canvas, "{at}");
                 assert_ne!(green.surface, own.surface, "{at}");
