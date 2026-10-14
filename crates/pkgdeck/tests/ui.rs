@@ -1403,3 +1403,41 @@ fn nothing_to_select_offers_no_select_button() {
         }
     }
 }
+
+#[test]
+fn installed_list_widgets_sit_on_the_ui_grid() {
+    use egui::emath::GuiRounding as _;
+    // egui draws an orange "Unaligned" marker on any widget edge off this grid.
+    for pixels_per_point in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        for size in [egui::vec2(1200.0, 800.0), egui::vec2(900.0, 600.0)] {
+            let mut app = app();
+            app.page = Page::Installed;
+            app.invalidate();
+            let mut harness = harness_with(app, size, 1.0 / 60.0);
+            harness.set_pixels_per_point(pixels_per_point);
+            harness.run_steps(4);
+            let mut off_grid = Vec::new();
+            for node in harness.root().children_recursive() {
+                // Text runs aren't registered with egui's overlay, so only check widgets.
+                let accesskit = node.accesskit_node();
+                if accesskit.role() == Role::TextRun || accesskit.bounding_box().is_none() {
+                    continue;
+                }
+                let rect = node.rect();
+                let edges = [rect.left(), rect.right(), rect.top(), rect.bottom()];
+                if edges.iter().any(|e| *e != e.round_ui()) {
+                    off_grid.push(format!(
+                        "{:?} {:?} {rect:?}",
+                        accesskit.role(),
+                        accesskit.label()
+                    ));
+                }
+            }
+            assert!(
+                off_grid.is_empty(),
+                "off-grid at {pixels_per_point} ppp, {size:?}:\n{}",
+                off_grid.join("\n")
+            );
+        }
+    }
+}

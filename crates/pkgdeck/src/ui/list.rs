@@ -8,8 +8,8 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2,
+    self, emath::GuiRounding as _, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke,
+    StrokeKind, Ui, UiBuilder, Vec2,
 };
 
 const ROW: f32 = 60.0;
@@ -364,7 +364,8 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
                 Rect::from_min_max(
                     pos2(area.left() - 4.0, rect.top()),
                     pos2(area.right(), rect.bottom()),
-                ),
+                )
+                .round_ui(),
                 Id::new(("column", title)),
                 Sense::click(),
             )
@@ -444,7 +445,9 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
         }
     }
     for (column, x) in dividers {
-        let handle = Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, rect.height()));
+        // Snap to the UI grid: egui's debug overlay flags off-grid edges as "Unaligned".
+        let handle =
+            Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, rect.height())).round_ui();
         let response = ui
             .interact(
                 handle,
