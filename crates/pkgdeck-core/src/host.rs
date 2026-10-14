@@ -1200,7 +1200,7 @@ impl Host {
     fn flatpak_host_command(
         &self,
         executable: &Path,
-        args: &[OsString],
+        _args: &[OsString],
     ) -> Result<Launch, ExecutionError> {
         if !executable.is_absolute() {
             return Err(ExecutionError::Invalid(
@@ -1210,7 +1210,7 @@ impl Host {
         #[cfg(target_os = "linux")]
         {
             let argv = std::iter::once(executable.as_os_str().to_owned())
-                .chain(args.iter().cloned())
+                .chain(_args.iter().cloned())
                 .collect();
             if let Some(program) = self.portal.program(argv, Some(self.env.clone())) {
                 return Ok(Launch::host(program));
@@ -1717,6 +1717,7 @@ mod flatpak_bridge_tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(target_os = "linux")]

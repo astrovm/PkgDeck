@@ -156,18 +156,25 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
-    if !narrow {
-        sidebar_splitter(app, ui, sidebar, splitter);
-    }
+    let resizing_sidebar = if !narrow {
+        let mut resize_border = sidebar;
+        if theme::skin().style.family() == crate::settings::Family::Liquid {
+            // The visible sidebar continues behind the title bar.
+            resize_border.min.y = window.top();
+        }
+        sidebar_splitter(app, ui, resize_border, splitter)
+    } else {
+        false
+    };
     content_ui(app, ui, content);
     activity::drawer(app, ui, full);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
-    frame::edges(ui, window);
+    frame::edges(ui, window, resizing_sidebar);
 }
 
 /// The edge between the sidebar and the page, to drag.
-fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) {
+fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) -> bool {
     let ctx = ui.ctx().clone();
     let handle = Rect::from_center_size(
         pos2(sidebar.right(), sidebar.center().y),
@@ -194,6 +201,7 @@ fn sidebar_splitter(app: &mut App, ui: &mut Ui, sidebar: Rect, id: Id) {
     if response.double_clicked() {
         app.settings.sidebar_width = SIDEBAR_DEFAULT;
     }
+    active
 }
 
 fn keyboard(app: &mut App, ctx: &egui::Context) {
@@ -1521,6 +1529,98 @@ mod header_tests {
             );
         harness.run_steps(3);
         harness
+    }
+
+    fn draw_window(app: &mut App, ui: &mut Ui) {
+        show(app, ui);
+    }
+
+    fn drag_sidebar(harness: &mut Harness<'_, (bool, App)>, from: egui::Pos2, to: egui::Pos2) {
+        harness.hover_at(from);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            CursorIcon::ResizeHorizontal
+        );
+        harness.drag_at(from);
+        harness.step();
+        assert_no_window_drag(harness);
+        harness.hover_at(to);
+        harness.run_steps(2);
+        assert_no_window_drag(harness);
+        harness.drop_at(to);
+        harness.run_steps(2);
+    }
+
+    fn assert_no_window_drag(harness: &Harness<'_, (bool, App)>) {
+        assert!(harness.output().viewport_output.values().all(|viewport| {
+            !viewport.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    egui::ViewportCommand::StartDrag | egui::ViewportCommand::BeginResize(_)
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn liquid_sidebar_resizes_along_the_whole_border() {
+        for y in [9.0, 16.0, 40.0, 60.0, 300.0, 590.0] {
+            let mut app = app(Page::Search, 0);
+            app.settings.style = crate::settings::Style::Liquid;
+            app.settings.reduce_motion = true;
+            let mut harness = draw(app, draw_window);
+            // The test root has an eight-point margin around the window.
+            drag_sidebar(
+                &mut harness,
+                pos2(8.0 + SIDEBAR_DEFAULT, y),
+                pos2(8.0 + 300.0, y),
+            );
+            assert_eq!(harness.state().1.settings.sidebar_width, 300.0, "y={y}");
+        }
+    }
+
+    #[test]
+    fn liquid_sidebar_top_drag_keeps_width_limits_and_the_icon_rail() {
+        let mut app = app(Page::Search, 0);
+        app.settings.style = crate::settings::Style::Liquid;
+        app.settings.reduce_motion = true;
+        let mut harness = draw(app, draw_window);
+        drag_sidebar(&mut harness, pos2(232.0, 30.0), pos2(500.0, 30.0));
+        assert_eq!(harness.state().1.settings.sidebar_width, SIDEBAR_MAX);
+        drag_sidebar(&mut harness, pos2(368.0, 30.0), pos2(20.0, 30.0));
+        assert_eq!(harness.state().1.settings.sidebar_width, LIQUID_RAIL_WIDTH);
+        drag_sidebar(&mut harness, pos2(104.0, 30.0), pos2(308.0, 30.0));
+        assert_eq!(harness.state().1.settings.sidebar_width, 300.0);
+    }
+
+    #[test]
+    fn title_bar_still_moves_the_window_away_from_the_sidebar_border() {
+        for style in [
+            crate::settings::Style::Liquid,
+            crate::settings::Style::Fluent,
+        ] {
+            let mut app = app(Page::Search, 0);
+            app.settings.style = style;
+            app.settings.reduce_motion = true;
+            let mut harness = draw(app, draw_window);
+            let from = pos2(232.0 + 20.0, 25.0);
+            harness.hover_at(from);
+            harness.run_steps(2);
+            harness.drag_at(from);
+            harness.step();
+            harness.hover_at(from + vec2(50.0, 0.0));
+            harness.step();
+            assert!(
+                harness.output().viewport_output.values().any(|viewport| {
+                    viewport
+                        .commands
+                        .contains(&egui::ViewportCommand::StartDrag)
+                }),
+                "{style:?}"
+            );
+            assert_eq!(harness.state().1.settings.sidebar_width, SIDEBAR_DEFAULT);
+        }
     }
 
     #[test]

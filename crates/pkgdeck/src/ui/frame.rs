@@ -233,7 +233,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 /// Lets the frame's edges resize the window. Called after the app has
 /// drawn. It reads the pointer itself rather than adding widgets, so the
 /// title bar and its buttons next to the edge don't take the press.
-pub fn edges(ui: &mut Ui, full: Rect) {
+pub fn edges(ui: &mut Ui, full: Rect, resizing_sidebar: bool) {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
     let state = WindowState::of(&ctx);
@@ -254,6 +254,11 @@ pub fn edges(ui: &mut Ui, full: Rect) {
             Stroke::new(1.0, edge),
             StrokeKind::Inside,
         );
+    }
+    // At the divider's endpoints the sidebar owns the drag, even where
+    // its handle overlaps the window's outer resize edge.
+    if resizing_sidebar {
+        return;
     }
     let Some(direction) = ctx
         .pointer_hover_pos()
@@ -431,6 +436,13 @@ pub fn paint_frame(
                 behind,
                 fit(painter.ctx(), behind),
                 super::skin::sidebar_color(palette),
+            );
+            // The sidebar's divider runs up behind the lights too, so the
+            // border has no gap between the title bar and the sidebar.
+            painter.vline(
+                behind.right() - 0.5,
+                full.top()..=bar.bottom(),
+                Stroke::new(1.0, palette.line),
             );
         }
         Family::Retro => {
@@ -1045,7 +1057,7 @@ mod tests {
                 // The app fills the room under the bar.
                 ui.painter()
                     .rect_filled(window(), CornerRadius::ZERO, Color32::RED);
-                edges(ui, window());
+                edges(ui, window(), false);
             })
         });
         match shapes.last() {
@@ -1058,6 +1070,30 @@ mod tests {
     }
 
     #[test]
+    fn the_mac_sidebar_divider_runs_up_through_the_title_bar() {
+        let palette = palette(Style::Liquid, false);
+        let metrics = metrics(Style::Liquid).expect("Liquid draws a frame");
+        let (bar, _) = layout(metrics, window(), false);
+        let shapes = in_style(Style::Liquid, || {
+            theme::painted(|ui| {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(Id::new("sidebar-extent"), 200.0_f32));
+                show(ui, window(), "PkgDeck", &palette);
+            })
+        });
+        let divider = shapes.iter().any(|shape| match shape {
+            Shape::LineSegment { points, .. } => {
+                (points[0].x - 199.5).abs() < 0.01
+                    && (points[1].x - 199.5).abs() < 0.01
+                    && points[0].y == window().top()
+                    && points[1].y == bar.bottom()
+            }
+            _ => false,
+        });
+        assert!(divider, "no divider through the title bar: {shapes:?}");
+    }
+
+    #[test]
     fn showing_the_frame_hands_the_app_the_room_under_the_bar() {
         for style in Style::ALL {
             let palette = palette(style, false);
@@ -1065,7 +1101,7 @@ mod tests {
             in_style(style, || {
                 theme::painted(|ui| {
                     room = show(ui, window(), "PkgDeck", &palette);
-                    edges(ui, window());
+                    edges(ui, window(), false);
                 })
             });
             match metrics(style) {
