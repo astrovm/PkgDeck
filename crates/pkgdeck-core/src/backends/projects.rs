@@ -242,16 +242,22 @@ struct Walk<'a> {
     projects: Vec<Project>,
 }
 
+#[cfg(target_os = "macos")]
+fn in_app_bundle(path: &Path) -> bool {
+    path.ancestors().any(|parent| {
+        parent
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    })
+}
+
 impl Walk<'_> {
     fn visit(&mut self, dir: &Path, depth: usize, owner: Option<usize>) {
         // App bundles can contain package.json and other project markers.
         // Their dependencies belong to the installed app, never to cleanup.
         #[cfg(target_os = "macos")]
-        if dir.ancestors().any(|parent| {
-            parent
-                .extension()
-                .is_some_and(|extension| extension == "app")
-        }) {
+        if in_app_bundle(dir) {
             return;
         }
         if self.cancel.requested() {
@@ -337,11 +343,7 @@ fn projects_in(folder: &Path, home: Option<PathBuf>, cancel: &Cancellation) -> V
         let Ok(resolved) = fs::canonicalize(folder) else {
             return vec![];
         };
-        if resolved.ancestors().any(|parent| {
-            parent
-                .extension()
-                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("app"))
-        }) {
+        if in_app_bundle(&resolved) {
             return vec![];
         }
         // Map the real home back into the selected path spelling. This also
@@ -1953,6 +1955,35 @@ mod tests {
         }
         assert!(home.join("Library/project/node_modules/data").exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_path_rule_holds_for_generated_case_and_depth_variants() {
+        for casing in 0..8 {
+            let extension: String = "app"
+                .chars()
+                .enumerate()
+                .map(|(index, letter)| {
+                    if casing & (1 << index) == 0 {
+                        letter
+                    } else {
+                        letter.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            for depth in 0..=MAX_DEPTH {
+                let mut path = PathBuf::from(format!("/fixtures/Example.{extension}"));
+                for index in 0..depth {
+                    path.push(format!("folder{index}"));
+                }
+                assert!(in_app_bundle(&path));
+                // Similar names and substrings are ordinary project folders.
+                assert!(!in_app_bundle(&PathBuf::from(format!(
+                    "/fixtures/Example.{extension}-source/folder{depth}"
+                ))));
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

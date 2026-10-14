@@ -261,6 +261,9 @@ jobs:
       - name: Test real bundles and Homebrew cask lifecycle
         if: needs.reviewed.outputs.tested != 'true'
         run: bash scripts/tests/macos-inventory.sh
+      - name: Test project cleanup permission boundaries
+        if: needs.reviewed.outputs.tested != 'true'
+        run: bash scripts/tests/macos-project-permissions.sh "$PWD/target/debug/pkd"
       - name: Test adopting an existing app into Homebrew
         if: needs.reviewed.outputs.tested != 'true'
         run: bash scripts/tests/macos-adoption.sh
