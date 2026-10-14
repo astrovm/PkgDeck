@@ -453,7 +453,7 @@ fn app_page(
                     app.ui.focus_list = true;
                 }
                 let (icon, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-                package_icon(app, ui, icon, row);
+                package_icon(app, ui, icon, row, false);
                 ui.vertical(|ui| {
                     let reserve = close
                         + if beside {
