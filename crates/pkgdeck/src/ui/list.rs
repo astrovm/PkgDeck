@@ -1811,7 +1811,8 @@ mod grid_tests {
                 );
                 app.settings.style = style;
                 app.page = Page::Installed;
-                app.c().set_rows(serde_json::Value::Array(rows.clone()).to_string().into());
+                app.c()
+                    .set_rows(serde_json::Value::Array(rows.clone()).to_string().into());
                 app.react();
                 let mut harness = Harness::builder()
                     .with_size(vec2(900.0, 700.0))
@@ -1823,7 +1824,10 @@ mod grid_tests {
                                 return;
                             }
                             // The custom scrollbar only draws once the app has set the theme.
-                            crate::ui::theme::set_scheme(ui.ctx(), crate::ui::theme::Scheme::of(&app.settings));
+                            crate::ui::theme::set_scheme(
+                                ui.ctx(),
+                                crate::ui::theme::Scheme::of(&app.settings),
+                            );
                             let card = Rect::from_min_size(pos2(20.0, top), vec2(600.0, 500.0));
                             super::list_card(app, ui, card);
                         },
@@ -1836,7 +1840,10 @@ mod grid_tests {
                     texts(&clipped.shape, &mut drawn);
                 }
                 // Without rows the card shows a skeleton, and the test would pass vacuously.
-                assert!(drawn.iter().any(|t| t == "Package 0"), "rows were not drawn");
+                assert!(
+                    drawn.iter().any(|t| t == "Package 0"),
+                    "rows were not drawn"
+                );
                 let labels = drawn.iter().filter(|t| *t == "Unaligned").count();
                 assert_eq!(
                     labels, 0,
