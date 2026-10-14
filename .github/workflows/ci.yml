@@ -471,8 +471,26 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           scope: macos-app
+      - name: Test macOS signing identity across updates
+        run: bash scripts/tests/macos-signing.sh
+      - name: Import persistent release identity
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: scripts/import-macos-signing.sh
       - name: Build app bundle
+        env:
+          # Pull requests do not receive the private release identity.
+          PKGDECK_REQUIRE_SIGNING: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && '1' || '0' }}
         run: scripts/bundle-macos.sh
+      - name: Remove temporary signing keychain
+        if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          keychain="$RUNNER_TEMP/pkgdeck-signing.keychain-db"
+          if [[ -f $keychain ]]; then
+            security delete-keychain "$keychain"
+          fi
       - name: Check bundle requirements
         if: needs.reviewed.outputs.tested != 'true'
         run: |

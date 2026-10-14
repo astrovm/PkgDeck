@@ -269,7 +269,9 @@ untracked files to be deleted. Tracked edits and locked worktrees stay.
   key.
 - `projects` uses the folders and age set in the app's Clean settings
   (`clean.json` in PkgDeck's config folder). By default: your home folder and
-  a week.
+  a week. On macOS, broad scans skip Desktop, Documents and Downloads;
+  add one of these folders explicitly to include it. App bundles are always
+  excluded from project cleanup, including their internal dependencies.
 - pip needs a virtual environment, like its other commands.
 - pnpm, the Podman build cache, and unused Flatpak runtimes aren't offered,
   because their package managers can't show an exact preview.

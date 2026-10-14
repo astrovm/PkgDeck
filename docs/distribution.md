@@ -40,6 +40,35 @@ The cask removes the download quarantine after checking the release checksum.
 A persistent self-signed certificate can provide a stable code identity without
 a paid Apple account; it does not provide Developer ID trust or notarization.
 
+Create the release identity once on a Mac and keep the resulting folder private,
+outside the repository:
+
+```sh
+scripts/create-macos-signing.sh "$HOME/Library/Application Support/PkgDeck/release-signing"
+```
+
+Back up that folder securely. Upload `signing.p12` as the base64-encoded
+`MACOS_SIGNING_P12` repository secret and the contents of `password.txt` as
+`MACOS_SIGNING_PASSWORD`. The archive contains the private signing key; never
+commit it or print it in logs. The public `certificate.pem` can be shared.
+Main and release-tag builds import these secrets into a temporary keychain,
+sign the app and CLI, then delete the keychain. Missing or invalid secrets fail
+the build instead of silently reverting to ad-hoc signing. Pull request builds
+use disposable test identities and an ad-hoc development bundle; they never
+receive the release key.
+
+For a local certificate-signed bundle, import the identity into your keychain
+and set `PKGDECK_SIGNING_IDENTITY` to its SHA-1 fingerprint before running
+`scripts/bundle-macos.sh`. `PKGDECK_SIGNING_KEYCHAIN` selects a particular
+keychain. `PKGDECK_REQUIRE_SIGNING=1` refuses an ad-hoc build. The same machinery
+also accepts a Developer ID Application identity if one becomes available.
+
+Keep using the same identity for updates. Creating a new self-signed certificate
+changes the identity and requires granting permissions again. A future move to
+Developer ID signing also requires a one-time approval. These signatures do
+not grant permissions automatically: the user still chooses which resources
+the app may access.
+
 Before 0.1.10 the tap had a `pkgdeck` formula that built the app from source.
 If you installed that on macOS, switch to the cask once:
 
