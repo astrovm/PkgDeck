@@ -1833,7 +1833,7 @@ mod tests {
     fn scheme(style: Style) -> theme::Scheme {
         theme::Scheme {
             style,
-            accent: style.accent(),
+            accent: Accent::Blue,
             ..theme::Scheme::default()
         }
     }
@@ -2036,7 +2036,7 @@ mod tests {
                                 accent: if color.is_some() {
                                     Accent::Custom
                                 } else {
-                                    style.accent()
+                                    Accent::Blue
                                 },
                                 custom_accent: color,
                                 roundness,

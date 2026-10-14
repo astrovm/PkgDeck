@@ -186,18 +186,6 @@ impl Style {
             Self::Liquid => Family::Liquid,
         }
     }
-    /// The accent the style was made with, picked when it's chosen.
-    pub fn accent(self) -> Accent {
-        match self.family() {
-            Family::Modern
-            | Family::Luna
-            | Family::Glass
-            | Family::Gel
-            | Family::Fluent
-            | Family::Liquid => Accent::Blue,
-            Family::Retro => Accent::Navy,
-        }
-    }
     /// Whether the style's title bar takes the accent, so the window bar
     /// tint does something.
     pub fn tints_window_bar(self) -> bool {
@@ -857,24 +845,10 @@ mod tests {
     }
 
     #[test]
-    fn every_style_has_a_name_and_an_accent_of_its_own() {
+    fn every_style_has_a_name_and_starts_on_the_blue_accent() {
         let names: std::collections::HashSet<_> = Style::ALL.map(Style::name).into();
         assert_eq!(names.len(), Style::ALL.len());
-        assert_eq!(Style::Modern.accent(), Accent::Blue);
-        assert_eq!(Style::Retro.accent(), Accent::Navy);
-        assert_eq!(Style::Aqua.accent(), Accent::Blue);
-        for style in Style::ALL {
-            assert!(Accent::ALL.contains(&style.accent()));
-            // Versions of one desktop share its accent.
-            assert_eq!(
-                style.accent(),
-                Style::ALL
-                    .into_iter()
-                    .find(|s| s.family() == style.family())
-                    .unwrap()
-                    .accent()
-            );
-        }
+        assert_eq!(Settings::default().accent, Accent::Blue);
         // Each style is one version of one desktop.
         let families = Style::ALL.map(Style::family);
         assert_eq!(

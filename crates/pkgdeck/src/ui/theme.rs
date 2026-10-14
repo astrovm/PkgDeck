@@ -1365,7 +1365,7 @@ mod tests {
         // Title bars and selections keep the desktop's own colour: 98's
         // navy, Aqua's blue gel.
         for style in [Style::Retro, Style::Luna, Style::Glass, Style::Aqua] {
-            for accent in [style.accent(), Accent::Teal] {
+            for accent in [Accent::Blue, Accent::Teal] {
                 assert_eq!(
                     of(style, accent, true).deep,
                     of(style, accent, false).deep,
@@ -1374,6 +1374,10 @@ mod tests {
             }
         }
         assert_eq!(of(Style::Retro, Accent::Navy, true).deep, rgb(0x000080));
+        assert_eq!(
+            of(Style::Retro, Accent::Navy, true).deep,
+            of(Style::Retro, Accent::Navy, false).deep,
+        );
         // Graphite, a grey as dark as the window, lifts off it in the dark.
         for style in Style::ALL {
             let graphite = of(style, Accent::Graphite, true);
@@ -1512,19 +1516,14 @@ mod tests {
                         dark,
                     )
                 };
-                let own = wearing(style.accent());
-                let other = if style.accent() == Accent::Green {
-                    Accent::Purple
-                } else {
-                    Accent::Green
-                };
-                let green = wearing(other);
-                // The style's own accent gets the same tint as any other.
-                assert!(own.tint_amount > 0.0, "{at}");
-                assert_eq!(own.tint_amount, green.tint_amount, "{at}");
+                let blue = wearing(Accent::Blue);
+                let green = wearing(Accent::Green);
+                // Blue gets the same tint as any other accent.
+                assert!(blue.tint_amount > 0.0, "{at}");
+                assert_eq!(blue.tint_amount, green.tint_amount, "{at}");
                 assert!(green.tint_amount > 0.0, "{at}");
-                assert_ne!(green.canvas, own.canvas, "{at}");
-                assert_ne!(green.surface, own.surface, "{at}");
+                assert_ne!(green.canvas, blue.canvas, "{at}");
+                assert_ne!(green.surface, blue.surface, "{at}");
                 assert_eq!(
                     green.tone(Color32::WHITE),
                     over(Color32::WHITE, green.tint, green.tint_amount)
@@ -1565,7 +1564,7 @@ mod tests {
         let green = glass(Accent::Green);
         assert!(luminance(green) < 0.01, "{green:?}");
         // Its own blue too: near black, not Media Center's navy.
-        assert_eq!(glass(Style::Glass.accent()), rgb(0x0e0f11));
+        assert_eq!(glass(Accent::Blue), rgb(0x0e0f11));
     }
 
     #[test]

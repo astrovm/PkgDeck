@@ -516,7 +516,7 @@ fn styles_and_their_choices_change_the_look() {
     harness.run_steps(3);
     let settings = &harness.state().1.settings;
     assert_eq!(settings.style, Style::Retro);
-    assert_eq!(settings.accent, Accent::Navy);
+    assert_eq!(settings.accent, Accent::Blue);
     // Windows 98 has its own colours and is always square.
     assert!(harness.query_by_label("Charcoal").is_none());
     assert!(harness.query_by_label("Roundness").is_none());
@@ -540,7 +540,7 @@ fn styles_and_their_choices_change_the_look() {
     assert!(harness.query_by_label("Export").is_none());
     assert!(harness.query_by_label("Import").is_none());
     click_in_view(&mut harness, None, "Modern");
-    assert_eq!(harness.state().1.settings.accent, Accent::Blue);
+    assert_eq!(harness.state().1.settings.accent, Accent::Teal);
     assert!(harness.query_by_label("Charcoal").is_some());
 }
 
@@ -570,7 +570,7 @@ fn every_style_mixes_with_every_other_look_option() {
                     settings.roundness = roundness;
                     settings.custom_accent = colour.to_owned();
                     settings.accent = if colour.is_empty() {
-                        style.accent()
+                        Accent::Blue
                     } else {
                         Accent::Custom
                     };

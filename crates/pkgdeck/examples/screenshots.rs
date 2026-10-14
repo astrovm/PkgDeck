@@ -277,7 +277,7 @@ fn themes() {
                 app.page = Page::Settings;
                 app.rows = vec![];
                 app.settings.style = style;
-                app.settings.accent = accent.unwrap_or_else(|| style.accent());
+                app.settings.accent = accent.unwrap_or(Accent::Blue);
                 app.settings.appearance = if dark {
                     Appearance::Dark
                 } else {

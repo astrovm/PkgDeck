@@ -420,7 +420,6 @@ fn styles(app: &mut App, ui: &mut Ui) {
         let mut scheme = theme::Scheme::of(&app.settings);
         scheme.style = style;
         if !current {
-            scheme.accent = style.accent();
             // The card shows the tints the style starts with.
             start_window_bar(style, &mut scheme.tint_window_bar);
         }
@@ -464,7 +463,6 @@ fn styles(app: &mut App, ui: &mut Ui) {
         ui.painter().galley(at, name, ink);
         if response.clicked() && !current {
             app.settings.style = style;
-            app.settings.accent = style.accent();
             start_window_bar(style, &mut app.settings.tint_window_bar);
         }
     }
