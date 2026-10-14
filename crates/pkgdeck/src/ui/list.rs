@@ -164,7 +164,6 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
     if !list_shown(app) {
         return (String::new(), None);
     }
-    let mut line = heading_text(app);
     let mut names = Vec::new();
     if app.waiting_shown() {
         names = app
@@ -176,12 +175,23 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
             })
             .map(|id| model::source_name(id).to_owned())
             .collect();
-        if !names.is_empty() {
-            line = format!("{line} · {}", waiting_text(&names));
-        }
     }
+    let line = status_line(heading_text(app), app.page == Page::Search, &names);
     let hover = (names.len() > 2).then(|| names.join("\n"));
     (line, hover)
+}
+
+/// While waiting on sources, "Waiting for …" already says the list is
+/// loading, so it takes the place of "Refreshing…" or "Loading…".
+/// "Searching…" stays, since the search has its own job to name.
+fn status_line(heading: String, searching: bool, names: &[String]) -> String {
+    if names.is_empty() {
+        heading
+    } else if searching {
+        format!("{heading} · {}", waiting_text(names))
+    } else {
+        waiting_text(names)
+    }
 }
 
 struct Columns {
@@ -1513,7 +1523,7 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::waiting_text;
+    use super::{status_line, waiting_text};
 
     #[test]
     fn failed_or_stopped_lists_always_offer_retry() {
@@ -1550,6 +1560,24 @@ mod tests {
             waiting_text(&names(&["APT", "Snap", "npm"])),
             "Waiting for 3 sources"
         );
+    }
+
+    #[test]
+    fn waiting_line_replaces_the_busy_word_but_not_searching() {
+        let apt = vec!["APT".to_owned()];
+        assert_eq!(
+            status_line("Refreshing…".into(), false, &apt),
+            "Waiting for APT"
+        );
+        assert_eq!(
+            status_line("Loading…".into(), false, &apt),
+            "Waiting for APT"
+        );
+        assert_eq!(
+            status_line("Searching…".into(), true, &apt),
+            "Searching… · Waiting for APT"
+        );
+        assert_eq!(status_line("Refreshing…".into(), false, &[]), "Refreshing…");
     }
 }
 

@@ -1406,12 +1406,12 @@ mod tests {
             tint_backgrounds: true,
             ..Scheme::default()
         };
-        let modern = Palette::of(tinted.clone(), true);
+        let modern = Palette::of(tinted, true);
         // Modern's greys, tinted with its blue.
         let blue = rgb(accent_colors(Accent::Blue).0);
         assert_eq!(modern.canvas, over(rgb(0x121212), blue, 0.05));
         assert_eq!(modern.accent, rgb(0x7aa7ff));
-        let light = Palette::of(tinted.clone(), false);
+        let light = Palette::of(tinted, false);
         assert_eq!(light.canvas, over(rgb(0xe8edf5), blue, 0.04));
         assert_eq!(light.accent_ink, Color32::WHITE);
         let tuned = Scheme {
