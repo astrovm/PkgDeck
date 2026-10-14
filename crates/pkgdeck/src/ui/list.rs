@@ -888,7 +888,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         let size = icon.width();
         let icon_rect =
             Rect::from_center_size(pos2(icon.center().x, rect.center().y), Vec2::splat(size));
-        package_icon(app, ui, icon_rect, &row);
+        package_icon(app, ui, icon_rect, &row, batch_state.is_some());
         if let Some(state) = batch_state {
             paint_batch_state(ui, icon_rect, state, &palette);
         }
@@ -1184,8 +1184,14 @@ fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Pale
     }
 }
 
+/// Whether the corner badge with the source shows. A batch mark takes that
+/// corner while the row runs, so the two never stack.
+fn source_badge_shown(row: &Row, size: f32, in_batch: bool) -> bool {
+    row.kind == "package" && size >= 32.0 && !in_batch
+}
+
 /// An app's icon, or its source's mark.
-pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
+pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row, in_batch: bool) {
     let palette = Palette::current(ui.ctx());
     let fallback = |ui: &mut Ui| {
         let mark = if skin::bare_icons() {
@@ -1221,7 +1227,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
                 Ok(egui::load::TexturePoll::Ready { .. }) => {
                     image.paint_at(ui, rect);
                     // The source, small, on the corner.
-                    if row.kind == "package" && rect.width() >= 32.0 {
+                    if source_badge_shown(row, rect.width(), in_batch) {
                         let badge = Rect::from_center_size(
                             rect.right_bottom() - vec2(3.0, 3.0),
                             Vec2::splat(18.0),
@@ -1526,7 +1532,22 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{status_line, waiting_text};
+    use super::{source_badge_shown, status_line, waiting_text};
+
+    #[test]
+    fn batch_mark_replaces_the_source_badge_on_its_row() {
+        let row = |kind: &str| -> crate::model::Row {
+            serde_json::from_value(serde_json::json!({
+                "kind": kind, "name": "fixture", "source": "dnf"
+            }))
+            .unwrap()
+        };
+        let package = row("package");
+        assert!(source_badge_shown(&package, 50.0, false));
+        assert!(!source_badge_shown(&package, 50.0, true));
+        assert!(!source_badge_shown(&package, 31.0, false));
+        assert!(!source_badge_shown(&row("failure"), 50.0, false));
+    }
 
     #[test]
     fn failed_or_stopped_lists_always_offer_retry() {
@@ -1740,7 +1761,7 @@ mod icon_tests {
             .unwrap();
             theme::painted(|ui| {
                 let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0));
-                package_icon(&app, ui, rect, &row);
+                package_icon(&app, ui, rect, &row, false);
             })
             .into_iter()
             .filter_map(|shape| match shape {
