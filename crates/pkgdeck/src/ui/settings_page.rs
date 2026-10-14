@@ -292,12 +292,14 @@ fn colours(app: &mut App, ui: &mut Ui) {
                 app.settings.tint_backgrounds = on;
             }
         });
-        setting_row(ui, "Tint window bar", "", SWITCH, |ui| {
-            let mut on = app.settings.tint_window_bar;
-            if switch(ui, &mut on, true, "Tint window bar").changed() {
-                app.settings.tint_window_bar = on;
-            }
-        });
+        if app.settings.style.tints_window_bar() {
+            setting_row(ui, "Tint window bar", "", SWITCH, |ui| {
+                let mut on = app.settings.tint_window_bar;
+                if switch(ui, &mut on, true, "Tint window bar").changed() {
+                    app.settings.tint_window_bar = on;
+                }
+            });
+        }
     });
 }
 
@@ -461,6 +463,11 @@ fn styles(app: &mut App, ui: &mut Ui) {
         if response.clicked() && !current {
             app.settings.style = style;
             app.settings.accent = style.accent();
+            if style == Style::Glass {
+                // Windows 7 starts with both tints off.
+                app.settings.tint_backgrounds = false;
+                app.settings.tint_window_bar = false;
+            }
         }
     }
 }

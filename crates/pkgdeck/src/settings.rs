@@ -198,6 +198,11 @@ impl Style {
             Family::Retro => Accent::Navy,
         }
     }
+    /// Whether the style's title bar takes the accent, so the window bar
+    /// tint does something.
+    pub fn tints_window_bar(self) -> bool {
+        matches!(self.family(), Family::Retro | Family::Luna | Family::Glass)
+    }
 }
 
 /// How much room rows and controls get.
@@ -851,6 +856,8 @@ mod tests {
         assert_eq!(Style::Retro.accent(), Accent::Navy);
         assert_eq!(Style::Aqua.accent(), Accent::Blue);
         for style in Style::ALL {
+            let tinted = matches!(style, Style::Retro | Style::Luna | Style::Glass);
+            assert_eq!(style.tints_window_bar(), tinted, "{style:?}");
             assert!(Accent::ALL.contains(&style.accent()));
             // Versions of one desktop share its accent.
             assert_eq!(

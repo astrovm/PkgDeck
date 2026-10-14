@@ -445,9 +445,29 @@ fn tint_backgrounds_switch_turns_the_accent_off_the_greys() {
 #[test]
 fn tint_window_bar_switch_turns_the_accent_off_the_title_bar() {
     let mut harness = show(Page::Settings);
+    // Modern has no accent title bar, so it offers no switch.
+    assert!(harness.query_by_label("Tint window bar").is_none());
+    harness.get_by_label("Windows XP").click();
+    harness.run_steps(3);
     assert!(harness.state().1.settings.tint_window_bar);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
     assert!(!harness.state().1.settings.tint_window_bar);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
+    assert!(harness.state().1.settings.tint_window_bar);
+}
+
+#[test]
+fn windows_7_turns_both_tints_off() {
+    use pkgdeck::settings::Style;
+    let mut harness = show(Page::Settings);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Tint backgrounds");
+    assert!(harness.state().1.settings.tint_backgrounds);
+    harness.get_by_label("Windows 7").click();
+    harness.run_steps(3);
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Glass);
+    assert!(!settings.tint_backgrounds);
+    assert!(!settings.tint_window_bar);
     click_in_view(&mut harness, Some(Role::CheckBox), "Tint window bar");
     assert!(harness.state().1.settings.tint_window_bar);
 }
