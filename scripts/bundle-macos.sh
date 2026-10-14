@@ -83,10 +83,7 @@ cat > "$contents/Info.plist" <<XML
 </dict></plist>
 XML
 
-# Without a paid Developer ID the app is ad-hoc signed; Apple Silicon refuses
-# to run unsigned code, and the cask clears the download quarantine.
-codesign --force --deep --sign - "$app"
-codesign --verify --deep --strict "$app"
+scripts/sign-macos.sh "$app"
 zip=build/artifacts/PkgDeck-v$version-macos-$arch.zip
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"

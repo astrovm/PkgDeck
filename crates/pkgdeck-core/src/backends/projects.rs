@@ -134,14 +134,19 @@ impl ProjectSettings {
         Some(config.join("pkgdeck/clean.json"))
     }
     /// The saved settings, or the defaults when there are none or they
-    /// can't be read. Relative folders are dropped.
+    /// can't be read. Relative folders and parent traversals are dropped.
     pub fn load(host: &Host) -> Self {
         let saved = Self::path(host)
             .and_then(|path| fs::read(path).ok())
             .and_then(|text| serde_json::from_slice::<Self>(&text).ok());
         match saved {
             Some(mut settings) => {
-                settings.folders.retain(|folder| folder.is_absolute());
+                settings.folders.retain(|folder| {
+                    folder.is_absolute()
+                        && !folder
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                });
                 settings
             }
             None => Self::defaults(host),
@@ -230,14 +235,31 @@ fn build_folder(name: &str, siblings: &BTreeSet<String>) -> bool {
 /// Finds projects under one folder.
 struct Walk<'a> {
     cancel: &'a Cancellation,
-    /// The home folder, whose `Library` is never looked into.
+    /// The home folder, whose `Library` is never looked into. On macOS,
+    /// protected home folders require selecting them as scan roots.
     home: Option<PathBuf>,
     device: u64,
     projects: Vec<Project>,
 }
 
+#[cfg(target_os = "macos")]
+fn in_app_bundle(path: &Path) -> bool {
+    path.ancestors().any(|parent| {
+        parent
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    })
+}
+
 impl Walk<'_> {
     fn visit(&mut self, dir: &Path, depth: usize, owner: Option<usize>) {
+        // App bundles can contain package.json and other project markers.
+        // Their dependencies belong to the installed app, never to cleanup.
+        #[cfg(target_os = "macos")]
+        if in_app_bundle(dir) {
+            return;
+        }
         if self.cancel.requested() {
             return;
         }
@@ -290,8 +312,14 @@ impl Walk<'_> {
                 self.projects[owner].folders.push(path);
                 continue;
             }
-            let library = depth == 0 && name == "Library" && self.home.as_deref() == Some(dir);
-            if name.starts_with('.') || library || depth >= MAX_DEPTH {
+            let in_home = self.home.as_deref() == Some(dir);
+            let library = in_home && name == "Library";
+            // A broad scan must not trigger TCC dialogs just by visiting
+            // the home folder. Explicitly selected roots still work.
+            let protected = cfg!(target_os = "macos")
+                && in_home
+                && matches!(name.as_str(), "Desktop" | "Documents" | "Downloads");
+            if name.starts_with('.') || library || protected || depth >= MAX_DEPTH {
                 continue;
             }
             // Other disks, such as network shares, stay out of it.
@@ -304,6 +332,29 @@ impl Walk<'_> {
 
 /// Projects under `folder`, and when each last changed.
 fn projects_in(folder: &Path, home: Option<PathBuf>, cancel: &Cancellation) -> Vec<Project> {
+    if folder
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return vec![];
+    }
+    #[cfg(target_os = "macos")]
+    let home = {
+        let Ok(resolved) = fs::canonicalize(folder) else {
+            return vec![];
+        };
+        if in_app_bundle(&resolved) {
+            return vec![];
+        }
+        // Map the real home back into the selected path spelling. This also
+        // recognizes a symlink to the home folder without changing item keys.
+        home.and_then(|home| fs::canonicalize(home).ok())
+            .and_then(|home| {
+                home.strip_prefix(&resolved)
+                    .ok()
+                    .map(|relative| folder.join(relative))
+            })
+    };
     let Ok(metadata) = fs::metadata(folder) else {
         return vec![];
     };
@@ -366,11 +417,31 @@ impl Projects {
             && !path
                 .components()
                 .any(|part| matches!(part, std::path::Component::ParentDir))
-            && self
-                .settings()
-                .folders
-                .iter()
-                .any(|folder| path.starts_with(folder))
+            && self.settings().folders.iter().any(|folder| {
+                if !path.starts_with(folder) {
+                    return false;
+                }
+                // Old cleanup keys must respect the same privacy boundary
+                // as a fresh scan. Selecting a protected root includes it.
+                #[cfg(target_os = "macos")]
+                if let Some(home) = home(&self.host).and_then(|home| fs::canonicalize(home).ok()) {
+                    let Ok(resolved_folder) = fs::canonicalize(folder) else {
+                        return false;
+                    };
+                    let Ok(resolved_path) = fs::canonicalize(path) else {
+                        return false;
+                    };
+                    for name in ["Desktop", "Documents", "Downloads"] {
+                        let protected = home.join(name);
+                        if resolved_path.starts_with(&protected)
+                            && !resolved_folder.starts_with(&protected)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
     }
 
     /// The task for one project's build folders, when it is old enough.
@@ -1811,6 +1882,213 @@ mod tests {
             fs::read_to_string(tree.join("tracked")).unwrap(),
             "new edit"
         );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn broad_mac_scans_skip_protected_folders_but_selected_roots_work() {
+        let parent = scratch("mac-protected");
+        let home = parent.join("home");
+        for folder in ["Desktop", "Documents", "Downloads", "code", "Library"] {
+            write(&home.join(folder).join("project/package.json"), "{}");
+            write(&home.join(folder).join("project/node_modules/data"), "keep");
+        }
+        age_files(&parent, 30);
+        let bin = tools(&home, "");
+        let cancel = Cancellation::default();
+        let alias = parent.join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        // Starting above the home folder must also respect the boundary.
+        for root in [&home, &parent, &alias] {
+            let mut backend = projects(&home, &bin, vec![root.clone()], 7);
+            let expected_home = if root == &alias { &alias } else { &home };
+            assert_eq!(
+                keys(&backend.cleanup(&cancel).unwrap()),
+                vec![format!(
+                    "build:{}",
+                    expected_home.join("code/project").display()
+                )]
+            );
+            for folder in ["Desktop", "Documents", "Downloads"] {
+                let id = CleanupId {
+                    backend: "projects".into(),
+                    key: format!(
+                        "build:{}",
+                        expected_home.join(folder).join("project").display()
+                    ),
+                };
+                assert!(matches!(
+                    backend.cleanup_plan(&id, &cancel),
+                    Err(EngineError::NotFound)
+                ));
+                assert!(matches!(
+                    backend.execute(&Operation::Clean(id), &cancel, &mut |_| {}),
+                    Err(EngineError::NotFound)
+                ));
+                assert!(home.join(folder).join("project/node_modules/data").exists());
+            }
+        }
+        let invalid = home.join("code/..");
+        let mut backend = projects(&home, &bin, vec![invalid.clone()], 7);
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        let settings = ProjectSettings {
+            folders: vec![invalid],
+            ..ProjectSettings::default()
+        };
+        let host = host(&home, &bin, &[]);
+        settings.save(&host).unwrap();
+        assert!(ProjectSettings::load(&host).folders.is_empty());
+        for folder in ["Desktop", "Documents", "Downloads"] {
+            let root = home.join(folder);
+            let mut backend = projects(&home, &bin, vec![root.clone()], 7);
+            let items = backend.cleanup(&cancel).unwrap();
+            assert_eq!(
+                keys(&items),
+                vec![format!("build:{}", root.join("project").display())]
+            );
+            backend
+                .execute(&Operation::Clean(items[0].id.clone()), &cancel, &mut |_| {})
+                .unwrap();
+            assert!(!root.join("project/node_modules").exists());
+            assert!(root.join("project/package.json").exists());
+        }
+        assert!(home.join("Library/project/node_modules/data").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_protected_names_inside_normal_project_folders_are_still_scanned() {
+        let home = scratch("mac-nested-names");
+        for name in ["Desktop", "Documents", "Downloads"] {
+            write(
+                &home.join("code").join(name).join("project/package.json"),
+                "{}",
+            );
+            write(
+                &home
+                    .join("code")
+                    .join(name)
+                    .join("project/node_modules/data"),
+                "fixture",
+            );
+        }
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let mut backend = projects(&home, &bin, vec![home.clone()], 7);
+        let cancel = Cancellation::default();
+        let items = backend.cleanup(&cancel).unwrap();
+        assert_eq!(items.len(), 3);
+        for item in items {
+            backend
+                .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+                .unwrap();
+        }
+        for name in ["Desktop", "Documents", "Downloads"] {
+            let project = home.join("code").join(name).join("project");
+            assert!(!project.join("node_modules").exists());
+            assert!(project.join("package.json").exists());
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_cleanup_keys_handle_missing_roots_projects_and_home() {
+        let home = scratch("mac-missing-paths");
+        let code = home.join("code");
+        write(&code.join("project/package.json"), "{}");
+        write(&code.join("project/node_modules/data"), "keep");
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let cancel = Cancellation::default();
+        for root in [code.clone(), home.join("missing")] {
+            let mut backend = projects(&home, &bin, vec![root.clone()], 7);
+            let id = CleanupId {
+                backend: "projects".into(),
+                key: format!("build:{}", root.join("missing-project").display()),
+            };
+            assert!(matches!(
+                backend.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
+            assert!(matches!(
+                backend.execute(&Operation::Clean(id), &cancel, &mut |_| {}),
+                Err(EngineError::NotFound)
+            ));
+        }
+        for absent_home in [None, Some(home.join("missing-home"))] {
+            let mut env = BTreeMap::from([("PATH".into(), bin.as_os_str().to_owned())]);
+            if let Some(home) = absent_home {
+                env.insert("HOME".into(), home.into_os_string());
+            }
+            let mut backend =
+                Projects::new(Host::new(Runtime::Native, env)).with_settings(ProjectSettings {
+                    folders: vec![code.clone()],
+                    days: 7,
+                    ..ProjectSettings::default()
+                });
+            let items = backend.cleanup(&cancel).unwrap();
+            assert_eq!(items.len(), 1);
+            assert!(backend.cleanup_plan(&items[0].id, &cancel).is_ok());
+        }
+        assert!(code.join("project/node_modules/data").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_path_rule_holds_for_generated_case_and_depth_variants() {
+        for casing in 0..8 {
+            let extension: String = "app"
+                .chars()
+                .enumerate()
+                .map(|(index, letter)| {
+                    if casing & (1 << index) == 0 {
+                        letter
+                    } else {
+                        letter.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            for depth in 0..=MAX_DEPTH {
+                let mut path = PathBuf::from(format!("/fixtures/Example.{extension}"));
+                for index in 0..depth {
+                    path.push(format!("folder{index}"));
+                }
+                assert!(in_app_bundle(&path));
+                // Similar names and substrings are ordinary project folders.
+                assert!(!in_app_bundle(&PathBuf::from(format!(
+                    "/fixtures/Example.{extension}-source/folder{depth}"
+                ))));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_app_dependencies_are_never_offered_for_project_cleanup() {
+        let home = scratch("mac-apps");
+        let app = home.join("Applications/Example.app");
+        write(&app.join("Contents/Resources/package.json"), "{}");
+        write(&app.join("Contents/Resources/node_modules/data"), "keep");
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let cancel = Cancellation::default();
+        let alias = home.join("app-alias");
+        std::os::unix::fs::symlink(app.join("Contents/Resources"), &alias).unwrap();
+        for root in [
+            home.clone(),
+            app.clone(),
+            home.join("Applications"),
+            app.join("Contents/Resources"),
+            alias,
+        ] {
+            let mut backend = projects(&home, &bin, vec![root], 7);
+            assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        }
+        assert!(app.join("Contents/Resources/node_modules/data").exists());
         fs::remove_dir_all(home).unwrap();
     }
 

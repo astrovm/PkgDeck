@@ -16,7 +16,7 @@ cask "pkgdeck" do
   binary "#{appdir}/PkgDeck.app/Contents/MacOS/pkd"
   binary "#{appdir}/PkgDeck.app/Contents/MacOS/pkgdeck"
 
-  # The app is ad-hoc signed, not notarized, so Gatekeeper would refuse the
+  # The app is not notarized, so Gatekeeper would refuse the
   # quarantined download; the checksum above verifies it instead.
   postflight_steps do
     run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/PkgDeck.app"]
