@@ -425,10 +425,10 @@ impl Projects {
                 // as a fresh scan. Selecting a protected root includes it.
                 #[cfg(target_os = "macos")]
                 if let Some(home) = home(&self.host).and_then(|home| fs::canonicalize(home).ok()) {
-                    let Ok(resolved_path) = fs::canonicalize(path) else {
+                    let Ok(resolved_folder) = fs::canonicalize(folder) else {
                         return false;
                     };
-                    let Ok(resolved_folder) = fs::canonicalize(folder) else {
+                    let Ok(resolved_path) = fs::canonicalize(path) else {
                         return false;
                     };
                     for name in ["Desktop", "Documents", "Downloads"] {
@@ -1955,6 +1955,86 @@ mod tests {
         }
         assert!(home.join("Library/project/node_modules/data").exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_protected_names_inside_normal_project_folders_are_still_scanned() {
+        let home = scratch("mac-nested-names");
+        for name in ["Desktop", "Documents", "Downloads"] {
+            write(
+                &home.join("code").join(name).join("project/package.json"),
+                "{}",
+            );
+            write(
+                &home
+                    .join("code")
+                    .join(name)
+                    .join("project/node_modules/data"),
+                "fixture",
+            );
+        }
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let mut backend = projects(&home, &bin, vec![home.clone()], 7);
+        let cancel = Cancellation::default();
+        let items = backend.cleanup(&cancel).unwrap();
+        assert_eq!(items.len(), 3);
+        for item in items {
+            backend
+                .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+                .unwrap();
+        }
+        for name in ["Desktop", "Documents", "Downloads"] {
+            let project = home.join("code").join(name).join("project");
+            assert!(!project.join("node_modules").exists());
+            assert!(project.join("package.json").exists());
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_cleanup_keys_handle_missing_roots_projects_and_home() {
+        let home = scratch("mac-missing-paths");
+        let code = home.join("code");
+        write(&code.join("project/package.json"), "{}");
+        write(&code.join("project/node_modules/data"), "keep");
+        age_files(&home, 30);
+        let bin = tools(&home, "");
+        let cancel = Cancellation::default();
+        for root in [code.clone(), home.join("missing")] {
+            let mut backend = projects(&home, &bin, vec![root.clone()], 7);
+            let id = CleanupId {
+                backend: "projects".into(),
+                key: format!("build:{}", root.join("missing-project").display()),
+            };
+            assert!(matches!(
+                backend.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
+            assert!(matches!(
+                backend.execute(&Operation::Clean(id), &cancel, &mut |_| {}),
+                Err(EngineError::NotFound)
+            ));
+        }
+        for absent_home in [None, Some(home.join("missing-home"))] {
+            let mut env = BTreeMap::from([("PATH".into(), bin.as_os_str().to_owned())]);
+            if let Some(home) = absent_home {
+                env.insert("HOME".into(), home.into_os_string());
+            }
+            let mut backend =
+                Projects::new(Host::new(Runtime::Native, env)).with_settings(ProjectSettings {
+                    folders: vec![code.clone()],
+                    days: 7,
+                    ..ProjectSettings::default()
+                });
+            let items = backend.cleanup(&cancel).unwrap();
+            assert_eq!(items.len(), 1);
+            assert!(backend.cleanup_plan(&items[0].id, &cancel).is_ok());
+        }
+        assert!(code.join("project/node_modules/data").exists());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[cfg(target_os = "macos")]
