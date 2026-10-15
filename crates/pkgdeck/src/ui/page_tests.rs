@@ -78,7 +78,7 @@ fn draw(
         // Header geometry includes arbitrary package names, including emoji
         // outside the bundled faces. Use the application's replacement glyph
         // instead of kittest's new missing-glyph panic or host-specific fonts.
-        .with_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu)
+        .allow_missing_glyphs()
         .build_ui_state(
             move |ui, (ready, app): &mut (bool, App)| {
                 if !*ready {
