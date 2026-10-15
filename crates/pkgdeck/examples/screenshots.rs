@@ -308,6 +308,37 @@ fn themes() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--refresh") {
+        for (name, size, state) in [
+            ("updates-refresh-after", [1180.0, 720.0], "empty"),
+            ("updates-refresh-running", [1180.0, 720.0], "running"),
+            ("updates-refresh-narrow", [400.0, 640.0], "empty"),
+            ("updates-refresh-failed", [1180.0, 720.0], "failed"),
+        ] {
+            render(name, size, |app| {
+                app.page = Page::Updates;
+                app.rows.clear();
+                app.background.available = 0;
+                app.report.checked_at = Some(model::now());
+                if state == "running" {
+                    app.rows = update_rows();
+                    app.background.available = 4;
+                    app.checking_updates = true;
+                    app.busy = true;
+                    app.writing = true;
+                }
+                if state == "failed" {
+                    app.report.phase = "partial".into();
+                    app.report.successful_sources = vec!["npm".into()];
+                    app.report.failures = serde_json::from_value(json!([
+                        {"source":"apt", "kind":"failed", "detail":"Could not reach the package server."}
+                    ])).unwrap();
+                }
+            });
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--themes") {
         return themes();
     }

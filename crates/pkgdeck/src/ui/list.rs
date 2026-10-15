@@ -11,6 +11,7 @@ use eframe::egui::{
     self, emath::GuiRounding as _, pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, Vec2,
 };
+use std::collections::HashSet;
 
 const ROW: f32 = 60.0;
 /// A wide row's height at the chosen density.
@@ -161,6 +162,33 @@ pub fn list_shown(app: &App) -> bool {
 /// The line under the page title: how many, or what the page is doing,
 /// and which sources it still waits for (named on hover past two).
 pub fn subtitle(app: &App) -> (String, Option<String>) {
+    if app.page == Page::Updates && app.opened.is_none() {
+        let line = if app.checking_updates {
+            "Checking for updates".into()
+        } else if !app.busy {
+            match app.read_failures().is_empty() {
+                false => "Some sources couldn’t be checked".into(),
+                true => app
+                    .report
+                    .checked_at
+                    .map(|at| {
+                        format!(
+                            "Last {}",
+                            model::checked_ago(at, model::now()).to_lowercase()
+                        )
+                    })
+                    .unwrap_or_default(),
+            }
+        } else {
+            heading_text(app)
+        };
+        let line = if !app.busy && !app.items.is_empty() && !line.is_empty() {
+            format!("{} · {line}", heading_text(app))
+        } else {
+            line
+        };
+        return (line, None);
+    }
     if !list_shown(app) {
         return (String::new(), None);
     }
@@ -835,11 +863,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let running = app.writing
         && (app.active_rows.contains(&identity)
             || app.progress.for_row(&identity, &row.source).is_some());
-    let batch_state = if app.writing && app.progress.total > 1 {
-        app.progress.for_row(&identity, &row.source)
-    } else {
-        None
-    };
+    let batch_state = batch_mark(
+        app.writing,
+        &app.progress,
+        &app.done_rows,
+        &identity,
+        &row.source,
+    );
     let pull = matches!(row.source.as_str(), "docker" | "podman")
         && row.is_installed()
         && row.reference.is_some()
@@ -1166,6 +1196,25 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
 
 /// Where a row stands in a batch: waiting, working, or done, over its icon.
 /// One quiet mark per row, so the card's single bar is all that moves.
+/// The batch mark on a row: what the running batch does to it. Once the
+/// batch ends, the rows it finished stay Done until the reload confirms them.
+fn batch_mark(
+    writing: bool,
+    progress: &model::Progress,
+    done: &HashSet<String>,
+    identity: &str,
+    source: &str,
+) -> Option<model::RowState> {
+    if !writing {
+        return done.contains(identity).then_some(model::RowState::Done);
+    }
+    if progress.total > 1 {
+        progress.for_row(identity, source)
+    } else {
+        None
+    }
+}
+
 fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Palette) {
     ui.painter().rect_filled(
         icon,
@@ -1427,7 +1476,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
         } else {
             String::new()
         }
-    } else if matches!(app.page, Page::Updates | Page::Clean) {
+    } else if app.page == Page::Clean {
         app.report
             .checked_at
             .map(|at| model::checked_ago(at, model::now()))
@@ -1499,8 +1548,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     );
 }
 
-/// The buttons under an empty list, with their icons. Anything that
-/// failed or stopped offers Retry, whatever it was doing.
+/// Contextual empty-list actions. Refresh always stays in the header.
 fn empty_actions(
     page: Page,
     failures: usize,
@@ -1508,22 +1556,15 @@ fn empty_actions(
     filtered: bool,
 ) -> Vec<(&'static str, &'static str)> {
     if failures > 0 {
-        return vec![("Retry", "refresh"), ("Details", "info")];
+        return vec![("Details", "info")];
     }
     if cancelled {
-        return vec![("Retry", "refresh")];
+        return vec![];
     }
     if page == Page::Search {
         return vec![];
     }
-    let mut labels = vec![(
-        if matches!(page, Page::Updates | Page::Clean) {
-            "Check again"
-        } else {
-            "Reload"
-        },
-        "refresh",
-    )];
+    let mut labels = vec![];
     if filtered {
         labels.push(("Clear filters", "cancel"));
     }
@@ -1532,7 +1573,41 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{source_badge_shown, status_line, waiting_text};
+    use super::{batch_mark, source_badge_shown, status_line, waiting_text};
+    use crate::model::{identity_of_row_value, Progress, RowState};
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_finished_row_keeps_its_mark_until_the_reload_confirms() {
+        let target = serde_json::json!({
+            "source": "dnf", "name": "fixture", "architecture": "x86_64"
+        });
+        let other = serde_json::json!({
+            "source": "dnf", "name": "other", "architecture": "x86_64"
+        });
+        let identity = identity_of_row_value(&target);
+        let progress: Progress = serde_json::from_value(serde_json::json!({
+            "total": 2, "done": 1,
+            "targets": [target, other],
+            "finished": [target],
+        }))
+        .unwrap();
+        let done = HashSet::from([identity.clone()]);
+        let mark = |writing, done: &HashSet<String>| {
+            batch_mark(writing, &progress, done, &identity, "dnf")
+        };
+        assert_eq!(mark(true, &HashSet::new()), Some(RowState::Done));
+        assert_eq!(mark(false, &done), Some(RowState::Done));
+        assert_eq!(mark(false, &HashSet::new()), None);
+        let other_id = identity_of_row_value(&serde_json::json!({
+            "source": "dnf", "name": "other", "architecture": "x86_64"
+        }));
+        assert_eq!(
+            batch_mark(false, &progress, &done, &other_id, "dnf"),
+            None,
+            "a row the batch didn't finish is not Done"
+        );
+    }
 
     #[test]
     fn batch_mark_replaces_the_source_badge_on_its_row() {
@@ -1550,25 +1625,22 @@ mod tests {
     }
 
     #[test]
-    fn failed_or_stopped_lists_always_offer_retry() {
+    fn refresh_empty_lists_leave_refresh_in_the_header() {
         use super::{empty_actions, Page};
         for page in Page::ALL {
             for failures in [1, 3] {
                 assert_eq!(
                     empty_actions(page, failures, false, true),
-                    [("Retry", "refresh"), ("Details", "info")]
+                    [("Details", "info")]
                 );
             }
-            assert_eq!(empty_actions(page, 0, true, true), [("Retry", "refresh")]);
+            assert!(empty_actions(page, 0, true, true).is_empty());
         }
         assert!(empty_actions(Page::Search, 0, false, true).is_empty());
-        assert_eq!(
-            empty_actions(Page::Updates, 0, false, false),
-            [("Check again", "refresh")]
-        );
+        assert_eq!(empty_actions(Page::Updates, 0, false, false), []);
         assert_eq!(
             empty_actions(Page::Installed, 0, false, true),
-            [("Reload", "refresh"), ("Clear filters", "cancel")]
+            [("Clear filters", "cancel")]
         );
     }
 

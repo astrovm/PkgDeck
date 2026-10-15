@@ -1444,7 +1444,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Open the selected row", "Space"),
     ("Install, remove or update the selected row", "Enter"),
     ("Update selected", "Ctrl+Shift+U"),
-    ("Reload the page", "Ctrl+R"),
+    ("Refresh or check for updates", "Ctrl+R"),
     ("Apply a confirmation", "Ctrl+Enter"),
     ("Clear search or close details", "Esc"),
     ("Quit", "Ctrl+Q"),
@@ -1453,17 +1453,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
 fn shortcuts(ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Keyboard shortcuts", |ui| {
-        let refresh = if cfg!(target_os = "macos") {
-            "Ctrl+Shift+R"
-        } else {
-            "Ctrl+M"
-        };
-        let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
-        let after_reload = all
-            .iter()
-            .position(|(label, _)| *label == "Reload the page")
-            .map_or(all.len(), |at| at + 1);
-        all.insert(after_reload, ("Refresh sources", refresh));
+        let all = SHORTCUTS;
         let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
         let per = all.len().div_ceil(columns);
         ui.columns(columns, |cols| {

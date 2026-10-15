@@ -638,6 +638,146 @@ fn snap_search_keeps_store_summaries_for_ranking() {
     assert!(installed.iter().all(|p| p.installed_version.is_some()));
 }
 
+#[derive(Clone)]
+struct SnapCheck {
+    updates: Result<String, ExecutionError>,
+}
+impl Transport for SnapCheck {
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        assert_eq!(executable, "snap");
+        assert!(!write, "an update check must not elevate or apply changes");
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+        match args.as_slice() {
+            [list] if list == "list" => Ok(output("Name Version Rev Tracking Publisher Notes\nfixture-one 1.0 1 latest/stable synthetic -\nfixture-two 2.0 2 latest/stable synthetic -\n")),
+            [refresh, list] if refresh == "refresh" && list == "--list" => self.updates.clone().map(output),
+            _ => panic!("unexpected Snap query: {args:?}"),
+        }
+    }
+}
+
+#[test]
+fn refresh_snap_checks_read_pending_updates_without_applying_them() {
+    for subset in 0..4 {
+        let mut updates = "Name Version Rev Publisher Notes\n".to_owned();
+        if subset & 1 != 0 {
+            updates.push_str("fixture-one 1.1 3 synthetic -\n");
+        }
+        if subset & 2 != 0 {
+            updates.push_str("fixture-two 2.0 4 synthetic -\n");
+        }
+        let mut snap = Snap::snap(SnapCheck {
+            updates: Ok(updates),
+        });
+        for _ in 0..2 {
+            let packages = snap.installed(&Cancellation::default()).unwrap();
+            assert_eq!(packages.len(), 2);
+            for (i, package) in packages.iter().enumerate() {
+                let available = subset & (1 << i) != 0;
+                assert_eq!(package.update == UpdateAvailability::Available, available);
+                assert_eq!(
+                    package.candidate_version.as_deref(),
+                    if available {
+                        Some(if i == 0 { "1.1" } else { "2.0" })
+                    } else {
+                        package.installed_version.as_deref()
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_snap_query_failures_remain_failures_in_the_inventory_report() {
+    for error in [
+        ExecutionError::Io("fixture store unavailable".into()),
+        ExecutionError::AuthorizationDenied,
+        ExecutionError::Cancelled,
+    ] {
+        let mut engine = Engine::default();
+        engine
+            .register(Snap::snap(SnapCheck {
+                updates: Err(error),
+            }))
+            .unwrap();
+        let report = engine.installed(&Cancellation::default());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].backend, "snap");
+        assert!(report.successful_sources.is_empty());
+        assert!(report.packages.is_empty());
+    }
+}
+
+#[test]
+fn refresh_snap_error_handling_preserves_other_managers_cached_inventory_behavior() {
+    struct CachedInventory;
+    impl Transport for CachedInventory {
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            assert!(!write);
+            let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+            match (executable, args.as_slice()) {
+                ("apk", [list, installed]) if list == "list" && installed == "--installed" => Ok(
+                    output("fixture-1.0-r0 x86_64 {fixture} (MIT) [installed]\n"),
+                ),
+                ("xbps-query", [list]) if list == "-l" => {
+                    Ok(output("ii fixture-1.0_1 Synthetic package\n"))
+                }
+                ("port", [quiet, installed]) if quiet == "-q" && installed == "installed" => {
+                    Ok(output("fixture @1.0_0 (active)\n"))
+                }
+                _ => Err(ExecutionError::Io(
+                    "fixture update query unavailable".into(),
+                )),
+            }
+        }
+    }
+    for mut backend in [
+        SystemManager::apk(CachedInventory),
+        SystemManager::xbps(CachedInventory),
+        SystemManager::macports(CachedInventory),
+    ] {
+        let packages = backend.installed(&Cancellation::default()).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].id.name, "fixture");
+        assert!(packages[0].installed_version.is_some());
+    }
+}
+
+#[test]
+fn refresh_snap_update_output_never_changes_installed_identities_or_runs_a_write() {
+    // Deterministic fuzz input includes binary bytes, broken UTF-8 and short rows.
+    for seed in 0..256_u32 {
+        let bytes: Vec<_> = (0..64)
+            .map(|i| ((seed * 37 + i * 17) % 256) as u8)
+            .collect();
+        let mut snap = Snap::snap(SnapCheck {
+            updates: Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        });
+        let packages = snap.installed(&Cancellation::default()).unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|p| p.id.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fixture-one", "fixture-two"]
+        );
+        assert_eq!(packages[0].installed_version.as_deref(), Some("1.0"));
+        assert_eq!(packages[1].installed_version.as_deref(), Some("2.0"));
+    }
+}
+
 #[test]
 fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     let cancel = Cancellation::default();
@@ -4912,6 +5052,111 @@ fn flatpak_update_checks_refresh_appstream_before_reading_versions() {
 }
 
 #[test]
+fn flatpak_refresh_reads_appstream_in_both_scopes_without_elevation() {
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    backend
+        .execute(
+            &Operation::Refresh {
+                backend: "flatpak".into(),
+            },
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        [
+            (
+                ["--user", "update", "--appstream", "--noninteractive"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                true,
+                false,
+            ),
+            (
+                ["--system", "update", "--appstream", "--noninteractive"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                true,
+                false,
+            ),
+        ]
+    );
+}
+
+/// A `fwupdmgr` argument list and whether it was a write.
+type FwupdCall = (Vec<String>, bool);
+/// Records every `fwupdmgr` call and answers with the given exit code.
+#[derive(Clone, Default)]
+struct FwupdCalls {
+    calls: Arc<Mutex<Vec<FwupdCall>>>,
+    code: Option<i32>,
+}
+impl Transport for FwupdCalls {
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        assert_eq!(executable, "fwupdmgr");
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        self.calls.lock().unwrap().push((args, write));
+        let completion = Completion {
+            code: self.code,
+            signal: None,
+            stdout: vec![],
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        };
+        match self.code {
+            Some(0) | None => Ok(completion),
+            Some(_) => Err(ExecutionError::Failed(completion)),
+        }
+    }
+}
+
+#[test]
+fn fwupd_refresh_runs_as_the_user_and_exit_two_means_current() {
+    let calls = FwupdCalls {
+        code: Some(2),
+        ..FwupdCalls::default()
+    };
+    let mut backend = Firmware::new(calls.clone());
+    let outcome = backend
+        .execute(
+            &Operation::Refresh {
+                backend: "fwupd".into(),
+            },
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(!outcome.cancellation_deferred);
+    assert_eq!(
+        *calls.calls.lock().unwrap(),
+        [(
+            [
+                "--assume-yes",
+                "--no-reboot-check",
+                "--no-unreported-check",
+                "refresh"
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            false,
+        )]
+    );
+}
+
+#[test]
 fn flatpak_search_preserves_branch_without_guessing_kind_or_fetching_updates() {
     let fixture = FlatpakFixture {
         installed: Some(String::new()),
@@ -5191,7 +5436,7 @@ fn local_archives_use_exact_native_managers() {
 
 #[test]
 fn system_manager_actions_preserve_native_target_and_noninteractive_mode() {
-    for source in ["dnf", "pacman", "zypper", "snap"] {
+    for source in ["dnf", "pacman", "zypper"] {
         let fixture = Fixture {
             record_writes: true,
             ..Fixture::new()
@@ -5199,8 +5444,7 @@ fn system_manager_actions_preserve_native_target_and_noninteractive_mode() {
         let mut backend = match source {
             "dnf" => Dnf::dnf(fixture.clone()),
             "pacman" => Pacman::pacman(fixture.clone()),
-            "zypper" => Zypper::zypper(fixture.clone()),
-            _ => Snap::snap(fixture.clone()),
+            _ => Zypper::zypper(fixture.clone()),
         };
         let id = PackageId {
             backend: source.into(),
@@ -5634,6 +5878,53 @@ fn apt_cleanup_loads_cache_without_authentication_and_preserves_orphans_on_failu
     let one = backend.cleanup_report(&Cancellation::default());
     assert_eq!(one.items[1].summary, "1 cached download");
     assert_eq!(one.items[1].bytes, Some(4096));
+}
+
+/// Records every system manager call, reads and writes alike.
+#[derive(Clone, Default)]
+struct SystemCalls(Arc<Mutex<Vec<SystemManagerCall>>>);
+type SystemManagerCall = (String, Vec<String>, bool);
+impl Transport for SystemCalls {
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        self.0
+            .lock()
+            .unwrap()
+            .push((executable.into(), args, write));
+        Ok(output(""))
+    }
+}
+
+#[test]
+fn snap_refresh_lists_snaps_as_the_user_and_never_upgrades() {
+    let calls = SystemCalls::default();
+    let mut backend = Snap::snap(calls.clone());
+    backend
+        .execute(
+            &Operation::Refresh {
+                backend: "snap".into(),
+            },
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        *calls.0.lock().unwrap(),
+        [(
+            "snap".to_owned(),
+            vec!["refresh".to_owned(), "--list".to_owned()],
+            false
+        )]
+    );
 }
 
 #[test]

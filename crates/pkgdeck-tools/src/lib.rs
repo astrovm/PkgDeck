@@ -314,6 +314,7 @@ impl Desktop {
     pub fn search(&mut self, name: &str) {
         self.key("ctrl+1");
         self.key("ctrl+f");
+        self.key("ctrl+a");
         self.xdo(&["type", "--clearmodifiers", "--delay", "0", name]);
         self.key("Return");
         // Focusing the list selects its first row.
@@ -333,7 +334,7 @@ impl Desktop {
             .and_then(|entry| entry["id"].as_u64())
             .unwrap_or(0);
         let (propose, confirm) = match op {
-            "install" => ("ctrl+i", "alt+i"),
+            "install" => ("Return", "alt+i"),
             "remove" => ("ctrl+d", "alt+r"),
             "upgrade" => ("ctrl+u", "alt+u"),
             "refresh" => ("ctrl+m", "alt+r"),
@@ -356,7 +357,9 @@ impl Desktop {
         // nothing was applied until an entry appears and resending is safe.
         for attempt in 1.. {
             self.key(propose);
-            self.key(confirm);
+            if !confirm.is_empty() {
+                self.key(confirm);
+            }
             let wait = Instant::now() + Duration::from_secs(15);
             while !started() && Instant::now() < wait {
                 sleep(Duration::from_millis(50));

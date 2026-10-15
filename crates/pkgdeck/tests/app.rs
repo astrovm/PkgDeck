@@ -302,7 +302,7 @@ fn search_debounces_ranks_and_installs() {
 }
 
 #[test]
-fn updates_check_some_and_update_them() {
+fn refresh_still_allows_checked_updates_after_checking() {
     let (_turn, mut app) = start(vec![
         package("a", "Alpha", Some("1"), Some("2")),
         package("b", "Beta", Some("1"), Some("2")),
@@ -311,6 +311,12 @@ fn updates_check_some_and_update_them() {
     app.open_page(Page::Updates);
     until(&mut app, "updates", |app| app.items.len() == 2);
     idle(&mut app);
+    app.refresh_page();
+    assert!(app.checking_updates);
+    idle(&mut app);
+    assert!(!app.checking_updates);
+    assert!(app.read_failures().is_empty());
+    assert_eq!(app.items.len(), 2);
     // Uncheck Beta: only Alpha is updated, after the dialog.
     let beta = app.rows[app.items[1].raw].identity();
     app.unchecked.insert(beta);
@@ -328,6 +334,9 @@ fn updates_check_some_and_update_them() {
     // plans with apt itself, which this synthetic manager can't, so that
     // ends in a notice instead.)
     until(&mut app, "reloaded", |app| app.items.len() == 1);
+    app.c().set_notice("{}".into());
+    app.react();
+    assert!(app.notice.is_empty());
     app.upgrade_updates();
     until(&mut app, "answer", |app| {
         app.confirmation.is_some() || !app.notice.is_empty()

@@ -122,6 +122,73 @@ fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
 }
 
 #[test]
+fn refresh_the_page_refresh_checks_updates_once_and_retains_rows_until_it_finishes() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.c().set_source_catalog(
+        json!([{"source":"npm", "available":true, "capabilities":["installed"]}])
+            .to_string()
+            .into(),
+    );
+    app.react();
+    rows(
+        &mut app,
+        json!([row(
+            "tool",
+            json!({"source":"npm", "candidate":"2", "update":"available"})
+        )]),
+    );
+    app.refresh_page();
+    assert!(app.checking_updates);
+    assert!(app.busy);
+    assert!(!app.can_act());
+    assert_eq!(app.retained.as_ref().unwrap().len(), 1);
+    assert!(app.confirmation.is_none());
+    app.refresh_page();
+    assert!(app.checking_updates);
+    // Completion owns its report; it must not start the generic post-write
+    // reload that would erase a failed index refresh from that report.
+    app.c().set_writing(false);
+    app.c().set_busy(false);
+    app.c().set_report_state(r#"{"phase":"partial","failures":[{"source":"npm","kind":"failed","detail":"Network unavailable"}]}"#.into());
+    app.react();
+    assert!(!app.checking_updates);
+    assert!(!app.post_write_reload);
+    assert_eq!(app.read_failures().len(), 1);
+    assert!(app.retained.is_none());
+}
+
+#[test]
+fn refresh_page_refresh_respects_busy_confirmations_and_pages_without_lists() {
+    let mut app = app();
+    app.page = Page::Settings;
+    app.refresh_page();
+    assert!(!app.busy);
+    app.page = Page::Updates;
+    app.page = Page::Updates;
+    app.enabled = HashSet::from(["invalid-old-setting".to_owned()]);
+    app.refresh_page();
+    assert!(!app.checking_updates);
+    assert!(!app.busy);
+    app.enabled.clear();
+    app.page = Page::Installed;
+    app.busy = true;
+    app.refresh_page();
+    assert!(!*app.ctl.busy());
+    app.busy = false;
+    app.c().set_confirmation("Review".into());
+    app.react();
+    app.refresh_page();
+    assert!(!app.busy);
+    app.confirmation = None;
+    app.c().set_confirmation("".into());
+    app.react();
+    app.refresh_page();
+    assert!(app.busy);
+    assert!(!app.checking_updates);
+}
+
+#[test]
 fn a_failed_row_says_why_until_the_controller_forgets_it() {
     let mut app = app();
     app.page = Page::Clean;
@@ -244,6 +311,83 @@ fn changes_flash_the_rows_they_touched() {
     // Without a snapshot there's nothing to compare.
     app.snapshot.clear();
     app.flash_changed_rows();
+}
+
+/// Runs a write and ends it with `batch` as its result. The job is still
+/// busy when the write ends, as it is until the reload it starts finishes.
+fn end_batch(app: &mut App, batch: Value) {
+    app.c().set_busy(true);
+    app.c().set_writing(true);
+    app.react();
+    app.c().set_batch_finished(batch.to_string().into());
+    app.c().set_writing(false);
+    app.react();
+}
+
+#[test]
+fn finished_rows_stay_done_until_the_reload_confirms() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    let (a, b) = (app.rows[0].identity(), app.rows[1].identity());
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(app.done_rows.contains(&a), "the finished row is Done");
+    assert!(!app.done_rows.contains(&b), "an unfinished row is not");
+    assert!(!app.post_write_reload, "a refresh replaces the full reload");
+    // The reload confirms the rows, so the marks go.
+    app.c().set_busy(false);
+    app.react();
+    assert!(app.done_rows.is_empty());
+}
+
+#[test]
+fn a_failed_row_is_never_marked_done() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    let b = app.rows[1].identity();
+    // `b` failed, so the batch lists only `a`.
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(!app.done_rows.contains(&b));
+}
+
+#[test]
+fn a_single_target_batch_marks_nothing_and_reloads_the_page() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({}))]));
+    end_batch(&mut app, json!({"sources": [], "finished": []}));
+    assert!(app.done_rows.is_empty());
+    assert!(app.post_write_reload, "no refresh was planned, so reload");
+}
+
+#[test]
+fn an_empty_first_run_batch_is_safe() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([row("a", json!({}))]));
+    end_batch(&mut app, json!({}));
+    assert!(app.done_rows.is_empty());
+}
+
+#[test]
+fn other_pages_reload_instead_of_refreshing_sources() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("a", json!({}))]));
+    let a = app.rows[0].identity();
+    end_batch(
+        &mut app,
+        json!({"sources": ["apt"], "finished": [row("a", json!({}))]}),
+    );
+    assert!(app.done_rows.contains(&a));
+    assert!(app.post_write_reload);
 }
 
 #[test]
@@ -1338,4 +1482,125 @@ fn clean_selected_reviews_only_the_checked_batch_tasks() {
     app.refresh_items();
     app.clean_selected();
     assert!(app.active_rows.is_empty());
+}
+
+#[test]
+fn refresh_failure_survives_the_real_worker_completion() {
+    use pkgdeck_core::{
+        engine::{Backend, EngineError},
+        package::*,
+    };
+    struct FailingRefresh;
+    impl Backend for FailingRefresh {
+        fn id(&self) -> &str {
+            "flatpak"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Refresh]
+        }
+        fn detect(
+            &mut self,
+            _: &pkgdeck_core::process::Cancellation,
+        ) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(
+            &mut self,
+            _: &pkgdeck_core::process::Cancellation,
+        ) -> Result<Vec<Package>, EngineError> {
+            Ok(vec![serde_json::from_value(json!({
+                "id":{"backend":"flatpak","name":"fixture","architecture":"all","scope":"system"},
+                "display_name":"Fixture","summary":"Disposable fixture","installed_version":"1","candidate_version":"2","update":"available"
+            })).unwrap()])
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &pkgdeck_core::process::Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            Err(EngineError::InvalidResponse {
+                backend: "flatpak".into(),
+                reason: "Fixture package server is unavailable".into(),
+            })
+        }
+    }
+    fn failing_engine(
+        _: &[String],
+        _: bool,
+        _: pkgdeck_core::host::Authorization,
+        _: &pkgdeck_core::process::Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = Engine::default();
+        engine.register(FailingRefresh)?;
+        Ok(engine)
+    }
+    let (store, mut settings) = Store::open(None, None);
+    settings.source_list = "flatpak".into();
+    settings.background_mode = false;
+    let mut app = App::with_controller(
+        create_synthetic_controller(failing_engine),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    app.open_page(Page::Updates);
+    let finish = |app: &mut App| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !app.idle() && Instant::now() < until {
+            app.tick(Instant::now());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.idle());
+    };
+    finish(&mut app);
+    assert_eq!(app.rows.iter().filter(|row| row.is_package()).count(), 1);
+    app.refresh_page();
+    assert!(app.checking_updates);
+    finish(&mut app);
+    assert!(!app.checking_updates);
+    assert_eq!(
+        app.read_failures().len(),
+        1,
+        "completion must preserve the failed index refresh"
+    );
+    assert_eq!(app.read_failures()[0].source, "flatpak");
+    assert!(app.read_failures()[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("Fixture package server"));
+    assert_eq!(app.rows.iter().filter(|row| row.is_package()).count(), 1);
+    assert!(!app.post_write_reload);
+    // A read retaining old rows cannot propose a change from that snapshot.
+    app.retained = Some(app.rows.clone());
+    app.propose("upgrade-all");
+    assert!(!app.busy);
+    assert!(app.confirmation.is_none());
+    app.retained = None;
+}
+
+#[test]
+fn refresh_checks_block_changes_and_other_work_keeps_its_existing_rules() {
+    let mut app = app();
+    let states = [
+        (false, false, false, true), // idle
+        (true, false, false, false), // loading the list
+        (true, true, false, true),   // another write may be queued
+        (true, false, true, true),   // background details don't block changes
+        (true, true, true, true),
+    ];
+    for (busy, writing, reading, allowed) in states {
+        app.busy = busy;
+        app.writing = writing;
+        app.reading = reading;
+        app.checking_updates = false;
+        assert_eq!(app.can_act(), allowed);
+        app.checking_updates = true;
+        assert!(!app.can_act());
+        app.upgrade_updates();
+        app.propose("upgrade-all");
+        assert!(app.confirmation.is_none());
+    }
 }

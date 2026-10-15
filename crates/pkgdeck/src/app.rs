@@ -84,6 +84,10 @@ pub struct App {
     pub details: Details,
     pub notice: Notice,
     pub progress: Progress,
+    /// What the last batch changed, read when `writing` goes false.
+    pub batch: model::BatchResult,
+    /// Rows a batch just finished, shown as Done until the reload confirms.
+    pub done_rows: HashSet<String>,
     pub catalog: Vec<Source>,
     pub report: ReportState,
     pub pending: Vec<String>,
@@ -96,6 +100,8 @@ pub struct App {
     pub writing: bool,
     pub reading: bool,
     pub refreshing: bool,
+    /// The explicit refresh-and-check flow owns its final reload.
+    pub checking_updates: bool,
 
     // What the window shows.
     pub page: Page,
@@ -218,6 +224,7 @@ impl App {
             on_failure_changed: "failure",
             on_failed_rows_changed: "failed_rows",
             on_progress_changed: "progress",
+            on_batch_finished_changed: "batch_finished",
             on_repositories_changed: "repositories",
             on_source_catalog_changed: "source_catalog",
             on_report_state_changed: "report_state",
@@ -269,6 +276,7 @@ impl App {
             writing: false,
             reading: false,
             refreshing: false,
+            checking_updates: false,
             page: Page::Search,
             page_changed: now,
             query: String::new(),
@@ -291,6 +299,8 @@ impl App {
             cursor_moved: false,
             unchecked: HashSet::new(),
             active_rows: HashSet::new(),
+            done_rows: HashSet::new(),
+            batch: model::BatchResult::default(),
             flashes: HashMap::new(),
             held: Vec::new(),
             snapshot: HashMap::new(),
@@ -516,6 +526,7 @@ impl App {
         let was_writing = self.writing;
         self.busy = *self.ctl.busy();
         self.writing = *self.ctl.writing();
+        self.checking_updates |= self.ctl.checking_updates();
         self.reading = *self.ctl.reading();
         self.refreshing = *self.ctl.refreshing();
         if has("source_catalog") {
@@ -536,6 +547,9 @@ impl App {
         }
         if has("progress") {
             self.progress = model::parse(self.ctl.progress().as_str());
+        }
+        if has("batch_finished") {
+            self.batch = model::parse(self.ctl.batch_finished().as_str());
         }
         if has("activity") {
             self.activity = model::parse(self.ctl.activity().as_str());
@@ -598,6 +612,7 @@ impl App {
             self.items_stale = true;
             self.flash_changed_rows();
             self.restore_selection();
+            self.done_rows.clear();
             if !self.post_write_reload && !self.writing {
                 self.snapshot.clear();
             }
@@ -627,10 +642,27 @@ impl App {
                     })
                     .collect();
                 self.flashes.clear();
+                self.done_rows.clear();
             } else if !self.writing && was_writing {
                 self.active_rows.clear();
-                if self.page.lists() && !self.close_pending {
-                    self.post_write_reload = true;
+                // The rows the batch finished stay Done until the reload
+                // confirms them, which clears them when the job ends.
+                self.done_rows = self
+                    .batch
+                    .finished
+                    .iter()
+                    .map(model::identity_of_row_value)
+                    .collect();
+                if self.page.lists() && !self.close_pending && !self.checking_updates {
+                    // Updates only re-reads the sources the batch ran on.
+                    let refresh = self.page == Page::Updates && !self.batch.sources.is_empty();
+                    if refresh {
+                        let sources = self.batch.sources.join(",");
+                        self.c().refresh_sources(sources.into());
+                    }
+                    if !refresh || !*self.ctl.busy() {
+                        self.post_write_reload = true;
+                    }
                 }
             }
         }
@@ -677,6 +709,9 @@ impl App {
         if self.post_write_reload && !self.busy {
             self.post_write_reload = false;
             self.reload(true, true);
+        }
+        if !self.busy {
+            self.checking_updates = false;
         }
     }
 
@@ -1175,6 +1210,32 @@ impl App {
         self.react();
     }
 
+    /// The header and Ctrl+R share one action. Updates fetches fresh indexes
+    /// before listing; other pages only read their current contents again.
+    pub fn refresh_page(&mut self) {
+        if self.busy || self.confirmation.is_some() || !self.page.lists() {
+            return;
+        }
+        if self.page != Page::Updates {
+            self.reload(true, true);
+            return;
+        }
+        let shown = self.effective_sources(Page::Updates);
+        let sources: Vec<_> = all_sources(&self.catalog)
+            .into_iter()
+            .filter(|source| shown.contains(source))
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        if !self.rows.is_empty() {
+            self.retained = Some(self.rows.clone());
+        }
+        self.checking_updates = true;
+        self.c().check_for_updates(sources.join(",").into());
+        self.react();
+    }
+
     /// "Flatpak", "3 sources", or "All sources": what the filter shows.
     pub fn source_summary(&self, page: Page) -> String {
         match self.page_sources.get(&page) {
@@ -1553,7 +1614,7 @@ impl App {
     // Changes
 
     pub fn can_act(&self) -> bool {
-        !self.busy || self.writing || self.reading
+        !self.checking_updates && (!self.busy || self.writing || self.reading)
     }
 
     fn review_here(&mut self, identity: &str) {
@@ -1615,7 +1676,7 @@ impl App {
     /// A change by name for the selection or the whole page: shortcuts,
     /// Update all, Manage all, Refresh, Clean all.
     pub fn propose(&mut self, action: &str) {
-        if self.retained.is_some() {
+        if self.retained.is_some() || self.checking_updates {
             return;
         }
         let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "clean-all");
@@ -1655,6 +1716,9 @@ impl App {
 
     /// Update all, or the checked ones.
     pub fn upgrade_updates(&mut self) {
+        if self.checking_updates {
+            return;
+        }
         if self.unchecked.is_empty() {
             self.propose("upgrade-all");
             return;

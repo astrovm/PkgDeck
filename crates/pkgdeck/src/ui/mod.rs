@@ -242,16 +242,15 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::L) && !app.items.is_empty() {
         app.ui.focus_list = true;
     }
-    // Before Cmd+R, which would take Shift+Cmd+R too.
     let refresh = if cfg!(target_os = "macos") {
         ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
     } else {
         command(Key::M)
     };
     if command(Key::R) && app.page.lists() {
-        app.reload(true, true);
+        app.refresh_page();
     }
-    let can_change = !app.busy || app.writing;
+    let can_change = !app.checking_updates && (!app.busy || app.writing);
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U))
         && app.page == Page::Updates
         && can_change
@@ -700,20 +699,42 @@ fn header(app: &mut App, ui: &mut Ui) {
             if response.clicked() {
                 app.toggle_activity();
             }
-            if list::list_shown(app) {
-                if !app.busy || app.writing {
-                    if icon_button(ui, "refresh", "Reload (Ctrl+R)", palette.muted, true).clicked()
-                    {
-                        app.reload(true, true);
+            if app.page.lists() && app.opened.is_none() {
+                let refreshing = app.busy && (!app.writing || app.checking_updates);
+                if refreshing {
+                    // One control: the spinner shows the work, a click stops it.
+                    let response = Button::new(Look::Secondary, "Cancel")
+                        .icon("cancel")
+                        .loading(true)
+                        .icon_only(compact)
+                        .tooltip(if app.page == Page::Updates {
+                            "Stop checking for updates"
+                        } else {
+                            "Stop refreshing this page"
+                        })
+                        .show(ui);
+                    if response.clicked() {
+                        app.cancel();
                     }
-                } else if Button::new(Look::Flat, "Cancel")
-                    .small()
-                    .icon("cancel")
-                    .icon_only(compact)
-                    .show(ui)
-                    .clicked()
-                {
-                    app.cancel();
+                } else {
+                    let label = if app.page == Page::Updates {
+                        "Check for updates"
+                    } else {
+                        "Refresh"
+                    };
+                    let response = Button::new(Look::Secondary, label)
+                        .icon("refresh")
+                        .icon_only(compact)
+                        .tooltip(if app.page == Page::Updates {
+                            "Refresh selected sources and check for updates (Ctrl+R)"
+                        } else {
+                            "Refresh this page (Ctrl+R)"
+                        })
+                        .enabled(!app.busy && app.confirmation.is_none())
+                        .show(ui);
+                    if response.clicked() {
+                        app.refresh_page();
+                    }
                 }
             }
             source_checks_button(app, ui, compact);
@@ -831,7 +852,7 @@ fn opening_row(app: &mut App, ui: &mut Ui) {
 
 /// The running change: what it is, how far along, and Cancel.
 pub fn progress_line(app: &mut App, ui: &mut Ui) {
-    if !app.writing || app.progress.label.is_empty() {
+    if !app.writing || app.progress.label.is_empty() || app.checking_updates {
         return;
     }
     if app.drawer_open {
@@ -1122,12 +1143,10 @@ fn clean_all_frees(app: &App) -> u64 {
 
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
-        Page::Updates => {
-            app.items
-                .iter()
-                .any(|i| app.shown_rows()[i.raw].is_package())
-                || !app.refreshable_sources().is_empty()
-        }
+        Page::Updates => app
+            .items
+            .iter()
+            .any(|i| app.shown_rows()[i.raw].is_package()),
         Page::Clean => !app.items.is_empty(),
         _ => false,
     };
@@ -1165,7 +1184,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 && Button::new(Look::Primary, &label)
                     .icon("updates")
                     .tooltip("Ctrl+Shift+U")
-                    .enabled(!(app.busy && !app.writing))
+                    .enabled(!app.checking_updates && !(app.busy && !app.writing))
                     .show(ui)
                     .clicked()
             {

@@ -161,6 +161,7 @@ pub struct Button<'a> {
     label: &'a str,
     tooltip: Option<String>,
     enabled: bool,
+    loading: bool,
     icon_only: bool,
     small: bool,
     min_width: f32,
@@ -176,6 +177,7 @@ impl<'a> Button<'a> {
             label,
             tooltip: None,
             enabled: true,
+            loading: false,
             icon_only: false,
             small: false,
             min_width: 0.0,
@@ -185,6 +187,11 @@ impl<'a> Button<'a> {
     }
     pub fn icon(mut self, icon: &'a str) -> Self {
         self.icon = Some(icon);
+        self
+    }
+    /// Replace the icon with progress while preserving the control's layout.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
         self
     }
     pub fn tooltip(mut self, text: impl Into<String>) -> Self {
@@ -371,7 +378,11 @@ impl<'a> Button<'a> {
                     Pos2::new(x, rect.center().y - icon_size / 2.0),
                     Vec2::splat(icon_size),
                 );
-                theme::paint_icon(painter, icon_rect, icon, ink);
+                if self.loading && !reduce_motion(ctx) {
+                    paint_spinner(ui, icon_rect, ink);
+                } else {
+                    theme::paint_icon(painter, icon_rect, icon, ink);
+                }
                 x += icon_size + 8.0;
             } else if let Some(galley) = &galley {
                 x = center - galley.size().x / 2.0;

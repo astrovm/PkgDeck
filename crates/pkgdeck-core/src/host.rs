@@ -1432,8 +1432,10 @@ impl Host {
         if write {
             self.privileged(&path, args, authorization, cancel)
         } else {
-            let timeout = if executable == "softwareupdate" {
-                // Its listing asks Apple's servers and can take minutes.
+            // A firmware metadata refresh downloads the whole catalog.
+            let fwupd_refresh = executable == "fwupdmgr" && args.iter().any(|arg| arg == "refresh");
+            let timeout = if executable == "softwareupdate" || fwupd_refresh {
+                // Their listings ask remote servers and can take minutes.
                 std::time::Duration::from_secs(300)
             } else if matches!(executable, "snap" | "fwupdmgr") {
                 std::time::Duration::from_secs(60)
