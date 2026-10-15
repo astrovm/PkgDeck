@@ -11,7 +11,9 @@ When a change fails, a short message says so, with **Details**. The failure
 then waits in **Activity**, marked by a dot, with **Retry** and **Dismiss**.
 
 Drag the sidebar's edge to resize it. Drag it thin, or make the window
-narrow, and it shows only icons. Double-click the edge to reset it.
+narrow, and it shows only icons. Double-click the edge to reset it. In
+**macOS 27**, **Windows 11** and **GNOME 51**, whose title bar is one with
+the window, the edge runs up through the title bar too.
 
 <img src="screenshots/narrow.png" width="280" alt="PkgDeck in a narrow window, with the sidebar as an icon rail">
 

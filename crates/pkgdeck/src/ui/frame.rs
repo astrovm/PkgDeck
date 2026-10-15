@@ -111,6 +111,17 @@ pub fn system_frame(style: Style, desktop: Desktop) -> bool {
     }
 }
 
+/// Whether `style`'s title bar is one with the window, with no colour or
+/// line of its own between it and the page: macOS 27, Windows 11 and
+/// GNOME 51. The sidebar's border then runs up through it, and drags there
+/// resize the sidebar.
+pub fn seamless_title_bar(style: Style) -> bool {
+    matches!(
+        style.family(),
+        Family::Liquid | Family::Fluent | Family::Adwaita
+    )
+}
+
 /// The title bar the app lays out for `style` on `desktop`: the style's
 /// own, none under the system's, but on the Mac macOS 27 keeps its bar
 /// under the system's lights, so the sidebar still runs up behind them.
