@@ -1149,7 +1149,10 @@ fn page_actions_height(app: &App) -> f32 {
             .items
             .iter()
             .any(|i| app.shown_rows()[i.raw].is_package()),
-        Page::Clean => !app.items.is_empty(),
+        Page::Clean => app
+            .items
+            .iter()
+            .any(|i| app.shown_rows()[i.raw].batch_cleanable()),
         _ => false,
     };
     if any {

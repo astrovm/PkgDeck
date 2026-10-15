@@ -26,9 +26,11 @@ openssl req -x509 -newkey rsa:3072 -nodes -keyout "$work/key.pem" -out "$work/ce
     -addext 'extendedKeyUsage=critical,codeSigning' 2>"$work/req.log" ||
     { cat "$work/req.log" >&2; exit 1; }
 # macOS security import expects the older PKCS#12 encryption algorithms,
-# which OpenSSL 3 only writes when asked.
+# which OpenSSL 3 and later only write when asked. LibreSSL and OpenSSL 1.1
+# write them anyway and don't know the option.
 pkcs12_args=(-export)
-if [[ $(openssl version) == 'OpenSSL 3'* ]]; then pkcs12_args+=(-legacy); fi
+pkcs12_help=$(openssl pkcs12 -help 2>&1 || true)
+if [[ $pkcs12_help == *-legacy* ]]; then pkcs12_args+=(-legacy); fi
 openssl pkcs12 "${pkcs12_args[@]}" -inkey "$work/key.pem" -in "$work/cert.pem" \
     -out "$work/identity/signing.p12" -passout "file:$work/identity/password.txt"
 openssl x509 -in "$work/cert.pem" -out "$work/identity/certificate.pem"
