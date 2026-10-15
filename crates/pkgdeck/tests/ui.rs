@@ -619,13 +619,16 @@ fn every_style_mixes_with_every_other_look_option() {
                     style.family() != Family::Retro,
                     "{at}"
                 );
-                // The older styles bring their own title bar and buttons.
+                // The older styles bring their own title bar and buttons;
+                // GNOME offers close alone.
                 for caption in ["Minimize window", "Maximize window", "Close window"] {
+                    let shown = style != Style::Modern
+                        && (style.family() != Family::Adwaita || caption == "Close window");
                     assert_eq!(
                         harness
                             .query_by_role_and_label(Role::Button, caption)
                             .is_some(),
-                        style != Style::Modern,
+                        shown,
                         "{at} {caption}"
                     );
                 }
@@ -648,6 +651,13 @@ fn the_older_styles_title_bar_buttons_answer_clicks() {
             ("Maximize window", egui::ViewportCommand::Maximized(true)),
             ("Close window", egui::ViewportCommand::Close),
         ] {
+            // GNOME offers close alone.
+            if style == Style::Adwaita && caption != "Close window" {
+                assert!(harness
+                    .query_by_role_and_label(Role::Button, caption)
+                    .is_none());
+                continue;
+            }
             harness.get_by_role_and_label(Role::Button, caption).click();
             let mut sent = Vec::new();
             for _ in 0..3 {

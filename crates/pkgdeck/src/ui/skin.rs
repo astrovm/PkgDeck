@@ -1977,7 +1977,7 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
 /// The background of list row `index`, where the style stripes them, as
 /// Aqua's lists did in pale blue.
 pub fn row_stripe(palette: &Palette, index: usize) -> Option<Color32> {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         return None;
     }
     // Another accent stripes in its own pale shade.
