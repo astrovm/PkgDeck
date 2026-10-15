@@ -4110,6 +4110,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             (self.kind, operation),
             (ManagerKind::Snap, Operation::Refresh { .. })
         ) {
+            progress(Progress::Message("Reading the Snap package list.".into()));
             bytes(
                 "snap",
                 self.call_with(
@@ -6734,14 +6735,22 @@ mod tests {
         }
         // Snap has no metadata-only refresh, so a failed listing must not
         // read as a successful refresh.
+        let mut messages = Vec::new();
         let outcome = SystemManager::snap(SnapdDown).execute(
             &Operation::Refresh {
                 backend: "snap".into(),
             },
             &Cancellation::default(),
-            &mut |_| {},
+            &mut |progress| messages.push(progress),
         );
         assert!(outcome.is_err(), "{outcome:?}");
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Progress::Message(text)] if text == "Reading the Snap package list."
+            ),
+            "{messages:?}"
+        );
     }
 
     #[test]
