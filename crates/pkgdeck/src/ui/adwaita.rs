@@ -3,7 +3,7 @@
 //! round grey one, as GNOME's default layout has.
 
 use super::frame::{fit, plain_glyph, window_corners, Caption, Press, WindowState};
-use super::skin::{adwaita_sidebar, faded, top_corners};
+use super::skin::{adwaita_sidebar, faded};
 use super::theme::Palette;
 use eframe::egui::{pos2, vec2, Color32, Id, Painter, Rect, Stroke, StrokeKind};
 
@@ -19,8 +19,10 @@ pub fn captions(bar: Rect) -> Vec<(Caption, Rect)> {
     )]
 }
 
-/// The window, its header bar, the sidebar's colour running up beside the
-/// title, and a hairline round it all.
+/// The window, the sidebar's colour running up beside the title, and a
+/// hairline round it all. The header bar has no colour or line of its own:
+/// in a toolbar view, as GNOME's apps have, libadwaita draws it flat over
+/// the pane below.
 pub fn paint_frame(
     painter: &Painter,
     full: Rect,
@@ -31,14 +33,6 @@ pub fn paint_frame(
     let dark = palette.dark;
     let corners = window_corners(state.maximized);
     painter.rect_filled(full, corners, palette.canvas);
-    let header = Rect::from_min_max(full.min, pos2(full.right(), bar.bottom()));
-    // Behind another window the header takes the window's colour.
-    let fill = match (dark, state.active) {
-        (_, false) => palette.canvas,
-        (true, true) => palette.tone(super::skin::rgb(0x2e2e32)),
-        (false, true) => palette.surface,
-    };
-    painter.rect_filled(header, top_corners(corners), fill);
     let sidebar = painter.ctx().data(|data| {
         data.get_temp::<f32>(Id::unique("sidebar-extent"))
             .unwrap_or(0.0)
@@ -55,11 +49,6 @@ pub fn paint_frame(
             Stroke::new(1.0, Color32::from_black_alpha(if dark { 92 } else { 18 })),
         );
     }
-    painter.hline(
-        header.x_range(),
-        header.bottom() - 0.5,
-        Stroke::new(1.0, Color32::from_black_alpha(if dark { 92 } else { 31 })),
-    );
     if !state.maximized {
         let outline = if dark {
             Color32::from_white_alpha(18)

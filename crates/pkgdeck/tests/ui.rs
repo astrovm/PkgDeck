@@ -1955,3 +1955,29 @@ fn refresh_timestamps_belong_to_updates_and_other_pages_keep_their_counts() {
         );
     }
 }
+
+#[test]
+fn the_activity_drawer_dims_the_page_inside_the_windows_rounded_corners() {
+    let mut app = app();
+    app.settings.style = pkgdeck::settings::Style::Adwaita;
+    app.drawer_open = true;
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    let scrim = harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(shape)
+                if shape.fill.r() == 0
+                    && [56, 115].contains(&shape.fill.a())
+                    && shape.rect.bottom() > 790.0 =>
+            {
+                Some(shape.corner_radius)
+            }
+            _ => None,
+        })
+        .expect("the page dims behind the drawer");
+    // GNOME 51's bottom corners are round; the scrim stops inside them.
+    assert!(scrim.sw > 0 && scrim.se > 0, "{scrim:?}");
+}

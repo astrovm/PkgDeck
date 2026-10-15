@@ -24,9 +24,10 @@ pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
         .fixed_pos(window.min)
         .show(&ctx, |ui| {
             let (rect, response) = ui.allocate_exact_size(window.size(), Sense::click());
+            // Inside the window's rounded corners, not over them.
             ui.painter().rect_filled(
                 rect,
-                CornerRadius::ZERO,
+                super::frame::fit(ui.ctx(), rect),
                 Color32::from_black_alpha(
                     ((if palette.dark { 115.0 } else { 56.0 }) * shown) as u8,
                 ),
