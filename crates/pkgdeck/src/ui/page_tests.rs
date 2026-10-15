@@ -75,6 +75,10 @@ fn draw(
     }
     let mut harness = Harness::builder()
         .with_size(vec2(width, 500.0))
+        // Header geometry includes arbitrary package names, including emoji
+        // outside the bundled faces. Use the application's replacement glyph
+        // instead of kittest's new missing-glyph panic or host-specific fonts.
+        .with_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu)
         .build_ui_state(
             move |ui, (ready, app): &mut (bool, App)| {
                 if !*ready {
