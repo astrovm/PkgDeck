@@ -252,23 +252,26 @@ fn capture(size: [f32; 2], prepare: impl FnOnce(&mut App)) -> image::RgbaImage {
     harness.render().expect("render")
 }
 
-/// The README's grid: Settings in nine looks, three across and three down,
-/// each shrunk to the same width with a clear gap between them.
+/// The README's grid: Settings in twelve looks, four across and three
+/// down, each shrunk to the same width with a clear gap between them.
 fn themes() {
     use pkgdeck::settings::{Accent, Style};
     const TILE: u32 = 800;
     const GAP: u32 = 32;
-    const COLUMNS: u32 = 3;
+    const COLUMNS: u32 = 4;
     let looks = [
         (Style::Modern, true, None),
         (Style::Retro, false, None),
         (Style::Luna, false, None),
-        (Style::Glass, false, None),
         (Style::Glass, true, Some(Accent::Pink)),
-        (Style::Fluent, false, None),
         (Style::Fluent, true, None),
         (Style::Aqua, true, None),
         (Style::Liquid, false, None),
+        (Style::Plastik, false, None),
+        (Style::Oxygen, false, None),
+        (Style::Breeze, true, None),
+        (Style::Clearlooks, false, None),
+        (Style::Adwaita, false, None),
     ];
     let tiles: Vec<image::RgbaImage> = looks
         .into_iter()

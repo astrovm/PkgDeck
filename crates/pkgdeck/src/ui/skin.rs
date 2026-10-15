@@ -1,5 +1,6 @@
 //! How each style draws the pieces everything is built from, after the
-//! desktop it's named for: Windows 98, XP and 7, and Mac OS X's Aqua.
+//! desktop it's named for: Windows 98, XP and 7, Mac OS X's Aqua, KDE's
+//! Plastik and Oxygen, and GNOME 2's Clearlooks.
 //! Buttons, fields, check boxes, panels, the canvas, the sidebar,
 //! selections, title bars, list headings and group boxes. Modern draws
 //! them flat. Only egui's own shapes, so a frame costs the same in any
@@ -198,6 +199,80 @@ fn luna_line(palette: &Palette) -> Color32 {
         lerp(palette.bright, gray(0x60), 0.5)
     } else {
         lerp(palette.deep, gray(0xa0), 0.55)
+    }
+}
+
+/// Breeze's button face: a hair off white, or Breeze Dark's grey.
+fn breeze_face(palette: &Palette) -> Color32 {
+    palette.tone(rgb(if palette.dark { 0x292c30 } else { 0xfcfcfc }))
+}
+
+/// The grey Breeze outlines its controls and frames in.
+fn breeze_line(palette: &Palette) -> Color32 {
+    lerp(
+        palette.canvas,
+        palette.ink,
+        if palette.dark { 0.25 } else { 0.3 },
+    )
+}
+
+/// Breeze's mark on a hovered or chosen item: a wash of the accent inside
+/// an outline of it, `shown` from 0 to 1.
+fn breeze_highlight(painter: &Painter, rect: Rect, palette: &Palette, shown: f32) {
+    painter.rect(
+        rect,
+        theme::round(5),
+        faded(palette.accent, 0.25 * shown),
+        Stroke::new(1.0, faded(palette.accent, 0.75 * shown)),
+        StrokeKind::Inside,
+    );
+}
+
+/// The light Oxygen glows with under the pointer.
+pub(super) fn oxygen_glow(palette: &Palette) -> Color32 {
+    lerp(
+        palette.deep,
+        Color32::WHITE,
+        if palette.dark { 0.3 } else { 0.4 },
+    )
+}
+
+/// Oxygen's window colour where the content starts: lit from above, it
+/// fades from here into its own grey.
+pub(super) fn oxygen_lit(palette: &Palette) -> Color32 {
+    lighter(palette.canvas, if palette.dark { 0.05 } else { 0.2 })
+}
+
+/// Oxygen's button face.
+pub(super) fn oxygen_face(palette: &Palette) -> Color32 {
+    if palette.dark {
+        lighter(palette.canvas, 0.1)
+    } else {
+        palette.tone(rgb(0xdfdcd9))
+    }
+}
+
+/// Plastik's button face.
+fn plastik_face(palette: &Palette) -> Color32 {
+    if palette.dark {
+        lighter(palette.surface, 0.12)
+    } else {
+        palette.tone(rgb(0xdddfe4))
+    }
+}
+
+/// Adwaita's sidebar: a shade under the window, or a step over it in the
+/// dark.
+pub(super) fn adwaita_sidebar(palette: &Palette) -> Color32 {
+    palette.tone(rgb(if palette.dark { 0x2e2e32 } else { 0xebebed }))
+}
+
+/// `color` shaded as GTK themes do: lighter above 1, darker below.
+pub(super) fn gtk_shade(color: Color32, factor: f32) -> Color32 {
+    if factor >= 1.0 {
+        lighter(color, (factor - 1.0) * 1.5)
+    } else {
+        darker(color, 1.0 - factor)
     }
 }
 
@@ -456,6 +531,170 @@ pub fn paint_button(
             );
             Some(if dark { palette.ink } else { Color32::BLACK })
         }
+        // Breeze: the button's own face in a grey outline that turns to the
+        // accent under the pointer; the default button filled with it.
+        Family::Breeze => {
+            let radius = theme::round(9);
+            if strong {
+                painter.rect(
+                    rect,
+                    radius,
+                    faded(fill, opacity),
+                    Stroke::new(1.0, faded(darker(fill, 0.15), opacity)),
+                    StrokeKind::Inside,
+                );
+            } else {
+                let face = lerp(
+                    breeze_face(palette),
+                    palette.accent,
+                    0.1 * hover + 0.15 * press,
+                );
+                let line = lerp(breeze_line(palette), palette.accent, hover.max(press));
+                painter.rect(
+                    rect,
+                    radius,
+                    faded(face, alpha),
+                    Stroke::new(1.0, faded(line, alpha)),
+                    StrokeKind::Inside,
+                );
+            }
+            None
+        }
+        // Adwaita: a wash of the text colour, deeper hovered and held; the
+        // suggested action filled with the accent.
+        Family::Adwaita => {
+            let radius = theme::round(9);
+            if strong {
+                painter.rect_filled(rect, radius, faded(fill, opacity));
+            } else {
+                let wash = 0.1 + 0.05 * hover + 0.15 * press;
+                painter.rect_filled(rect, radius, faded(palette.ink, wash * alpha));
+            }
+            None
+        }
+        // Plastik: a soft grey gradient in a dark outline, brighter under
+        // the pointer; the default button ringed in the selection colour.
+        Family::Plastik => {
+            let radius = theme::round(9);
+            let base = darker(lighter(plastik_face(palette), hover * 0.12), press * 0.1);
+            let stops = if pressed {
+                [(0.0, darker(base, 0.06)), (1.0, lighter(base, 0.1))]
+            } else {
+                [
+                    (0.0, lighter(base, if dark { 0.12 } else { 0.5 })),
+                    (1.0, darker(base, 0.04)),
+                ]
+            };
+            bands(painter, rect, radius, &fade_all(stops, alpha));
+            let line = if dark {
+                darker(palette.canvas, 0.5)
+            } else {
+                darker(base, 0.45)
+            };
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, faded(line, alpha)),
+                StrokeKind::Inside,
+            );
+            if strong {
+                painter.rect_stroke(
+                    rect.shrink(1.0),
+                    radius,
+                    Stroke::new(1.0, faded(lerp(palette.deep, base, 0.3), alpha)),
+                    StrokeKind::Inside,
+                );
+            }
+            Some(if dark { palette.ink } else { Color32::BLACK })
+        }
+        // Oxygen: a lit, rounded slab on a soft shadow that glows in the
+        // accent's light under the pointer, and the default one round its
+        // edge.
+        Family::Oxygen => {
+            let radius = theme::round(9);
+            let base = darker(oxygen_face(palette), press * 0.08);
+            let under = if dark { 70.0 } else { 40.0 };
+            painter.add(
+                epaint::RectShape::filled(
+                    rect.translate(vec2(0.0, 1.0)),
+                    radius,
+                    Color32::from_black_alpha((under * alpha) as u8),
+                )
+                .with_blur_width(2.0),
+            );
+            let stops = if pressed {
+                [
+                    (0.0, darker(base, 0.06)),
+                    (0.5, base),
+                    (1.0, lighter(base, 0.12)),
+                ]
+            } else {
+                [
+                    (0.0, lighter(base, if dark { 0.12 } else { 0.6 })),
+                    (0.5, lighter(base, if dark { 0.04 } else { 0.2 })),
+                    (1.0, darker(base, 0.04)),
+                ]
+            };
+            bands(painter, rect, radius, &fade_all(stops, alpha));
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(
+                    1.0,
+                    faded(darker(base, if dark { 0.45 } else { 0.2 }), alpha),
+                ),
+                StrokeKind::Inside,
+            );
+            let glow = if hover > 0.0 && !pressed {
+                faded(oxygen_glow(palette), hover * alpha)
+            } else if strong {
+                faded(palette.deep, 0.6 * alpha)
+            } else {
+                Color32::TRANSPARENT
+            };
+            if glow.a() > 0 {
+                painter.rect_stroke(rect, radius, Stroke::new(1.5, glow), StrokeKind::Inside);
+            }
+            Some(palette.ink)
+        }
+        // Clearlooks: a gentle gloss in a dark outline; the default button
+        // outlined in the selection colour.
+        Family::Clearlooks => {
+            let radius = theme::round(9);
+            let face = if dark {
+                lighter(palette.surface, 0.14)
+            } else {
+                palette.canvas
+            };
+            let base = darker(lighter(face, hover * 0.08), press * 0.1);
+            let stops = if pressed {
+                [
+                    (0.0, darker(base, 0.1)),
+                    (0.5, darker(base, 0.06)),
+                    (1.0, darker(base, 0.02)),
+                ]
+            } else {
+                [
+                    (0.0, lighter(base, if dark { 0.08 } else { 0.7 })),
+                    (0.5, lighter(base, if dark { 0.04 } else { 0.3 })),
+                    (1.0, darker(base, 0.03)),
+                ]
+            };
+            bands(painter, rect, radius, &fade_all(stops, alpha));
+            let line = darker(palette.canvas, if dark { 0.5 } else { 0.45 });
+            let line = if strong {
+                lerp(darker(palette.deep, 0.2), line, 0.3)
+            } else {
+                line
+            };
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, faded(line, alpha)),
+                StrokeKind::Inside,
+            );
+            Some(palette.ink)
+        }
         Family::Gel => {
             let radius = pill(rect);
             let blue = strong;
@@ -633,6 +872,77 @@ pub fn paint_field(
                 Stroke::new(1.0, darker(line, 0.15)),
             );
         }
+        // A white box in a dark line, sunk a little: a shade inside its top.
+        Family::Plastik | Family::Clearlooks => {
+            let radius = theme::round(5);
+            let line = lerp(
+                darker(palette.canvas, if palette.dark { 0.45 } else { 0.4 }),
+                palette.deep,
+                focus,
+            );
+            painter.rect(
+                rect,
+                radius,
+                palette.surface,
+                Stroke::new(1.0, line),
+                StrokeKind::Inside,
+            );
+            painter.hline(
+                (rect.left() + 2.0)..=(rect.right() - 2.0),
+                rect.top() + 1.5,
+                Stroke::new(
+                    1.0,
+                    Color32::from_black_alpha(if palette.dark { 50 } else { 22 }),
+                ),
+            );
+        }
+        // Oxygen sinks its fields softly into the window and rings them
+        // with the accent's glow while typed in.
+        Family::Oxygen => {
+            painter.rect_filled(rect, radius, palette.surface);
+            let shade = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 6.0));
+            gradient(
+                painter,
+                shade.shrink2(vec2(radius.nw as f32 * 0.5, 0.0)),
+                top_corners(CornerRadius::same(radius.nw.min(6))),
+                Color32::from_black_alpha(if palette.dark { 60 } else { 24 }),
+                Color32::TRANSPARENT,
+                false,
+            );
+            let line = darker(palette.canvas, if palette.dark { 0.4 } else { 0.2 });
+            painter.rect_stroke(rect, radius, Stroke::new(1.0, line), StrokeKind::Inside);
+            if focus > 0.0 {
+                painter.rect_stroke(
+                    rect,
+                    radius,
+                    Stroke::new(2.0, faded(oxygen_glow(palette), focus)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        // Breeze's outline turns to the accent while typed in.
+        Family::Breeze => {
+            painter.rect(
+                rect,
+                radius,
+                palette.surface,
+                Stroke::new(1.0, lerp(breeze_line(palette), palette.accent, focus)),
+                StrokeKind::Inside,
+            );
+        }
+        // Adwaita: a wash of the text colour, and a ring of the accent
+        // while typed in.
+        Family::Adwaita => {
+            painter.rect_filled(rect, radius, faded(palette.ink, 0.08));
+            if focus > 0.0 {
+                painter.rect_stroke(
+                    rect,
+                    radius,
+                    Stroke::new(2.0, faded(palette.accent, 0.5 * focus)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
         Family::Gel => {
             let radius = pill(rect);
             painter.rect_filled(rect, radius, palette.surface);
@@ -682,7 +992,7 @@ pub fn paint_check(
     let checked = checked.clamp(0.0, 1.0);
     let dark = palette.dark;
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => {
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => {
             let border = if hovered {
                 palette.accent
             } else {
@@ -779,6 +1089,81 @@ pub fn paint_check(
                 },
                 opacity,
             )
+        }
+        // A white box in a dark line. Clearlooks fills a ticked one with the
+        // selection colour, as Ubuntu's Human did in orange.
+        Family::Plastik | Family::Clearlooks => {
+            let radius = theme::round(4);
+            let clearlooks = style() == Family::Clearlooks;
+            let fill = if clearlooks {
+                lerp(palette.surface, palette.deep, checked)
+            } else {
+                palette.surface
+            };
+            gradient(
+                painter,
+                rect,
+                radius,
+                faded(darker(fill, 0.06), opacity),
+                faded(fill, opacity),
+                false,
+            );
+            let line = darker(palette.canvas, 0.45);
+            let line = if hovered {
+                lerp(line, palette.deep, 0.6)
+            } else {
+                line
+            };
+            let line = if clearlooks {
+                lerp(line, darker(palette.deep, 0.3), checked)
+            } else {
+                line
+            };
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, faded(line, opacity)),
+                StrokeKind::Inside,
+            );
+            faded(
+                if clearlooks {
+                    ink_on(palette.deep)
+                } else {
+                    palette.ink
+                },
+                opacity,
+            )
+        }
+        // Oxygen's lit slab, glowing under the pointer.
+        Family::Oxygen => {
+            let radius = theme::round(5);
+            let base = oxygen_face(palette);
+            gradient(
+                painter,
+                rect,
+                radius,
+                faded(lighter(base, if dark { 0.12 } else { 0.6 }), opacity),
+                faded(darker(base, 0.04), opacity),
+                false,
+            );
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(
+                    1.0,
+                    faded(darker(base, if dark { 0.45 } else { 0.22 }), opacity),
+                ),
+                StrokeKind::Inside,
+            );
+            if hovered {
+                painter.rect_stroke(
+                    rect,
+                    radius,
+                    Stroke::new(1.5, faded(oxygen_glow(palette), opacity)),
+                    StrokeKind::Inside,
+                );
+            }
+            faded(palette.ink, opacity)
         }
         Family::Gel => {
             let radius = CornerRadius::same(
@@ -972,6 +1357,126 @@ pub fn paint_steps(
                 );
             }
         }
+        // A thin rail filled with the accent up to a round handle: Breeze's
+        // button face in an outline that takes the accent under the
+        // pointer, Adwaita's white knob on a shadow.
+        Family::Breeze | Family::Adwaita => {
+            let rail = Rect::from_center_size(track.center(), vec2(track.width(), 4.0));
+            painter.rect_filled(rail, CornerRadius::same(2), shade(palette.rail()));
+            painter.rect_filled(
+                Rect::from_min_max(rail.min, pos2(x, rail.max.y)),
+                CornerRadius::same(2),
+                shade(palette.accent),
+            );
+            for &at in stops {
+                let color = if at <= x {
+                    palette.accent
+                } else {
+                    palette.rail()
+                };
+                painter.circle_filled(pos2(at, y), 2.5, shade(color));
+            }
+            let center = pos2(x, y);
+            if style() == Family::Breeze {
+                painter.circle(
+                    center,
+                    9.0,
+                    shade(breeze_face(palette)),
+                    Stroke::new(
+                        1.0,
+                        shade(lerp(breeze_line(palette), palette.accent, hover)),
+                    ),
+                );
+            } else {
+                paint_knob(painter, center, 9.0 + hover, opacity);
+                painter.circle_stroke(
+                    center,
+                    9.0 + hover,
+                    Stroke::new(1.0, Color32::from_black_alpha((30.0 * opacity) as u8)),
+                );
+            }
+        }
+        // A sunken groove and a small raised handle over the ticks.
+        Family::Plastik | Family::Clearlooks => {
+            painter.rect(
+                groove,
+                CornerRadius::same(2),
+                shade(darker(face, 0.08)),
+                Stroke::new(1.0, shade(darker(face, 0.4))),
+                StrokeKind::Inside,
+            );
+            ticks(darker(face, 0.5));
+            let thumb = Rect::from_center_size(pos2(x.round(), y - 1.0), vec2(11.0, 20.0));
+            let base = if style() == Family::Plastik {
+                plastik_face(palette)
+            } else if palette.dark {
+                lighter(palette.surface, 0.14)
+            } else {
+                face
+            };
+            let base = lighter(base, hover * 0.1);
+            let radius = CornerRadius::same(2);
+            gradient(
+                painter,
+                thumb,
+                radius,
+                shade(lighter(base, if palette.dark { 0.1 } else { 0.6 })),
+                shade(darker(base, 0.05)),
+                false,
+            );
+            painter.rect_stroke(
+                thumb,
+                radius,
+                Stroke::new(1.0, shade(darker(face, 0.5))),
+                StrokeKind::Inside,
+            );
+        }
+        // A soft groove and a round lit slab, glowing under the pointer.
+        Family::Oxygen => {
+            let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
+            gradient(
+                painter,
+                groove,
+                CornerRadius::same(3),
+                shade(darker(face, 0.18)),
+                shade(lighter(face, 0.2)),
+                false,
+            );
+            ticks(darker(face, 0.4));
+            let base = oxygen_face(palette);
+            let knob = Rect::from_center_size(pos2(x, y), vec2(18.0, 18.0));
+            let round = CornerRadius::same(9);
+            painter.add(
+                epaint::RectShape::filled(
+                    knob.translate(vec2(0.0, 1.0)),
+                    round,
+                    shade(Color32::from_black_alpha(50)),
+                )
+                .with_blur_width(2.0),
+            );
+            gradient(
+                painter,
+                knob,
+                round,
+                shade(lighter(base, if palette.dark { 0.15 } else { 0.6 })),
+                shade(darker(base, 0.05)),
+                false,
+            );
+            painter.rect_stroke(
+                knob,
+                round,
+                Stroke::new(1.0, shade(darker(base, 0.25))),
+                StrokeKind::Inside,
+            );
+            if hover > 0.0 {
+                painter.rect_stroke(
+                    knob,
+                    round,
+                    Stroke::new(1.5, shade(faded(oxygen_glow(palette), hover))),
+                    StrokeKind::Inside,
+                );
+            }
+        }
         Family::Gel => {
             // A rounded groove and a blue gel bead on it.
             let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
@@ -1031,7 +1536,14 @@ pub fn shadow(palette: &Palette) -> Shadow {
         // Explorer's panes lie flat on its white.
         Family::Glass if palette.dark => (2, 10, 80),
         Family::Gel => (3, 12, if palette.dark { 90 } else { 40 }),
-        Family::Glass | Family::Retro | Family::Luna => (0, 0, 0),
+        // Oxygen's frames sit on soft shadows; Breeze's and Adwaita's cards
+        // lift a hair.
+        Family::Oxygen => (1, 6, if palette.dark { 80 } else { 30 }),
+        Family::Breeze => (1, 4, if palette.dark { 60 } else { 14 }),
+        Family::Adwaita => (1, 6, if palette.dark { 70 } else { 16 }),
+        Family::Glass | Family::Retro | Family::Luna | Family::Plastik | Family::Clearlooks => {
+            (0, 0, 0)
+        }
     };
     Shadow {
         offset: [0, offset],
@@ -1051,6 +1563,12 @@ pub fn panel_stroke(palette: &Palette) -> Stroke {
         // A list view's frame.
         Family::Glass => rgb(0xc0c1cd),
         Family::Gel => lerp(palette.ink, palette.surface, 0.62),
+        Family::Plastik => darker(palette.canvas, if palette.dark { 0.5 } else { 0.38 }),
+        Family::Clearlooks => darker(palette.canvas, if palette.dark { 0.5 } else { 0.32 }),
+        Family::Oxygen => lerp(palette.canvas, palette.ink, 0.18),
+        Family::Breeze => breeze_line(palette),
+        // Adwaita's cards are held by their shadow and a faint ring.
+        Family::Adwaita => faded(palette.ink, if palette.dark { 0.1 } else { 0.07 }),
     };
     Stroke::new(1.0, color)
 }
@@ -1084,7 +1602,12 @@ pub fn edge(painter: &Painter, rect: Rect, palette: &Palette, sunken: bool) {
         | Family::Liquid
         | Family::Luna
         | Family::Glass
-        | Family::Gel => {}
+        | Family::Gel
+        | Family::Plastik
+        | Family::Oxygen
+        | Family::Breeze
+        | Family::Clearlooks
+        | Family::Adwaita => {}
     }
 }
 
@@ -1099,6 +1622,22 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
                 rect,
                 CornerRadius::ZERO,
                 palette.tone(rgb(0x26292d)),
+                palette.canvas,
+                false,
+            );
+        }
+        // Oxygen lights the window from above: a lighter grey at the top
+        // fades into its own.
+        Family::Oxygen => {
+            let glow = Rect::from_min_max(
+                rect.min,
+                pos2(rect.right(), rect.top() + (rect.height() * 0.6).min(220.0)),
+            );
+            gradient(
+                painter,
+                glow,
+                super::frame::fit(painter.ctx(), glow),
+                oxygen_lit(palette),
                 palette.canvas,
                 false,
             );
@@ -1256,6 +1795,52 @@ pub fn paint_sidebar(
             painter.rect_filled(rect, CornerRadius::ZERO, list);
             end(if dark { Color32::BLACK } else { gray(0x9a) });
         }
+        // KDE 3 and GNOME 2 list the pages in a white box sunk into the
+        // window, as their file managers did their places.
+        Family::Plastik | Family::Clearlooks => {
+            painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+            let list = entries.expand2(vec2(6.0, 8.0));
+            painter.rect(
+                list,
+                theme::round(5),
+                palette.surface,
+                panel_stroke(palette),
+                StrokeKind::Inside,
+            );
+            end(darker(palette.canvas, if dark { 0.4 } else { 0.18 }));
+        }
+        // Oxygen's lit window shows through; the pages sit in a soft white
+        // panel, and a dark line beside a light one ends the sidebar.
+        Family::Oxygen => {
+            let list = entries.expand2(vec2(6.0, 8.0));
+            painter.rect(
+                list,
+                theme::round(12),
+                palette.surface,
+                panel_stroke(palette),
+                StrokeKind::Inside,
+            );
+            let span = rect.top()..=rect.bottom();
+            painter.vline(
+                rect.right() - 1.5,
+                span.clone(),
+                Stroke::new(1.0, darker(palette.canvas, 0.15)),
+            );
+            painter.vline(
+                rect.right() - 0.5,
+                span,
+                Stroke::new(1.0, lighter(palette.canvas, if dark { 0.06 } else { 0.4 })),
+            );
+        }
+        // Plasma's sidebars are the view's white, a line from the window.
+        Family::Breeze => {
+            painter.rect_filled(rect, round, palette.surface);
+            end(breeze_line(palette));
+        }
+        Family::Adwaita => {
+            painter.rect_filled(rect, round, adwaita_sidebar(palette));
+            end(Color32::from_black_alpha(if dark { 92 } else { 18 }));
+        }
     }
     SidebarInk::default()
 }
@@ -1292,12 +1877,25 @@ pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Opti
             );
             Some(ink_on(fill))
         }
-        Family::Retro | Family::Luna => {
+        Family::Retro | Family::Luna | Family::Plastik => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.deep);
             Some(ink_on(palette.deep))
         }
         Family::Glass => {
             glass_selection(painter, rect, palette, 1.0);
+            None
+        }
+        Family::Oxygen | Family::Clearlooks => {
+            soft_selection(painter, rect, palette, 1.0);
+            Some(ink_on(palette.deep))
+        }
+        Family::Breeze => {
+            breeze_highlight(painter, rect, palette, 1.0);
+            None
+        }
+        // Adwaita's sidebar marks its row with a wash of the text colour.
+        Family::Adwaita => {
+            painter.rect_filled(rect, theme::round(6), faded(palette.ink, 0.1));
             None
         }
         Family::Gel => {
@@ -1318,6 +1916,30 @@ pub fn paint_selection(painter: &Painter, rect: Rect, palette: &Palette) -> Opti
             Some(Color32::WHITE)
         }
     }
+}
+
+/// The selection colour lit from above, as Oxygen rounds it and
+/// Clearlooks lays it square.
+fn soft_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32) {
+    let radius = if style() == Family::Oxygen {
+        theme::round(6)
+    } else {
+        CornerRadius::ZERO
+    };
+    gradient(
+        painter,
+        rect,
+        radius,
+        faded(lighter(palette.deep, 0.18), shown),
+        faded(palette.deep, shown),
+        false,
+    );
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, faded(darker(palette.deep, 0.15), shown)),
+        StrokeKind::Inside,
+    );
 }
 
 /// Windows 7's pale blue selection with its darker edge.
@@ -1355,16 +1977,21 @@ fn glass_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32)
 /// The background of list row `index`, where the style stripes them, as
 /// Aqua's lists did in pale blue.
 pub fn row_stripe(palette: &Palette, index: usize) -> Option<Color32> {
-    (style() == Family::Gel && index % 2 == 1).then(|| {
-        if palette.dark {
-            lighter(palette.surface, 0.05)
-        } else if palette.tint_amount > 0.0 {
-            // Another accent stripes in its own pale shade.
-            lerp(Color32::WHITE, palette.tint, 0.08)
-        } else {
-            rgb(0xedf3fe)
-        }
-    })
+    if index.is_multiple_of(2) {
+        return None;
+    }
+    // Another accent stripes in its own pale shade.
+    let tinted = (palette.tint_amount > 0.0).then(|| lerp(Color32::WHITE, palette.tint, 0.08));
+    match style() {
+        Family::Gel if palette.dark => Some(lighter(palette.surface, 0.05)),
+        Family::Gel => Some(tinted.unwrap_or(rgb(0xedf3fe))),
+        // KDE 3 striped its lists in pale blue, KDE 4 in a warm grey.
+        Family::Plastik if palette.dark => Some(lighter(palette.surface, 0.04)),
+        Family::Plastik => Some(tinted.unwrap_or(rgb(0xeef6ff))),
+        Family::Oxygen if palette.dark => Some(lighter(palette.surface, 0.03)),
+        Family::Oxygen => Some(palette.tone(rgb(0xf8f7f6))),
+        _ => None,
+    }
 }
 
 /// A list row under the pointer, `hover` from 0 to 1: Modern's soft tint,
@@ -1374,8 +2001,20 @@ pub fn paint_row_hover(painter: &Painter, rect: Rect, palette: &Palette, hover: 
         return;
     }
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => {
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Adwaita => {
             painter.rect_filled(rect, theme::round(10), faded(palette.ink, hover * 0.045));
+        }
+        Family::Breeze => breeze_highlight(painter, rect, palette, 0.5 * hover),
+        // Oxygen's views glow under the pointer.
+        Family::Oxygen => {
+            let glow = oxygen_glow(palette);
+            painter.rect(
+                rect,
+                theme::round(6),
+                faded(glow, 0.25 * hover),
+                Stroke::new(1.0, faded(glow, 0.6 * hover)),
+                StrokeKind::Inside,
+            );
         }
         Family::Glass => {
             let radius = theme::round(10);
@@ -1403,7 +2042,7 @@ pub fn paint_row_hover(painter: &Painter, rect: Rect, palette: &Palette, hover: 
                 StrokeKind::Inside,
             );
         }
-        Family::Retro | Family::Luna | Family::Gel => {}
+        Family::Retro | Family::Luna | Family::Gel | Family::Plastik | Family::Clearlooks => {}
     }
 }
 
@@ -1421,8 +2060,18 @@ pub fn bare_icons() -> bool {
 /// selection solid.
 pub fn row_selection_ink(palette: &Palette) -> Option<Color32> {
     match style() {
-        Family::Retro | Family::Luna | Family::Gel => Some(ink_on(palette.deep)),
-        Family::Modern | Family::Fluent | Family::Liquid | Family::Glass => None,
+        Family::Retro
+        | Family::Luna
+        | Family::Gel
+        | Family::Plastik
+        | Family::Oxygen
+        | Family::Clearlooks => Some(ink_on(palette.deep)),
+        Family::Modern
+        | Family::Fluent
+        | Family::Liquid
+        | Family::Glass
+        | Family::Breeze
+        | Family::Adwaita => None,
     }
 }
 
@@ -1446,13 +2095,15 @@ pub fn on_fill(palette: &Palette, ink: Color32) -> Palette {
 /// The selected list row's background, `shown` from 0 to 1.
 pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, shown: f32) {
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => {
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Adwaita => {
             painter.rect_filled(rect, theme::round(10), faded(palette.selection, shown));
         }
-        Family::Retro | Family::Luna | Family::Gel => {
+        Family::Retro | Family::Luna | Family::Gel | Family::Plastik => {
             painter.rect_filled(rect, CornerRadius::ZERO, faded(palette.deep, shown));
         }
         Family::Glass => glass_selection(painter, rect, palette, shown),
+        Family::Oxygen | Family::Clearlooks => soft_selection(painter, rect, palette, shown),
+        Family::Breeze => breeze_highlight(painter, rect, palette, shown),
     }
 }
 
@@ -1461,7 +2112,34 @@ pub fn paint_row_selection(painter: &Painter, rect: Rect, palette: &Palette, sho
 pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Option<Color32> {
     let dark = palette.dark;
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => None,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => None,
+        // The same bar as the window's, tinted or not, lit from above.
+        Family::Plastik | Family::Clearlooks => {
+            let (from, _) = super::frame::title_colors(palette, true);
+            bands(
+                painter,
+                rect,
+                top_corners(theme::round(12)),
+                &[
+                    (0.0, lighter(from, 0.3)),
+                    (0.5, from),
+                    (1.0, darker(from, 0.08)),
+                ],
+            );
+            Some(ink_on(from))
+        }
+        // Oxygen's title bar is the window's own lit grey.
+        Family::Oxygen => {
+            gradient(
+                painter,
+                rect,
+                top_corners(theme::round(12)),
+                lighter(oxygen_lit(palette), if dark { 0.04 } else { 0.25 }),
+                oxygen_lit(palette),
+                false,
+            );
+            Some(palette.ink)
+        }
         // The same bar as the window's, tinted or not.
         Family::Retro => {
             let (from, to) = super::frame::title_colors(palette, true);
@@ -1527,9 +2205,15 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
 /// The page's heading: plain ink in every style and accent.
 pub fn heading() -> FontId {
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => theme::bold(26.0),
-        Family::Glass => theme::font(24.0),
-        Family::Luna | Family::Retro | Family::Gel => theme::bold(22.0),
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Adwaita => theme::bold(26.0),
+        // Windows 7 and Plasma head pages in a large regular weight.
+        Family::Glass | Family::Breeze => theme::font(24.0),
+        Family::Luna
+        | Family::Retro
+        | Family::Gel
+        | Family::Plastik
+        | Family::Oxygen
+        | Family::Clearlooks => theme::bold(22.0),
     }
 }
 
@@ -1549,9 +2233,47 @@ pub fn column_title(title: &str) -> String {
 pub fn paint_column_band(painter: &Painter, rect: Rect, palette: &Palette) -> bool {
     let dark = palette.dark;
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => return false,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => {
+            return false
+        }
         Family::Retro => {
             painter.rect_filled(rect, CornerRadius::ZERO, palette.canvas);
+        }
+        // A button's gradient across the headings.
+        Family::Plastik | Family::Clearlooks => {
+            let base = if dark {
+                lighter(palette.surface, 0.1)
+            } else if style() == Family::Plastik {
+                plastik_face(palette)
+            } else {
+                palette.canvas
+            };
+            gradient(
+                painter,
+                rect,
+                CornerRadius::ZERO,
+                lighter(base, if dark { 0.06 } else { 0.5 }),
+                darker(base, 0.02),
+                false,
+            );
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, darker(palette.canvas, 0.4)),
+            );
+        }
+        Family::Oxygen => {
+            let (top, bottom) = if dark {
+                (lighter(palette.surface, 0.08), palette.surface)
+            } else {
+                (lighter(palette.canvas, 0.45), lighter(palette.canvas, 0.25))
+            };
+            gradient(painter, rect, CornerRadius::ZERO, top, bottom, false);
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, darker(palette.canvas, 0.15)),
+            );
         }
         Family::Luna => {
             let (top, bottom) = if dark {
@@ -1683,9 +2405,27 @@ pub fn paint_column_cell(
         );
     };
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => None,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => None,
         Family::Retro => {
             retro_edge(painter, cell, palette.canvas, false, 1.0);
+            None
+        }
+        Family::Plastik | Family::Clearlooks => {
+            if hovered {
+                painter.rect_filled(
+                    cell,
+                    CornerRadius::ZERO,
+                    Color32::from_white_alpha(if dark { 12 } else { 90 }),
+                );
+            }
+            divider(darker(palette.canvas, 0.35));
+            None
+        }
+        Family::Oxygen => {
+            if hovered {
+                painter.rect_filled(cell, CornerRadius::ZERO, faded(oxygen_glow(palette), 0.2));
+            }
+            divider(lerp(palette.canvas, palette.ink, 0.2));
             None
         }
         Family::Luna => {
@@ -1771,7 +2511,40 @@ pub fn group(palette: &Palette) -> Option<Group> {
         size: 14.0,
     };
     Some(match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => return None,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => {
+            return None
+        }
+        // KDE 3 sets the title on a dark line.
+        Family::Plastik => Group {
+            stroke: Stroke::new(1.0, darker(palette.canvas, 0.3)),
+            radius: theme::round(8),
+            ..none
+        },
+        // Oxygen's group boxes are soft, lighter slabs.
+        Family::Oxygen => Group {
+            fill: if dark {
+                Color32::from_white_alpha(6)
+            } else {
+                Color32::from_white_alpha(70)
+            },
+            stroke: Stroke::new(
+                1.0,
+                if dark {
+                    Color32::from_black_alpha(80)
+                } else {
+                    Color32::from_black_alpha(26)
+                },
+            ),
+            radius: theme::round(12),
+            on_line: false,
+            ..none
+        },
+        // GNOME 2 heads a group with a bold title and no frame.
+        Family::Clearlooks => Group {
+            on_line: false,
+            bold: true,
+            ..none
+        },
         // Etched after the content, in `paint_group`.
         Family::Retro => none,
         Family::Luna => Group {
@@ -2169,19 +2942,24 @@ mod tests {
                 // XP, and inside the box in the rest.
                 assert_eq!(
                     group.on_line,
-                    matches!(style.family(), Family::Retro | Family::Luna),
+                    matches!(
+                        style.family(),
+                        Family::Retro | Family::Luna | Family::Plastik
+                    ),
                     "{style:?}"
                 );
+                // Every older desktop fills its selection solid but 7.
                 assert_eq!(
                     row_selection_ink(&palette).is_some(),
-                    matches!(style.family(), Family::Retro | Family::Luna | Family::Gel),
+                    style.family() != Family::Glass,
                     "{style:?}"
                 );
             });
         }
-        // Windows 11 and macOS 27 keep Modern's layout: tiles, switches, no
-        // group boxes; only Windows 11 marks the selection with a bar.
-        for style in [Style::Fluent, Style::Liquid] {
+        // Windows 11, macOS 27, Plasma 6 and GNOME 51 keep Modern's layout:
+        // tiles, switches, no group boxes; only Windows 11 marks the
+        // selection with a bar.
+        for style in [Style::Fluent, Style::Liquid, Style::Breeze, Style::Adwaita] {
             let palette = Palette::of(scheme(style), false);
             in_style(style, || {
                 assert_eq!(selection_bar(), style == Style::Fluent, "{style:?}");

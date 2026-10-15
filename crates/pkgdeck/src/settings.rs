@@ -125,6 +125,21 @@ pub enum Style {
     /// lights.
     #[serde(alias = "tahoe", alias = "macos")]
     Liquid,
+    /// KDE 3: Plastik's soft grey gradients and a title bar in the accent.
+    #[serde(alias = "kde3")]
+    Plastik,
+    /// KDE 4: Oxygen's glowing, rounded controls on a softly lit grey.
+    #[serde(alias = "kde4")]
+    Oxygen,
+    /// KDE Plasma 6: Breeze, flat and light, with blue outlines.
+    #[serde(alias = "plasma", alias = "kde")]
+    Breeze,
+    /// GNOME 2: Clearlooks' glossy controls and a blue title bar.
+    #[serde(alias = "gnome2")]
+    Clearlooks,
+    /// GNOME 51: Adwaita, a header bar and rounded cards.
+    #[serde(alias = "gnome", alias = "libadwaita")]
+    Adwaita,
 }
 
 /// The desktop a style is a version of. Versions of one desktop share how
@@ -144,20 +159,33 @@ pub enum Family {
     Fluent,
     /// macOS 27.
     Liquid,
+    /// KDE 3.
+    Plastik,
+    /// KDE 4.
+    Oxygen,
+    /// KDE Plasma 6.
+    Breeze,
+    /// GNOME 2.
+    Clearlooks,
+    /// GNOME 51.
+    Adwaita,
 }
 
 impl Family {
     /// Whether the desktop draws flat, rounded controls, as Modern does,
     /// rather than bevels and gradients.
     pub fn flat(self) -> bool {
-        matches!(self, Self::Modern | Self::Fluent | Self::Liquid)
+        matches!(
+            self,
+            Self::Modern | Self::Fluent | Self::Liquid | Self::Breeze | Self::Adwaita
+        )
     }
 }
 
 impl Style {
     /// In the order the picker shows them: Windows oldest to newest, then
-    /// the Mac.
-    pub const ALL: [Self; 7] = [
+    /// the Mac, KDE and GNOME.
+    pub const ALL: [Self; 12] = [
         Self::Modern,
         Self::Retro,
         Self::Luna,
@@ -165,6 +193,11 @@ impl Style {
         Self::Fluent,
         Self::Aqua,
         Self::Liquid,
+        Self::Plastik,
+        Self::Oxygen,
+        Self::Breeze,
+        Self::Clearlooks,
+        Self::Adwaita,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -175,6 +208,11 @@ impl Style {
             Self::Aqua => "Mac OS X Tiger",
             Self::Fluent => "Windows 11",
             Self::Liquid => "macOS 27",
+            Self::Plastik => "KDE 3",
+            Self::Oxygen => "KDE 4",
+            Self::Breeze => "KDE Plasma 6",
+            Self::Clearlooks => "GNOME 2",
+            Self::Adwaita => "GNOME 51",
         }
     }
     /// The desktop this style is a version of.
@@ -187,12 +225,20 @@ impl Style {
             Self::Aqua => Family::Gel,
             Self::Fluent => Family::Fluent,
             Self::Liquid => Family::Liquid,
+            Self::Plastik => Family::Plastik,
+            Self::Oxygen => Family::Oxygen,
+            Self::Breeze => Family::Breeze,
+            Self::Clearlooks => Family::Clearlooks,
+            Self::Adwaita => Family::Adwaita,
         }
     }
     /// Whether the style's title bar takes the accent, so the window bar
     /// tint does something.
     pub fn tints_window_bar(self) -> bool {
-        matches!(self.family(), Family::Retro | Family::Luna | Family::Glass)
+        matches!(
+            self.family(),
+            Family::Retro | Family::Luna | Family::Glass | Family::Plastik | Family::Clearlooks
+        )
     }
     /// Whether the window bar tint starts on in this style: Windows 7 starts
     /// off, the rest start on.
@@ -929,7 +975,10 @@ mod tests {
     #[test]
     fn only_styles_with_an_accent_title_bar_offer_the_window_bar_tint() {
         for style in Style::ALL {
-            let tinted = matches!(style, Style::Retro | Style::Luna | Style::Glass);
+            let tinted = matches!(
+                style,
+                Style::Retro | Style::Luna | Style::Glass | Style::Plastik | Style::Clearlooks
+            );
             assert_eq!(style.tints_window_bar(), tinted, "{style:?}");
         }
     }
@@ -951,6 +1000,11 @@ mod tests {
                 Family::Fluent,
                 Family::Gel,
                 Family::Liquid,
+                Family::Plastik,
+                Family::Oxygen,
+                Family::Breeze,
+                Family::Clearlooks,
+                Family::Adwaita,
             ]
         );
         // Every style is saved under a name of its own and read back.

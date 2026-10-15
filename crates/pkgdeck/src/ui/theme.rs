@@ -213,6 +213,16 @@ impl Skin {
             Family::Gel => 0.35,
             Family::Glass => 0.4,
             Family::Retro => 0.0,
+            // Plastik's corners are barely softened; Clearlooks' a little
+            // more.
+            Family::Plastik => 0.25,
+            Family::Clearlooks => 0.35,
+            // Oxygen's controls are round and soft.
+            Family::Oxygen => 0.7,
+            // Breeze rounds controls by 5, as Windows 11 does.
+            Family::Breeze => 0.55,
+            // Adwaita's buttons are rounded by 9 and its cards by 12.
+            Family::Adwaita => 1.0,
         }
     }
     /// A corner of `radius` at Modern's roundness, in this style.
@@ -373,6 +383,22 @@ impl Palette {
             // macOS: the window's grey behind white content.
             (Family::Liquid, true) => (0x1e1e20, 0x2a2a2d, 0xf5f5f7, 0x9d9da3),
             (Family::Liquid, false) => (0xf0f0f2, 0xffffff, 0x1d1d1f, 0x6e6e73),
+            // KDE 3's grey, and a dark grey of the same make.
+            (Family::Plastik, true) => (0x2f3033, 0x222326, 0xeeeeee, 0xa9a9ab),
+            (Family::Plastik, false) => (0xefefef, 0xffffff, 0x000000, 0x5a5a5a),
+            // Oxygen's warm grey; in the dark, KDE 4's Obsidian Coast.
+            (Family::Oxygen, true) => (0x302f2f, 0x201f1f, 0xe0dedb, 0xa29f9b),
+            (Family::Oxygen, false) => (0xd6d2d0, 0xffffff, 0x1f1c1b, 0x65615f),
+            // Breeze and Breeze Dark: the window behind the view.
+            (Family::Breeze, true) => (0x202326, 0x141618, 0xfcfcfc, 0xa1a9b1),
+            (Family::Breeze, false) => (0xeff0f1, 0xffffff, 0x232629, 0x5f6a76),
+            // Clearlooks' warm grey, and a dark grey of the same make.
+            (Family::Clearlooks, true) => (0x3c3b37, 0x2c2b28, 0xeeeeec, 0xb0afab),
+            (Family::Clearlooks, false) => (0xedeceb, 0xffffff, 0x1a1a1a, 0x5c5c5c),
+            // Adwaita: the window a hair off white, cards white; in the dark,
+            // cards a step lighter than the window.
+            (Family::Adwaita, true) => (0x222226, 0x343437, 0xffffff, 0xa0a0a4),
+            (Family::Adwaita, false) => (0xfafafb, 0xffffff, 0x323237, 0x6c6c71),
         }
     }
 
@@ -398,8 +424,8 @@ impl Palette {
         let hue = custom.unwrap_or(rgb(on_light));
         let tint_amount = match (scheme.style.family(), dark) {
             _ if !scheme.tint_backgrounds => 0.0,
-            (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
-            (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
+            (family, _) if family.flat() && dark => 0.05,
+            (family, _) if family.flat() => 0.04,
             (_, true) => 0.06,
             (_, false) => 0.08,
         };
@@ -684,6 +710,41 @@ const SEGOE: &[(&str, &str)] = &[(
     "bundled:Selawik-Regular.ttf",
     "bundled:Selawik-Semibold.ttf",
 )];
+/// KDE 3 and 4 and GNOME 2 drew Bitstream Vera, which DejaVu carries on;
+/// Verdana is its closest kin on the Mac.
+const DEJAVU: &[(&str, &str)] = &[
+    (
+        "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/TTF/DejaVuSans.ttf",
+        "usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ),
+    (
+        "System/Library/Fonts/Supplemental/Verdana.ttf",
+        "System/Library/Fonts/Supplemental/Verdana Bold.ttf",
+    ),
+];
+/// Plasma draws Noto Sans.
+const NOTO: &[(&str, &str)] = &[
+    (
+        "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/noto/NotoSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+    ),
+];
 /// A font PkgDeck carries, by the name its list gives it.
 fn bundled(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix("bundled:")? {
@@ -717,7 +778,10 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
             Family::Glass => Face::Style(SEGOE),
             // Selawik stands in for Segoe UI Variable, Inter for SF Pro.
             Family::Fluent => Face::Style(SEGOE),
-            Family::Modern | Family::Liquid => Face::Inter,
+            Family::Plastik | Family::Oxygen | Family::Clearlooks => Face::Style(DEJAVU),
+            Family::Breeze => Face::Style(NOTO),
+            // Adwaita Sans is drawn from Inter.
+            Family::Modern | Family::Liquid | Family::Adwaita => Face::Inter,
         },
     }
 }
@@ -900,7 +964,9 @@ pub fn apply(ctx: &egui::Context) {
 /// none for Modern's, which float over the content.
 pub fn scroll_bar(style: Style, palette: &Palette) -> Option<(f32, Color32)> {
     let handle = match style.family() {
-        Family::Modern | Family::Fluent | Family::Liquid => return None,
+        Family::Modern | Family::Fluent | Family::Liquid | Family::Breeze | Family::Adwaita => {
+            return None
+        }
         Family::Retro => palette.canvas,
         Family::Luna => over(
             palette.surface,
@@ -909,9 +975,23 @@ pub fn scroll_bar(style: Style, palette: &Palette) -> Option<(f32, Color32)> {
         ),
         Family::Glass => over(palette.canvas, palette.ink, 0.12),
         Family::Gel => over(palette.surface, palette.deep, 0.6),
+        // Plastik's grey button face; Oxygen's lit slab.
+        Family::Plastik if palette.dark => over(palette.surface, palette.ink, 0.2),
+        Family::Plastik => palette.tone(rgb(0xdddfe4)),
+        Family::Oxygen => over(
+            palette.canvas,
+            Color32::WHITE,
+            if palette.dark { 0.1 } else { 0.4 },
+        ),
+        // Clearlooks colours its scroll bars with the selection.
+        Family::Clearlooks => over(
+            palette.deep,
+            Color32::WHITE,
+            if palette.dark { 0.1 } else { 0.35 },
+        ),
     };
     let width = match style.family() {
-        Family::Gel => 15.0,
+        Family::Gel | Family::Oxygen | Family::Clearlooks => 15.0,
         Family::Luna | Family::Glass => 17.0,
         _ => 16.0,
     };
