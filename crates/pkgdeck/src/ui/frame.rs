@@ -84,10 +84,17 @@ pub fn set_desktop(desktop: Desktop) {
 }
 
 pub fn desktop() -> Desktop {
-    match DESKTOP.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Desktop::Kde,
-        2 => Desktop::Mac,
-        _ => Desktop::Other,
+    Desktop::from_code(DESKTOP.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+impl Desktop {
+    /// The desktop `set_desktop` stored as `code`.
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Kde,
+            2 => Self::Mac,
+            _ => Self::Other,
+        }
     }
 }
 
@@ -325,10 +332,14 @@ fn show_on(ui: &mut Ui, full: Rect, title: &str, palette: &Palette, desktop: Des
 /// drawn. It reads the pointer itself rather than adding widgets, so the
 /// title bar and its buttons next to the edge don't take the press.
 pub fn edges(ui: &mut Ui, full: Rect, resizing_sidebar: bool) {
+    edges_on(ui, full, resizing_sidebar, desktop());
+}
+
+fn edges_on(ui: &mut Ui, full: Rect, resizing_sidebar: bool, desktop: Desktop) {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
     let state = WindowState::of(&ctx);
-    if system_frame(style, desktop()) || state.maximized {
+    if system_frame(style, desktop) || state.maximized {
         return;
     }
     if style.family() == Family::Liquid {
@@ -1376,6 +1387,31 @@ mod tests {
             }
             other => panic!("the outline should come last, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn under_the_system_frame_the_system_draws_the_edge() {
+        let palette = palette(Style::Liquid, false);
+        let shapes = in_style(Style::Liquid, || {
+            theme::painted(|ui| {
+                show_on(ui, window(), "PkgDeck", &palette, Desktop::Mac);
+                ui.painter()
+                    .rect_filled(window(), CornerRadius::ZERO, Color32::RED);
+                edges_on(ui, window(), false, Desktop::Mac);
+            })
+        });
+        match shapes.last() {
+            Some(Shape::Rect(app)) => assert_eq!(app.fill, Color32::RED),
+            other => panic!("the app should come last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_desktop_set_is_the_one_read_back() {
+        for desktop in [Desktop::Other, Desktop::Kde, Desktop::Mac] {
+            assert_eq!(Desktop::from_code(desktop as u8), desktop);
+        }
+        assert_eq!(Desktop::from_code(9), Desktop::Other);
     }
 
     #[test]
