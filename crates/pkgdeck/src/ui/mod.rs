@@ -3,7 +3,10 @@
 //! dialogs, toasts). Each part is its own module.
 
 mod activity;
+mod adwaita;
 mod aero;
+mod breeze;
+mod clearlooks;
 mod dialogs;
 mod fluent;
 mod frame;
@@ -12,7 +15,9 @@ pub mod icons;
 mod liquid;
 mod list;
 mod luna;
+mod oxygen;
 mod page;
+mod plastik;
 mod scrollbar;
 mod settings_page;
 mod shade;

@@ -65,6 +65,16 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         // macOS 27: no edge but a hairline, the lights in a short bar the
         // sidebar runs up behind.
         Family::Liquid => (0.0, 0.0, 52.0, 0.0),
+        // KWin's Plastik and Oxygen: a thin border of the window's grey
+        // under a title bar that spans it.
+        Family::Plastik => (4.0, 0.0, 22.0, 0.0),
+        Family::Oxygen => (4.0, 0.0, 26.0, 0.0),
+        // Breeze: a hairline outline and a 30 pixel title bar.
+        Family::Breeze => (1.0, 0.0, 30.0, 0.0),
+        // Metacity's Clearlooks: a four pixel border.
+        Family::Clearlooks => (4.0, 0.0, 24.0, 0.0),
+        // GNOME: a hairline and a 47 pixel header bar.
+        Family::Adwaita => (1.0, 0.0, 47.0, 0.0),
     };
     Some(Metrics {
         side,
@@ -87,8 +97,20 @@ pub fn window_corners(maximized: bool) -> CornerRadius {
         |radius: f32| CornerRadius::same((radius * skin.roundness.clamp(0.0, 2.0)).round() as u8);
     match skin.family() {
         Family::Gel => super::skin::top_corners(scaled(5.0)),
+        Family::Plastik => super::skin::top_corners(scaled(3.0)),
         Family::Fluent => scaled(8.0),
         Family::Liquid => scaled(26.0),
+        Family::Oxygen => scaled(5.0),
+        Family::Breeze => scaled(4.0),
+        // Metacity rounds the title bar's corners a pixel more than the
+        // bottom's.
+        Family::Clearlooks => CornerRadius {
+            nw: scaled(4.0).nw,
+            ne: scaled(4.0).ne,
+            sw: scaled(3.0).sw,
+            se: scaled(3.0).se,
+        },
+        Family::Adwaita => scaled(15.0),
         _ => CornerRadius::ZERO,
     }
 }
@@ -365,6 +387,11 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Maximize, at(2.0)),
             ]
         }
+        Family::Plastik => super::plastik::captions(bar),
+        Family::Oxygen => super::oxygen::captions(bar),
+        Family::Breeze => super::breeze::captions(bar),
+        Family::Clearlooks => super::clearlooks::captions(bar),
+        Family::Adwaita => super::adwaita::captions(bar),
     }
 }
 
@@ -479,6 +506,11 @@ pub fn paint_frame(
                 );
             }
         }
+        Family::Plastik => super::plastik::paint_frame(painter, full, bar, palette, state),
+        Family::Oxygen => super::oxygen::paint_frame(painter, full, bar, inner, palette, state),
+        Family::Breeze => super::breeze::paint_frame(painter, full, bar, palette, state),
+        Family::Clearlooks => super::clearlooks::paint_frame(painter, full, bar, palette, state),
+        Family::Adwaita => super::adwaita::paint_frame(painter, full, bar, palette, state),
     }
 }
 
@@ -530,6 +562,105 @@ pub fn paint_caption(
             };
             super::gel::paint_light(painter, rect, caption, look, press.group);
         }
+        Family::Plastik => {
+            super::plastik::paint_caption(painter, rect, caption, press, palette, state)
+        }
+        Family::Oxygen => {
+            super::oxygen::paint_caption(painter, rect, caption, press, palette, state)
+        }
+        Family::Breeze => {
+            super::breeze::paint_caption(painter, rect, caption, press, palette, state)
+        }
+        Family::Clearlooks => {
+            super::clearlooks::paint_caption(painter, rect, caption, press, palette, state)
+        }
+        Family::Adwaita => {
+            super::adwaita::paint_caption(painter, rect, caption, press, palette, state)
+        }
+    }
+}
+
+/// The caption symbols most desktops share, `half` from the middle to
+/// their edge: a bar low down, a window, two windows, and a cross.
+pub(super) fn plain_glyph(
+    painter: &Painter,
+    center: egui::Pos2,
+    caption: Caption,
+    maximized: bool,
+    half: f32,
+    stroke: Stroke,
+) {
+    match caption {
+        Caption::Minimize => {
+            painter.hline(
+                center.x - half..=center.x + half,
+                center.y + half - stroke.width / 2.0,
+                stroke,
+            );
+        }
+        Caption::Maximize if maximized => {
+            // Two windows, the front one a corner lower.
+            let side = half * 1.5;
+            let front = Rect::from_min_size(
+                pos2(center.x - half, center.y + half - side),
+                vec2(side, side),
+            );
+            let back = front.translate(vec2(half * 2.0 - side, side - half * 2.0));
+            painter.rect_stroke(back, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+            painter.rect_stroke(front, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+        }
+        Caption::Maximize => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, vec2(half * 2.0, half * 2.0)),
+                CornerRadius::ZERO,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        Caption::Close => {
+            painter.line_segment(
+                [center + vec2(-half, -half), center + vec2(half, half)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + vec2(-half, half), center + vec2(half, -half)],
+                stroke,
+            );
+        }
+    }
+}
+
+/// KDE's caption symbols since Oxygen, `half` from the middle to their
+/// edge: a chevron down, a chevron up, a diamond to restore, and a cross.
+pub(super) fn chevron_glyph(
+    painter: &Painter,
+    center: egui::Pos2,
+    caption: Caption,
+    maximized: bool,
+    half: f32,
+    stroke: Stroke,
+) {
+    let at = |x: f32, y: f32| center + vec2(x * half, y * half);
+    match caption {
+        Caption::Minimize => {
+            painter.add(egui::Shape::line(
+                vec![at(-1.0, -0.5), at(0.0, 0.5), at(1.0, -0.5)],
+                stroke,
+            ));
+        }
+        Caption::Maximize if maximized => {
+            painter.add(egui::Shape::closed_line(
+                vec![at(0.0, -1.0), at(1.0, 0.0), at(0.0, 1.0), at(-1.0, 0.0)],
+                stroke,
+            ));
+        }
+        Caption::Maximize => {
+            painter.add(egui::Shape::line(
+                vec![at(-1.0, 0.5), at(0.0, -0.5), at(1.0, 0.5)],
+                stroke,
+            ));
+        }
+        Caption::Close => plain_glyph(painter, center, caption, maximized, half, stroke),
     }
 }
 
@@ -595,7 +726,9 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
     let painter = ui.painter();
     let style = theme::skin().family();
     let (from, _) = title_colors(palette, state.active);
-    let (font, ink, centered) = match style {
+    // The title's face and colour, whether it's centred, and whether the
+    // window's icon sits at the bar's left.
+    let (font, ink, centered, icon) = match style {
         Family::Modern | Family::Liquid => return,
         Family::Fluent => (
             theme::font(12.0),
@@ -605,6 +738,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 palette.muted
             },
             false,
+            true,
         ),
         Family::Retro => (
             theme::bold(12.0),
@@ -614,8 +748,9 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 lerp(palette.canvas, Color32::WHITE, 0.6)
             },
             false,
+            true,
         ),
-        Family::Luna => (theme::title(15.0), Color32::WHITE, false),
+        Family::Luna => (theme::title(15.0), Color32::WHITE, false, true),
         Family::Glass => (
             theme::font(12.5),
             if palette.dark {
@@ -624,6 +759,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 Color32::BLACK
             },
             false,
+            true,
         ),
         Family::Gel => (
             theme::font(13.0),
@@ -633,35 +769,72 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
                 palette.muted
             },
             true,
+            false,
+        ),
+        Family::Plastik => (
+            theme::bold(12.0),
+            if state.active {
+                ink_on(from)
+            } else {
+                lerp(ink_on(from), from, 0.35)
+            },
+            false,
+            true,
+        ),
+        Family::Oxygen | Family::Breeze => (
+            if style == Family::Oxygen {
+                theme::bold(12.0)
+            } else {
+                theme::font(12.5)
+            },
+            if state.active {
+                palette.ink
+            } else {
+                palette.muted
+            },
+            true,
+            true,
+        ),
+        Family::Clearlooks => (
+            theme::bold(12.5),
+            if state.active {
+                Color32::WHITE
+            } else {
+                lerp(palette.ink, palette.canvas, 0.45)
+            },
+            true,
+            true,
+        ),
+        Family::Adwaita => (
+            theme::bold(14.0),
+            if state.active {
+                palette.ink
+            } else {
+                lerp(palette.ink, palette.canvas, 0.45)
+            },
+            true,
+            false,
         ),
     };
     let galley = painter.layout_no_wrap(title.to_owned(), font, ink);
-    let icon = 16.0;
-    let (icon_at, text_at) = if centered {
-        let text = pos2(
-            bar.center().x - galley.size().x / 2.0,
-            bar.center().y - galley.size().y / 2.0,
-        );
-        (None, text)
-    } else {
-        // Windows 7's icon sits 8 pixels in from the window's edge,
-        // or the screen's when maximized.
-        let glass = style == Family::Glass && bar.left() > 0.5;
-        let left = bar.left()
-            + match style {
-                _ if glass => -2.0,
-                Family::Fluent => 12.0,
-                _ => 4.0,
-            };
-        let icon_rect =
-            Rect::from_center_size(pos2(left + icon / 2.0, bar.center().y), vec2(icon, icon));
-        (
-            Some(icon_rect),
-            pos2(
-                icon_rect.right() + 5.0,
-                bar.center().y - galley.size().y / 2.0,
-            ),
-        )
+    let size = 16.0;
+    // Windows 7's icon sits 8 pixels in from the window's edge, or the
+    // screen's when maximized.
+    let glass = style == Family::Glass && bar.left() > 0.5;
+    let left = bar.left()
+        + match style {
+            _ if glass => -2.0,
+            Family::Fluent => 12.0,
+            Family::Oxygen | Family::Breeze | Family::Clearlooks => 6.0,
+            _ => 4.0,
+        };
+    let icon_at = icon
+        .then(|| Rect::from_center_size(pos2(left + size / 2.0, bar.center().y), vec2(size, size)));
+    let y = bar.center().y - galley.size().y / 2.0;
+    let text_at = match icon_at {
+        _ if centered => pos2(bar.center().x - galley.size().x / 2.0, y),
+        Some(icon_rect) => pos2(icon_rect.right() + 5.0, y),
+        None => pos2(left, y),
     };
     let area = Rect::from_min_size(text_at, galley.size());
     match style {
@@ -677,12 +850,33 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             );
         }
         Family::Glass => super::aero::paint_title_glow(painter, area, palette.dark),
-        Family::Gel if !palette.dark => {
+        // Aqua and Oxygen press their titles into the bar: a light line
+        // under the letters.
+        Family::Gel | Family::Oxygen if !palette.dark => {
             painter.galley_with_override_text_color(
                 text_at + vec2(0.0, 1.0),
                 galley.clone(),
                 Color32::from_white_alpha(160),
             );
+        }
+        Family::Plastik if state.active => {
+            painter.galley_with_override_text_color(
+                text_at + vec2(1.0, 1.0),
+                galley.clone(),
+                faded(super::skin::darker(from, 0.5), 0.6),
+            );
+        }
+        // Clearlooks outlines its white title in the bar's deep shade.
+        Family::Clearlooks if state.active => {
+            let outline = super::skin::gtk_shade(super::clearlooks::base(palette), 0.7);
+            for shift in [
+                vec2(1.0, 0.0),
+                vec2(-1.0, 0.0),
+                vec2(0.0, 1.0),
+                vec2(0.0, -1.0),
+            ] {
+                painter.galley_with_override_text_color(text_at + shift, galley.clone(), outline);
+            }
         }
         _ => {}
     }
@@ -700,14 +894,11 @@ mod tests {
     use eframe::egui::Shape;
 
     /// Every style but Modern draws its frame.
-    const FRAMED: [Style; 6] = [
-        Style::Retro,
-        Style::Luna,
-        Style::Glass,
-        Style::Aqua,
-        Style::Fluent,
-        Style::Liquid,
-    ];
+    fn framed() -> impl Iterator<Item = Style> {
+        Style::ALL
+            .into_iter()
+            .filter(|style| *style != Style::Modern)
+    }
 
     fn in_style<R>(style: Style, run: impl FnOnce() -> R) -> R {
         let skin = theme::Skin {
@@ -763,7 +954,7 @@ mod tests {
     fn modern_keeps_the_system_frame_and_the_rest_draw_their_own() {
         assert_eq!(metrics(Style::Modern), None);
         assert!(captions(Style::Modern, window()).is_empty());
-        for style in FRAMED {
+        for style in framed() {
             let metrics = metrics(style).unwrap();
             // Windows 98's 18 is the shortest.
             assert!(metrics.title >= 18.0, "{style:?}");
@@ -779,7 +970,7 @@ mod tests {
 
     #[test]
     fn the_title_bar_sits_on_top_and_the_app_under_it() {
-        for style in FRAMED {
+        for style in framed() {
             let metrics = metrics(style).unwrap();
             let (bar, inner) = layout(metrics, window(), false);
             assert_eq!(bar.height(), metrics.title, "{style:?}");
@@ -803,16 +994,18 @@ mod tests {
 
     #[test]
     fn every_frame_has_its_three_buttons_where_its_desktop_put_them() {
-        for style in FRAMED {
+        for style in framed() {
             let (bar, _) = layout(metrics(style).unwrap(), window(), false);
             let buttons = captions(style, bar);
             let mut kinds: Vec<_> = buttons.iter().map(|(caption, _)| *caption).collect();
             kinds.sort_by_key(|caption| *caption as u8);
-            assert_eq!(
-                kinds,
-                [Caption::Minimize, Caption::Maximize, Caption::Close],
-                "{style:?}"
-            );
+            // GNOME offers close alone.
+            let expected: &[Caption] = if style.family() == Family::Adwaita {
+                &[Caption::Close]
+            } else {
+                &[Caption::Minimize, Caption::Maximize, Caption::Close]
+            };
+            assert_eq!(kinds, expected, "{style:?}");
             for (i, (caption, rect)) in buttons.iter().enumerate() {
                 assert!(bar.contains_rect(*rect), "{style:?} {caption:?}");
                 assert!(rect.width() >= 11.0, "{style:?} {caption:?}");
@@ -824,13 +1017,22 @@ mod tests {
             let at = |kind| buttons.iter().find(|(c, _)| *c == kind).unwrap().1;
             let close = at(Caption::Close);
             match style.family() {
-                // Windows closes at the far right.
-                Family::Retro | Family::Luna | Family::Glass | Family::Fluent => {
-                    assert!(close.right() > bar.right() - 8.0, "{style:?}");
-                    assert!(close.left() > at(Caption::Maximize).right() - 0.5);
-                }
                 // The Mac closes at the left.
-                _ => assert!(close.left() < bar.left() + 20.0, "{style:?}"),
+                Family::Gel | Family::Liquid => {
+                    assert!(close.left() < bar.left() + 20.0, "{style:?}")
+                }
+                // Windows, KDE and GNOME close at the right, Windows at the
+                // very edge.
+                family => {
+                    let edge = match family {
+                        Family::Retro | Family::Luna | Family::Glass | Family::Fluent => 8.0,
+                        _ => 24.0,
+                    };
+                    assert!(close.right() > bar.right() - edge, "{style:?}");
+                    if family != Family::Adwaita {
+                        assert!(close.left() > at(Caption::Maximize).right() - 0.5);
+                    }
+                }
             }
         }
     }
@@ -873,7 +1075,7 @@ mod tests {
         let (from, to) = in_style(Style::Retro, || title_colors(&blue, true));
         assert_eq!(from, blue.deep);
         assert_ne!(to, from);
-        for style in FRAMED {
+        for style in framed() {
             for dark in [false, true] {
                 let palette = palette(style, dark);
                 in_style(style, || {
@@ -895,7 +1097,7 @@ mod tests {
 
     #[test]
     fn untinted_title_bars_are_grey_in_every_state() {
-        for style in FRAMED {
+        for style in framed() {
             for dark in [false, true] {
                 let scheme = theme::Scheme {
                     style,
@@ -920,7 +1122,7 @@ mod tests {
 
     #[test]
     fn every_frame_draws_inside_the_window_in_every_state() {
-        for style in FRAMED {
+        for style in framed() {
             for dark in [false, true] {
                 let palette = palette(style, dark);
                 for state in states() {

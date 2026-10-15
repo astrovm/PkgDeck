@@ -253,14 +253,10 @@ mod tests {
             let [r, g, b, _] = palette.canvas.to_array();
             assert_eq!(backdrop(Style::Modern, false, &palette), Some([r, g, b]));
             assert_eq!(backdrop(Style::Modern, true, &palette), None);
-            for style in [
-                Style::Retro,
-                Style::Luna,
-                Style::Glass,
-                Style::Aqua,
-                Style::Fluent,
-                Style::Liquid,
-            ] {
+            for style in Style::ALL
+                .into_iter()
+                .filter(|style| *style != Style::Modern)
+            {
                 assert_eq!(backdrop(style, false, &palette), None, "{style:?}");
             }
         }
