@@ -23,8 +23,8 @@ echo "dev-containers: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 
 # Toolbx images carry the com.github.containers.toolbox label, so a Distrobox
 # container made from one is the case that could appear twice.
-toolbx_image=quay.io/toolbx/ubuntu-toolbox:24.04
-distrobox_image=docker.io/library/alpine:3.22
+toolbx_image=quay.io/toolbx/ubuntu-toolbox:26.04
+distrobox_image=docker.io/library/alpine:3.24
 box="pkd-test-$backend"
 other="pkd-test-other"
 exported=$HOME/.local/bin/pkd-test-busybox
