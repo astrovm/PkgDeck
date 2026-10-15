@@ -277,7 +277,8 @@ list of snaps. A check never installs, upgrades or removes anything.
 
 APT, DNF, Pacman and Zypper need your password to refresh their lists, so a
 check uses their current lists. Use **Refresh sources** to update them. It asks
-you to review first. MacPorts uses its current ports tree and never self-updates
+you to review first and stays available when no updates are listed.
+MacPorts uses its current ports tree and never self-updates
 during a check. Sources without a list refresh are checked too. **Ctrl+R** runs
 the check.
 

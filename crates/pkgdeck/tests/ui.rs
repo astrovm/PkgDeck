@@ -858,7 +858,10 @@ fn empty_updates_can_refresh_source_indexes_with_the_mouse() {
         h.run_steps(4);
         // The accessible button remains discoverable without knowing the
         // keyboard shortcut, even when cached indexes show no updates.
-        h.get_by_role_and_label(Role::Button, "Refresh sources").click();
+        let refresh = h.get_by_role_and_label(Role::Button, "Refresh sources");
+        assert!(refresh.rect().bottom() <= size.y);
+        assert!(!refresh.accesskit_node().is_disabled());
+        refresh.click();
         h.run_steps(2);
         assert!(h.state().1.confirmation.is_some());
         assert!(!h.state().1.checking_updates);

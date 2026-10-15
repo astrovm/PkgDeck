@@ -1143,10 +1143,12 @@ fn clean_all_frees(app: &App) -> u64 {
 
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
-        Page::Updates => app
-            .items
-            .iter()
-            .any(|i| app.shown_rows()[i.raw].is_package()),
+        Page::Updates => {
+            app.items
+                .iter()
+                .any(|i| app.shown_rows()[i.raw].is_package())
+                || !app.refreshable_sources().is_empty()
+        }
         Page::Clean => !app.items.is_empty(),
         _ => false,
     };

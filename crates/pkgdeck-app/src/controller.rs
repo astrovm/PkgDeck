@@ -413,7 +413,8 @@ impl ProgressState {
     }
     /// A whole-source step moved on to the package `name` (as its source
     /// names it: the row's name or the name people see). The package
-    /// before it is done. False when no row of that source matches.
+    /// before it has moved on, but success still waits for the transaction
+    /// result. False when no row of that source matches.
     fn move_to(&mut self, backend: &str, name: &str) -> bool {
         let Some(id) = self.rows.get(backend).and_then(|rows| {
             rows.iter()
@@ -425,7 +426,7 @@ impl ProgressState {
             return false;
         };
         if let Some(previous) = self.item.take().filter(|previous| *previous != id) {
-            self.finish(previous, true);
+            self.finish(previous, false);
         }
         self.label = format!(
             "Update {}",
@@ -16269,10 +16270,14 @@ mod tests {
     #[test]
     fn batch_output_waits_for_the_transaction_result_before_claiming_success() {
         for outcome in [Outcome::Finished, Outcome::Failed, Outcome::Cancelled] {
-            let packages = [
+            let mut packages = [
                 synthetic_package("first", "First App"),
                 synthetic_package("second", "Second App"),
             ];
+            for package in &mut packages {
+                package.update = UpdateAvailability::Available;
+                package.candidate_version = Some("2".into());
+            }
             let operation = Operation::UpgradeAll {
                 backend: "apt".into(),
             };
@@ -16282,7 +16287,11 @@ mod tests {
             // APT unpacks multiple packages before configuring them. Moving
             // on to the next package does not prove the first one succeeded.
             assert!(state.observe("Unpacking first (2) over (1) ..."));
+            assert!(state.observe("Unpacking first (2) over (1) ..."));
+            assert_eq!(state.done, 0);
             assert!(state.observe("Unpacking second (2) over (1) ..."));
+            assert_eq!(state.done, 1);
+            assert_eq!(state.item.as_ref(), Some(&packages[1].id));
             let result = |state: &ProgressState| -> Value {
                 serde_json::from_str(state.batch_result().as_str()).unwrap()
             };
@@ -16304,6 +16313,7 @@ mod tests {
                 vec![]
             };
             assert_eq!(result(&state)["finished"], json!(expected), "{outcome:?}");
+            assert_eq!(state.done, 2);
         }
     }
     #[test]

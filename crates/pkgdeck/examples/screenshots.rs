@@ -308,6 +308,21 @@ fn themes() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--empty-refresh") {
+        for (name, size) in [
+            ("updates-empty-refresh-wide", [1180.0, 720.0]),
+            ("updates-empty-refresh-narrow", [400.0, 640.0]),
+        ] {
+            render(name, size, |app| {
+                app.page = Page::Updates;
+                app.rows.clear();
+                app.background.available = 0;
+                app.report.checked_at = Some(model::now());
+                app.catalog[0].capabilities.push("refresh".into());
+            });
+        }
+        return;
+    }
     if std::env::args().any(|arg| arg == "--refresh") {
         for (name, size, state) in [
             ("updates-refresh-after", [1180.0, 720.0], "empty"),
