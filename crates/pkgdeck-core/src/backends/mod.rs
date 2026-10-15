@@ -6713,6 +6713,38 @@ mod tests {
     }
 
     #[test]
+    fn snap_refresh_reports_a_failed_listing() {
+        #[derive(Clone)]
+        struct SnapdDown;
+        impl Transport for SnapdDown {
+            fn system_manager(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                assert_eq!(executable, "snap");
+                assert_eq!(
+                    args.to_vec(),
+                    vec![OsString::from("refresh"), OsString::from("--list")]
+                );
+                Err(ExecutionError::Disabled("snapd is not running".into()))
+            }
+        }
+        // Snap has no metadata-only refresh, so a failed listing must not
+        // read as a successful refresh.
+        let outcome = SystemManager::snap(SnapdDown).execute(
+            &Operation::Refresh {
+                backend: "snap".into(),
+            },
+            &Cancellation::default(),
+            &mut |_| {},
+        );
+        assert!(outcome.is_err(), "{outcome:?}");
+    }
+
+    #[test]
     fn brew_update_waits_for_another_update_to_finish() {
         let mut calls = 0;
         let result = brew_update(&Cancellation::default(), || {
