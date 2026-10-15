@@ -53,11 +53,22 @@ fn app(row: &Row, page: Page) -> App {
 }
 
 fn draw(
+    app: App,
+    row: Row,
+    width: f32,
+    narrow: bool,
+    opened: bool,
+) -> Harness<'static, (bool, App)> {
+    draw_with_fallback(app, row, width, narrow, opened, false)
+}
+
+fn draw_with_fallback(
     mut app: App,
     row: Row,
     width: f32,
     narrow: bool,
     opened: bool,
+    allow_missing_glyphs: bool,
 ) -> Harness<'static, (bool, App)> {
     let details = Details {
         package: Some(row.clone()),
@@ -73,33 +84,35 @@ fn draw(
     if opened {
         app.opened = Some(details.clone());
     }
-    let mut harness = Harness::builder()
-        .with_size(vec2(width, 500.0))
+    let builder = Harness::builder().with_size(vec2(width, 500.0));
+    let builder = if allow_missing_glyphs {
         // Header geometry includes arbitrary package names, including emoji
         // outside the bundled faces. Use the application's replacement glyph
         // instead of kittest's new missing-glyph panic or host-specific fonts.
-        .allow_missing_glyphs()
-        .build_ui_state(
-            move |ui, (ready, app): &mut (bool, App)| {
-                if !*ready {
-                    // This root has no host font directories: snapshots use the
-                    // bundled faces and egui fallbacks on every OS and architecture.
-                    let root =
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-                    crate::setup(ui.ctx(), &root, None);
-                    set_reduce_motion(ui.ctx(), true);
-                    *ready = true;
-                    return;
-                }
-                let rect = ui.max_rect();
-                if row.is_package() {
-                    app_page(app, ui, rect, &row, Some(details.clone()), narrow, opened);
-                } else {
-                    panel(app, ui, rect, &row, narrow);
-                }
-            },
-            (false, app),
-        );
+        builder.allow_missing_glyphs()
+    } else {
+        builder
+    };
+    let mut harness = builder.build_ui_state(
+        move |ui, (ready, app): &mut (bool, App)| {
+            if !*ready {
+                // This root has no host font directories: snapshots use the
+                // bundled faces and egui fallbacks on every OS and architecture.
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                crate::setup(ui.ctx(), &root, None);
+                set_reduce_motion(ui.ctx(), true);
+                *ready = true;
+                return;
+            }
+            let rect = ui.max_rect();
+            if row.is_package() {
+                app_page(app, ui, rect, &row, Some(details.clone()), narrow, opened);
+            } else {
+                panel(app, ui, rect, &row, narrow);
+            }
+        },
+        (false, app),
+    );
     harness.run_steps(4);
     harness
 }
@@ -339,7 +352,8 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
                 if kind == "package" {
                     row.adopt_with = Some("apt".into());
                 }
-                let harness = draw(app(&row, page), row.clone(), width, narrow, opened);
+                let harness =
+                    draw_with_fallback(app(&row, page), row.clone(), width, narrow, opened, true);
                 actual.insert(
                     format!("{kind}-{width}-{narrow}-{opened}"),
                     header_geometry(&harness),
