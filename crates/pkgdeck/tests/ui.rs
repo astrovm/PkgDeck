@@ -847,6 +847,26 @@ fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
 }
 
 #[test]
+fn empty_updates_can_refresh_source_indexes_with_the_mouse() {
+    for size in [egui::vec2(1200.0, 800.0), egui::vec2(400.0, 600.0)] {
+        let mut app = with_sources(app());
+        app.page = Page::Updates;
+        app.c().set_rows("[]".into());
+        app.react();
+        app.invalidate();
+        let mut h = harness_at(app, size);
+        h.run_steps(4);
+        // The accessible button remains discoverable without knowing the
+        // keyboard shortcut, even when cached indexes show no updates.
+        h.get_by_role_and_label(Role::Button, "Refresh sources").click();
+        h.run_steps(2);
+        assert!(h.state().1.confirmation.is_some());
+        assert!(!h.state().1.checking_updates);
+        assert!(!h.state().1.busy);
+    }
+}
+
+#[test]
 fn refresh_sources_is_reviewed_and_separate_from_the_routine_check() {
     let mut h = harness(with_sources(app()));
     h.state_mut().1.page = Page::Updates;

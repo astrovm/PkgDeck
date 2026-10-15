@@ -16267,6 +16267,46 @@ mod tests {
         assert_eq!(result(&state), json!({"sources": [], "finished": []}));
     }
     #[test]
+    fn batch_output_waits_for_the_transaction_result_before_claiming_success() {
+        for outcome in [Outcome::Finished, Outcome::Failed, Outcome::Cancelled] {
+            let packages = [
+                synthetic_package("first", "First App"),
+                synthetic_package("second", "Second App"),
+            ];
+            let operation = Operation::UpgradeAll {
+                backend: "apt".into(),
+            };
+            let job = Job::UpgradeAll(vec![operation.clone()], None);
+            let mut state = ProgressState::new(&job, None, &Names::new()).with_rows(&packages);
+            state.apply(&Event::Started(operation.clone()));
+            // APT unpacks multiple packages before configuring them. Moving
+            // on to the next package does not prove the first one succeeded.
+            assert!(state.observe("Unpacking first (2) over (1) ..."));
+            assert!(state.observe("Unpacking second (2) over (1) ..."));
+            let result = |state: &ProgressState| -> Value {
+                serde_json::from_str(state.batch_result().as_str()).unwrap()
+            };
+            assert_eq!(result(&state)["finished"], json!([]));
+            state.apply(&Event::Finished {
+                operation,
+                result: match outcome {
+                    Outcome::Finished => Ok(OperationOutcome::default()),
+                    Outcome::Cancelled => Err(EngineError::Cancelled),
+                    _ => Err(EngineError::InvalidResponse {
+                        backend: "apt".into(),
+                        reason: "configuration failed".into(),
+                    }),
+                },
+            });
+            let expected = if outcome == Outcome::Finished {
+                packages.iter().map(|p| target_row(&p.id)).collect()
+            } else {
+                vec![]
+            };
+            assert_eq!(result(&state)["finished"], json!(expected), "{outcome:?}");
+        }
+    }
+    #[test]
     fn followed_output_moves_the_running_update_all_on() {
         let mut controller = synthetic_controller();
         let mut controller = controller.pin_mut();
