@@ -56,11 +56,15 @@ pub fn blur_known(blur: bool) {
 /// Whether `desktop`, as `XDG_CURRENT_DESKTOP` names it, blurs behind
 /// windows: KDE's, when its blur effect is on.
 pub fn blurs_on(desktop: Option<&str>, effect_on: impl FnOnce() -> Option<bool>) -> bool {
-    let kde = desktop
+    is_kde(desktop) && effect_on().unwrap_or(false)
+}
+
+/// Whether `desktop`, as `XDG_CURRENT_DESKTOP` names it, is KDE's.
+pub fn is_kde(desktop: Option<&str>) -> bool {
+    desktop
         .unwrap_or_default()
         .split(':')
-        .any(|name| name.eq_ignore_ascii_case("kde"));
-    kde && effect_on().unwrap_or(false)
+        .any(|name| name.eq_ignore_ascii_case("kde"))
 }
 
 /// A tiny, blurred copy of the desktop's wallpaper, for glass to show

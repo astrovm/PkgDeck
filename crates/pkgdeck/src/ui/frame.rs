@@ -1,6 +1,6 @@
 //! The window's own frame in the older styles: the title bar, its buttons
 //! and the border, drawn the way each desktop drew its windows. Modern
-//! keeps the system's frame.
+//! keeps the system's frame, and so does a style on the desktop it copies.
 
 use super::skin::{faded, gradient, gray, ink_on, lerp, retro_edge, rgb};
 use super::theme::{self, Palette};
@@ -45,6 +45,81 @@ pub struct Metrics {
     pub top: f32,
     pub title: f32,
     pub below: f32,
+}
+
+/// The desktop the window is on, as far as its frame goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Desktop {
+    #[default]
+    Other,
+    Kde,
+    Mac,
+}
+
+impl Desktop {
+    /// The one PkgDeck is running on.
+    pub fn detect() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else {
+            Self::of(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref())
+        }
+    }
+    /// The Linux desktop `XDG_CURRENT_DESKTOP` names.
+    pub fn of(names: Option<&str>) -> Self {
+        if crate::backdrop::is_kde(names) {
+            Self::Kde
+        } else {
+            Self::Other
+        }
+    }
+}
+
+static DESKTOP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Tells the frame which desktop the window is on. Until then, as in
+/// tests and previews, it's none in particular.
+pub fn set_desktop(desktop: Desktop) {
+    DESKTOP.store(desktop as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn desktop() -> Desktop {
+    Desktop::from_code(DESKTOP.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+impl Desktop {
+    /// The desktop `set_desktop` stored as `code`.
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Kde,
+            2 => Self::Mac,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Whether the system draws the window's frame for `style` on `desktop`:
+/// Modern always keeps it, and a style keeps the real thing on the
+/// desktop it copies, window menu and settings included. GNOME draws no
+/// frames for apps, so GNOME 51 draws its own there too.
+pub fn system_frame(style: Style, desktop: Desktop) -> bool {
+    match style.family() {
+        Family::Modern => true,
+        Family::Breeze => desktop == Desktop::Kde,
+        Family::Liquid => desktop == Desktop::Mac,
+        _ => false,
+    }
+}
+
+/// The title bar the app lays out for `style` on `desktop`: the style's
+/// own, none under the system's, but on the Mac macOS 27 keeps its bar
+/// under the system's lights, so the sidebar still runs up behind them.
+pub fn drawn(style: Style, desktop: Desktop) -> Option<Metrics> {
+    if system_frame(style, desktop) && style.family() != Family::Liquid {
+        None
+    } else {
+        metrics(style)
+    }
 }
 
 /// The frame `style` draws, or None when it keeps the system's.
@@ -203,11 +278,15 @@ pub fn layout(metrics: Metrics, full: Rect, maximized: bool) -> (Rect, Rect) {
 /// Draws the frame around `full` and handles its buttons, dragging and
 /// double clicks. Returns where the app goes.
 pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
+    show_on(ui, full, title, palette, desktop())
+}
+
+fn show_on(ui: &mut Ui, full: Rect, title: &str, palette: &Palette, desktop: Desktop) -> Rect {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
-    let metrics = metrics(style);
-    decorate(&ctx, metrics.is_none());
-    let Some(metrics) = metrics else {
+    let system = system_frame(style, desktop);
+    decorate(&ctx, system);
+    let Some(metrics) = drawn(style, desktop) else {
         publish_corners(&ctx, full, true);
         return full;
     };
@@ -225,7 +304,8 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     if drag.double_clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!state.maximized));
     }
-    let buttons = captions(style, bar);
+    // Under the system's frame its own buttons stand in.
+    let buttons = if system { vec![] } else { captions(style, bar) };
     let hovered_group = buttons
         .iter()
         .any(|(_, rect)| ui.rect_contains_pointer(rect.expand(2.0)));
@@ -252,10 +332,14 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
 /// drawn. It reads the pointer itself rather than adding widgets, so the
 /// title bar and its buttons next to the edge don't take the press.
 pub fn edges(ui: &mut Ui, full: Rect, resizing_sidebar: bool) {
+    edges_on(ui, full, resizing_sidebar, desktop());
+}
+
+fn edges_on(ui: &mut Ui, full: Rect, resizing_sidebar: bool, desktop: Desktop) {
     let ctx = ui.ctx().clone();
     let style = theme::skin().style;
     let state = WindowState::of(&ctx);
-    if metrics(style).is_none() || state.maximized {
+    if system_frame(style, desktop) || state.maximized {
         return;
     }
     if style.family() == Family::Liquid {
@@ -1306,6 +1390,31 @@ mod tests {
     }
 
     #[test]
+    fn under_the_system_frame_the_system_draws_the_edge() {
+        let palette = palette(Style::Liquid, false);
+        let shapes = in_style(Style::Liquid, || {
+            theme::painted(|ui| {
+                show_on(ui, window(), "PkgDeck", &palette, Desktop::Mac);
+                ui.painter()
+                    .rect_filled(window(), CornerRadius::ZERO, Color32::RED);
+                edges_on(ui, window(), false, Desktop::Mac);
+            })
+        });
+        match shapes.last() {
+            Some(Shape::Rect(app)) => assert_eq!(app.fill, Color32::RED),
+            other => panic!("the app should come last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_desktop_set_is_the_one_read_back() {
+        for desktop in [Desktop::Other, Desktop::Kde, Desktop::Mac] {
+            assert_eq!(Desktop::from_code(desktop as u8), desktop);
+        }
+        assert_eq!(Desktop::from_code(9), Desktop::Other);
+    }
+
+    #[test]
     fn the_mac_sidebar_divider_runs_up_through_the_title_bar() {
         let palette = palette(Style::Liquid, false);
         let metrics = metrics(Style::Liquid).expect("Liquid draws a frame");
@@ -1327,6 +1436,103 @@ mod tests {
             _ => false,
         });
         assert!(divider, "no divider through the title bar: {shapes:?}");
+    }
+
+    #[test]
+    fn the_desktop_comes_from_its_names() {
+        assert_eq!(Desktop::of(Some("KDE")), Desktop::Kde);
+        assert_eq!(Desktop::of(Some("ubuntu:KDE")), Desktop::Kde);
+        for names in [
+            None,
+            Some(""),
+            Some("GNOME"),
+            Some("ubuntu:GNOME"),
+            Some("KDEX"),
+        ] {
+            assert_eq!(Desktop::of(names), Desktop::Other, "{names:?}");
+        }
+    }
+
+    #[test]
+    fn a_style_keeps_the_system_frame_on_the_desktop_it_copies() {
+        let desktops = [Desktop::Other, Desktop::Kde, Desktop::Mac];
+        for style in Style::ALL {
+            for desktop in desktops {
+                let system = matches!(
+                    (style, desktop),
+                    (Style::Modern, _)
+                        | (Style::Breeze, Desktop::Kde)
+                        | (Style::Liquid, Desktop::Mac)
+                );
+                assert_eq!(
+                    system_frame(style, desktop),
+                    system,
+                    "{style:?} {desktop:?}"
+                );
+            }
+        }
+        // GNOME has no frame of its own for apps, so GNOME 51 never asks.
+        assert!(!system_frame(Style::Adwaita, Desktop::Other));
+    }
+
+    #[test]
+    fn only_macos_27_lays_out_a_bar_under_the_system_frame() {
+        assert_eq!(drawn(Style::Breeze, Desktop::Kde), None);
+        assert_eq!(drawn(Style::Modern, Desktop::Mac), None);
+        assert_eq!(drawn(Style::Liquid, Desktop::Mac), metrics(Style::Liquid));
+        // The styles that copy another desktop still draw theirs.
+        assert_eq!(drawn(Style::Breeze, Desktop::Mac), metrics(Style::Breeze));
+        assert_eq!(drawn(Style::Oxygen, Desktop::Kde), metrics(Style::Oxygen));
+        assert_eq!(drawn(Style::Aqua, Desktop::Mac), metrics(Style::Aqua));
+    }
+
+    #[test]
+    fn under_the_system_frame_no_window_buttons_are_drawn() {
+        let cases = [
+            (Style::Breeze, Desktop::Kde, true),
+            (Style::Liquid, Desktop::Mac, true),
+            (Style::Breeze, Desktop::Other, false),
+            (Style::Liquid, Desktop::Other, false),
+        ];
+        for (style, desktop, system) in cases {
+            let palette = palette(style, false);
+            let ctx = egui::Context::default();
+            let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+            crate::setup(&ctx, &fixtures, None);
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
+            let mut room = Rect::NOTHING;
+            let mut output = in_style(style, || {
+                ctx.run_ui(egui::RawInput::default(), |ui| {
+                    room = show_on(ui, window(), "PkgDeck", &palette, desktop);
+                })
+            });
+            output.textures_delta.clear();
+            let decorations: Vec<bool> = output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| &viewport.commands)
+                .filter_map(|command| match command {
+                    ViewportCommand::Decorations(on) => Some(*on),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(decorations, [system], "{style:?} {desktop:?}");
+            let close = Id::unique("window-frame").with(Caption::Close);
+            assert_eq!(
+                ctx.read_response(close).is_some(),
+                !system,
+                "{style:?} {desktop:?}"
+            );
+            match drawn(style, desktop) {
+                None => assert_eq!(room, window(), "{style:?}"),
+                Some(metrics) => {
+                    assert_eq!(room, layout(metrics, window(), false).1, "{style:?}");
+                }
+            }
+        }
+        assert_eq!(drawn(Style::Breeze, Desktop::Kde), None);
     }
 
     #[test]

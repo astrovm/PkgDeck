@@ -610,7 +610,11 @@ and **About**.
   - **GNOME 51**: Adwaita's header bar, rounded cards, and only a close
     button, as GNOME has.
   - Every style but **Modern** draws its own title bar and window buttons,
-    after the real desktop. The window's corners are round where its
+    after the real desktop. On the desktop it copies, a style keeps the
+    real ones instead: **KDE Plasma 6** on KDE Plasma, and **macOS 27** on
+    the Mac, with its sidebar still running up behind the system's traffic
+    lights. GNOME doesn't draw title bars for apps, so **GNOME 51** draws
+    its own there too. The window's corners are round where its
     desktop's are: the title bar's on Mac OS X Tiger and KDE 3, all four on
     Windows 11, macOS 27, KDE 4, KDE Plasma 6, GNOME 2 and GNOME 51, and none
     when maximized.
