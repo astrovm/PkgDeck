@@ -102,7 +102,9 @@ int main(int argc, const char **argv) {
                 return entry != NULL;
             }), @"Menu bar icon never registered");
             check_menu(app);
-            require(running.finishedLaunching, @"AppKit never finished launching");
+            // LaunchServices updates this asynchronously after the first
+            // accessible menu appears, especially on a normal window launch.
+            require(until(^BOOL { return running.finishedLaunching; }), @"AppKit never finished launching");
             if (background.boolValue) {
                 require(windows(app).count == 0, @"Background startup showed a window");
                 require(running.activationPolicy == NSApplicationActivationPolicyAccessory, @"Background startup showed a Dock icon");
