@@ -95,7 +95,7 @@ fn quiet(launch: &app::Launch) -> bool {
 const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
 
 /// `decorated` is whether the system draws the window's frame: the older
-/// styles draw their own.
+/// styles draw their own, unless the desktop they copy is the one running.
 fn options(decorated: bool) -> eframe::NativeOptions {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("PkgDeck")
@@ -216,6 +216,7 @@ fn main() {
         prepare_macos_environment();
     }
     let launch = parse(&args);
+    pkgdeck::ui::set_desktop(pkgdeck::ui::Desktop::detect());
     let var = |key: &str| std::env::var(key).ok();
     let socket = opening::socket_path(var("XDG_RUNTIME_DIR"), rustix::process::geteuid().as_raw());
     let listener = if launch.smoke_test {
@@ -277,7 +278,10 @@ fn main() {
             let media = media.clone();
             let result = eframe::run_native(
                 "PkgDeck",
-                options(app.settings.style == pkgdeck::settings::Style::Modern),
+                options(pkgdeck::ui::system_frame(
+                    app.settings.style,
+                    pkgdeck::ui::desktop(),
+                )),
                 Box::new(|cc| {
                     pkgdeck::setup(&cc.egui_ctx, std::path::Path::new("/"), media);
                     Ok(Box::new(Window::new(&cc.egui_ctx, &mut app)))

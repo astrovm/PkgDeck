@@ -58,6 +58,7 @@ mod native {
         fn pkgdeck_mac_pump(seconds: f64);
         fn pkgdeck_mac_watch_reopen(watching: c_int);
         fn pkgdeck_mac_tray_titles() -> *mut c_char;
+        fn pkgdeck_mac_unify_title_bar(view: *mut std::ffi::c_void, unified: c_int) -> c_int;
         fn pkgdeck_mac_fill_window(
             view: *mut std::ffi::c_void,
             fill: c_int,
@@ -128,6 +129,10 @@ mod native {
     pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<[u8; 3]>) {
         let [r, g, b] = fill.unwrap_or_default();
         unsafe { pkgdeck_mac_fill_window(view.as_ptr(), fill.is_some().into(), r, g, b) }
+    }
+    /// `view` must be the window's live `NSView`, on the main thread.
+    pub fn unify_title_bar(view: std::ptr::NonNull<std::ffi::c_void>, unified: bool) -> bool {
+        unsafe { pkgdeck_mac_unify_title_bar(view.as_ptr(), unified.into()) != 0 }
     }
     pub fn tray_titles() -> Vec<String> {
         unsafe {
@@ -629,6 +634,14 @@ fn tray_icon(hue: Color32) -> Vec<ksni::Icon> {
 #[cfg(target_os = "macos")]
 pub fn fill_window(view: std::ptr::NonNull<std::ffi::c_void>, fill: Option<[u8; 3]>) {
     native::fill_window(view, fill);
+}
+
+/// Runs the Mac window's content up under a see-through title bar as tall
+/// as a toolbar's, the system's lights in its middle, or puts the usual
+/// title bar back. False while the window has no title bar to change.
+#[cfg(target_os = "macos")]
+pub fn unify_title_bar(view: std::ptr::NonNull<std::ffi::c_void>, unified: bool) -> bool {
+    native::unify_title_bar(view, unified)
 }
 
 /// Finds out whether the desktop can blur, once, off the caller's thread,

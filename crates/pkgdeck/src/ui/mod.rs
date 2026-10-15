@@ -36,6 +36,7 @@ use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CursorIcon, Id, Key, Modifiers, Rect, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, Vec2,
 };
+pub use frame::{desktop, set_desktop, system_frame, Desktop};
 pub use settings_page::Tab as SettingsTab;
 use std::collections::HashSet;
 use widgets::*;

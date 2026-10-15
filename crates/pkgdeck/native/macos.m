@@ -191,6 +191,45 @@ void pkgdeck_mac_fill_window(void *view, int fill, unsigned char r, unsigned cha
         : [NSColor clearColor];
 }
 
+// macOS 27 keeps the system's traffic lights: the content runs up under a
+// see-through title bar, and an empty toolbar makes the bar as tall as
+// PkgDeck's own, with the lights in its middle. `unified` 0 puts the usual
+// title bar back. Changes only what differs, so it can run every frame.
+// Returns 0 while the window has no title bar yet: winit puts it back after
+// the frame that asks, and resets the style mask when it does.
+int pkgdeck_mac_unify_title_bar(void *view, int unified) {
+    NSWindow *window = [(NSView *)view window];
+    if (!window) return 1;
+    NSWindowStyleMask mask = window.styleMask;
+    if (unified && !(mask & NSWindowStyleMaskTitled)) return 0;
+    NSWindowStyleMask want = unified
+        ? mask | NSWindowStyleMaskFullSizeContentView
+        : mask & ~NSWindowStyleMaskFullSizeContentView;
+    if (want != mask) {
+        window.styleMask = want;
+        // As winit does after changing the mask, or keys stop arriving.
+        [window makeFirstResponder:(NSView *)view];
+    }
+    if (window.titlebarAppearsTransparent != (BOOL)unified) window.titlebarAppearsTransparent = unified;
+    NSWindowTitleVisibility title = unified ? NSWindowTitleHidden : NSWindowTitleVisible;
+    if (window.titleVisibility != title) window.titleVisibility = title;
+    if (unified && !window.toolbar) {
+        NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"io.github.astrovm.PkgDeck"];
+        window.toolbar = toolbar;
+        [toolbar release];
+        if (@available(macOS 11.0, *)) {
+            window.toolbarStyle = NSWindowToolbarStyleUnified;
+            window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+        }
+    } else if (!unified && window.toolbar) {
+        window.toolbar = nil;
+        if (@available(macOS 11.0, *)) {
+            window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
+        }
+    }
+    return 1;
+}
+
 // Hide the Dock icon while only the menu bar icon is left, and bring it back.
 void pkgdeck_mac_set_dock_visible(int visible) {
     [[NSApplication sharedApplication] setActivationPolicy:visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];

@@ -155,13 +155,30 @@ fn ask_blur(frame: &eframe::Frame, blur: bool) {
 /// What fills the window behind its content: the canvas's colour under
 /// the system's frame, or nothing, see-through, for glass and the frames
 /// styles draw themselves.
-fn backdrop(
-    style: crate::settings::Style,
-    blur: bool,
-    palette: &theme::Palette,
-) -> Option<[u8; 3]> {
+fn backdrop(system_frame: bool, blur: bool, palette: &theme::Palette) -> Option<[u8; 3]> {
     let [r, g, b, _] = palette.canvas.to_array();
-    (!blur && crate::ui::frame::metrics(style).is_none()).then_some([r, g, b])
+    (!blur && system_frame).then_some([r, g, b])
+}
+
+/// On the Mac, runs the app up under a see-through system title bar, or
+/// puts the usual one back. Returns false while the window can't take it
+/// yet; elsewhere there's nothing to do.
+fn unify_title_bar(frame: &eframe::Frame, unified: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = frame.window_handle() {
+            if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+                return crate::platform::unify_title_bar(handle.ns_view, unified);
+            }
+        }
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (frame, unified);
+        true
+    }
 }
 
 /// Fills the window behind its content with a colour, or makes it
@@ -207,13 +224,17 @@ impl eframe::App for Window<'_> {
         theme::set_see_through(blur);
         // The system's frame, which Modern keeps, needs the window filled
         // behind it; the frames styles draw themselves need it see-through.
-        let fill = backdrop(
-            theme::skin().style,
-            blur,
-            &theme::Palette::current(ui.ctx()),
-        );
+        let style = theme::skin().style;
+        let system = crate::ui::system_frame(style, crate::ui::desktop());
+        let fill = backdrop(system, blur, &theme::Palette::current(ui.ctx()));
         if self.filled != Some(fill) && fill_window(frame, fill) {
             self.filled = Some(fill);
+        }
+        // macOS 27 runs its own bar up under the system's lights.
+        let unified = system && style.family() == crate::settings::Family::Liquid;
+        if !unify_title_bar(frame, unified) {
+            // The system's frame isn't back yet: try again next frame.
+            ui.ctx().request_repaint();
         }
         self.app.sync_icon();
         // Elsewhere the window carries its own icon, which follows too.
@@ -243,7 +264,6 @@ impl eframe::App for Window<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Style;
     use theme::{Palette, Scheme};
 
     #[test]
@@ -251,14 +271,10 @@ mod tests {
         for dark in [true, false] {
             let palette = Palette::of(Scheme::default(), dark);
             let [r, g, b, _] = palette.canvas.to_array();
-            assert_eq!(backdrop(Style::Modern, false, &palette), Some([r, g, b]));
-            assert_eq!(backdrop(Style::Modern, true, &palette), None);
-            for style in Style::ALL
-                .into_iter()
-                .filter(|style| *style != Style::Modern)
-            {
-                assert_eq!(backdrop(style, false, &palette), None, "{style:?}");
-            }
+            assert_eq!(backdrop(true, false, &palette), Some([r, g, b]));
+            assert_eq!(backdrop(true, true, &palette), None);
+            assert_eq!(backdrop(false, false, &palette), None);
+            assert_eq!(backdrop(false, true, &palette), None);
         }
     }
 }
