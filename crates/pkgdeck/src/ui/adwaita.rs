@@ -40,7 +40,7 @@ pub fn paint_frame(
     };
     painter.rect_filled(header, top_corners(corners), fill);
     let sidebar = painter.ctx().data(|data| {
-        data.get_temp::<f32>(Id::new("sidebar-extent"))
+        data.get_temp::<f32>(Id::unique("sidebar-extent"))
             .unwrap_or(0.0)
     });
     if sidebar > 0.0 {
