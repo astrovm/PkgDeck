@@ -13414,6 +13414,66 @@ mod tests {
         assert_eq!(controller.failure().to_string(), "{}");
     }
     #[test]
+    fn unrelated_source_reports_keep_failed_changes_and_their_retry() {
+        let package = synthetic_package("htop", "htop");
+        let clean = Operation::Clean(CleanupId {
+            backend: "projects".into(),
+            key: "worktrees:/code/app".into(),
+        });
+        for operation in [
+            Operation::Upgrade(package.id.clone()),
+            Operation::Remove(package.id.clone()),
+            clean,
+        ] {
+            let mut controller = synthetic_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().prefetch.clear();
+            let cleaning = matches!(operation, Operation::Clean(_));
+            let updating = matches!(operation, Operation::Upgrade(_));
+            finish_write(
+                &mut controller,
+                Job::Write(operation.clone(), None),
+                Err(EngineError::NotFound),
+            );
+            controller.as_mut().rust_mut().active_view = if cleaning {
+                "Clean"
+            } else if updating {
+                "Updates"
+            } else {
+                "Installed"
+            }
+            .into();
+            controller.as_mut().rust_mut().updates_view = updating;
+            let look = |controller: &mut Pin<&mut ffi::PackageController>, source: &str| {
+                controller.as_mut().rust_mut().source_filter = vec![source.into()];
+                controller.as_mut().apply(Ok(if cleaning {
+                    Payload::Cleanup(CleanupReport {
+                        items: vec![],
+                        failures: vec![],
+                    })
+                } else {
+                    Payload::Packages(PackageReport {
+                        packages: vec![],
+                        failures: vec![],
+                        successful_sources: vec![source.into()],
+                    })
+                }));
+            };
+            look(&mut controller, "npm");
+            assert_eq!(
+                parsed(controller.failed_rows()).as_array().unwrap().len(),
+                1,
+                "{operation:?}"
+            );
+            assert_ne!(controller.failure().to_string(), "{}", "{operation:?}");
+            assert!(controller.rust().retry_job.is_some(), "{operation:?}");
+            look(&mut controller, operation.backend());
+            assert_eq!(controller.failed_rows().to_string(), "[]");
+            assert_eq!(controller.failure().to_string(), "{}");
+            assert!(controller.rust().retry_job.is_none());
+        }
+    }
+    #[test]
     fn a_step_outside_a_package_or_task_is_named_by_its_title() {
         let refresh = Operation::Refresh {
             backend: "apt".into(),
