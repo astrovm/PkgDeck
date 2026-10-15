@@ -1343,6 +1343,113 @@ fn a_failed_clean_is_a_toast_a_marked_row_and_a_card_in_activity() {
 }
 
 #[test]
+fn a_failed_cleanup_keeps_its_retry_after_loading_another_source() {
+    use pkgdeck_core::{
+        engine::{Backend, Engine, EngineError},
+        package::{
+            Availability, Capability, CleanupId, CleanupItem, CleanupKind, Operation,
+            OperationOutcome, Progress,
+        },
+        process::Cancellation,
+    };
+    struct Cleaner(&'static str);
+    impl Backend for Cleaner {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Clean]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+            Ok(if self.0 == "projects" {
+                vec![CleanupItem {
+                    id: CleanupId {
+                        backend: self.0.into(),
+                        key: "worktrees:/code/fixture".into(),
+                    },
+                    kind: CleanupKind::Worktree,
+                    title: "Fixture worktrees".into(),
+                    summary: "Finished worktrees".into(),
+                    preview: "Remove the fixture worktree".into(),
+                    bytes: Some(1000),
+                }]
+            } else {
+                vec![]
+            })
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            Err(EngineError::InvalidResponse {
+                backend: self.0.into(),
+                reason: "Fixture is busy".into(),
+            })
+        }
+    }
+    fn settle(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while *app.ctl.busy() && std::time::Instant::now() < deadline {
+            app.c().poll();
+            app.react();
+            std::thread::yield_now();
+        }
+        app.react();
+        assert!(!app.busy);
+    }
+    let (store, settings) = Store::open(None, None);
+    let mut platform = Platform::start(|| {});
+    platform.record_notifications();
+    let controller = create_synthetic_controller(|sources, _, _, _| {
+        let mut engine = Engine::default();
+        for source in ["projects", "dev-caches"] {
+            if sources.is_empty() || sources.iter().any(|id| id == source) {
+                engine.register(Cleaner(source)).unwrap();
+            }
+        }
+        Ok(engine)
+    });
+    let mut app = App::with_controller(controller, settings, store, platform, Launch::default());
+    app.settings.reduce_motion = true;
+    app.page = Page::Clean;
+    app.c()
+        .load("Clean".into(), "".into(), "projects".into(), false, true);
+    settle(&mut app);
+    let mut h = harness(app);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "Run cleanup Fixture worktrees")
+        .click();
+    h.run_steps(2);
+    settle(&mut h.state_mut().1);
+    h.run_steps(3);
+    h.query_all_by_role_and_label(Role::Button, "Clean")
+        .last()
+        .unwrap()
+        .click();
+    h.run_steps(2);
+    settle(&mut h.state_mut().1);
+    h.run_steps(3);
+    assert!(!h.state().1.failure.is_empty());
+    h.state_mut()
+        .1
+        .c()
+        .load("Clean".into(), "".into(), "dev-caches".into(), false, true);
+    settle(&mut h.state_mut().1);
+    h.run_steps(3);
+    assert!(h.state().1.rows.is_empty());
+    assert!(!h.state().1.failure.is_empty());
+    h.state_mut().1.toggle_activity();
+    h.run_steps(4);
+    assert!(h.query_by_label("Clean Fixture worktrees failed").is_some());
+    assert!(h.query_by_role_and_label(Role::Button, "Retry").is_some());
+}
+
+#[test]
 fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     let mut app = app();
     app.page = Page::Clean;

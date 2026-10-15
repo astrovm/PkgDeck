@@ -425,7 +425,7 @@ impl ProgressState {
             return false;
         };
         if let Some(previous) = self.item.take().filter(|previous| *previous != id) {
-            self.finish(previous, true);
+            self.finish(previous, false);
         }
         self.label = format!(
             "Update {}",
@@ -445,8 +445,8 @@ impl ProgressState {
         pkgdeck_core::backends::output_package(&backend, line)
             .is_some_and(|name| self.move_to(&backend, &name))
     }
-    /// Marks a package done and counts it, once. `ok` says whether its
-    /// change succeeded.
+    /// Marks a package done and counts it once. Success is confirmed only
+    /// when the operation finishes, not when its output moves to another row.
     fn finish(&mut self, id: PackageId, ok: bool) {
         if ok && !self.succeeded.contains(&id) {
             self.succeeded.push(id.clone());
@@ -4580,8 +4580,18 @@ impl ffi::PackageController {
         let view = self.rust().active_view.clone();
         let updates = self.rust().updates_view;
         let packages = &self.rust().packages;
+        let successful = self.successful_sources();
         let answered = |backend: &str| {
-            !self
+            (if cleanup.is_some() {
+                self.rust().source_filter.is_empty()
+                    || self
+                        .rust()
+                        .source_filter
+                        .iter()
+                        .any(|source| source == backend)
+            } else {
+                successful.iter().any(|source| source == backend)
+            }) && !self
                 .rust()
                 .failures
                 .iter()
@@ -13467,6 +13477,17 @@ mod tests {
             );
             assert_ne!(controller.failure().to_string(), "{}", "{operation:?}");
             assert!(controller.rust().retry_job.is_some(), "{operation:?}");
+            if !cleaning {
+                controller.as_mut().rust_mut().source_filter.clear();
+                controller
+                    .as_mut()
+                    .apply(Ok(Payload::Packages(PackageReport::default())));
+                assert_eq!(
+                    parsed(controller.failed_rows()).as_array().unwrap().len(),
+                    1
+                );
+                assert!(controller.rust().retry_job.is_some());
+            }
             look(&mut controller, operation.backend());
             assert_eq!(controller.failed_rows().to_string(), "[]");
             assert_eq!(controller.failure().to_string(), "{}");
@@ -16325,6 +16346,45 @@ mod tests {
             result: Ok(OperationOutcome::default()),
         });
         assert_eq!(result(&state), json!({"sources": [], "finished": []}));
+    }
+    #[test]
+    fn unpacking_another_package_does_not_prove_the_previous_update_succeeded() {
+        let packages: Vec<_> = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| {
+                let mut package = synthetic_package(name, name);
+                package.update = UpdateAvailability::Available;
+                package
+            })
+            .collect();
+        let operation = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        let job = Job::UpgradeAll(vec![operation.clone()], None);
+        for ok in [false, true] {
+            let mut state = ProgressState::new(&job, None, &Names::new()).with_rows(&packages);
+            state.apply(&Event::Started(operation.clone()));
+            assert!(state.observe("Unpacking alpha:all (2) over (1) ..."));
+            assert!(state.observe("Unpacking beta:all (2) over (1) ..."));
+            assert!(state.succeeded.is_empty());
+            state.apply(&Event::Finished {
+                operation: operation.clone(),
+                result: if ok {
+                    Ok(OperationOutcome::default())
+                } else {
+                    Err(EngineError::NotFound)
+                },
+            });
+            assert_eq!(state.succeeded.len(), if ok { 2 } else { 0 });
+            assert_eq!(
+                parsed(&state.batch_result())["finished"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                if ok { 2 } else { 0 }
+            );
+            assert_eq!(state.fraction(), Some(1.0));
+        }
     }
     #[test]
     fn followed_output_moves_the_running_update_all_on() {

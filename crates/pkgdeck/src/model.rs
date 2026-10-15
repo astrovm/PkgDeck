@@ -151,8 +151,6 @@ impl Row {
             self.identity()
         }
     }
-    /// What identifies a row across loads, as the controller reads it back
-    /// in `propose_checked`.
     /// What a failed change names this row by; see `FailedRow::key`.
     pub fn failure_key(&self) -> String {
         if self.kind == "cleanup" {
@@ -161,6 +159,7 @@ impl Row {
             self.identity()
         }
     }
+    /// What identifies a row across loads and in `propose_checked`.
     pub fn identity(&self) -> String {
         // The same text as `identity_of(&self.identity_value())`, without
         // building a JSON value first: lists ask for it often.
