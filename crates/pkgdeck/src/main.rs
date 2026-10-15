@@ -97,23 +97,50 @@ const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
 /// `decorated` is whether the system draws the window's frame: the older
 /// styles draw their own.
 fn options(decorated: bool) -> eframe::NativeOptions {
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("PkgDeck")
+        .with_decorations(decorated)
+        // Glass styles let the desktop show through, blurred.
+        .with_transparent(true)
+        .with_app_id("io.github.astrovm.PkgDeck")
+        .with_inner_size(DEFAULT_SIZE)
+        .with_min_inner_size([360.0, 400.0])
+        .with_drag_and_drop(true);
+    // macOS already has a full-resolution, multi-size icon in the bundle.
+    // Supplying a window icon makes eframe replace it in the Dock.
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_icon(
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo-64.png"))
+            .unwrap_or_default(),
+    );
     eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("PkgDeck")
-            .with_decorations(decorated)
-            // Glass styles let the desktop show through, blurred.
-            .with_transparent(true)
-            .with_app_id("io.github.astrovm.PkgDeck")
-            .with_inner_size(DEFAULT_SIZE)
-            .with_min_inner_size([360.0, 400.0])
-            .with_drag_and_drop(true)
-            .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo-64.png"))
-                    .unwrap_or_default(),
-            ),
+        viewport,
         run_and_return: true,
         ..Default::default()
     }
+}
+
+/// Finish AppKit launch through the same event loop that will own windows
+/// later. A menu-bar-only launch must also register with macOS, but calling
+/// finishLaunching ourselves would bypass winit's launch delegate.
+#[cfg(target_os = "macos")]
+fn start_macos_background() -> eframe::Result {
+    struct Startup;
+    impl eframe::App for Startup {
+        fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
+            ui.ctx()
+                .send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        }
+    }
+    let mut options = options(true);
+    options.viewport = options.viewport.with_visible(false);
+    eframe::run_native("PkgDeck", options, Box::new(|_| Ok(Box::new(Startup))))
+}
+
+/// exec discards the app's WindowServer registration on macOS, so the menu
+/// bar icon must stay in the process that launched AppKit.
+fn restart_in_tray(smoke_test: bool) -> bool {
+    cfg!(target_os = "linux") && !smoke_test
 }
 
 /// Set on the copy [`start_fresh`] runs, so it carries the last check over.
@@ -224,6 +251,14 @@ fn main() {
     // An open window adds the menu bar or tray icon once it shows: making
     // it first only delays the window.
     if start_hidden {
+        #[cfg(target_os = "macos")]
+        {
+            app.platform.set_dock_visible(false);
+            if let Err(error) = start_macos_background() {
+                eprintln!("pkgdeck: {error}");
+                std::process::exit(1);
+            }
+        }
         app.c().set_window_open(false);
         app.sync_tray();
         pkgdeck::memory::release();
@@ -254,9 +289,10 @@ fn main() {
             return;
         }
         // In the tray: keep checking, wait for the window to be asked back.
+        app.platform.set_dock_visible(false);
         app.platform.watch_reopen(true);
         if show {
-            fresh_due = !app.launch.smoke_test;
+            fresh_due = restart_in_tray(app.launch.smoke_test);
             pkgdeck::memory::release();
         }
         show = false;
@@ -310,6 +346,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dock_keeps_the_bundled_icon() {
+        let icon = options(true).viewport.icon;
+        assert_eq!(icon.is_none(), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn only_linux_restarts_after_closing_the_window() {
+        assert!(!restart_in_tray(true));
+        assert_eq!(restart_in_tray(false), cfg!(target_os = "linux"));
+    }
 
     #[test]
     fn only_a_background_launch_with_nothing_to_open_is_quiet() {
