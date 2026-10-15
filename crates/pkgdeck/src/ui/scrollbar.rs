@@ -1,9 +1,8 @@
 //! Scroll areas whose bars are drawn the way the desktop a style is a
 //! version of draws them: Windows 98's dithered track between raised
 //! buttons, XP's blue thumb with its grip, 7's glass, Aqua's gel capsule
-//! with both arrows at one end, Plastik's grey slab, Oxygen's glowing one
-//! in a groove, Clearlooks' thumb in the selection colour. Modern, and the
-//! styles that float theirs, keep egui's own bar over the content.
+//! with both arrows at one end. Modern, and the styles that float theirs,
+//! keep egui's own bar over the content.
 //!
 //! The bar is ours, not egui's: the area hides its own, the content is
 //! narrowed by the bar's width, and the bar is drawn and driven here. egui
@@ -11,9 +10,7 @@
 
 use super::{
     shade::{self, Axis},
-    skin::{
-        darker, faded, gray, gtk_shade, lerp, lighter, oxygen_face, oxygen_glow, retro_edge, rgb,
-    },
+    skin::{darker, faded, gray, lerp, lighter, retro_edge, rgb},
     theme::{self, Palette},
 };
 use crate::settings::Family;
@@ -677,191 +674,7 @@ fn paint(
         Family::Luna => luna(bar),
         Family::Glass => glass(bar),
         Family::Gel => gel(bar),
-        Family::Plastik | Family::Clearlooks => plastik(bar),
-        Family::Oxygen => oxygen(bar),
     }
-}
-
-/// Plastik's bar: grey slabs lit across, in a flat groove. Clearlooks
-/// draws the same pieces glossier, its thumb in the selection colour.
-fn plastik(bar: Bar) {
-    let Bar {
-        painter,
-        palette,
-        vertical,
-        parts,
-        touch,
-        can_back,
-        can_forward,
-    } = bar;
-    let dark = palette.dark;
-    let cross = across(vertical);
-    let clearlooks = theme::skin().family() == Family::Clearlooks;
-    let face = if dark {
-        lighter(palette.surface, 0.12)
-    } else if clearlooks {
-        palette.canvas
-    } else {
-        palette.tone(rgb(0xdddfe4))
-    };
-    let groove = darker(palette.canvas, if clearlooks { 0.1 } else { 0.05 });
-    painter.rect(
-        parts.strip,
-        CornerRadius::ZERO,
-        groove,
-        Stroke::new(1.0, darker(palette.canvas, 0.3)),
-        StrokeKind::Inside,
-    );
-    let radius = CornerRadius::same(2);
-    let slab = |rect: Rect, piece: Piece, enabled: bool, color: Color32| {
-        let color = if !enabled {
-            lerp(color, palette.canvas, 0.5)
-        } else if piece.press {
-            darker(color, 0.1)
-        } else if piece.hover {
-            lighter(color, 0.12)
-        } else {
-            color
-        };
-        let stops = if clearlooks {
-            vec![
-                (0.0, gtk_shade(color, if dark { 1.04 } else { 1.1 })),
-                (0.5, gtk_shade(color, 1.02)),
-                (0.5, color),
-                (1.0, gtk_shade(color, 0.94)),
-            ]
-        } else {
-            vec![
-                (0.0, lighter(color, if dark { 0.12 } else { 0.5 })),
-                (1.0, darker(color, 0.04)),
-            ]
-        };
-        shade::gradient(painter, rect, radius, cross, &stops);
-        painter.rect_stroke(
-            rect,
-            radius,
-            Stroke::new(1.0, darker(color, if dark { 0.5 } else { 0.42 })),
-            StrokeKind::Inside,
-        );
-    };
-    let ink = if dark { palette.ink } else { Color32::BLACK };
-    for (rect, piece, enabled, toward) in [
-        (parts.back, touch.back, can_back, Toward::Back),
-        (parts.forward, touch.forward, can_forward, Toward::Forward),
-    ] {
-        slab(rect, piece, enabled, face);
-        arrow(
-            painter,
-            rect,
-            vertical,
-            toward,
-            rect.width().min(rect.height()) * 0.4,
-            if enabled { ink } else { faded(ink, 0.35) },
-        );
-    }
-    let thumb = if clearlooks {
-        lerp(palette.deep, Color32::WHITE, if dark { 0.1 } else { 0.35 })
-    } else {
-        face
-    };
-    slab(parts.thumb, touch.thumb, true, thumb);
-    grip(
-        painter,
-        parts.thumb,
-        vertical,
-        faded(darker(thumb, 0.45), 0.8),
-        Color32::from_white_alpha(if dark { 40 } else { 200 }),
-    );
-}
-
-/// Oxygen's bar: a soft groove with a lit, rounded slab in it that glows
-/// under the pointer, and bare arrows.
-fn oxygen(bar: Bar) {
-    let Bar {
-        painter,
-        palette,
-        vertical,
-        parts,
-        touch,
-        can_back,
-        can_forward,
-    } = bar;
-    let dark = palette.dark;
-    let cross = across(vertical);
-    let thick = parts.strip.width().min(parts.strip.height());
-    let inset = (thick * 0.2).round();
-    let capsule = |rect: Rect| {
-        let rect = if vertical {
-            rect.shrink2(vec2(inset, 0.0))
-        } else {
-            rect.shrink2(vec2(0.0, inset))
-        };
-        let radius = CornerRadius::same((rect.width().min(rect.height()) / 2.0) as u8);
-        (rect, radius)
-    };
-    let (groove, round) = capsule(parts.track);
-    shade::gradient(
-        painter,
-        groove,
-        round,
-        cross,
-        &[
-            (0.0, darker(palette.canvas, if dark { 0.3 } else { 0.15 })),
-            (1.0, lighter(palette.canvas, if dark { 0.03 } else { 0.15 })),
-        ],
-    );
-    let glow = oxygen_glow(palette);
-    for (rect, piece, enabled, toward) in [
-        (parts.back, touch.back, can_back, Toward::Back),
-        (parts.forward, touch.forward, can_forward, Toward::Forward),
-    ] {
-        let ink = if !enabled {
-            faded(palette.muted, 0.5)
-        } else if piece.hover || piece.press {
-            darker(glow, 0.2)
-        } else {
-            palette.ink
-        };
-        arrow(
-            painter,
-            rect,
-            vertical,
-            toward,
-            rect.width().min(rect.height()) * 0.4,
-            ink,
-        );
-    }
-    let (thumb, round) = capsule(parts.thumb);
-    let base = oxygen_face(palette);
-    let base = if touch.thumb.press {
-        darker(base, 0.08)
-    } else {
-        base
-    };
-    shade::gradient(
-        painter,
-        thumb,
-        round,
-        cross,
-        &[
-            (0.0, lighter(base, if dark { 0.15 } else { 0.6 })),
-            (1.0, darker(base, 0.05)),
-        ],
-    );
-    let lit = touch.thumb.hover || touch.thumb.press;
-    painter.rect_stroke(
-        thumb,
-        round,
-        Stroke::new(
-            if lit { 1.5 } else { 1.0 },
-            if lit {
-                glow
-            } else {
-                darker(base, if dark { 0.45 } else { 0.25 })
-            },
-        ),
-        StrokeKind::Inside,
-    );
 }
 
 fn retro(bar: Bar) {
@@ -1586,15 +1399,7 @@ mod tests {
 
     #[test]
     fn the_pieces_always_fit_the_strip() {
-        for family in [
-            Family::Retro,
-            Family::Luna,
-            Family::Glass,
-            Family::Gel,
-            Family::Plastik,
-            Family::Oxygen,
-            Family::Clearlooks,
-        ] {
+        for family in [Family::Retro, Family::Luna, Family::Glass, Family::Gel] {
             for vertical in [true, false] {
                 for len in [1.0f32, 10.0, 34.0, 60.0, 400.0, 2000.0] {
                     for content in [len + 1.0, len * 1.5, len * 40.0] {

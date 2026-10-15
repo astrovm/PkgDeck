@@ -599,14 +599,8 @@ and **About**.
   - **Mac OS X Tiger**: Aqua gel buttons and plain grey title bars.
   - **macOS 27**: a sidebar that runs up to the top edge, with icons in the
     accent, traffic lights at the top left and large soft corners.
-  - **KDE 3**: Plastik's soft grey gradients, square buttons and a title bar
-    in the accent, lit from above.
-  - **KDE 4**: Oxygen's warm grey, lit from the top of the window, with
-    rounded controls that glow under the pointer.
   - **KDE Plasma 6**: Breeze, flat and light, with outlines that turn to the
     accent under the pointer.
-  - **GNOME 2**: Clearlooks' glossy controls and a glossy title bar in a
-    paler shade of the accent.
   - **GNOME 51**: Adwaita's header bar, rounded cards, and only a close
     button, as GNOME has.
   - Every style but **Modern** draws its own title bar and window buttons,
@@ -615,21 +609,22 @@ and **About**.
     the Mac, with its sidebar still running up behind the system's traffic
     lights. GNOME doesn't draw title bars for apps, so **GNOME 51** draws
     its own there too. The window's corners are round where its
-    desktop's are: the title bar's on Mac OS X Tiger and KDE 3, all four on
-    Windows 11, macOS 27, KDE 4, KDE Plasma 6, GNOME 2 and GNOME 51, and none
-    when maximized.
+    desktop's are: the title bar's on Mac OS X Tiger, all four on Windows
+    11, macOS 27, KDE Plasma 6 and GNOME 51, and none when maximized.
   - Every style has the same layout. The older ones draw icons in colour,
-    and Mac OS X Tiger, KDE 3 and KDE 4 stripe their lists. Windows 11,
+    and Mac OS X Tiger stripes its lists. Windows 11,
     macOS 27, KDE Plasma 6 and GNOME 51 are flat like **Modern**.
   - In dark mode, the older styles keep their shapes and turn the rest
     dark: Windows 98's bevels on dark grey, XP's and Windows 7's frames
-    around near black, Mac OS X Tiger's blue gel on charcoal, and KDE 4 in
-    the colours of its Obsidian Coast scheme. KDE Plasma 6 uses Breeze Dark.
+    around near black, and Mac OS X Tiger's blue gel on charcoal. KDE
+    Plasma 6 uses Breeze Dark.
   - **Windows 7** blurs what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
     `PKGDECK_NO_BLUR=1` to never blur.
   - Picking a style never changes the accent or **Tint backgrounds**.
+  - KDE 3, KDE 4 and GNOME 2 were removed. If you had one picked, PkgDeck
+    switches you to **KDE Plasma 6** or **GNOME 51**.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
   blue-grey of earlier versions). In light mode, **Classic** (blue-grey, the
@@ -645,22 +640,19 @@ and **About**.
   tints the background, panels and buttons, the same way in every accent. Leave
   it off to keep those greys neutral. The accent still colours selection, links
   and controls.
-- **Tint window bar** (under **Accent**): only **Windows 98**, **Windows XP**,
-  **Windows 7**, **KDE 3** and **GNOME 2** draw an accent title bar, so only
-  they show it. When on, the
+- **Tint window bar** (under **Accent**): only **Windows 98**, **Windows XP**
+  and **Windows 7** draw an accent title bar, so only they show it. When on, the
   accent colours that title bar. Turn it off for a neutral grey bar. The accent
   still colours selection, links and controls. Each style keeps its own choice,
   so changing it in one style doesn't change the others. It starts on for
-  **Windows 98**, **Windows XP**, **KDE 3** and **GNOME 2**, and off for
-  **Windows 7**.
+  **Windows 98** and **Windows XP**, and off for **Windows 7**.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.
 - **Font**: **Style**, **Inter** or **System**. **Style** is the style's own
   font, or a free copy of it: MS Sans Serif's pixels for Windows 98, Tahoma
   for XP, Segoe UI for Windows 7 and Windows 11, Lucida Grande for Mac OS X
-  Tiger, DejaVu Sans for KDE 3, KDE 4 and GNOME 2, and Noto Sans for KDE
-  Plasma 6. Where one isn't installed, the closest font that is. macOS 27
+  Tiger, and Noto Sans for KDE Plasma 6. Where one isn't installed, the closest font that is. macOS 27
   and GNOME 51 use Inter, which GNOME's Adwaita Sans is drawn from.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
   scales with the text.

@@ -4,7 +4,7 @@ One app for every package manager.
 
 Search, install, update, and clean up software, from the app or the `pkd` command line.
 
-![PkgDeck Settings in Modern, Windows 98, Windows XP, Windows 7, Windows 11, Mac OS X Tiger, macOS 27, KDE 3, KDE 4, KDE Plasma 6, GNOME 2 and GNOME 51 styles, light and dark](docs/screenshots/themes.png)
+![PkgDeck Settings in Modern, Windows 98, Windows XP, Windows 7, Windows 11, Mac OS X Tiger, macOS 27, KDE Plasma 6 and GNOME 51 styles, light and dark](docs/screenshots/themes.png)
 
 ## ✨ Features
 

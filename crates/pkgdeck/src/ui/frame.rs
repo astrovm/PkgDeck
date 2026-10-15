@@ -140,14 +140,8 @@ pub fn metrics(style: Style) -> Option<Metrics> {
         // macOS 27: no edge but a hairline, the lights in a short bar the
         // sidebar runs up behind.
         Family::Liquid => (0.0, 0.0, 52.0, 0.0),
-        // KWin's Plastik and Oxygen: a thin border of the window's grey
-        // under a title bar that spans it.
-        Family::Plastik => (4.0, 0.0, 22.0, 0.0),
-        Family::Oxygen => (4.0, 0.0, 26.0, 0.0),
         // Breeze: a hairline outline and a 30 pixel title bar.
         Family::Breeze => (1.0, 0.0, 30.0, 0.0),
-        // Metacity's Clearlooks: a four pixel border.
-        Family::Clearlooks => (4.0, 0.0, 24.0, 0.0),
         // GNOME: a hairline and a 47 pixel header bar.
         Family::Adwaita => (1.0, 0.0, 47.0, 0.0),
     };
@@ -172,19 +166,9 @@ pub fn window_corners(maximized: bool) -> CornerRadius {
         |radius: f32| CornerRadius::same((radius * skin.roundness.clamp(0.0, 2.0)).round() as u8);
     match skin.family() {
         Family::Gel => super::skin::top_corners(scaled(5.0)),
-        Family::Plastik => super::skin::top_corners(scaled(3.0)),
         Family::Fluent => scaled(8.0),
         Family::Liquid => scaled(26.0),
-        Family::Oxygen => scaled(5.0),
         Family::Breeze => scaled(4.0),
-        // Metacity rounds the title bar's corners a pixel more than the
-        // bottom's.
-        Family::Clearlooks => CornerRadius {
-            nw: scaled(4.0).nw,
-            ne: scaled(4.0).ne,
-            sw: scaled(3.0).sw,
-            se: scaled(3.0).se,
-        },
         Family::Adwaita => scaled(15.0),
         _ => CornerRadius::ZERO,
     }
@@ -471,10 +455,7 @@ pub fn captions(style: Style, bar: Rect) -> Vec<(Caption, Rect)> {
                 (Caption::Maximize, at(2.0)),
             ]
         }
-        Family::Plastik => super::plastik::captions(bar),
-        Family::Oxygen => super::oxygen::captions(bar),
         Family::Breeze => super::breeze::captions(bar),
-        Family::Clearlooks => super::clearlooks::captions(bar),
         Family::Adwaita => super::adwaita::captions(bar),
     }
 }
@@ -590,10 +571,7 @@ pub fn paint_frame(
                 );
             }
         }
-        Family::Plastik => super::plastik::paint_frame(painter, full, bar, palette, state),
-        Family::Oxygen => super::oxygen::paint_frame(painter, full, bar, inner, palette, state),
         Family::Breeze => super::breeze::paint_frame(painter, full, bar, palette, state),
-        Family::Clearlooks => super::clearlooks::paint_frame(painter, full, bar, palette, state),
         Family::Adwaita => super::adwaita::paint_frame(painter, full, bar, palette, state),
     }
 }
@@ -646,17 +624,8 @@ pub fn paint_caption(
             };
             super::gel::paint_light(painter, rect, caption, look, press.group);
         }
-        Family::Plastik => {
-            super::plastik::paint_caption(painter, rect, caption, press, palette, state)
-        }
-        Family::Oxygen => {
-            super::oxygen::paint_caption(painter, rect, caption, press, palette, state)
-        }
         Family::Breeze => {
             super::breeze::paint_caption(painter, rect, caption, press, palette, state)
-        }
-        Family::Clearlooks => {
-            super::clearlooks::paint_caption(painter, rect, caption, press, palette, state)
         }
         Family::Adwaita => {
             super::adwaita::paint_caption(painter, rect, caption, press, palette, state)
@@ -714,7 +683,7 @@ pub(super) fn plain_glyph(
     }
 }
 
-/// KDE's caption symbols since Oxygen, `half` from the middle to their
+/// KDE's caption symbols, `half` from the middle to their
 /// edge: a chevron down, a chevron up, a diamond to restore, and a cross.
 pub(super) fn chevron_glyph(
     painter: &Painter,
@@ -855,36 +824,12 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             true,
             false,
         ),
-        Family::Plastik => (
-            theme::bold(12.0),
-            if state.active {
-                ink_on(from)
-            } else {
-                lerp(ink_on(from), from, 0.35)
-            },
-            false,
-            true,
-        ),
-        Family::Oxygen | Family::Breeze => (
-            if style == Family::Oxygen {
-                theme::bold(12.0)
-            } else {
-                theme::font(12.5)
-            },
+        Family::Breeze => (
+            theme::font(12.5),
             if state.active {
                 palette.ink
             } else {
                 palette.muted
-            },
-            true,
-            true,
-        ),
-        Family::Clearlooks => (
-            theme::bold(12.5),
-            if state.active {
-                Color32::WHITE
-            } else {
-                lerp(palette.ink, palette.canvas, 0.45)
             },
             true,
             true,
@@ -909,7 +854,7 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
         + match style {
             _ if glass => -2.0,
             Family::Fluent => 12.0,
-            Family::Oxygen | Family::Breeze | Family::Clearlooks => 6.0,
+            Family::Breeze => 6.0,
             _ => 4.0,
         };
     let icon_at = icon
@@ -934,33 +879,14 @@ fn paint_title(ui: &Ui, bar: Rect, title: &str, palette: &Palette, state: Window
             );
         }
         Family::Glass => super::aero::paint_title_glow(painter, area, palette.dark),
-        // Aqua and Oxygen press their titles into the bar: a light line
-        // under the letters.
-        Family::Gel | Family::Oxygen if !palette.dark => {
+        // Aqua presses its title into the bar: a light line under the
+        // letters.
+        Family::Gel if !palette.dark => {
             painter.galley_with_override_text_color(
                 text_at + vec2(0.0, 1.0),
                 galley.clone(),
                 Color32::from_white_alpha(160),
             );
-        }
-        Family::Plastik if state.active => {
-            painter.galley_with_override_text_color(
-                text_at + vec2(1.0, 1.0),
-                galley.clone(),
-                faded(super::skin::darker(from, 0.5), 0.6),
-            );
-        }
-        // Clearlooks outlines its white title in the bar's deep shade.
-        Family::Clearlooks if state.active => {
-            let outline = super::skin::gtk_shade(super::clearlooks::base(palette), 0.7);
-            for shift in [
-                vec2(1.0, 0.0),
-                vec2(-1.0, 0.0),
-                vec2(0.0, 1.0),
-                vec2(0.0, -1.0),
-            ] {
-                painter.galley_with_override_text_color(text_at + shift, galley.clone(), outline);
-            }
         }
         _ => {}
     }
@@ -1512,7 +1438,7 @@ mod tests {
         assert_eq!(drawn(Style::Liquid, Desktop::Mac), metrics(Style::Liquid));
         // The styles that copy another desktop still draw theirs.
         assert_eq!(drawn(Style::Breeze, Desktop::Mac), metrics(Style::Breeze));
-        assert_eq!(drawn(Style::Oxygen, Desktop::Kde), metrics(Style::Oxygen));
+        assert_eq!(drawn(Style::Luna, Desktop::Kde), metrics(Style::Luna));
         assert_eq!(drawn(Style::Aqua, Desktop::Mac), metrics(Style::Aqua));
     }
 
