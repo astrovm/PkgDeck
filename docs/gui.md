@@ -276,9 +276,10 @@ sources that need no password: Flatpak app data, firmware metadata, and Snap's
 list of snaps. A check never installs, upgrades or removes anything.
 
 APT, DNF, Pacman and Zypper need your password to refresh their lists, so a
-check uses their current lists. Use **Refresh** to update them. MacPorts uses
-its current ports tree and never self-updates during a check. Sources without
-a list refresh are checked too. **Ctrl+R** runs the same action.
+check uses their current lists. Use **Refresh sources** to update them. It asks
+you to review first. MacPorts uses its current ports tree and never self-updates
+during a check. Sources without a list refresh are checked too. **Ctrl+R** runs
+the check.
 
 The button stays in the same place for empty and populated lists. During a check
 it becomes one **Cancel** button with a spinner. Existing rows stay visible. The
@@ -673,7 +674,8 @@ and **About**.
 | Enter | Install, remove, or update the selected row |
 | Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
 | Ctrl+Shift+U | Update checked packages |
-| Ctrl+R | Refresh the page, or refresh selected sources and check for updates on Updates |
+| Ctrl+R | Refresh the page, or check for updates on Updates |
+| Ctrl+M | Refresh sources on Updates after review (Linux) |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
 | Alt+C | Cancel the open confirmation |
 | Esc | Close Activity, clear the search, close the details, or go back from an app page |

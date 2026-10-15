@@ -337,10 +337,10 @@ impl Desktop {
             "install" => ("Return", "alt+i"),
             "remove" => ("ctrl+d", "alt+r"),
             "upgrade" => ("ctrl+u", "alt+u"),
-            "refresh" => ("ctrl+r", ""),
+            "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
-        // The single update check lives on Updates; open it first.
+        // Refresh sources lives on Updates; open it and let it load first.
         if op == "refresh" {
             self.key("ctrl+3");
         } else {

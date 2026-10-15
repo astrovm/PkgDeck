@@ -797,7 +797,7 @@ fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
                     1,
                     "{page:?} {empty} {size:?}"
                 );
-                for obsolete in ["Refresh sources", "Check again", "Reload (Ctrl+R)"] {
+                for obsolete in ["Check again", "Reload (Ctrl+R)"] {
                     assert!(h.query_by_label(obsolete).is_none(), "{obsolete}");
                 }
                 h.get_by_role_and_label(Role::Button, label).click();
@@ -844,6 +844,24 @@ fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
     h.run_steps(2);
     assert!(h.state().1.checking_updates);
+}
+
+#[test]
+fn refresh_sources_is_reviewed_and_separate_from_the_routine_check() {
+    let mut h = harness(with_sources(app()));
+    h.state_mut().1.page = Page::Updates;
+    h.run_steps(3);
+    assert_eq!(
+        h.query_all_by_role_and_label(Role::Button, "Refresh sources")
+            .count(),
+        1
+    );
+    // Ctrl+M asks for review instead of starting a silent refresh.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    h.run_steps(2);
+    assert!(h.state().1.confirmation.is_some());
+    assert!(!h.state().1.checking_updates);
+    assert!(!h.state().1.busy);
 }
 
 #[test]
