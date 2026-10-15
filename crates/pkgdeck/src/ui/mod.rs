@@ -1144,15 +1144,13 @@ fn clean_all_frees(app: &App) -> u64 {
 }
 
 fn page_actions_height(app: &App) -> f32 {
+    // Rows may be on their way while a list reloads.
+    let rows = app.shown_rows();
+    let shown =
+        |keep: fn(&model::Row) -> bool| app.items.iter().any(|i| rows.get(i.raw).is_some_and(keep));
     let any = match app.page {
-        Page::Updates => app
-            .items
-            .iter()
-            .any(|i| app.shown_rows()[i.raw].is_package()),
-        Page::Clean => app
-            .items
-            .iter()
-            .any(|i| app.shown_rows()[i.raw].batch_cleanable()),
+        Page::Updates => shown(model::Row::is_package),
+        Page::Clean => shown(model::Row::batch_cleanable),
         _ => false,
     };
     if any {

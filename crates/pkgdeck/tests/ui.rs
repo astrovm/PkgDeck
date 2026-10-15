@@ -1284,7 +1284,8 @@ fn clean_all_works_while_lists_load_but_waits_for_a_change() {
     {
         let app = &mut harness.state_mut().1;
         app.busy = false;
-        app.retained = Some(Vec::new());
+        // A change keeps its rows on screen while it runs.
+        app.retained = Some(app.rows.clone());
     }
     harness.run_steps(2);
     assert!(!enabled(&harness));
