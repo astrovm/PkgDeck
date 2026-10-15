@@ -570,7 +570,7 @@ fn brew_updates(script: &Script) -> usize {
     script
         .calls()
         .iter()
-        .filter(|line| line.as_str() == "w:brew update")
+        .filter(|line| line.as_str() == "brew update")
         .count()
 }
 /// Homebrew answering detection, then `rest` for everything else.
@@ -668,7 +668,7 @@ fn index_refresh_detects_homebrew_before_writing() {
 fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
     let cancel = Cancellation::default();
     let script = Script::new(|line| match line {
-        "w:brew update" => ok(""),
+        "brew update" => ok(""),
         other => panic!("cached detection must not run {other}"),
     });
     let mut engine = Engine::default();
@@ -679,14 +679,14 @@ fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
     }
 
     assert!(engine.refresh_update_indexes(&[], &cancel).is_empty());
-    assert_eq!(script.calls(), ["w:brew update"]);
+    assert_eq!(script.calls(), ["brew update"]);
 }
 
 #[test]
 fn index_refresh_fetches_for_casks_alone() {
     let cancel = Cancellation::default();
     let script = Script::new(|line| match line {
-        "w:brew update" => ok(""),
+        "brew update" => ok(""),
         other => panic!("cached detection must not run {other}"),
     });
     let mut engine = Engine::default();
@@ -694,7 +694,7 @@ fn index_refresh_fetches_for_casks_alone() {
     engine.note_detected("homebrew-cask".into(), Ok(Availability::Available));
 
     assert!(engine.refresh_update_indexes(&[], &cancel).is_empty());
-    assert_eq!(script.calls(), ["w:brew update"]);
+    assert_eq!(script.calls(), ["brew update"]);
 }
 
 #[test]
@@ -733,7 +733,7 @@ fn a_cancelled_index_refresh_stops_before_fetching() {
 fn a_cancelled_homebrew_fetch_cancels_the_update_check() {
     let cancel = Cancellation::default();
     let script = brew(|line| match line {
-        "w:brew update" => Err(ExecutionError::Cancelled),
+        "brew update" => Err(ExecutionError::Cancelled),
         other => panic!("a cancelled fetch must not list: {other}"),
     });
     let mut engine = Engine::default();
@@ -756,7 +756,7 @@ fn update_checks_fetch_homebrew_once_and_listings_do_not() {
     let script = brew({
         let fetched = fetched.clone();
         move |line| {
-            if line == "w:brew update" {
+            if line == "brew update" {
                 fetched.store(true, Ordering::SeqCst);
                 return ok("");
             }
@@ -815,7 +815,7 @@ fn update_checks_fetch_homebrew_once_and_listings_do_not() {
 fn a_failed_homebrew_fetch_is_shared_and_keeps_the_known_packages() {
     let cancel = Cancellation::default();
     let script = brew(|line| {
-        if line == "w:brew update" {
+        if line == "brew update" {
             return failed(1);
         }
         match line {
