@@ -259,7 +259,7 @@ fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)
     if name == "cleanup-settings" {
         harness
             .ctx
-            .data_mut(|data| data.insert_temp(egui::Id::new("cleanup-choices-open"), true));
+            .data_mut(|data| data.insert_temp(egui::Id::unique("cleanup-choices-open"), true));
     }
     harness.run_steps(40);
     let image = harness.render().expect("render");

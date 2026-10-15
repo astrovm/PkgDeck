@@ -64,7 +64,7 @@ impl Scroll {
     fn new(vertical: bool) -> Self {
         Self {
             vertical,
-            salt: Id::new("scroll_area"),
+            salt: Id::unique("scroll_area"),
             auto_shrink: [true; 2],
             max_height: None,
             offset: None,
@@ -72,7 +72,7 @@ impl Scroll {
     }
 
     pub fn id_salt(mut self, salt: impl Hash + std::fmt::Debug) -> Self {
-        self.salt = Id::new(salt);
+        self.salt = Id::unique(salt);
         self
     }
 
@@ -155,9 +155,9 @@ impl Scroll {
                 out.content_size.x
             },
             offset: if vertical {
-                out.state.offset.y
+                out.state.unclamped_offset().y
             } else {
-                out.state.offset.x
+                out.state.unclamped_offset().x
             },
         };
         ctx.data_mut(|d| d.insert_temp(key, now));
@@ -561,7 +561,7 @@ const TILE: f32 = 16.0;
 /// A square of `a` and `b` on a one-pixel checker, tiled into the dither of
 /// Windows 98's scroll track.
 fn dither(ctx: &egui::Context, a: Color32, b: Color32) -> TextureHandle {
-    let id = Id::new(("scroll-dither", a, b));
+    let id = Id::unique(("scroll-dither", a, b));
     if let Some(texture) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
         return texture;
     }
@@ -1216,9 +1216,9 @@ mod tests {
                         });
                     inner = out.inner_rect;
                     offset = if vertical {
-                        out.state.offset.y
+                        out.state.unclamped_offset().y
                     } else {
-                        out.state.offset.x
+                        out.state.unclamped_offset().x
                     };
                 });
                 // Nothing here draws, so nobody takes the textures.
@@ -1339,6 +1339,7 @@ mod tests {
             window.frame(vec![Event::PointerMoved(at)]);
             window.frame(vec![Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Wheel,
                 delta: vec2(0.0, -120.0),
                 phase: egui::TouchPhase::Move,
                 modifiers: Default::default(),

@@ -13,13 +13,13 @@ use eframe::egui::{
 
 pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
     let ctx = ui.ctx().clone();
-    let shown = ease(&ctx, Id::new("drawer"), app.drawer_open, LAYOUT);
+    let shown = ease(&ctx, Id::unique("drawer"), app.drawer_open, LAYOUT);
     if shown <= 0.0 {
         return;
     }
     let palette = Palette::current(&ctx);
     // The page dims behind it; a click there closes it.
-    let scrim = egui::Area::new(Id::new("drawer-scrim"))
+    let scrim = egui::Area::new(Id::unique("drawer-scrim"))
         .order(egui::Order::Middle)
         .fixed_pos(window.min)
         .show(&ctx, |ui| {
@@ -41,7 +41,7 @@ pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
         pos2(window.right() - width * shown, window.top()),
         vec2(width, window.height()),
     );
-    egui::Area::new(Id::new("drawer-panel"))
+    egui::Area::new(Id::unique("drawer-panel"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(&ctx, |ui| {
@@ -253,7 +253,12 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                 // runs under it.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if expandable {
-                        let turn = ease(ui.ctx(), Id::new(("chevron", entry.id)), expanded, REVEAL);
+                        let turn = ease(
+                            ui.ctx(),
+                            Id::unique(("chevron", entry.id)),
+                            expanded,
+                            REVEAL,
+                        );
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                         let icon = if turn > 0.5 { "up" } else { "down" };
                         theme::paint_icon(ui.painter(), rect, icon, palette.muted);
@@ -351,10 +356,15 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                     bar,
                     fraction,
                     palette.accent,
-                    Id::new(("activity-bar", entry.id)),
+                    Id::unique(("activity-bar", entry.id)),
                 );
             }
-            let open = ease(ui.ctx(), Id::new(("expanded", entry.id)), expanded, REVEAL);
+            let open = ease(
+                ui.ctx(),
+                Id::unique(("expanded", entry.id)),
+                expanded,
+                REVEAL,
+            );
             if open > 0.0 && expanded {
                 ui.scope(|ui| {
                     ui.multiply_opacity(open);
@@ -415,7 +425,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
         let click = ui
             .interact(
                 response.inner.rect,
-                Id::new(("entry", entry.id)),
+                Id::unique(("entry", entry.id)),
                 Sense::click(),
             )
             .on_hover_cursor(CursorIcon::PointingHand);

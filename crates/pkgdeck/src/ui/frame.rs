@@ -96,7 +96,7 @@ pub fn window_corners(maximized: bool) -> CornerRadius {
 /// Tells the app's own painting where the window's corners are.
 fn publish_corners(ctx: &egui::Context, full: Rect, maximized: bool) {
     let corners = window_corners(maximized);
-    ctx.data_mut(|data| data.insert_temp(Id::new("window-corners"), (full, corners)));
+    ctx.data_mut(|data| data.insert_temp(Id::unique("window-corners"), (full, corners)));
 }
 
 /// The corners a rectangle of the app's own painting must take where it
@@ -104,7 +104,7 @@ fn publish_corners(ctx: &egui::Context, full: Rect, maximized: bool) {
 /// frame.
 pub fn fit(ctx: &egui::Context, rect: Rect) -> CornerRadius {
     let Some((full, corners)) =
-        ctx.data(|data| data.get_temp::<(Rect, CornerRadius)>(Id::new("window-corners")))
+        ctx.data(|data| data.get_temp::<(Rect, CornerRadius)>(Id::unique("window-corners")))
     else {
         return CornerRadius::ZERO;
     };
@@ -195,7 +195,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     let painter = ui.painter().clone();
     paint_frame(&painter, full, bar, inner, palette, state);
     // Dragging the title bar moves the window; a double click maximizes.
-    let id = Id::new("window-frame");
+    let id = Id::unique("window-frame");
     let drag = ui.interact(bar, id.with("title"), Sense::click_and_drag());
     if drag.drag_started_by(egui::PointerButton::Primary) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
@@ -210,11 +210,7 @@ pub fn show(ui: &mut Ui, full: Rect, title: &str, palette: &Palette) -> Rect {
     for (caption, rect) in buttons {
         let response = ui.interact(rect, id.with(caption), Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
-                true,
-                caption.label(state.maximized),
-            )
+            egui::WidgetInfo::labeled(egui::Role::Button, true, caption.label(state.maximized))
         });
         let look = Press {
             hovered: response.hovered(),
@@ -328,7 +324,7 @@ fn cursor(direction: ResizeDirection) -> CursorIcon {
 
 /// Turns the system's frame on or off when the style asks for the other.
 fn decorate(ctx: &egui::Context, on: bool) {
-    let id = Id::new("window-decorated");
+    let id = Id::unique("window-decorated");
     if ctx.data(|data| data.get_temp::<bool>(id)) != Some(on) {
         ctx.data_mut(|data| data.insert_temp(id, on));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(on));
@@ -426,7 +422,7 @@ pub fn paint_frame(
             painter.rect_filled(full, window_corners(state.maximized), palette.canvas);
             // The sidebar runs up behind the lights, as far as the page.
             let sidebar = painter.ctx().data(|data| {
-                data.get_temp::<f32>(Id::new("sidebar-extent"))
+                data.get_temp::<f32>(Id::unique("sidebar-extent"))
                     .unwrap_or(0.0)
             });
             let behind = Rect::from_min_max(
@@ -1115,7 +1111,7 @@ mod tests {
         let shapes = in_style(Style::Liquid, || {
             theme::painted(|ui| {
                 ui.ctx()
-                    .data_mut(|data| data.insert_temp(Id::new("sidebar-extent"), 200.0_f32));
+                    .data_mut(|data| data.insert_temp(Id::unique("sidebar-extent"), 200.0_f32));
                 show(ui, window(), "PkgDeck", &palette);
             })
         });

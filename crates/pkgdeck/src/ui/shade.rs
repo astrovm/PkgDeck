@@ -4,7 +4,7 @@
 //! fading to clear, as egui's shapes do.
 
 use eframe::egui::{
-    epaint::{tessellator::path, Mesh},
+    epaint::{tessellator::path, Mesh, RoundedRect},
     vec2, Color32, CornerRadius, Painter, Pos2, Rect, Vec2,
 };
 
@@ -72,7 +72,7 @@ pub fn color_at(stops: &[(f32, Color32)], t: f32) -> Color32 {
 /// The outline of `rect` rounded by `radius`, without repeated points.
 pub fn outline(rect: Rect, radius: CornerRadius) -> Vec<Pos2> {
     let mut points = Vec::new();
-    path::rounded_rectangle(&mut points, rect, radius.into());
+    path::rounded_rectangle(&mut points, RoundedRect::new(rect, radius));
     tidy(points)
 }
 

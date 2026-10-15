@@ -14,8 +14,8 @@ pkgdeck-app = { path = "../pkgdeck-app" }
 serde.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
-eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
-egui_extras = { version = "=0.36.2", default-features = false, features = ["file", "image", "svg"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "=0.37.0", default-features = false, features = ["file", "image", "svg"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 sha2.workspace = true
 hex.workspace = true
@@ -37,7 +37,7 @@ x11rb = { version = "=0.14.0", default-features = false }
 cc = "=1.8.0"
 
 [dev-dependencies]
-egui_kittest = { version = "=0.36.2", features = ["wgpu", "snapshot"] }
+egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }
 
 [lints]
 workspace = true
