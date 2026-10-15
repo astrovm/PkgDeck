@@ -320,8 +320,8 @@ pub fn paint_caption(
     // texture rather than piling up new ones. Close is red whatever the
     // accent.
     let base = if close { None } else { base };
-    let slot = Id::new(("pkgdeck-luna-caption", close, light));
-    let key = Id::new((base, dark, size));
+    let slot = Id::unique(("pkgdeck-luna-caption", close, light));
+    let key = Id::unique((base, dark, size));
     let cached = painter
         .ctx()
         .data(|data| data.get_temp::<(Id, TextureHandle)>(slot))

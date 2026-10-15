@@ -160,7 +160,7 @@ fn light(caption: Caption, look: Look) -> &'static Light {
 
 /// The texture for one light at `size` pixels, made once.
 fn texture(ctx: &Context, caption: Caption, look: Look, size: [usize; 2]) -> TextureHandle {
-    let id = Id::new(("pkgdeck-gel-light", caption, look, size));
+    let id = Id::unique(("pkgdeck-gel-light", caption, look, size));
     if let Some(texture) = ctx.data(|data| data.get_temp::<TextureHandle>(id)) {
         return texture;
     }

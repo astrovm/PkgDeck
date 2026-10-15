@@ -54,7 +54,7 @@ pub fn opened_page(app: &mut App, ui: &mut Ui, rect: Rect) {
         return;
     };
     let row = opened.package.clone().unwrap_or_default();
-    let entered = ease(ui.ctx(), Id::new("opened-in"), true, REVEAL);
+    let entered = ease(ui.ctx(), Id::unique("opened-in"), true, REVEAL);
     let rect = rect.translate(vec2((1.0 - entered) * 32.0, 0.0));
     ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt("opened"), |ui| {
         ui.multiply_opacity(entered);
@@ -238,9 +238,8 @@ fn chips(ui: &mut Ui, items: &[String], palette: &Palette) {
                 .layout(item.clone(), theme::font(12.5), palette.ink, row);
             let (rect, response) =
                 ui.allocate_exact_size(galley.size() + 2.0 * padding, Sense::hover());
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, item.as_str())
-            });
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, item.as_str()));
             if ui.is_rect_visible(rect) {
                 ui.painter()
                     .rect_filled(rect, theme::round(8), palette.hover_solid());
@@ -606,7 +605,7 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
     let half = rect.width() / 2.0;
     let x = glide(
         ui.ctx(),
-        Id::new(("scope-knob", identity)),
+        Id::unique(("scope-knob", identity)),
         rect.left() + current as f32 * half,
         LAYOUT,
     );
@@ -625,7 +624,7 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
         let response = ui
             .interact(
                 part,
-                Id::new(("scope", label, identity)),
+                Id::unique(("scope", label, identity)),
                 if enabled {
                     Sense::click()
                 } else {
@@ -678,7 +677,7 @@ fn review_card(app: &mut App, ui: &mut Ui) {
     } else {
         palette.accent
     };
-    let entered = ease(ui.ctx(), Id::new("review-in"), true, REVEAL);
+    let entered = ease(ui.ctx(), Id::unique("review-in"), true, REVEAL);
     egui::Frame::new()
         .fill(alpha(color, 0.09 * entered))
         .stroke(Stroke::new(1.0, alpha(color, 0.35 * entered)))
@@ -946,7 +945,7 @@ fn body(
         if response.clicked() {
             app.ui.dependencies_open = !open;
         }
-        let shown = ease(ui.ctx(), Id::new(("deps", row.identity())), open, REVEAL);
+        let shown = ease(ui.ctx(), Id::unique(("deps", row.identity())), open, REVEAL);
         if shown > 0.0 {
             ui.scope(|ui| {
                 ui.multiply_opacity(shown);
@@ -1028,7 +1027,7 @@ fn launch_editor(app: &mut App, ui: &mut Ui, raw: usize, identity: &str) {
     Field::new(
         &mut draft.arguments,
         "--example",
-        Id::new(("args", identity)),
+        Id::unique(("args", identity)),
     )
     .monospace()
     .show(ui);
@@ -1044,7 +1043,7 @@ fn launch_editor(app: &mut App, ui: &mut Ui, raw: usize, identity: &str) {
             Field::new(
                 &mut variable.name,
                 "NAME",
-                Id::new(("env-name", identity, index)),
+                Id::unique(("env-name", identity, index)),
             )
             .monospace()
             .width(width)
@@ -1053,7 +1052,7 @@ fn launch_editor(app: &mut App, ui: &mut Ui, raw: usize, identity: &str) {
             Field::new(
                 &mut variable.value,
                 "value",
-                Id::new(("env-value", identity, index)),
+                Id::unique(("env-value", identity, index)),
             )
             .monospace()
             .width(width - 16.0)
@@ -1130,7 +1129,7 @@ fn source_editor(app: &mut App, ui: &mut Ui, raw: usize, identity: &str) {
     let mut submit = false;
     ui.horizontal(|ui| {
         let draft = &mut app.ui.source_draft.as_mut().expect("draft").1;
-        let field = Field::new(draft, "owner/name", Id::new(("github", identity)))
+        let field = Field::new(draft, "owner/name", Id::unique(("github", identity)))
             .width((ui.available_width() - 90.0).max(120.0))
             .show(ui);
         let edited = *draft != saved;

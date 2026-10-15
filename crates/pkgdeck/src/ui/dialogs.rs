@@ -41,14 +41,14 @@ fn modal(
     content: impl FnOnce(&mut Ui),
 ) -> bool {
     let palette = Palette::current(ctx);
-    let shown = ease(ctx, Id::new((id, "shown")), open, REVEAL);
+    let shown = ease(ctx, Id::unique((id, "shown")), open, REVEAL);
     if shown <= 0.0 {
         return open;
     }
     let screen = ctx.content_rect();
     let width = width.min(screen.width() - 32.0);
     let response =
-        egui::Modal::new(Id::new(id))
+        egui::Modal::new(Id::unique(id))
             .backdrop_color(Color32::from_black_alpha(
                 ((if palette.dark { 130.0 } else { 70.0 }) * shown) as u8,
             ))
@@ -61,7 +61,7 @@ fn modal(
                 },
             ))
             .area(
-                egui::Modal::default_area(Id::new(id))
+                egui::Modal::default_area(Id::unique(id))
                     .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, (1.0 - shown) * 12.0)),
             )
             .show(ctx, |ui| {
@@ -423,11 +423,11 @@ fn open_link(app: &mut App, ctx: &egui::Context) {
         let field = Field::new(
             &mut app.ui.open_link,
             "Paste an HTTPS link",
-            Id::new("open-link-field"),
+            Id::unique("open-link-field"),
         )
         .icon("external")
         .show(ui);
-        if ui.ctx().animate_bool(Id::new("open-link-focus"), true) < 0.5 {
+        if ui.ctx().animate_bool(Id::unique("open-link-focus"), true) < 0.5 {
             field.response.request_focus();
         }
         let valid = link_valid(app.ui.open_link.trim());
@@ -623,7 +623,7 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
             close = true;
         }
         ui.label(egui::RichText::new("Name").color(palette.muted));
-        Field::new(&mut draft.name, "flathub", Id::new("repo-name")).show(ui);
+        Field::new(&mut draft.name, "flathub", Id::unique("repo-name")).show(ui);
         let name_ok = name_valid(&draft.name);
         if !draft.name.is_empty() && !name_ok {
             ui.label(
@@ -637,7 +637,7 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
         Field::new(
             &mut draft.url,
             "https://…/repository.flatpakrepo",
-            Id::new("repo-url"),
+            Id::unique("repo-url"),
         )
         .show(ui);
         let url_ok = repo_url_valid(&draft.url);
@@ -939,9 +939,8 @@ fn picker_row(
             Sense::hover()
         },
     );
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, name)
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, checked, name));
     if enabled && response.hovered() {
         ui.painter()
             .rect_filled(rect, theme::round(6), palette.hover);
@@ -950,7 +949,7 @@ fn picker_row(
     paint_tick(
         ui,
         tick,
-        Id::new(("picker-tick", id)),
+        Id::unique(("picker-tick", id)),
         checked,
         enabled,
         response.hovered(),
@@ -974,7 +973,7 @@ fn picker_row(
 
 pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
     let ctx = ui.ctx().clone();
-    let shown = ease(&ctx, Id::new("picker-shown"), app.ui.picker_open, REVEAL);
+    let shown = ease(&ctx, Id::unique("picker-shown"), app.ui.picker_open, REVEAL);
     if shown <= 0.0 {
         return;
     }
@@ -993,7 +992,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
         button.rect.bottom() + 6.0 - (1.0 - shown) * 6.0,
     );
     let mut changed = false;
-    let area = egui::Area::new(Id::new("source-picker"))
+    let area = egui::Area::new(Id::unique("source-picker"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .show(&ctx, |ui| {
@@ -1018,11 +1017,11 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                     let field = Field::new(
                         &mut app.ui.picker_search,
                         "Find a source",
-                        Id::new("picker-search"),
+                        Id::unique("picker-search"),
                     )
                     .icon("search")
                     .show(ui);
-                    if ui.ctx().animate_bool(Id::new("picker-focus"), true) < 0.5 {
+                    if ui.ctx().animate_bool(Id::unique("picker-focus"), true) < 0.5 {
                         field.response.request_focus();
                     }
                     ui.add_space(6.0);

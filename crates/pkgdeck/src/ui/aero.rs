@@ -112,7 +112,7 @@ fn painted_desktop(painter: &Painter, full: Rect, radius: CornerRadius, dark: bo
 
 /// The desktop's wallpaper, blurred, as a texture once it's loaded.
 fn wallpaper_texture(ctx: &eframe::egui::Context) -> Option<eframe::egui::TextureId> {
-    let id = eframe::egui::Id::new("pkgdeck-wallpaper");
+    let id = eframe::egui::Id::unique("pkgdeck-wallpaper");
     if let Some(texture) = ctx.data(|data| data.get_temp::<eframe::egui::TextureHandle>(id)) {
         return Some(texture.id());
     }

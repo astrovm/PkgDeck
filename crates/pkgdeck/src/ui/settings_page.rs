@@ -56,7 +56,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.allocate_ui(vec2(width, 34.0), |ui| {
         if let Some(choice) = segmented_sized(
             ui,
-            Id::new("settings-tab"),
+            Id::unique("settings-tab"),
             &names,
             position(&Tab::ALL, tab),
             &widths,
@@ -238,7 +238,7 @@ fn colours(app: &mut App, ui: &mut Ui) {
             let all = [Appearance::System, Appearance::Light, Appearance::Dark];
             if let Some(choice) = segmented(
                 ui,
-                Id::new("theme"),
+                Id::unique("theme"),
                 &["System", "Light", "Dark"],
                 position(&all, app.settings.appearance),
             ) {
@@ -253,7 +253,7 @@ fn colours(app: &mut App, ui: &mut Ui) {
                     let all = [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate];
                     if let Some(choice) = segmented(
                         ui,
-                        Id::new("dark-theme"),
+                        Id::unique("dark-theme"),
                         &["Charcoal", "Black", "Slate"],
                         position(&all, app.settings.dark_theme),
                     ) {
@@ -263,7 +263,7 @@ fn colours(app: &mut App, ui: &mut Ui) {
                     let all = [LightTheme::Classic, LightTheme::White, LightTheme::Paper];
                     if let Some(choice) = segmented(
                         ui,
-                        Id::new("light-theme"),
+                        Id::unique("light-theme"),
                         &["Classic", "White", "Paper"],
                         position(&all, app.settings.light_theme),
                     ) {
@@ -316,7 +316,7 @@ fn layout(app: &mut App, ui: &mut Ui) {
                 _ => format!("{}%", step * 25),
             };
             setting_row(ui, "Roundness", &hint, vec2(240.0, 28.0), |ui| {
-                if steps(ui, Id::new("roundness"), 9, &mut step, true, 240.0) {
+                if steps(ui, Id::unique("roundness"), 9, &mut step, true, 240.0) {
                     app.settings.roundness = step as f32 / 4.0;
                 }
             });
@@ -325,7 +325,7 @@ fn layout(app: &mut App, ui: &mut Ui) {
             let all = [Density::Compact, Density::Normal, Density::Roomy];
             if let Some(choice) = segmented(
                 ui,
-                Id::new("density"),
+                Id::unique("density"),
                 &["Compact", "Normal", "Roomy"],
                 position(&all, app.settings.density),
             ) {
@@ -336,7 +336,7 @@ fn layout(app: &mut App, ui: &mut Ui) {
             let all = [Typeface::Style, Typeface::Inter, Typeface::System];
             if let Some(choice) = segmented(
                 ui,
-                Id::new("typeface"),
+                Id::unique("typeface"),
                 &["Style", "Inter", "System"],
                 position(&all, app.settings.typeface),
             ) {
@@ -352,7 +352,7 @@ fn layout(app: &mut App, ui: &mut Ui) {
             ];
             if let Some(choice) = segmented(
                 ui,
-                Id::new("text-size"),
+                Id::unique("text-size"),
                 &["Small", "Normal", "Large", "Larger"],
                 position(&all, app.settings.text_size),
             ) {
@@ -411,11 +411,11 @@ fn styles(app: &mut App, ui: &mut Ui) {
             );
         let card = egui::Rect::from_min_size(at, PREVIEW);
         let response = ui
-            .interact(card, Id::new("style").with(index), Sense::click())
+            .interact(card, Id::unique("style").with(index), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let current = app.settings.style == style;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, current, style.name())
+            egui::WidgetInfo::selected(egui::Role::RadioButton, true, current, style.name())
         });
         let mut scheme = theme::Scheme::of(&app.settings);
         scheme.style = style;
@@ -527,12 +527,12 @@ fn preview(painter: &egui::Painter, rect: egui::Rect, palette: &Palette) {
 fn custom_swatch(ui: &mut Ui, settings: &mut crate::settings::Settings, cell: egui::Rect) {
     let palette = Palette::current(ui.ctx());
     let response = ui
-        .interact(cell, Id::new("custom-accent"), Sense::click())
+        .interact(cell, Id::unique("custom-accent"), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Pick a colour");
     let current = settings.accent == Accent::Custom;
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, true, current, "Custom accent")
+        egui::WidgetInfo::selected(egui::Role::Button, true, current, "Custom accent")
     });
     let center = cell.center();
     let hovered = if response.hovered() { 1.0 } else { 0.0 };
@@ -627,12 +627,12 @@ fn swatches(
         let center = center_of(index);
         let cell = egui::Rect::from_center_size(center, Vec2::splat(SWATCH));
         let response = ui
-            .interact(cell, Id::new("accent").with(index), Sense::click())
+            .interact(cell, Id::unique("accent").with(index), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(accent.name());
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                egui::WidgetType::RadioButton,
+                egui::Role::RadioButton,
                 true,
                 accent == current,
                 accent.name(),
@@ -770,12 +770,7 @@ fn segmented_sized(
             .interact(cell, id.with(index), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::RadioButton,
-                true,
-                index == current,
-                *label,
-            )
+            egui::WidgetInfo::selected(egui::Role::RadioButton, true, index == current, *label)
         });
         let color = if index == current {
             chosen_ink
@@ -928,7 +923,7 @@ fn checks(app: &mut App, ui: &mut Ui) {
                 let mut index = interval;
                 if steps(
                     ui,
-                    Id::new("interval"),
+                    Id::unique("interval"),
                     model::INTERVALS.len(),
                     &mut index,
                     background,
@@ -1154,7 +1149,7 @@ fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
 /// for the engine and `pkd` to read too.
 fn clean(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
-    let id = Id::new("project-settings");
+    let id = Id::unique("project-settings");
     let mut projects = ui
         .data_mut(|data| data.get_temp::<ProjectSettings>(id))
         .unwrap_or_else(|| ProjectSettings::load(&Host::current()));
@@ -1211,7 +1206,7 @@ fn clean(app: &mut App, ui: &mut Ui) {
                 let mut index = step;
                 if steps(
                     ui,
-                    Id::new("project-days"),
+                    Id::unique("project-days"),
                     PROJECT_DAYS.len(),
                     &mut index,
                     true,
@@ -1258,7 +1253,7 @@ fn clean(app: &mut App, ui: &mut Ui) {
                 }
             }
         }
-        let error_id = Id::new("project-settings-error");
+        let error_id = Id::unique("project-settings-error");
         if let Some(error) = ui.data_mut(|data| data.get_temp::<String>(error_id)) {
             ui.label(egui::RichText::new(error).color(palette.danger));
         }
@@ -1270,9 +1265,9 @@ fn clean(app: &mut App, ui: &mut Ui) {
             .map(|error| format!("Couldn't save: {error}"));
         ui.data_mut(|data| match error {
             Some(error) => {
-                data.insert_temp(Id::new("project-settings-error"), error);
+                data.insert_temp(Id::unique("project-settings-error"), error);
             }
-            None => data.remove::<String>(Id::new("project-settings-error")),
+            None => data.remove::<String>(Id::unique("project-settings-error")),
         });
     }
     ui.data_mut(|data| data.insert_temp(id, projects));
@@ -1331,8 +1326,7 @@ fn radio(ui: &mut Ui, on: bool, label: &str, hint: &str, hint_color: egui::Color
     let height = (title.size().y + 2.0 + note.size().y).max(dot) + 8.0;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    response
-        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
     // The line under it is read with it.
     ui.ctx()
         .accesskit_node_builder(response.id, |node| node.set_description(hint.to_owned()));

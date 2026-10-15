@@ -10,7 +10,7 @@ use crate::{
 };
 use eframe::egui::{
     self, emath::easing, vec2, Align2, Color32, CursorIcon, FontId, Frame, Id, Margin, Pos2, Rect,
-    Response, Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
+    Response, Role, Sense, Stroke, Ui, Vec2, WidgetInfo,
 };
 
 pub const CONTROL_HEIGHT: f32 = 36.0;
@@ -19,7 +19,7 @@ pub const REVEAL: f32 = 0.12;
 pub const LAYOUT: f32 = 0.17;
 
 fn motion_id() -> Id {
-    Id::new("pkgdeck-reduce-motion")
+    Id::unique("pkgdeck-reduce-motion")
 }
 pub fn set_reduce_motion(ctx: &egui::Context, reduce: bool) {
     ctx.data_mut(|data| data.insert_temp(motion_id(), reduce));
@@ -222,7 +222,7 @@ impl<'a> Button<'a> {
         self
     }
     pub fn id_salt(mut self, salt: impl std::hash::Hash + std::fmt::Debug) -> Self {
-        self.id_salt = Some(Id::new(salt));
+        self.id_salt = Some(Id::unique(salt));
         self
     }
 
@@ -276,7 +276,7 @@ impl<'a> Button<'a> {
             CursorIcon::Default
         });
         let label = self.label.to_owned();
-        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, self.enabled, &label));
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, self.enabled, &label));
         if ui.is_rect_visible(rect) {
             let ctx = ui.ctx();
             let hover = ease(
@@ -419,7 +419,7 @@ pub fn icon_button(
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let tip = tooltip.to_owned();
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, &tip));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &tip));
     if ui.is_rect_visible(rect) {
         let hover = ease(
             ui.ctx(),
@@ -467,7 +467,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
     }
     let value = *on;
     let text = label.to_owned();
-    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, value, &text));
+    response.widget_info(|| WidgetInfo::selected(Role::CheckBox, enabled, value, &text));
     if ui.is_rect_visible(rect) && skin::switch_as_check() {
         // The older desktops had check boxes, not switches.
         let tick = Rect::from_center_size(
@@ -520,7 +520,7 @@ pub fn tickbox(ui: &mut Ui, checked: bool, enabled: bool, label: &str) -> Respon
         },
     );
     let text = label.to_owned();
-    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, checked, &text));
+    response.widget_info(|| WidgetInfo::selected(Role::CheckBox, enabled, checked, &text));
     paint_tick(ui, rect, response.id, checked, enabled, response.hovered());
     if enabled {
         response.on_hover_cursor(CursorIcon::PointingHand)
@@ -653,7 +653,7 @@ impl<'a> Field<'a> {
             .font(font)
             .frame(Frame::NONE)
             .margin(Margin::symmetric(0, 0))
-            .vertical_align(egui::Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .desired_width(text_rect.width());
         let output = ui.put(text_rect, edit);
         let submitted = output.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

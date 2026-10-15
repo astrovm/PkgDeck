@@ -43,7 +43,7 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
     let focused = app.ui.list_focused;
     let ring = ease(
         &ctx,
-        Id::new("list-ring"),
+        Id::unique("list-ring"),
         focused && app.ui.keyboard_nav,
         REVEAL,
     );
@@ -344,7 +344,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         let all_checked =
             !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
         let none_checked = selectable.iter().all(|row| !app.row_checked(row));
-        let id = Id::new("tick-all");
+        let id = Id::unique("tick-all");
         let response = ui
             .interact(
                 Rect::from_center_size(tick.center(), Vec2::splat(22.0)),
@@ -359,7 +359,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             });
         response.widget_info(|| {
             let mut info = egui::WidgetInfo::selected(
-                egui::WidgetType::Checkbox,
+                egui::Role::CheckBox,
                 !selectable.is_empty(),
                 all_checked,
                 "Select all tasks",
@@ -394,7 +394,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
                     pos2(area.right(), rect.bottom()),
                 )
                 .round_ui(),
-                Id::new(("column", title)),
+                Id::unique(("column", title)),
                 Sense::click(),
             )
             .on_hover_cursor(CursorIcon::PointingHand);
@@ -479,7 +479,7 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
         let response = ui
             .interact(
                 handle,
-                Id::new(("column-divider", column)),
+                Id::unique(("column-divider", column)),
                 Sense::click_and_drag(),
             )
             .on_hover_cursor(CursorIcon::ResizeHorizontal);
@@ -489,7 +489,7 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
             } else {
                 "Resize Version column"
             };
-            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label)
+            egui::WidgetInfo::labeled(egui::Role::Unknown, true, label)
         });
         let active = response.hovered() || response.dragged();
         ui.painter().line_segment(
@@ -560,7 +560,7 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     }
     offsets.push(y);
     let total = y + 4.0;
-    let list_id = Id::new(("list", app.page.name()));
+    let list_id = Id::unique(("list", app.page.name()));
     // Keyboard.
     let list_focus = ui.interact(
         body,
@@ -676,7 +676,7 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
                     }
                 }
             });
-            ctx.data_mut(|d| d.insert_temp(offset_key, out.state.offset.y));
+            ctx.data_mut(|d| d.insert_temp(offset_key, out.state.unclamped_offset().y));
         },
     );
     app.hovered_row(hovered_raw);
@@ -828,7 +828,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         );
         rect.min.y += GROUP_HEADING;
     }
-    let id = Id::new(("row", &identity));
+    let id = Id::unique(("row", &identity));
     let response = ui.interact(rect.shrink2(vec2(6.0, 2.0)), id, Sense::click());
     let selected = app.selected.as_deref() == Some(identity.as_str());
     let hover = ease(
@@ -904,7 +904,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             .on_hover_cursor(CursorIcon::PointingHand);
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                egui::WidgetType::Checkbox,
+                egui::Role::CheckBox,
                 enabled,
                 checked,
                 format!("Select {}", row.title()),
@@ -1172,12 +1172,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             .map_or_else(|| row.summary.clone(), |reason| format!("Failed: {reason}"))
     );
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            !retaining,
-            selected,
-            &accessible,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, !retaining, selected, &accessible)
     });
     if response.clicked() && !retaining {
         app.ui.keyboard_nav = false;
@@ -1449,7 +1444,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     );
     // A soft disc behind the icon.
     let pop = ui.ctx().animate_bool_with_time_and_easing(
-        Id::new(("empty", &message)),
+        Id::unique(("empty", &message)),
         true,
         secs(ui.ctx(), 0.3),
         egui::emath::easing::back_out,

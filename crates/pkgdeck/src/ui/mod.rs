@@ -95,10 +95,10 @@ pub const COMPACT_BELOW: f32 = 560.0;
 pub const SPLIT_FROM: f32 = 600.0;
 
 pub fn search_id() -> Id {
-    Id::new("pkgdeck-search")
+    Id::unique("pkgdeck-search")
 }
 pub fn filter_id() -> Id {
-    Id::new("pkgdeck-filter")
+    Id::unique("pkgdeck-filter")
 }
 
 /// One frame of the window.
@@ -132,11 +132,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let rail_width = rail_width();
     let stored = app.settings.sidebar_width.clamp(rail_width, SIDEBAR_MAX);
     let rail = narrow || stored < RAIL_SNAP;
-    let splitter = Id::new("sidebar-splitter");
+    let splitter = Id::unique("sidebar-splitter");
     let dragging = ctx.dragged_id() == Some(splitter);
     let sidebar_width = glide(
         &ctx,
-        Id::new("sidebar-width"),
+        Id::unique("sidebar-width"),
         if rail {
             rail_width
         } else {
@@ -147,7 +147,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // The frame's title bar paints the sidebar's colour this far, where the
     // sidebar runs up behind the window's buttons. The frame paints first,
     // so a new width shows on the next frame.
-    let extent = Id::new("sidebar-extent");
+    let extent = Id::unique("sidebar-extent");
     let before = ctx.data(|data| data.get_temp::<f32>(extent));
     ctx.data_mut(|data| data.insert_temp(extent, sidebar_width));
     if before != Some(sidebar_width) {
@@ -358,7 +358,7 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
         Vec2::splat(30.0),
     );
     theme::paint_logo(&painter, logo, &palette);
-    let name_shown = ease(&ctx, Id::new("sidebar-names"), !rail, LAYOUT);
+    let name_shown = ease(&ctx, Id::unique("sidebar-names"), !rail, LAYOUT);
     if name_shown > 0.02 {
         painter.text(
             pos2(logo.right() + 10.0, logo.center().y),
@@ -372,7 +372,7 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     let current = Page::ALL.iter().position(|p| *p == app.page).unwrap_or(0);
     let pill_y = glide(
         &ctx,
-        Id::new("nav-pill"),
+        Id::unique("nav-pill"),
         top + current as f32 * (entry_height + 4.0),
         LAYOUT,
     );
@@ -398,15 +398,10 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             vec2(inner.width(), entry_height),
         );
         let response = ui
-            .interact(entry, Id::new(("nav", page.name())), Sense::click())
+            .interact(entry, Id::unique(("nav", page.name())), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::Button,
-                true,
-                page == app.page,
-                page.name(),
-            )
+            egui::WidgetInfo::selected(egui::Role::Button, true, page == app.page, page.name())
         });
         let hover = ease(
             &ctx,
@@ -561,10 +556,9 @@ fn clear_filter_button(ui: &mut Ui, chip: Rect) -> bool {
     let palette = Palette::current(ui.ctx());
     let rect = Rect::from_min_max(pos2(chip.right() - CLEAR_WIDTH, chip.top()), chip.max);
     let response = ui
-        .interact(rect, ui.id().with("clear-filter"), Sense::click())
+        .interact(rect, ui.scope_id().with("clear-filter"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear filter"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Clear filter"));
     let hover = ease(
         ui.ctx(),
         response.id.with("hover"),
@@ -670,7 +664,7 @@ fn header(app: &mut App, ui: &mut Ui) {
             .tooltip("Activity (Ctrl+J)")
             .show(ui);
             let pop = ui.ctx().animate_bool_with_time_and_easing(
-                Id::new("activity-badge"),
+                Id::unique("activity-badge"),
                 count > 0,
                 secs(ui.ctx(), REVEAL),
                 egui::emath::easing::back_out,
@@ -687,7 +681,7 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
             // A failure waits in Activity: a dot until it is opened.
             let dot = ui.ctx().animate_bool_with_time_and_easing(
-                Id::new("activity-failure"),
+                Id::unique("activity-failure"),
                 app.failure_unseen && count == 0,
                 secs(ui.ctx(), REVEAL),
                 egui::emath::easing::back_out,
@@ -910,7 +904,7 @@ pub fn progress_card(app: &mut App, ui: &mut Ui, salt: &str) {
                     bar,
                     progress.bar(),
                     palette.accent,
-                    Id::new(("bar", salt)),
+                    Id::unique(("bar", salt)),
                 );
             });
         });
@@ -1050,7 +1044,7 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
     let showing_panel = selected_panel == Some(false);
     let wants_side = showing_page || showing_panel;
     let split = rect.width() >= SPLIT_FROM;
-    let open = ease(&ctx, Id::new("details-open"), wants_side, LAYOUT);
+    let open = ease(&ctx, Id::unique("details-open"), wants_side, LAYOUT);
     if !split {
         // Narrow windows show one at a time: the page slides over the list.
         if wants_side || open > 0.0 {
@@ -1098,7 +1092,11 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
             vec2(12.0, rect.height()),
         );
         let response = ui
-            .interact(handle, Id::new("details-splitter"), Sense::click_and_drag())
+            .interact(
+                handle,
+                Id::unique("details-splitter"),
+                Sense::click_and_drag(),
+            )
             .on_hover_cursor(CursorIcon::ResizeHorizontal);
         let active = response.hovered() || response.dragged();
         let shown = ease(&ctx, response.id.with("hover"), active, FEEDBACK);
@@ -1306,7 +1304,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
         } else {
             app.toast.clone()
         };
-        let id = Id::new(("toast", restart));
+        let id = Id::unique(("toast", restart));
         let shown = ease(&ctx, id, toast.is_some(), REVEAL);
         let Some(toast) = toast else { continue };
         let width = 460.0f32.min(content.width() - 32.0);

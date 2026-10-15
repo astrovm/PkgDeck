@@ -251,13 +251,13 @@ pub fn round(radius: u8) -> CornerRadius {
 }
 
 fn scheme_id() -> egui::Id {
-    egui::Id::new("pkgdeck-scheme")
+    egui::Id::unique("pkgdeck-scheme")
 }
 fn scheme(ctx: &egui::Context) -> Scheme {
     ctx.data(|data| data.get_temp(scheme_id()).unwrap_or_default())
 }
 fn font_root_id() -> egui::Id {
-    egui::Id::new("pkgdeck-font-root")
+    egui::Id::unique("pkgdeck-font-root")
 }
 /// Shows `scheme` from now on, restyling only when it changed.
 pub fn set_scheme(ctx: &egui::Context, scheme: Scheme) {
