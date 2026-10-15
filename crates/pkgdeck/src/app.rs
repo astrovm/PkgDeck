@@ -100,6 +100,8 @@ pub struct App {
     pub writing: bool,
     pub reading: bool,
     pub refreshing: bool,
+    /// The explicit refresh-and-check flow owns its final reload.
+    pub checking_updates: bool,
 
     // What the window shows.
     pub page: Page,
@@ -274,6 +276,7 @@ impl App {
             writing: false,
             reading: false,
             refreshing: false,
+            checking_updates: false,
             page: Page::Search,
             page_changed: now,
             query: String::new(),
@@ -523,6 +526,7 @@ impl App {
         let was_writing = self.writing;
         self.busy = *self.ctl.busy();
         self.writing = *self.ctl.writing();
+        self.checking_updates |= self.ctl.checking_updates();
         self.reading = *self.ctl.reading();
         self.refreshing = *self.ctl.refreshing();
         if has("source_catalog") {
@@ -649,7 +653,7 @@ impl App {
                     .iter()
                     .map(model::identity_of_row_value)
                     .collect();
-                if self.page.lists() && !self.close_pending {
+                if self.page.lists() && !self.close_pending && !self.checking_updates {
                     // Updates only re-reads the sources the batch ran on.
                     let refresh = self.page == Page::Updates && !self.batch.sources.is_empty();
                     if refresh {
@@ -705,6 +709,9 @@ impl App {
         if self.post_write_reload && !self.busy {
             self.post_write_reload = false;
             self.reload(true, true);
+        }
+        if !self.busy {
+            self.checking_updates = false;
         }
     }
 
@@ -1203,6 +1210,32 @@ impl App {
         self.react();
     }
 
+    /// The header and Ctrl+R share one action. Updates fetches fresh indexes
+    /// before listing; other pages only read their current contents again.
+    pub fn refresh_page(&mut self) {
+        if self.busy || self.confirmation.is_some() || !self.page.lists() {
+            return;
+        }
+        if self.page != Page::Updates {
+            self.reload(true, true);
+            return;
+        }
+        let shown = self.effective_sources(Page::Updates);
+        let sources: Vec<_> = all_sources(&self.catalog)
+            .into_iter()
+            .filter(|source| shown.contains(source))
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        if !self.rows.is_empty() {
+            self.retained = Some(self.rows.clone());
+        }
+        self.checking_updates = true;
+        self.c().check_for_updates(sources.join(",").into());
+        self.react();
+    }
+
     /// "Flatpak", "3 sources", or "All sources": what the filter shows.
     pub fn source_summary(&self, page: Page) -> String {
         match self.page_sources.get(&page) {
@@ -1581,7 +1614,7 @@ impl App {
     // Changes
 
     pub fn can_act(&self) -> bool {
-        !self.busy || self.writing || self.reading
+        !self.checking_updates && (!self.busy || self.writing || self.reading)
     }
 
     fn review_here(&mut self, identity: &str) {
@@ -1643,7 +1676,7 @@ impl App {
     /// A change by name for the selection or the whole page: shortcuts,
     /// Update all, Manage all, Refresh, Clean all.
     pub fn propose(&mut self, action: &str) {
-        if self.retained.is_some() {
+        if self.retained.is_some() || self.checking_updates {
             return;
         }
         let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "clean-all");
@@ -1683,6 +1716,9 @@ impl App {
 
     /// Update all, or the checked ones.
     pub fn upgrade_updates(&mut self) {
+        if self.checking_updates {
+            return;
+        }
         if self.unchecked.is_empty() {
             self.propose("upgrade-all");
             return;

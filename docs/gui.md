@@ -96,7 +96,7 @@ These controls work on every package page:
   It also lists sources you can't use, with the reason.
 - Each tick in the sources filter applies right away.
 - While a filter is on, the **×** at the end of its button clears it.
-- **Reload** gets fresh package data.
+- **Refresh** in the page header gets fresh package data. **Ctrl+R** does the same.
 
 Docker and Podman images are shown as separate sources. Each row shows
 tags, size, age, and image ID. You can pull a tagged image again or remove it.
@@ -106,7 +106,7 @@ only Docker or Podman and search for the full image name with its tag.
 ## Updates
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
-Opening this page, **Reload**, and the background check run `brew update` once
+Opening this page and the background check run `brew update` once
 before they read Homebrew. Formulae and casks share that fetch, so a newly
 published cask (including PkgDeck itself) can show up. They also ask each
 Flatpak remote for new versions again. The Installed page does not fetch: it
@@ -172,7 +172,7 @@ that shows the package, source, scope, and the extra changes, with
 
 Cancel stops work that hasn't started yet. If a package manager is already
 making changes, PkgDeck lets it finish first. Finished changes are not undone
-if a later step fails. Click **Reload** to see the current state.
+if a later step fails. Click **Refresh** to see the current state.
 
 While a change runs, its row shows a progress bar and its button turns into
 **Cancel**. When it finishes, a short message at the bottom of the window says
@@ -271,8 +271,20 @@ failed shows why in red, with **Try again** under it.
 The sources filter only filters one page. Neither one turns repositories on
 or off.
 
-**Refresh sources** on **Updates** downloads the latest package lists of
-the sources that page shows, after one review. Some ask for your password.
+**Check for updates** in the **Updates** header first refreshes the selected
+sources that need no password: Flatpak app data, firmware metadata, and Snap's
+list of snaps. A check never installs, upgrades or removes anything.
+
+APT, DNF, Pacman and Zypper need your password to refresh their lists, so a
+check uses their current lists. Use **Refresh** to update them. MacPorts uses
+its current ports tree and never self-updates during a check. Sources without
+a list refresh are checked too. **Ctrl+R** runs the same action.
+
+The button stays in the same place for empty and populated lists. During a check
+it becomes one **Cancel** button with a spinner. Existing rows stay visible. The
+header shows the last check time or **Some sources couldn’t be checked** when
+a source fails. Refresh failures remain visible even if its old package list
+can still be read.
 
 ### Repositories
 
@@ -661,8 +673,7 @@ and **About**.
 | Enter | Install, remove, or update the selected row |
 | Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
 | Ctrl+Shift+U | Update checked packages |
-| Ctrl+R | Reload the page |
-| Ctrl+M | Refresh sources: download the latest package lists |
+| Ctrl+R | Refresh the page, or refresh selected sources and check for updates on Updates |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
 | Alt+C | Cancel the open confirmation |
 | Esc | Close Activity, clear the search, close the details, or go back from an app page |

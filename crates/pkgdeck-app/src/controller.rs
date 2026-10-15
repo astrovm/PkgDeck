@@ -251,6 +251,8 @@ enum Job {
     /// Download the latest package lists of several sources, one after
     /// another.
     RefreshAll(Vec<Operation>),
+    /// Refresh the selected sources, then read their updates in the same worker.
+    CheckUpdates(Vec<Operation>, Vec<String>),
     ManifestExport(PathBuf, Vec<PackageId>),
     ManifestPreview(PathBuf),
 }
@@ -264,6 +266,7 @@ impl Job {
                 | Self::AutoClean { .. }
                 | Self::CleanAll(_)
                 | Self::RefreshAll(_)
+                | Self::CheckUpdates(..)
                 | Self::Repositories(Some(_))
                 | Self::ImportRepository(_)
         )
@@ -281,7 +284,8 @@ impl Job {
             Self::UpgradeAll(operations, _)
             | Self::AutoUpgrade(operations, _)
             | Self::CleanAll(operations)
-            | Self::RefreshAll(operations) => operations.clone(),
+            | Self::RefreshAll(operations)
+            | Self::CheckUpdates(operations, _) => operations.clone(),
             _ => vec![],
         }
     }
@@ -306,6 +310,7 @@ enum Payload {
     Details(Box<PackageDetails>),
     Written(OperationOutcome),
     Batch(String, Vec<Outcome>),
+    CheckedUpdates(Box<PackageReport>, String, Vec<Outcome>),
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
@@ -820,6 +825,40 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let mut report = engine.installed_for_updates(cancel);
             filter_updates(&mut report);
             Ok(Payload::BackgroundUpdates(report))
+        }
+        Job::CheckUpdates(operations, _) => {
+            // Index-only sources still need a fresh check. Sources with a
+            // refresh operation fetch below, so don't fetch them twice.
+            let refreshing: Vec<_> = operations.iter().map(|op| op.backend().to_owned()).collect();
+            let mut failures = engine.refresh_update_indexes(&refreshing, cancel);
+            let (status, outcomes) = batch(engine, &operations, vec![], cancel, &mut |reply| {
+                if let Reply::ProgressEvent(Event::Finished { operation, result: Err(error) }) = &reply {
+                    failures.push(BackendFailure { backend: operation.backend().into(), error: error.clone() });
+                }
+                send(reply);
+            });
+            if cancel.requested() {
+                Ok(Payload::Batch(status, outcomes))
+            } else {
+                send(Reply::Progress("Checking for updates".into()));
+                let mut report = engine.installed(cancel);
+                if cancel.requested() {
+                    Ok(Payload::Batch(status, outcomes))
+                } else {
+                    // A cached index can still be read after its refresh failed.
+                    // Preserve that failure instead of claiming a fresh check.
+                    report.successful_sources.retain(|source| !failures.iter().any(|f| &f.backend == source));
+                    report.failures.retain(|failure| !failures.iter().any(|f| f.backend == failure.backend));
+                    report.failures.extend(failures);
+                    // A missing tool isn't a failed check. Broken installs and real errors stay.
+                    report.failures.retain(|failure| {
+                        !matches!(&failure.error, EngineError::Unavailable { reason, .. }
+                            if pkgdeck_core::backends::is_missing_tool_reason(reason))
+                    });
+                    filter_updates(&mut report);
+                    Ok(Payload::CheckedUpdates(Box::new(report), status, outcomes))
+                }
+            }
         }
         Job::Load(view, query) => {
             if view == "Sources" {
@@ -1966,6 +2005,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
+        Job::CheckUpdates(_, sources) => sources.clone(),
         Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
@@ -2840,6 +2880,10 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
         Job::RefreshAll(operations) => {
             let retry = keep(operations);
             (!retry.is_empty()).then(|| refresh_job(retry))
+        }
+        Job::CheckUpdates(operations, sources) => {
+            let retry = keep(operations);
+            (!retry.is_empty()).then(|| Job::CheckUpdates(retry, sources.clone()))
         }
         _ => None,
     }
@@ -5135,6 +5179,12 @@ impl ffi::PackageController {
                         }
                         let _ = sender.send(Reply::Rows(PreparedRows::new(&report.packages)));
                     }
+                    Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => {
+                        for package in &mut report.packages {
+                            crate::metadata::enrich_cached(package);
+                        }
+                        let _ = sender.send(Reply::Rows(PreparedRows::new(&report.packages)));
+                    }
                     Reply::Done(Ok(
                         Payload::RetryPackages(_, report) | Payload::RetryFailedUpdates(_, report),
                     )) => {
@@ -5596,6 +5646,77 @@ impl ffi::PackageController {
         }
         self.as_mut().set_phase("loading");
         self.start(Job::RefreshSources(sources));
+    }
+    /// One explicit update check. Refreshes only the sources whose refresh
+    /// needs no password, then checks every selected source, including
+    /// registries without indexes.
+    pub fn check_for_updates(mut self: Pin<&mut Self>, sources: QString) {
+        if self.rust().foreground_worker() || self.rust().pending.is_some() {
+            return;
+        }
+        let mut sources: Vec<String> = sources
+            .to_string()
+            .split(',')
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if sources.is_empty()
+            || sources
+                .iter()
+                .any(|source| !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str()))
+        {
+            return;
+        }
+        sources.sort();
+        sources.dedup();
+        let catalog: Vec<Value> =
+            serde_json::from_str(self.source_catalog().as_str()).unwrap_or_default();
+        let operations = sources
+            .iter()
+            .filter(|source| {
+                // A check runs only refreshes that need no password. Managers
+                // whose refresh would prompt wait for an explicit refresh.
+                // MacPorts can rebuild its own base, so it is never automatic.
+                let refresh = Operation::Refresh {
+                    backend: source.to_string(),
+                };
+                source.as_str() != "macports"
+                    && pkgdeck_core::batch::protected_commands(&refresh)
+                        .is_ok_and(|commands| commands.is_empty())
+                    && catalog.iter().any(|row| {
+                        row["source"].as_str() == Some(source.as_str())
+                            && row["available"] == true
+                            && row["capabilities"]
+                                .as_array()
+                                .is_some_and(|caps| caps.contains(&json!("refresh")))
+                    })
+            })
+            .map(|backend| Operation::Refresh {
+                backend: backend.clone(),
+            })
+            .collect();
+        self.as_mut().rust_mut().active_view = "Updates".into();
+        self.as_mut().rust_mut().source_filter = sources.clone();
+        self.as_mut().rust_mut().updates_view = true;
+        self.as_mut().set_phase("loading");
+        let job = Job::CheckUpdates(operations, sources);
+        if job.operations().is_empty() {
+            self.start(job);
+        } else {
+            self.accept_confirmed(job);
+        }
+    }
+    pub fn checking_updates(&self) -> bool {
+        self.rust()
+            .worker
+            .as_ref()
+            .is_some_and(|worker| matches!(worker.job, Job::CheckUpdates(..)))
+            || self
+                .rust()
+                .confirmed_queue
+                .iter()
+                .any(|entry| matches!(entry.job, Job::CheckUpdates(..)))
     }
     /// Snapshot the current table under `key`. Called after a terminal view
     /// report lands; the caller guarantees no newer load superseded it.
@@ -6745,6 +6866,9 @@ impl ffi::PackageController {
                     .apply(Ok(Payload::Written(OperationOutcome::default())));
                 self.set_status(status.as_str().into());
             }
+            Ok(Payload::CheckedUpdates(report, _, _)) => {
+                self.apply(Ok(Payload::Packages(*report)));
+            }
             Ok(Payload::Written(outcome)) => {
                 crate::metadata::invalidate();
                 self.as_mut().set_upgradable(false);
@@ -7300,7 +7424,9 @@ impl ffi::PackageController {
             // before any page has listed it.
             let finished: Vec<Operation> =
                 match replies.iter().find(|reply| matches!(reply, Reply::Done(_))) {
-                    Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => job
+                    Some(Reply::Done(Ok(
+                        Payload::Batch(_, outcomes) | Payload::CheckedUpdates(_, _, outcomes),
+                    ))) => job
                         .operations()
                         .into_iter()
                         .zip(outcomes)
@@ -7407,6 +7533,12 @@ impl ffi::PackageController {
                         self.as_mut().rust_mut().details_preview = false;
                     }
                     Reply::Done(result) => {
+                        let (result, checked) = match result {
+                            Ok(Payload::CheckedUpdates(report, status, outcomes)) => {
+                                (Ok(Payload::Batch(status, outcomes)), Some(*report))
+                            }
+                            result => (result, None),
+                        };
                         if self.rust().discard_revalidation && job.reviews() {
                             continue;
                         }
@@ -7470,7 +7602,10 @@ impl ffi::PackageController {
                                 self.as_mut().set_failure(encoded(notice.clone()));
                             }
                             self.as_mut().remember_failed_rows(&job, &result);
-                            self.as_mut().set_notice(encoded(notice));
+                            if !matches!(job, Job::CheckUpdates(..)) || notice["kind"] != "success"
+                            {
+                                self.as_mut().set_notice(encoded(notice));
+                            }
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
                                 if let Some(store) = self.rust().activity_store.clone() {
                                     let outcomes = match &result {
@@ -7542,6 +7677,25 @@ impl ffi::PackageController {
                                 | Ok(Payload::RetrySources(..))
                         );
                         self.as_mut().apply(result);
+                        if let Some(report) = checked {
+                            // A read for another page may have queued while the
+                            // refresh ran. Its rows and source selection win.
+                            if self.rust().active_view == "Updates"
+                                && self.rust().queued.is_none()
+                                && self.rust().deferred_load.is_none()
+                            {
+                                self.as_mut().apply(Ok(Payload::Packages(report)));
+                                let key = cache_key(
+                                    "Updates",
+                                    "",
+                                    &self.rust().source_filter,
+                                    self.rust().sudo,
+                                );
+                                self.as_mut().stash_current(key);
+                            }
+                        } else if matches!(job, Job::CheckUpdates(..)) && cancel.requested() {
+                            self.as_mut().set_phase("cancelled");
+                        }
                         if stashable {
                             if let Some(key) = key {
                                 self.as_mut().stash_current(key);
@@ -17567,6 +17721,809 @@ mod tests {
             bytes,
         }
     }
+    struct UpdateCheckFixture {
+        id: &'static str,
+        index: bool,
+        armed: bool,
+        refreshed: bool,
+        failure: bool,
+        read_failure: bool,
+        stop: bool,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Backend for UpdateCheckFixture {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Refresh]
+        }
+        fn has_update_index(&self) -> bool {
+            self.index
+        }
+        fn arm_update_check(&mut self, token: Option<u64>) {
+            self.armed = token.is_some();
+        }
+        fn refresh_update_index(&mut self, _: &Cancellation) -> Result<(), EngineError> {
+            if self.index && self.armed {
+                self.log.lock().unwrap().push(format!("index:{}", self.id));
+                if self.failure {
+                    return Err(ExecutionError::AuthorizationDenied.into());
+                }
+                self.refreshed = true;
+            }
+            Ok(())
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.log.lock().unwrap().push(format!("read:{}", self.id));
+            if self.stop {
+                cancel.cancel();
+            }
+            if self.read_failure {
+                return Err(ExecutionError::Invalid("fixture read failed".into()).into());
+            }
+            let mut package = fixture_row();
+            package.id.backend = self.id.into();
+            package.update = if self.refreshed || self.id == "npm" {
+                UpdateAvailability::Available
+            } else {
+                UpdateAvailability::Current
+            };
+            Ok(vec![package])
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            cancel: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("refresh:{}", self.id));
+            if self.stop {
+                cancel.cancel();
+                return Err(EngineError::Cancelled);
+            }
+            if self.failure {
+                return Err(ExecutionError::AuthorizationDenied.into());
+            }
+            self.refreshed = true;
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn refresh_explicit_update_checks_refresh_before_reading_and_keep_refresh_failures() {
+        for failure in [false, true] {
+            let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+            let mut engine = Engine::default();
+            for id in ["apt", "npm"] {
+                engine
+                    .register(UpdateCheckFixture {
+                        index: false,
+                        armed: false,
+                        id,
+                        refreshed: false,
+                        failure: id == "apt" && failure,
+                        read_failure: false,
+                        stop: false,
+                        log: log.clone(),
+                    })
+                    .unwrap();
+            }
+            let operations = vec![Operation::Refresh {
+                backend: "apt".into(),
+            }];
+            let mut replies = vec![];
+            execute(
+                &mut engine,
+                Job::CheckUpdates(operations.clone(), vec!["apt".into(), "npm".into()]),
+                &Cancellation::default(),
+                &mut |r| replies.push(r),
+            );
+            assert_eq!(log.lock().unwrap()[0], "refresh:apt");
+            assert!(log.lock().unwrap().contains(&"read:npm".into()));
+            assert!(!log.lock().unwrap().contains(&"refresh:npm".into()));
+            let (report, outcomes) = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, outcomes))) => (report, outcomes));
+            assert_eq!(report.packages.len(), if failure { 1 } else { 2 });
+            assert_eq!(report.failures.len(), usize::from(failure));
+            assert_eq!(report.successful_sources.contains(&"apt".into()), !failure);
+            assert_eq!(
+                outcomes,
+                [if failure {
+                    Outcome::Failed
+                } else {
+                    Outcome::Finished
+                }]
+            );
+            if failure {
+                assert_eq!(
+                    report.failures[0].error,
+                    EngineError::Execution(ExecutionError::AuthorizationDenied)
+                );
+                let retry = retry_job(
+                    &Job::CheckUpdates(operations, vec!["apt".into(), "npm".into()]),
+                    &Ok(Payload::Batch("failed".into(), outcomes)),
+                );
+                assert!(
+                    matches!(retry, Some(Job::CheckUpdates(ops, sources)) if ops.len() == 1 && sources == ["apt", "npm"])
+                );
+            }
+        }
+        // Registries without a refresh operation are still checked.
+        let mut engine = Engine::default();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        engine
+            .register(UpdateCheckFixture {
+                index: false,
+                armed: false,
+                id: "npm",
+                refreshed: false,
+                failure: false,
+                read_failure: false,
+                stop: false,
+                log: log.clone(),
+            })
+            .unwrap();
+        let mut replies = vec![];
+        execute(
+            &mut engine,
+            Job::CheckUpdates(vec![], vec!["npm".into()]),
+            &Cancellation::default(),
+            &mut |r| replies.push(r),
+        );
+        assert_eq!(*log.lock().unwrap(), ["read:npm"]);
+        assert!(
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::CheckedUpdates(report, _, outcomes)))) if report.packages.len() == 1 && outcomes.is_empty())
+        );
+    }
+    #[test]
+    fn refresh_explicit_checks_fetch_index_only_sources_once_and_preserve_their_failure() {
+        for failure in [false, true] {
+            let mut engine = Engine::default();
+            let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+            engine
+                .register(UpdateCheckFixture {
+                    id: "npm",
+                    index: true,
+                    armed: false,
+                    refreshed: false,
+                    failure,
+                    read_failure: false,
+                    stop: false,
+                    log: log.clone(),
+                })
+                .unwrap();
+            let mut replies = vec![];
+            execute(
+                &mut engine,
+                Job::CheckUpdates(vec![], vec!["npm".into()]),
+                &Cancellation::default(),
+                &mut |r| replies.push(r),
+            );
+            let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => report);
+            assert_eq!(report.failures.len(), usize::from(failure));
+            assert_eq!(report.successful_sources.contains(&"npm".into()), !failure);
+            assert_eq!(log.lock().unwrap().last().unwrap(), "read:npm");
+            if !failure {
+                assert_eq!(*log.lock().unwrap(), ["index:npm", "read:npm"]);
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_failures_replace_only_the_same_sources_read_failure() {
+        let mut engine = Engine::default();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        for id in ["apt", "npm"] {
+            engine
+                .register(UpdateCheckFixture {
+                    id,
+                    index: false,
+                    armed: false,
+                    refreshed: false,
+                    failure: id == "apt",
+                    read_failure: true,
+                    stop: false,
+                    log: log.clone(),
+                })
+                .unwrap();
+        }
+        let mut replies = vec![];
+        execute(
+            &mut engine,
+            Job::CheckUpdates(
+                vec![Operation::Refresh {
+                    backend: "apt".into(),
+                }],
+                vec!["apt".into(), "npm".into()],
+            ),
+            &Cancellation::default(),
+            &mut |r| replies.push(r),
+        );
+        let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => report);
+        assert_eq!(report.failures.len(), 2);
+        let apt = report.failures.iter().find(|f| f.backend == "apt").unwrap();
+        assert_eq!(
+            apt.error,
+            EngineError::Execution(ExecutionError::AuthorizationDenied)
+        );
+        let npm = report.failures.iter().find(|f| f.backend == "npm").unwrap();
+        assert!(
+            matches!(&npm.error, EngineError::Execution(ExecutionError::Invalid(message)) if message == "fixture read failed")
+        );
+    }
+
+    #[test]
+    fn refresh_failed_operations_do_not_claim_a_successful_check_and_keep_the_error_notice() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().rust_mut().active_view = "Installed".into();
+        ctl.as_mut()
+            .rust_mut()
+            .last_success
+            .insert("apt".into(), 123);
+        ctl.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::CheckUpdates(
+                vec![
+                    Operation::Refresh {
+                        backend: "apt".into(),
+                    },
+                    Operation::Refresh {
+                        backend: "flatpak".into(),
+                    },
+                ],
+                vec!["apt".into(), "flatpak".into()],
+            ),
+            vec![Reply::Done(Ok(Payload::CheckedUpdates(
+                Box::default(),
+                "failed".into(),
+                vec![Outcome::Failed, Outcome::Finished],
+            )))],
+        ));
+        settle(&mut ctl);
+        assert_eq!(ctl.rust().last_success["apt"], 123);
+        assert!(ctl.rust().last_success["flatpak"] > 123);
+        let notice: Value = serde_json::from_str(ctl.notice().as_str()).unwrap();
+        assert_eq!(notice["kind"], "error");
+        assert_eq!(notice["retry"], true);
+    }
+
+    #[test]
+    fn refresh_a_failed_check_without_a_report_is_not_reported_as_cancelled() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::CheckUpdates(vec![], vec!["apt".into()]),
+            vec![Reply::Done(Err(EngineError::Execution(
+                ExecutionError::AuthorizationDenied,
+            )))],
+        ));
+        settle(&mut ctl);
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_ne!(state["phase"], "cancelled");
+        let notice: Value = serde_json::from_str(ctl.notice().as_str()).unwrap();
+        assert_eq!(notice["kind"], "error");
+    }
+
+    #[test]
+    fn refresh_checking_snap_and_macports_does_not_apply_their_software_updates() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().set_source_catalog(encoded(json!([
+            {"source":"snap", "available":true, "capabilities":["refresh", "installed"]},
+            {"source":"macports", "available":true, "capabilities":["refresh", "installed"]},
+            {"source":"apt", "available":true, "capabilities":["refresh", "installed"]}
+        ])));
+        ctl.as_mut().check_for_updates("snap,macports,apt".into());
+        let job = &ctl.rust().worker.as_ref().unwrap().job;
+        let (ops, sources) = expect!(job, Job::CheckUpdates(ops, sources) => (ops, sources));
+        // Snap's refresh only lists snaps, so it runs; apt would prompt and waits.
+        assert_eq!(
+            ops,
+            &[Operation::Refresh {
+                backend: "snap".into()
+            }]
+        );
+        assert_eq!(sources, &["apt", "macports", "snap"]);
+        settle(&mut ctl);
+    }
+
+    #[test]
+    fn refresh_final_rows_are_prepared_on_the_worker_before_the_report_is_published() {
+        fn engine(
+            _: &[String],
+            _: bool,
+            _: Authorization,
+            _: &Cancellation,
+        ) -> Result<Engine, EngineError> {
+            let mut engine = Engine::default();
+            engine
+                .register(UpdateCheckFixture {
+                    id: "npm",
+                    index: false,
+                    armed: false,
+                    refreshed: false,
+                    failure: false,
+                    read_failure: false,
+                    stop: false,
+                    log: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+                })
+                .unwrap();
+            Ok(engine)
+        }
+        let mut controller = ffi::create_synthetic_controller(engine);
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().check_for_updates("npm".into());
+        let worker = ctl.as_mut().rust_mut().worker.take().unwrap();
+        worker.handle.join().unwrap();
+        let replies: Vec<_> = worker.receiver.try_iter().collect();
+        let rows = replies
+            .iter()
+            .position(|r| matches!(r, Reply::Rows(_)))
+            .unwrap();
+        let done = replies
+            .iter()
+            .position(|r| matches!(r, Reply::Done(Ok(Payload::CheckedUpdates(..)))))
+            .unwrap();
+        assert!(rows < done);
+        let rows = expect!(&replies[rows], Reply::Rows(rows) => rows);
+        assert!(rows.json.contains("npm"));
+    }
+
+    /// A source whose tool is missing: detection says it isn't installed.
+    struct NotInstalled {
+        id: &'static str,
+    }
+    impl Backend for NotInstalled {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Refresh]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Unavailable(format!("{} not found", self.id)))
+        }
+    }
+    const NOT_INSTALLED: [&str; 25] = [
+        "amp",
+        "apk",
+        "aur",
+        "composer",
+        "conda",
+        "copilot",
+        "cursor",
+        "dnf",
+        "dotnet",
+        "droid",
+        "gem",
+        "kiro",
+        "macos-apps",
+        "macports",
+        "mas",
+        "mise",
+        "nix",
+        "pacman",
+        "pip",
+        "pixi",
+        "system-image",
+        "xbps",
+        "zypper",
+        "macos-updates",
+        "oh-my-zsh",
+    ];
+    #[test]
+    fn refresh_sources_that_are_not_installed_are_not_reported_as_failed_checks() {
+        fn engine(
+            _: &[String],
+            _: bool,
+            _: Authorization,
+            _: &Cancellation,
+        ) -> Result<Engine, EngineError> {
+            let mut engine = Engine::default();
+            for id in NOT_INSTALLED {
+                engine.register(NotInstalled { id }).unwrap();
+            }
+            Ok(engine)
+        }
+        let mut controller = ffi::create_synthetic_controller(engine);
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut()
+            .check_for_updates(NOT_INSTALLED.join(",").into());
+        settle(&mut ctl);
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_eq!(state["phase"], "complete");
+        assert_eq!(state["failures"], json!([]));
+    }
+    #[test]
+    fn refresh_a_real_error_still_reports_its_source_next_to_missing_ones() {
+        fn engine(
+            _: &[String],
+            _: bool,
+            _: Authorization,
+            _: &Cancellation,
+        ) -> Result<Engine, EngineError> {
+            let mut engine = Engine::default();
+            engine.register(NotInstalled { id: "amp" }).unwrap();
+            engine
+                .register(UpdateCheckFixture {
+                    id: "npm",
+                    index: false,
+                    armed: false,
+                    refreshed: false,
+                    failure: false,
+                    read_failure: true,
+                    stop: false,
+                    log: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+                })
+                .unwrap();
+            Ok(engine)
+        }
+        let mut controller = ffi::create_synthetic_controller(engine);
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().check_for_updates("amp,npm".into());
+        settle(&mut ctl);
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_eq!(state["phase"], "failed");
+        assert_eq!(state["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(state["failures"][0]["source"], "npm");
+        assert_ne!(state["failures"][0]["kind"], "unavailable");
+    }
+
+    /// A source that is installed but broken: detection says it's unavailable
+    /// for a reason other than a missing tool.
+    struct BrokenInstall {
+        id: &'static str,
+    }
+    impl Backend for BrokenInstall {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Refresh]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Unavailable(
+                "Docker is installed but unavailable: daemon stopped".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn refresh_an_installed_but_broken_source_still_reports_a_failed_check() {
+        fn engine(
+            _: &[String],
+            _: bool,
+            _: Authorization,
+            _: &Cancellation,
+        ) -> Result<Engine, EngineError> {
+            let mut engine = Engine::default();
+            engine.register(NotInstalled { id: "amp" }).unwrap();
+            engine.register(BrokenInstall { id: "docker" }).unwrap();
+            Ok(engine)
+        }
+        let mut controller = ffi::create_synthetic_controller(engine);
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().check_for_updates("amp,docker".into());
+        settle(&mut ctl);
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_eq!(state["phase"], "failed");
+        assert_eq!(state["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(state["failures"][0]["source"], "docker");
+    }
+
+    #[test]
+    fn refresh_cancelling_an_explicit_check_never_reads_or_claims_fresh_results() {
+        let mut engine = Engine::default();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        engine
+            .register(UpdateCheckFixture {
+                index: false,
+                armed: false,
+                id: "apt",
+                refreshed: false,
+                failure: false,
+                read_failure: false,
+                stop: true,
+                log: log.clone(),
+            })
+            .unwrap();
+        let mut replies = vec![];
+        execute(
+            &mut engine,
+            Job::CheckUpdates(
+                vec![Operation::Refresh {
+                    backend: "apt".into(),
+                }],
+                vec!["apt".into()],
+            ),
+            &Cancellation::default(),
+            &mut |r| replies.push(r),
+        );
+        assert_eq!(*log.lock().unwrap(), ["refresh:apt"]);
+        assert!(
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes == [Outcome::Cancelled])
+        );
+    }
+    #[test]
+    fn refresh_cancellation_during_the_read_keeps_the_old_rows_and_marks_the_check_stopped() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut engine = Engine::default();
+        engine
+            .register(UpdateCheckFixture {
+                id: "npm",
+                index: false,
+                armed: false,
+                refreshed: false,
+                failure: false,
+                read_failure: false,
+                stop: true,
+                log: log.clone(),
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let job = Job::CheckUpdates(vec![], vec!["npm".into()]);
+        let mut replies = vec![];
+        execute(&mut engine, job.clone(), &cancel, &mut |r| replies.push(r));
+        assert_eq!(*log.lock().unwrap(), ["read:npm"]);
+        assert!(
+            matches!(replies.last(), Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes.is_empty())
+        );
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().set_rows(
+            "[{\"kind\":\"package\",\"name\":\"known-update\",\"source\":\"npm\"}]".into(),
+        );
+        let before = ctl.rows().to_string();
+        let mut worker = fake_worker(job, replies);
+        worker.cancel = cancel;
+        ctl.as_mut().rust_mut().worker = Some(worker);
+        settle(&mut ctl);
+        assert_eq!(ctl.rows().to_string(), before);
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_eq!(state["phase"], "cancelled");
+        assert!(state.get("checked_at").is_none());
+    }
+
+    #[test]
+    fn refresh_checked_update_reports_apply_without_an_extra_read_and_refresh_jobs_describe_their_operations(
+    ) {
+        let operations = vec![
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            Operation::Refresh {
+                backend: "flatpak".into(),
+            },
+        ];
+        assert_eq!(Job::RefreshAll(operations.clone()).operations(), operations);
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().apply(Ok(Payload::CheckedUpdates(
+            Box::new(PackageReport {
+                packages: vec![fixture_row()],
+                failures: vec![],
+                successful_sources: vec!["fixture".into()],
+            }),
+            "Checked".into(),
+            vec![],
+        )));
+        assert_eq!(ctl.rust().packages.len(), 1);
+        assert!(ctl.rust().worker.is_none());
+        assert!(retry_job(
+            &Job::CheckUpdates(vec![], vec!["npm".into()]),
+            &Ok(Payload::Batch("Checked".into(), vec![]))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn refresh_explicit_check_source_selection_is_deduplicated_and_uses_only_refresh_capabilities()
+    {
+        // Exhaust every subset: selection, availability and refresh capability
+        // are independent, and rereading registries must not depend on refresh.
+        for chosen in 1..8_u8 {
+            for available in 0..8_u8 {
+                for refresh in 0..8_u8 {
+                    let ids = ["apt", "flatpak", "npm"];
+                    let mut ctl = synthetic_controller();
+                    let mut ctl = ctl.pin_mut();
+                    ctl.as_mut().set_source_catalog(encoded(json!(ids.iter().enumerate().map(|(i, source)| json!({"source":source, "available": available & (1<<i) != 0, "capabilities": if refresh & (1<<i) != 0 { vec!["refresh"] } else { vec!["installed"] }})).collect::<Vec<_>>())));
+                    let sources: Vec<_> = ids
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| chosen & (1 << i) != 0)
+                        .map(|(_, id)| *id)
+                        .collect();
+                    ctl.as_mut().check_for_updates(
+                        format!("{},{}", sources.join(","), sources.join(",")).into(),
+                    );
+                    assert!(ctl.checking_updates());
+                    let job = &ctl.rust().worker.as_ref().unwrap().job;
+                    let (ops, selected) =
+                        expect!(job, Job::CheckUpdates(ops, selected) => (ops, selected));
+                    assert_eq!(selected, &sources);
+                    let expected: Vec<_> = ids
+                        .iter()
+                        .enumerate()
+                        // Elevated refreshes (apt) never run in a check.
+                        .filter(|(i, id)| {
+                            chosen & available & refresh & (1 << i) != 0 && **id != "apt"
+                        })
+                        .map(|(_, id)| Operation::Refresh {
+                            backend: (*id).into(),
+                        })
+                        .collect();
+                    assert_eq!(ops, &expected);
+                    assert_eq!(engine_source(job, &[]), selected.clone());
+                    ctl.as_mut().check_for_updates("apt".into());
+                    assert!(
+                        ctl.rust().confirmed_queue.is_empty(),
+                        "a second click queued work"
+                    );
+                    settle(&mut ctl);
+                }
+            }
+        }
+        let mut ctl = synthetic_controller();
+        let mut ctl = ctl.pin_mut();
+        for invalid in ["", ",,", "unknown", "apt,unknown"] {
+            ctl.as_mut().check_for_updates(invalid.into());
+            assert!(ctl.rust().worker.is_none());
+        }
+        ctl.as_mut().rust_mut().pending = Some(Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        ));
+        ctl.as_mut().check_for_updates("apt".into());
+        assert!(ctl.rust().worker.is_none());
+    }
+    #[test]
+    fn refresh_an_explicit_check_never_replaces_a_new_pages_rows_or_source_selection() {
+        for view in ["Installed", "Search", "Updates"] {
+            let mut controller = synthetic_controller();
+            let mut ctl = controller.pin_mut();
+            ctl.as_mut().rust_mut().active_view = view.into();
+            ctl.as_mut().rust_mut().source_filter = vec!["npm".into()];
+            ctl.as_mut().rust_mut().deferred_load =
+                Some(Job::Load(view.into(), "new query".into()));
+            ctl.as_mut().set_rows(
+                "[{\"kind\":\"package\",\"name\":\"current-page\",\"source\":\"npm\"}]".into(),
+            );
+            let before = ctl.rows().to_string();
+            let report = PackageReport {
+                packages: vec![fixture_row()],
+                successful_sources: vec!["apt".into()],
+                failures: vec![],
+            };
+            ctl.as_mut().rust_mut().worker = Some(fake_worker(
+                Job::CheckUpdates(vec![], vec!["apt".into()]),
+                vec![Reply::Done(Ok(Payload::CheckedUpdates(
+                    Box::new(report),
+                    "Completed".into(),
+                    vec![],
+                )))],
+            ));
+            wait_until(&mut ctl, |ctl| !ctl.checking_updates());
+            assert_eq!(
+                ctl.rows().to_string(),
+                before,
+                "late Updates report replaced {view}"
+            );
+            assert!(ctl
+                .rust()
+                .view_cache
+                .get(&cache_key("Updates", "", &["npm".into()], false))
+                .is_none());
+            settle(&mut ctl);
+        }
+    }
+
+    #[test]
+    fn refresh_a_check_only_refreshes_sources_that_need_no_password() {
+        for (source, refreshes) in [
+            ("apt", false),
+            ("dnf", false),
+            ("pacman", false),
+            ("zypper", false),
+            ("flatpak", true),
+            ("snap", true),
+            ("fwupd", true),
+        ] {
+            let mut controller = synthetic_controller();
+            let mut ctl = controller.pin_mut();
+            ctl.as_mut().set_source_catalog(encoded(
+                json!([{"source":source, "available":true, "capabilities":["refresh"]}]),
+            ));
+            ctl.as_mut().check_for_updates(source.into());
+            let job = &ctl.rust().worker.as_ref().unwrap().job;
+            let ops = job.operations();
+            if refreshes {
+                assert_eq!(
+                    ops,
+                    &[Operation::Refresh {
+                        backend: source.into()
+                    }],
+                    "{source} check should refresh without a password"
+                );
+            } else {
+                assert!(ops.is_empty(), "{source} check queued a password refresh");
+            }
+            assert!(
+                ctl.rust().confirmed_queue.is_empty(),
+                "{source} check queued work"
+            );
+            settle(&mut ctl);
+        }
+    }
+
+    #[test]
+    fn refresh_checks_preempt_background_reads_and_are_identified_while_queued() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().set_source_catalog(encoded(
+            json!([{"source":"flatpak", "available":true, "capabilities":["refresh"]}]),
+        ));
+        ctl.as_mut().rust_mut().worker =
+            Some(fake_worker(Job::Load("Updates".into(), "".into()), vec![]));
+        ctl.as_mut().rust_mut().background = true;
+        ctl.as_mut()
+            .check_for_updates(" flatpak , flatpak , ".into());
+        assert!(ctl.checking_updates());
+        assert_eq!(ctl.rust().confirmed_queue.len(), 1);
+        assert!(ctl.rust().worker.as_ref().unwrap().cancel.requested());
+        settle(&mut ctl);
+        assert!(!ctl.checking_updates());
+        assert!(ctl.rust().confirmed_queue.is_empty());
+    }
+
+    #[test]
+    fn refresh_a_finished_explicit_check_publishes_and_caches_its_final_report() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().rust_mut().active_view = "Updates".into();
+        ctl.as_mut().rust_mut().updates_view = true;
+        ctl.as_mut().rust_mut().source_filter = vec!["npm".into()];
+        let mut package = fixture_row();
+        package.id.backend = "npm".into();
+        let report = PackageReport {
+            packages: vec![package],
+            successful_sources: vec!["npm".into()],
+            failures: vec![],
+        };
+        ctl.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::CheckUpdates(vec![], vec!["npm".into()]),
+            vec![Reply::Done(Ok(Payload::CheckedUpdates(
+                Box::new(report),
+                "Completed".into(),
+                vec![],
+            )))],
+        ));
+        ctl.as_mut().set_busy(true);
+        ctl.as_mut().set_writing(true);
+        settle(&mut ctl);
+        assert!(!ctl.busy());
+        assert!(!ctl.writing());
+        assert!(!ctl.checking_updates());
+        assert_eq!(ctl.rust().packages.len(), 1);
+        assert!(ctl.rust().queued.is_none());
+        assert!(ctl.notice().is_empty() || ctl.notice().as_str() == "{}");
+        let state: Value = serde_json::from_str(ctl.report_state().as_str()).unwrap();
+        assert_eq!(state["phase"], "complete");
+        assert!(state["checked_at"].as_u64().unwrap() > 0);
+        assert!(ctl
+            .rust()
+            .view_cache
+            .get(&cache_key("Updates", "", &["npm".into()], false))
+            .is_some());
+    }
+
     #[test]
     fn refreshing_sources_reviews_only_those_that_can_refresh() {
         let mut controller = ffi::create_controller();

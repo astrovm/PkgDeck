@@ -146,9 +146,10 @@ impl<T: Transport> Firmware<T> {
         if let Some(id) = id {
             args.push(id.into());
         }
+        // Metadata refresh does not change the firmware, so it runs as the user.
         let result = self
             .transport
-            .system_manager("fwupdmgr", &args, cancel, true);
+            .system_manager("fwupdmgr", &args, cancel, command != "refresh");
         let result = match result {
             Ok(result) | Err(ExecutionError::Failed(result))
                 if result.code == Some(2) && command == "refresh" =>

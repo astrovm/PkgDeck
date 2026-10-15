@@ -771,45 +771,79 @@ fn settings_turn_package_managers_on_and_off() {
 }
 
 #[test]
-fn updates_refresh_the_package_lists_it_shows() {
-    let mut app = with_sources(app());
-    app.page = Page::Updates;
-    app.invalidate();
-    let mut harness = harness(app);
-    harness.run_steps(3);
-    harness.get_by_label("Refresh sources").click();
-    harness.run_steps(3);
-    // APT can refresh; Flatpak can't, and Homebrew's check failed.
-    assert!(harness
-        .query_by_label_contains("Refresh 1 source")
-        .is_some());
-    harness.get_by_label("Cancel").click();
-    harness.run_steps(3);
-    assert!(harness
-        .query_by_label_contains("Refresh 1 source")
-        .is_none());
-    // The shortcut reviews the same list, from any page.
-    harness.state_mut().1.page = Page::Installed;
-    if cfg!(target_os = "macos") {
-        harness.key_press_modifiers(
-            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-            egui::Key::R,
-        );
-    } else {
-        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
+    for page in [Page::Updates, Page::Installed, Page::Clean, Page::Search] {
+        for empty in [false, true] {
+            for size in [egui::vec2(1200.0, 800.0), egui::vec2(400.0, 600.0)] {
+                let mut app = with_sources(app());
+                app.page = page;
+                if page == Page::Search {
+                    app.query = "fixture".into();
+                }
+                if empty {
+                    app.c().set_rows("[]".into());
+                    app.react();
+                }
+                app.invalidate();
+                let mut h = harness_at(app, size);
+                h.run_steps(4);
+                let label = if page == Page::Updates {
+                    "Check for updates"
+                } else {
+                    "Refresh"
+                };
+                assert_eq!(
+                    h.query_all_by_role_and_label(Role::Button, label).count(),
+                    1,
+                    "{page:?} {empty} {size:?}"
+                );
+                for obsolete in ["Refresh sources", "Check again", "Reload (Ctrl+R)"] {
+                    assert!(h.query_by_label(obsolete).is_none(), "{obsolete}");
+                }
+                h.get_by_role_and_label(Role::Button, label).click();
+                h.run_steps(2);
+                assert!(h.state().1.busy);
+                assert_eq!(h.state().1.checking_updates, page == Page::Updates);
+                assert!(h.state().1.confirmation.is_none());
+                if page == Page::Updates {
+                    assert!(!h
+                        .state()
+                        .1
+                        .retained
+                        .as_ref()
+                        .is_some_and(|rows| rows.is_empty()));
+                }
+                // The spinner and Cancel are one control: no separate busy label.
+                let busy_label = if page == Page::Updates {
+                    "Checking…"
+                } else {
+                    "Refreshing…"
+                };
+                assert!(h
+                    .query_by_role_and_label(Role::Button, busy_label)
+                    .is_none());
+                assert_eq!(
+                    h.query_all_by_role_and_label(Role::Button, "Cancel")
+                        .count(),
+                    1,
+                    "{page:?} {empty} {size:?}"
+                );
+                h.get_by_role_and_label(Role::Button, "Cancel").click();
+                h.run_steps(2);
+            }
+        }
     }
-    harness.run_steps(3);
-    assert!(harness
-        .query_by_label_contains("Refresh 1 source")
-        .is_some());
-    harness.get_by_label("Cancel").click();
-    harness.run_steps(3);
-    harness.state_mut().1.page = Page::Updates;
-    // Without a source that can refresh there's no button.
-    harness.state_mut().1.set_source_enabled("flatpak", true);
-    harness.state_mut().1.set_source_enabled("apt", false);
-    harness.run_steps(3);
-    assert!(harness.query_by_label("Refresh sources").is_none());
+    let mut h = harness(with_sources(app()));
+    h.state_mut().1.page = Page::Updates;
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    h.run_steps(2);
+    assert!(h.state().1.checking_updates);
+    assert!(h.state().1.confirmation.is_none());
+    // Repeated shortcuts don't replace or queue the running check.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    h.run_steps(2);
+    assert!(h.state().1.checking_updates);
 }
 
 #[test]
@@ -1424,7 +1458,7 @@ fn switch_disabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
 }
 
 #[test]
-fn a_failed_list_offers_retry_and_details_and_retry_reloads() {
+fn refresh_a_failed_list_uses_the_header_check_and_offers_details() {
     let mut app = with_sources(app());
     app.page = Page::Updates;
     app.c().set_rows("[]".into());
@@ -1437,7 +1471,7 @@ fn a_failed_list_offers_retry_and_details_and_retry_reloads() {
     app.invalidate();
     let mut harness = harness(app);
     harness.run_steps(4);
-    for label in ["Retry", "Details"] {
+    for label in ["Check for updates", "Details"] {
         assert!(
             harness
                 .query_by_role_and_label(Role::Button, label)
@@ -1453,7 +1487,9 @@ fn a_failed_list_offers_retry_and_details_and_retry_reloads() {
     assert!(harness.state().1.ui.checks_open);
     harness.state_mut().1.ui.checks_open = false;
     harness.run_steps(3);
-    harness.get_by_role_and_label(Role::Button, "Retry").click();
+    harness
+        .get_by_role_and_label(Role::Button, "Check for updates")
+        .click();
     harness.run_steps(3);
     assert!(harness
         .state_mut()
@@ -1521,5 +1557,222 @@ fn installed_list_widgets_sit_on_the_ui_grid() {
                 off_grid.join("\n")
             );
         }
+    }
+}
+
+#[test]
+fn refresh_header_reports_fresh_partial_and_running_checks_and_preserves_batch_progress() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.report.checked_at = Some(pkgdeck::model::now());
+    app.invalidate();
+    let mut h = harness(app);
+    h.run_steps(4);
+    assert!(h.query_by_label_contains("Last checked").is_some());
+    let count = h.state().1.items.len();
+    let caption = format!(
+        "{count} {} · Last checked",
+        if count == 1 { "update" } else { "updates" }
+    );
+    assert!(h.query_by_label_contains(&caption).is_some());
+    let update = h.get_by_role_and_label(Role::Button, "Update all");
+    assert!(update.rect().bottom() <= 800.0);
+    assert!(!update.accesskit_node().is_disabled());
+    h.state_mut().1.report.failures =
+        serde_json::from_value(json!([{"source":"apt","kind":"failed"}])).unwrap();
+    h.run_steps(2);
+    assert!(h
+        .query_by_label_contains("Some sources couldn’t be checked")
+        .is_some());
+    h.state_mut().1.report.failures.clear();
+    h.state_mut().1.busy = true;
+    h.state_mut().1.writing = true;
+    h.state_mut().1.progress.label = "Updating".into();
+    h.run_steps(2);
+    // Ordinary writes retain their progress card and its Cancel control.
+    assert_eq!(
+        h.query_all_by_role_and_label(Role::Button, "Cancel")
+            .count(),
+        1
+    );
+    assert!(!h
+        .get_by_role_and_label(Role::Button, "Update all")
+        .accesskit_node()
+        .is_disabled());
+    // Completed work can leave its last progress text behind.
+    h.state_mut().1.writing = false;
+    h.state_mut().1.busy = false;
+    h.run_steps(2);
+    assert_eq!(
+        h.query_all_by_role_and_label(Role::Button, "Cancel")
+            .count(),
+        0
+    );
+    h.state_mut().1.writing = true;
+    h.state_mut().1.busy = true;
+    h.state_mut().1.checking_updates = true;
+    h.run_steps(2);
+    assert!(h.query_by_label("Checking for updates").is_some());
+    assert_eq!(
+        h.query_all_by_role_and_label(Role::Button, "Cancel")
+            .count(),
+        1
+    );
+    assert!(h
+        .get_by_role_and_label(Role::Button, "Update all")
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewed() {
+    use pkgdeck_core::{
+        engine::{Backend, Engine, EngineError},
+        package::{Availability, Capability, Package, PackageId, Scope, UpdateAvailability},
+        process::Cancellation,
+    };
+    struct Fixture;
+    impl Backend for Fixture {
+        fn id(&self) -> &str {
+            "flatpak"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            Ok(vec![Package {
+                id: PackageId {
+                    backend: "flatpak".into(),
+                    name: "org.example.Fixture".into(),
+                    architecture: "all".into(),
+                    scope: Scope::User { uid: 1234 },
+                    remote: None,
+                    reference: None,
+                },
+                display_name: "Fixture".into(),
+                summary: "Synthetic package".into(),
+                installed_version: Some("1.0".into()),
+                candidate_version: Some("2.0".into()),
+                update: UpdateAvailability::Available,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+                adopt_with: None,
+            }])
+        }
+    }
+    let (store, settings) = Store::open(None, None);
+    let mut platform = Platform::start(|| {});
+    platform.record_notifications();
+    let controller = create_synthetic_controller(|_, _, _, _| {
+        let mut engine = Engine::default();
+        engine.register(Fixture).unwrap();
+        Ok(engine)
+    });
+    let mut app = App::with_controller(controller, settings, store, platform, Launch::default());
+    app.settings.reduce_motion = true;
+    app.page = Page::Updates;
+    app.c().set_source_catalog(
+        json!([{"source":"flatpak", "available":true, "capabilities":["installed", "upgrade"]}])
+            .to_string()
+            .into(),
+    );
+    app.c()
+        .load("Updates".into(), "".into(), "flatpak".into(), false, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while *app.ctl.busy() && std::time::Instant::now() < deadline {
+        app.c().poll();
+        app.react();
+        std::thread::yield_now();
+    }
+    app.react();
+    assert!(!app.busy);
+    let mut h = harness(app);
+    h.run_steps(4);
+    assert_eq!(h.state().1.items.len(), 1);
+    let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    h.key_press_modifiers(modifiers, egui::Key::U);
+    h.run_steps(2);
+    assert!(
+        h.state().1.confirmation.is_some(),
+        "idle updates must be reviewable by shortcut"
+    );
+    h.state_mut().1.confirm(true);
+    assert!(h.state().1.writing);
+    h.run_steps(2);
+    h.key_press_modifiers(modifiers, egui::Key::U);
+    h.run_steps(2);
+    assert!(
+        h.state().1.confirmation.is_some(),
+        "another update can be reviewed while a write runs"
+    );
+    h.state_mut().1.confirm(false);
+    h.state_mut().1.checking_updates = true;
+    h.run_steps(2);
+    h.key_press_modifiers(modifiers, egui::Key::U);
+    h.run_steps(2);
+    assert!(h.state().1.confirmation.is_none());
+    h.state_mut().1.cancel();
+}
+
+#[test]
+fn refresh_empty_updates_show_the_timestamp_only_in_the_header() {
+    fn count_text(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> usize {
+        fn matches(shape: &egui::Shape, wanted: &str) -> usize {
+            match shape {
+                egui::Shape::Text(text) => usize::from(text.galley.text() == wanted),
+                egui::Shape::Vec(shapes) => shapes.iter().map(|shape| matches(shape, wanted)).sum(),
+                _ => 0,
+            }
+        }
+        shapes
+            .iter()
+            .map(|shape| matches(&shape.shape, wanted))
+            .sum()
+    }
+    for page in [Page::Updates, Page::Clean] {
+        let mut app = with_sources(app());
+        app.page = page;
+        app.c().set_rows("[]".into());
+        app.react();
+        app.report.checked_at = Some(pkgdeck::model::now());
+        app.invalidate();
+        let mut h = harness(app);
+        h.run_steps(4);
+        assert_eq!(
+            count_text(&h.output().shapes, "Checked just now"),
+            usize::from(page == Page::Clean)
+        );
+        if page == Page::Updates {
+            assert!(h.query_by_label("Last checked just now").is_some());
+        }
+    }
+}
+
+#[test]
+fn refresh_timestamps_belong_to_updates_and_other_pages_keep_their_counts() {
+    for page in [Page::Installed, Page::Search] {
+        let mut app = with_sources(app());
+        app.page = page;
+        if page == Page::Search {
+            app.query = "fixture".into();
+        }
+        app.report.checked_at = Some(pkgdeck::model::now());
+        app.invalidate();
+        let mut h = harness(app);
+        h.run_steps(4);
+        let count = h.state().1.items.len();
+        let caption = format!(
+            "{count} {}",
+            if count == 1 { "package" } else { "packages" }
+        );
+        assert!(h.query_by_label(&caption).is_some(), "{page:?}");
+        assert!(
+            h.query_by_label_contains("Last checked").is_none(),
+            "{page:?}"
+        );
     }
 }

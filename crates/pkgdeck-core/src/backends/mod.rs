@@ -1677,18 +1677,14 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
         }
         let (id, verb) = match operation {
             Operation::Refresh { backend } if backend == "flatpak" => {
-                for (system, scope) in [(false, "--user"), (true, "--system")] {
+                // Appstream metadata only: no app is downloaded or changed. The
+                // system scope runs as the user because this is not privileged.
+                for scope in ["--user", "--system"] {
                     self.call(
-                        &[
-                            scope,
-                            "update",
-                            "--no-deploy",
-                            "--noninteractive",
-                            "--assumeyes",
-                        ],
+                        &[scope, "update", "--appstream", "--noninteractive"],
                         cancel,
                         true,
-                        system,
+                        false,
                     )?;
                 }
                 return Ok(OperationOutcome::default());
@@ -1754,6 +1750,34 @@ fn availability(result: Result<Completion, ExecutionError>) -> Result<Availabili
         Ok(_) => Ok(Availability::Available),
         Err(ExecutionError::Disabled(reason)) => Ok(Availability::Unavailable(reason)),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether an `Unavailable` reason means the tool isn't installed. Missing
+/// tools report `"<tool> not found"`; an installed but broken source reports
+/// why it's broken, so it doesn't match.
+pub fn is_missing_tool_reason(reason: &str) -> bool {
+    reason
+        .strip_suffix(" not found")
+        .is_some_and(|tool| !tool.is_empty() && !tool.contains(' '))
+}
+
+#[cfg(test)]
+mod missing_tool_reason_tests {
+    use super::is_missing_tool_reason;
+
+    #[test]
+    fn missing_tools_match_and_broken_installs_do_not() {
+        assert!(is_missing_tool_reason("APT not found"));
+        assert!(is_missing_tool_reason("mas not found"));
+        assert!(!is_missing_tool_reason(" not found"));
+        assert!(!is_missing_tool_reason("pipx home not found"));
+        assert!(!is_missing_tool_reason(
+            "Docker is installed but unavailable: daemon stopped"
+        ));
+        assert!(!is_missing_tool_reason(
+            "mas 6.3.0 is too old; PkgDeck needs mas 7 or newer"
+        ));
     }
 }
 
@@ -3337,6 +3361,7 @@ impl ManagerKind {
     /// Where the manager lists pending updates, if it can without writing.
     fn update_args(self) -> Option<(&'static str, &'static [&'static str])> {
         match self {
+            Self::Snap => Some(("snap", &["refresh", "--list"])),
             Self::Apk => Some(("apk", &["list", "--upgradable"])),
             // -M reads the repository index into memory; -n only reports.
             Self::Xbps => Some(("xbps-install", &["-Mun"])),
@@ -3436,7 +3461,6 @@ impl ManagerKind {
             (Self::Zypper, Operation::Remove(_)) => vec!["--non-interactive", "remove", "--"],
             (Self::Zypper, Operation::Upgrade(_)) => vec!["--non-interactive", "update", "--"],
             (Self::Zypper, Operation::UpgradeAll { .. }) => vec!["--non-interactive", "update"],
-            (Self::Snap, Operation::Refresh { .. }) => vec!["refresh"],
             (Self::Snap, Operation::Install(_)) => vec!["install"],
             (Self::Snap, Operation::Remove(_)) => vec!["remove"],
             (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
@@ -3455,7 +3479,8 @@ impl ManagerKind {
             (Self::MacPorts, Operation::Remove(_)) => vec!["-N", "uninstall"],
             (Self::MacPorts, Operation::Upgrade(_)) => vec!["-N", "upgrade"],
             (Self::MacPorts, Operation::UpgradeAll { .. }) => vec!["-N", "upgrade", "outdated"],
-            (_, Operation::Clean(_)) => return None,
+            // Snap's refresh is read-only and handled in `execute`.
+            (Self::Snap, Operation::Refresh { .. }) | (_, Operation::Clean(_)) => return None,
         })
     }
 }
@@ -3552,6 +3577,7 @@ impl<T: Transport> SystemManager<T> {
             Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
                 return Err(EngineError::Cancelled)
             }
+            Err(error) if matches!(self.kind, ManagerKind::Snap) => return Err(error),
             Err(_) => return Ok(BTreeMap::new()),
         };
         Ok(text
@@ -3559,6 +3585,7 @@ impl<T: Transport> SystemManager<T> {
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 match self.kind {
+                    ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
                     ManagerKind::Apk => apk_pkgver(fields.first()?),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
                         xbps_pkgver(fields.first()?)
@@ -4076,6 +4103,23 @@ impl<T: Transport> Backend for SystemManager<T> {
             return Ok(OperationOutcome {
                 cancellation_deferred: result.cancellation_deferred,
             });
+        }
+        // Snap has no metadata-only refresh. `snap refresh` upgrades every snap,
+        // so the refresh runs the read-only listing instead.
+        if matches!(
+            (self.kind, operation),
+            (ManagerKind::Snap, Operation::Refresh { .. })
+        ) {
+            bytes(
+                "snap",
+                self.call_with(
+                    "snap",
+                    vec![OsString::from("refresh"), OsString::from("--list")],
+                    cancel,
+                    false,
+                )?,
+            )?;
+            return Ok(OperationOutcome::default());
         }
         let Some(fixed) = self.kind.write_args(operation) else {
             return Err(self.unsupported(Capability::Clean));

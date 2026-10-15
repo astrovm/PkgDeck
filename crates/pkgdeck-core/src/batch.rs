@@ -129,17 +129,6 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             "clean" => apt_command(AptAction::Clean)?,
             _ => return Err(invalid("unknown APT cleanup task")),
         },
-        Operation::Refresh { backend } if backend == "flatpak" => ProtectedCommand::new(
-            "flatpak",
-            [
-                "--system",
-                "update",
-                "--no-deploy",
-                "--noninteractive",
-                "--assumeyes",
-            ]
-            .map(str::to_owned),
-        ),
         Operation::UpgradeAll { backend } if backend == "flatpak" => ProtectedCommand::new(
             "flatpak",
             ["--system", "update", "--noninteractive", "--assumeyes"].map(str::to_owned),
@@ -187,15 +176,16 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             args.push(reference.into());
             ProtectedCommand::new("flatpak", args)
         }
-        Operation::Refresh { backend } if backend == "fwupd" => firmware_command("refresh", None)?,
         Operation::UpgradeAll { backend } if backend == "fwupd" => {
             firmware_command("update", None)?
         }
         Operation::Upgrade(id) if id.backend == "fwupd" => {
             firmware_command("update", Some(&id.name))?
         }
+        // Refreshes of these managers are reviewed and elevated. Snap has no
+        // metadata-only refresh, so its refresh runs as the user (see backends).
         Operation::Refresh { backend }
-            if matches!(backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
+            if matches!(backend.as_str(), "dnf" | "pacman" | "zypper") =>
         {
             manager_command(backend, "refresh", None)?
         }
@@ -380,7 +370,7 @@ fn manager_command(
         ("zypper", "remove") => &["--non-interactive", "remove", "--"],
         ("zypper", "upgrade") => &["--non-interactive", "update", "--"],
         ("zypper", "all") => &["--non-interactive", "update"],
-        ("snap", "refresh" | "upgrade" | "all") => &["refresh"],
+        ("snap", "upgrade" | "all") => &["refresh"],
         ("snap", "install") => &["install"],
         ("snap", "remove") => &["remove"],
         _ => return Err(invalid("unsupported system manager")),
@@ -1148,7 +1138,6 @@ mod tests {
             // `pacman -S --needed NAME` would install a missing package.
             Operation::Upgrade(id("pacman", "synthetic")),
             all("fwupd"),
-            refresh("fwupd"),
             Operation::Upgrade(id("flatpak", "org.example.App")),
             Operation::Clean(crate::package::CleanupId {
                 backend: "apt".into(),
@@ -1423,13 +1412,6 @@ mod tests {
                 "clean",
             ),
             (
-                Operation::Refresh {
-                    backend: "flatpak".into(),
-                },
-                "flatpak",
-                "update",
-            ),
-            (
                 Operation::UpgradeAll {
                     backend: "flatpak".into(),
                 },
@@ -1460,13 +1442,6 @@ mod tests {
                 "update",
             ),
             (
-                Operation::Refresh {
-                    backend: "fwupd".into(),
-                },
-                "fwupdmgr",
-                "refresh",
-            ),
-            (
                 Operation::UpgradeAll {
                     backend: "fwupd".into(),
                 },
@@ -1491,7 +1466,9 @@ mod tests {
                 "{operation:?}"
             );
         }
-        for backend in ["dnf", "pacman", "zypper", "snap"] {
+        // Routine checks never elevate a refresh; only the explicit,
+        // reviewed refresh of these managers does.
+        for backend in ["dnf", "pacman", "zypper"] {
             for operation in [
                 Operation::Refresh {
                     backend: backend.into(),
@@ -2097,6 +2074,32 @@ done"#;
         app.scope = Scope::User { uid: 1000 };
         assert!(flatpak_ref(&app).is_err());
         assert!(manager_command("unsupported", "refresh", None).is_err());
+        // `snap refresh` upgrades every snap, so a refresh never maps to it.
+        assert!(manager_command("snap", "refresh", None).is_err());
+    }
+
+    #[test]
+    fn metadata_refreshes_of_flatpak_fwupd_and_snap_never_elevate() {
+        for backend in ["flatpak", "fwupd", "snap"] {
+            let refresh = Operation::Refresh {
+                backend: backend.into(),
+            };
+            assert!(
+                protected_commands(&refresh).unwrap().is_empty(),
+                "{backend}"
+            );
+        }
+        // Refreshing needs no approval, so an unattended run may do it too.
+        let refreshes = UPGRADE_ONLY_BACKENDS
+            .iter()
+            .map(|backend| Operation::Refresh {
+                backend: (*backend).into(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &refreshes),
+            Ok(())
+        );
     }
 
     #[test]

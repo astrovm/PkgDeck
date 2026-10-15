@@ -162,6 +162,33 @@ pub fn list_shown(app: &App) -> bool {
 /// The line under the page title: how many, or what the page is doing,
 /// and which sources it still waits for (named on hover past two).
 pub fn subtitle(app: &App) -> (String, Option<String>) {
+    if app.page == Page::Updates && app.opened.is_none() {
+        let line = if app.checking_updates {
+            "Checking for updates".into()
+        } else if !app.busy {
+            match app.read_failures().is_empty() {
+                false => "Some sources couldn’t be checked".into(),
+                true => app
+                    .report
+                    .checked_at
+                    .map(|at| {
+                        format!(
+                            "Last {}",
+                            model::checked_ago(at, model::now()).to_lowercase()
+                        )
+                    })
+                    .unwrap_or_default(),
+            }
+        } else {
+            heading_text(app)
+        };
+        let line = if !app.busy && !app.items.is_empty() && !line.is_empty() {
+            format!("{} · {line}", heading_text(app))
+        } else {
+            line
+        };
+        return (line, None);
+    }
     if !list_shown(app) {
         return (String::new(), None);
     }
@@ -1449,7 +1476,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
         } else {
             String::new()
         }
-    } else if matches!(app.page, Page::Updates | Page::Clean) {
+    } else if app.page == Page::Clean {
         app.report
             .checked_at
             .map(|at| model::checked_ago(at, model::now()))
@@ -1521,8 +1548,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     );
 }
 
-/// The buttons under an empty list, with their icons. Anything that
-/// failed or stopped offers Retry, whatever it was doing.
+/// Contextual empty-list actions. Refresh always stays in the header.
 fn empty_actions(
     page: Page,
     failures: usize,
@@ -1530,22 +1556,15 @@ fn empty_actions(
     filtered: bool,
 ) -> Vec<(&'static str, &'static str)> {
     if failures > 0 {
-        return vec![("Retry", "refresh"), ("Details", "info")];
+        return vec![("Details", "info")];
     }
     if cancelled {
-        return vec![("Retry", "refresh")];
+        return vec![];
     }
     if page == Page::Search {
         return vec![];
     }
-    let mut labels = vec![(
-        if matches!(page, Page::Updates | Page::Clean) {
-            "Check again"
-        } else {
-            "Reload"
-        },
-        "refresh",
-    )];
+    let mut labels = vec![];
     if filtered {
         labels.push(("Clear filters", "cancel"));
     }
@@ -1606,25 +1625,22 @@ mod tests {
     }
 
     #[test]
-    fn failed_or_stopped_lists_always_offer_retry() {
+    fn refresh_empty_lists_leave_refresh_in_the_header() {
         use super::{empty_actions, Page};
         for page in Page::ALL {
             for failures in [1, 3] {
                 assert_eq!(
                     empty_actions(page, failures, false, true),
-                    [("Retry", "refresh"), ("Details", "info")]
+                    [("Details", "info")]
                 );
             }
-            assert_eq!(empty_actions(page, 0, true, true), [("Retry", "refresh")]);
+            assert!(empty_actions(page, 0, true, true).is_empty());
         }
         assert!(empty_actions(Page::Search, 0, false, true).is_empty());
-        assert_eq!(
-            empty_actions(Page::Updates, 0, false, false),
-            [("Check again", "refresh")]
-        );
+        assert_eq!(empty_actions(Page::Updates, 0, false, false), []);
         assert_eq!(
             empty_actions(Page::Installed, 0, false, true),
-            [("Reload", "refresh"), ("Clear filters", "cancel")]
+            [("Clear filters", "cancel")]
         );
     }
 
