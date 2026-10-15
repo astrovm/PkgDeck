@@ -856,8 +856,16 @@ fn refresh_sources_is_reviewed_and_separate_from_the_routine_check() {
             .count(),
         1
     );
-    // Ctrl+M asks for review instead of starting a silent refresh.
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    // The refresh shortcut asks for review instead of starting a silent refresh.
+    // Linux uses Ctrl+M; macOS uses Shift+Cmd+R (see ui/mod.rs).
+    if cfg!(target_os = "macos") {
+        h.key_press_modifiers(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::R,
+        );
+    } else {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    }
     h.run_steps(2);
     assert!(h.state().1.confirmation.is_some());
     assert!(!h.state().1.checking_updates);
