@@ -113,6 +113,10 @@ fn options(decorated: bool) -> eframe::NativeOptions {
         eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo-64.png"))
             .unwrap_or_default(),
     );
+    // An absent icon selects eframe's default. Its empty icon sentinel
+    // instead leaves NSApplication's bundled icon alone.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_icon(eframe::egui::IconData::default());
     eframe::NativeOptions {
         viewport,
         run_and_return: true,
@@ -127,10 +131,10 @@ fn options(decorated: bool) -> eframe::NativeOptions {
 fn start_macos_background() -> eframe::Result {
     struct Startup;
     impl eframe::App for Startup {
-        fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
-            ui.ctx()
-                .send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        fn logic(&mut self, ctx: &eframe::egui::Context, _: &mut eframe::Frame) {
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
         }
+        fn ui(&mut self, _: &mut eframe::egui::Ui, _: &mut eframe::Frame) {}
     }
     let mut options = options(true);
     options.viewport = options.viewport.with_visible(false);
@@ -349,8 +353,11 @@ mod tests {
 
     #[test]
     fn the_dock_keeps_the_bundled_icon() {
-        let icon = options(true).viewport.icon;
-        assert_eq!(icon.is_none(), cfg!(target_os = "macos"));
+        let icon = options(true).viewport.icon.unwrap();
+        assert_eq!(
+            *icon == eframe::egui::IconData::default(),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]
