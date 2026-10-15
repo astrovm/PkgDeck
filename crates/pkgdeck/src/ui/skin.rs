@@ -1462,15 +1462,15 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
     let dark = palette.dark;
     match style() {
         Family::Modern | Family::Fluent | Family::Liquid => None,
+        // The same bar as the window's, tinted or not.
         Family::Retro => {
-            // Windows 98's title bar: the accent fading to a lighter shade.
-            let end = lerp(palette.deep, palette.bright, 0.85);
-            gradient(painter, rect, CornerRadius::ZERO, palette.deep, end, true);
-            Some(ink_on(palette.deep))
+            let (from, to) = super::frame::title_colors(palette, true);
+            gradient(painter, rect, CornerRadius::ZERO, from, to, true);
+            Some(ink_on(from))
         }
         Family::Luna => {
             let radius = top_corners(theme::round(18));
-            let blue = palette.deep;
+            let blue = palette.bar;
             bands(
                 painter,
                 rect,
@@ -1525,11 +1525,11 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
 }
 
 /// The page's heading: plain ink in every style and accent.
-pub fn heading(palette: &Palette) -> (FontId, Color32) {
+pub fn heading() -> FontId {
     match style() {
-        Family::Modern | Family::Fluent | Family::Liquid => (theme::bold(26.0), palette.ink),
-        Family::Glass => (theme::font(24.0), palette.ink),
-        Family::Luna | Family::Retro | Family::Gel => (theme::bold(22.0), palette.ink),
+        Family::Modern | Family::Fluent | Family::Liquid => theme::bold(26.0),
+        Family::Glass => theme::font(24.0),
+        Family::Luna | Family::Retro | Family::Gel => theme::bold(22.0),
     }
 }
 
@@ -1752,8 +1752,6 @@ pub struct Group {
     pub stroke: Stroke,
     pub radius: CornerRadius,
     pub shadow: Shadow,
-    /// The title's colour.
-    pub ink: Color32,
     /// The title sits on the box's top line, rather than inside it.
     pub on_line: bool,
     pub bold: bool,
@@ -1768,7 +1766,6 @@ pub fn group(palette: &Palette) -> Option<Group> {
         stroke: Stroke::NONE,
         radius: CornerRadius::ZERO,
         shadow: Shadow::NONE,
-        ink: palette.ink,
         on_line: true,
         bold: false,
         size: 14.0,
@@ -1990,7 +1987,6 @@ mod tests {
         }
         let strip = paint_title_strip(painter, rect(), palette);
         assert_eq!(strip.is_some(), !style.flat(), "{at}");
-        assert!(heading(palette).1.a() > 0, "{at}");
         let band = paint_column_band(painter, rect(), palette);
         assert_eq!(band, !style.flat(), "{at}");
         for (sorted, hovered) in [(false, false), (true, true)] {

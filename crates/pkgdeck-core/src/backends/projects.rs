@@ -39,8 +39,7 @@ const GRADLE: &[&str] = &[
     "settings.gradle.kts",
 ];
 
-/// Where to look for projects, and how long one stays untouched before its
-/// build files count as old.
+/// Which local files keep a finished worktree from being cleaned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeProtection {
@@ -609,8 +608,10 @@ impl Projects {
     }
 
     /// Removes one finished worktree if the chosen protection lets it go.
-    /// Git refuses some that are safe, such as any with a submodule, so
-    /// after that check `--force` only skips Git's own.
+    /// Git refuses some that are safe, such as any with a submodule or new
+    /// files the protection allows to lose. `--force` then skips only Git's
+    /// own check, after the protection passes again: a file saved since the
+    /// first check keeps the worktree.
     fn remove_worktree(
         &self,
         repository: &Path,
@@ -620,16 +621,22 @@ impl Projects {
         if let Some(reason) = self.kept_because(path, cancel) {
             return Err(reason);
         }
-        let path = path.to_string_lossy();
-        self.git_run(repository, &["worktree", "remove", &path], cancel)
-            .or_else(|_| {
-                self.git_run(
-                    repository,
-                    &["worktree", "remove", "--force", &path],
-                    cancel,
-                )
-            })
-            .map(drop)
+        let shown = path.to_string_lossy();
+        if self
+            .git_run(repository, &["worktree", "remove", &shown], cancel)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if let Some(reason) = self.kept_because(path, cancel) {
+            return Err(reason);
+        }
+        self.git_run(
+            repository,
+            &["worktree", "remove", "--force", &shown],
+            cancel,
+        )
+        .map(drop)
     }
 
     /// The branch finished work lands on: the remote's default, or a local
@@ -1794,6 +1801,49 @@ mod tests {
             "Couldn't remove ~/.trees/a: Git couldn't check it"
         );
         assert!(tree.join("tracked").exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_file_saved_after_the_check_keeps_the_worktree_from_a_forced_removal() {
+        let home = scratch("saved-later");
+        let repo = home.join("repo");
+        write(&repo.join("tracked"), "original");
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        let tree = home.join(".trees/a");
+        let path = tree.display().to_string();
+        git(&repo, &["worktree", "add", "--quiet", "-b", "a", &path]);
+        age_files(&home, 30);
+        // The user saves a file right as the plain removal starts, so Git
+        // refuses it for a reason PkgDeck didn't see.
+        let bin = tools(&home, "");
+        let real = Host::current().resolve("git").unwrap().expect("git");
+        fs::remove_file(bin.join("git")).unwrap();
+        fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\nif [ \"$3 $4\" = 'worktree remove' ] && [ \"$5\" != --force ]; then echo saved >> \"$5/tracked\"; fi\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut backend = projects(&home, &bin, vec![repo], 7);
+        let cancel = Cancellation::default();
+        let item = backend.cleanup(&cancel).unwrap().remove(0);
+        let error = backend
+            .execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("Couldn't remove ~/.trees/a: "));
+        assert_eq!(
+            fs::read_to_string(tree.join("tracked")).unwrap(),
+            "originalsaved\n"
+        );
         fs::remove_dir_all(home).unwrap();
     }
 

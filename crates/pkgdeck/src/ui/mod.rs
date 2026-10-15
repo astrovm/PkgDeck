@@ -144,9 +144,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         },
         if dragging { 0.0 } else { LAYOUT },
     );
-    // The frame's title bar paints the sidebar's colour that far, where the
-    // sidebar runs up behind the window's buttons.
-    // The frame paints before this runs, so a change takes one more frame.
+    // The frame's title bar paints the sidebar's colour this far, where the
+    // sidebar runs up behind the window's buttons. The frame paints first,
+    // so a new width shows on the next frame.
     let extent = Id::new("sidebar-extent");
     let before = ctx.data(|data| data.get_temp::<f32>(extent));
     ctx.data_mut(|data| data.insert_temp(extent, sidebar_width));
@@ -593,10 +593,13 @@ fn header(app: &mut App, ui: &mut Ui) {
     let compact = width < 600.0;
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
-        let (font, ink) = skin::heading(&palette);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
+            ui.label(
+                egui::RichText::new(app.page.name())
+                    .font(skin::heading())
+                    .color(palette.ink),
+            );
             if app.page != Page::Settings && app.opened.is_none() {
                 let (line, hover) = list::subtitle(app);
                 ui.horizontal(|ui| {
@@ -1128,8 +1131,7 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 }
 
-/// How much **Clean all** frees: every shown task but data, which it
-/// leaves alone.
+/// How much the checked tasks free. Data is never in a batch.
 fn clean_all_frees(app: &App) -> u64 {
     let rows = app.shown_rows();
     // Rows may be on their way while a list reloads.
@@ -1256,7 +1258,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             } else {
                 format!("{action} ({})", model::size(bytes))
             };
-            if (selected > 0 || (total == 0 && !app.items.is_empty()))
+            if selected > 0
                 && Button::new(Look::Solid(Tone::Danger), &label)
                     .icon("remove")
                     .enabled(app.can_act() && app.retained.is_none())
