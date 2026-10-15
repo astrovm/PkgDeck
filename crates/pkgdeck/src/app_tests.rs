@@ -945,7 +945,6 @@ fn row_actions_need_a_row_an_action_and_a_free_controller() {
     app.run_adopt(1);
     assert!(!app.active_rows.is_empty());
     app.propose("adopt-all");
-    app.propose("clean-all");
     app.choose(0, false);
     // Updates with nothing checked do nothing.
     app.page = Page::Updates;
@@ -1399,7 +1398,7 @@ fn cleanup_choices_survive_navigation_and_do_not_change_update_sources() {
 }
 
 #[test]
-fn package_rows_check_on_their_own_and_cleanup_rows_by_key() {
+fn package_rows_check_on_their_own() {
     let mut app = app();
     let package: Row = serde_json::from_value(row("htop", json!({}))).unwrap();
     assert!(app.row_checked(&package));
@@ -1408,19 +1407,6 @@ fn package_rows_check_on_their_own_and_cleanup_rows_by_key() {
     assert!(app.settings.cleanup.excluded.len() == 1, "only sccache");
     app.set_row_checked(&package, true);
     assert!(app.row_checked(&package));
-    // Equally named tasks stay apart by key; a task without one uses its name.
-    let task = |name: &str, key: &str| -> Row {
-        serde_json::from_value(
-            json!({"kind":"cleanup", "source":"projects", "name":name, "cleanup_key":key}),
-        )
-        .unwrap()
-    };
-    assert_ne!(
-        task("app", "worktrees:/a").check_identity(),
-        task("app", "worktrees:/b").check_identity()
-    );
-    assert_eq!(task("app", "").check_identity(), r#"["projects","app"]"#);
-    assert_eq!(package.check_identity(), package.identity());
 }
 
 #[test]

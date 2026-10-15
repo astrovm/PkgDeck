@@ -135,22 +135,6 @@ impl Row {
     pub fn batch_cleanable(&self) -> bool {
         self.kind == "cleanup" && self.cleanup_kind != "data"
     }
-    /// Checkbox identity uses a cleanup key, so equally named projects stay separate.
-    pub fn check_identity(&self) -> String {
-        if self.kind == "cleanup" {
-            serde_json::to_string(&(
-                &self.source,
-                if self.cleanup_key.is_empty() {
-                    &self.name
-                } else {
-                    &self.cleanup_key
-                },
-            ))
-            .unwrap_or_default()
-        } else {
-            self.identity()
-        }
-    }
     /// What a failed change names this row by; see `FailedRow::key`.
     pub fn failure_key(&self) -> String {
         if self.kind == "cleanup" {

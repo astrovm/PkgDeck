@@ -383,7 +383,7 @@ pub struct Press {
 
 /// The title bar's colour where the style takes it from the accent, or a
 /// neutral grey when the window bar is not tinted.
-fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
+pub(super) fn title_colors(palette: &Palette, active: bool) -> (Color32, Color32) {
     let bar = palette.bar;
     match theme::skin().family() {
         Family::Retro if active => {

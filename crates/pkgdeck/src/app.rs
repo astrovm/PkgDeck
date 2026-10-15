@@ -1054,7 +1054,7 @@ impl App {
                         key: row.cleanup_key.clone(),
                     })
         } else {
-            !self.unchecked.contains(&row.check_identity())
+            !self.unchecked.contains(&row.identity())
         }
     }
     pub fn set_row_checked(&mut self, row: &Row, checked: bool) {
@@ -1068,9 +1068,9 @@ impl App {
             );
             self.sync_cleanup_preferences();
         } else if checked {
-            self.unchecked.remove(&row.check_identity());
+            self.unchecked.remove(&row.identity());
         } else {
-            self.unchecked.insert(row.check_identity());
+            self.unchecked.insert(row.identity());
         }
     }
     pub fn set_all_checked(&mut self, checked: bool) {
@@ -1674,12 +1674,12 @@ impl App {
     }
 
     /// A change by name for the selection or the whole page: shortcuts,
-    /// Update all, Manage all, Refresh, Clean all.
+    /// Update all and Manage all.
     pub fn propose(&mut self, action: &str) {
         if self.retained.is_some() || self.checking_updates {
             return;
         }
-        let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "clean-all");
+        let whole_page = matches!(action, "upgrade-all" | "adopt-all");
         let selected = self.selected_item().cloned();
         if whole_page {
             self.review_on = ReviewOn::Dialog;
@@ -1705,11 +1705,7 @@ impl App {
                 }
             }
         }
-        let index = if action == "clean-all" {
-            -1
-        } else {
-            selected.map_or(-1, |item| item.raw as i32)
-        };
+        let index = selected.map_or(-1, |item| item.raw as i32);
         self.c().propose(action.into(), index);
         self.react();
     }

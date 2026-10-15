@@ -1200,7 +1200,7 @@ impl Host {
     fn flatpak_host_command(
         &self,
         executable: &Path,
-        _args: &[OsString],
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] args: &[OsString],
     ) -> Result<Launch, ExecutionError> {
         if !executable.is_absolute() {
             return Err(ExecutionError::Invalid(
@@ -1210,7 +1210,7 @@ impl Host {
         #[cfg(target_os = "linux")]
         {
             let argv = std::iter::once(executable.as_os_str().to_owned())
-                .chain(_args.iter().cloned())
+                .chain(args.iter().cloned())
                 .collect();
             if let Some(program) = self.portal.program(argv, Some(self.env.clone())) {
                 return Ok(Launch::host(program));

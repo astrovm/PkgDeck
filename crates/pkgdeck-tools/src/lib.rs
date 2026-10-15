@@ -357,9 +357,7 @@ impl Desktop {
         // nothing was applied until an entry appears and resending is safe.
         for attempt in 1.. {
             self.key(propose);
-            if !confirm.is_empty() {
-                self.key(confirm);
-            }
+            self.key(confirm);
             let wait = Instant::now() + Duration::from_secs(15);
             while !started() && Instant::now() < wait {
                 sleep(Duration::from_millis(50));

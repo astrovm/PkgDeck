@@ -259,11 +259,12 @@ PkgDeck checks the task again right before running it.
 | `dev-caches` | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
 | `projects` | Build folders and finished Git worktrees of projects you haven't touched in a while |
 
-Worktree cleanup uses **Keep worktrees with local changes** from the app's
+Worktree cleanup uses **Worktrees with uncommitted files** from the app's
 Clean settings (`~/.config/pkgdeck/clean.json`, or under `XDG_CONFIG_HOME`).
 `worktree_protection` defaults to `any_local_files`; `uncommitted_changes`
 allows ignored files to be deleted, and `edited_tracked_files` also allows
-untracked files to be deleted. Tracked edits and locked worktrees stay.
+untracked files to be deleted. Tracked edits and locked worktrees stay, and
+so do worktrees whose submodules have unpushed commits or stashes.
 
 - `--all` skips unused volumes, because they hold data. Clean them by their
   key.

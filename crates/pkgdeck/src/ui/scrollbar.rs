@@ -459,11 +459,9 @@ fn drive(
         SPEED,
     ));
 
-    // The wheel scrolls over the bar too, as it does on a native one.
-    if ctx
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|pos| parts.strip.contains(pos))
-    {
+    // The wheel scrolls over the bar too, as it does on a native one, but
+    // not through a window or menu on top of it.
+    if ui.rect_contains_pointer(parts.strip) {
         let wheel = ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta));
         let by = if vertical { wheel.y } else { wheel.x };
         ask(-by);

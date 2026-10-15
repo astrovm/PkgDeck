@@ -335,7 +335,7 @@ enum Reply {
     ProgressEvent(Event),
     /// A line of output from an Update all step that names a package.
     Output(String),
-    /// What the failed steps of a batch printed, for the banner's details.
+    /// What the failed steps of a batch printed, for the failure's details.
     FailureOutput(String),
     /// A cask whose update stopped for the administrator password.
     NeedsPassword(PackageId),
@@ -2232,7 +2232,7 @@ fn strip_debug(text: &str) -> String {
 /// The most output shown under a failure. The end matters most: it is where
 /// tools print what went wrong.
 const FAILURE_OUTPUT_LIMIT: usize = 6000;
-/// Everything a failed command printed, for the banner's details, so the
+/// Everything a failed command printed, for the failure's details, so the
 /// reason is readable without running it again in a terminal.
 fn raw_failure_output(error: &EngineError) -> Option<String> {
     let EngineError::Execution(pkgdeck_core::process::ExecutionError::Failed(result)) = error
@@ -2685,7 +2685,7 @@ fn job_backend(operations: &[Operation]) -> Option<&str> {
         .all(|operation| operation.backend() == first)
         .then_some(first)
 }
-/// What the banner says when a change can't be prepared, for example when
+/// What the notice says when a change can't be prepared, for example when
 /// APT's dry run fails before the confirmation opens.
 fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -> Option<Value> {
     let (title, operations) = match job {
@@ -2953,7 +2953,7 @@ fn short_name(operation: &Operation, names: &Names) -> String {
         _ => operation_title_named(operation, names),
     }
 }
-/// The banner title for one change that failed, such as "Firefox didn't
+/// The notice title for one change that failed, such as "Firefox didn't
 /// update".
 fn failed_title(operation: &Operation, names: &Names) -> String {
     match operation {
@@ -2963,7 +2963,7 @@ fn failed_title(operation: &Operation, names: &Names) -> String {
         _ => format!("{} failed", operation_title_named(operation, names)),
     }
 }
-/// What the banner says once a change finishes.
+/// What the notice says once a change finishes.
 fn write_notice(
     job: &Job,
     result: &Result<Payload, EngineError>,
@@ -3118,7 +3118,6 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
 struct CheckedPlan {
     operations: Vec<Operation>,
     confirmation: String,
-    details: String,
     items: Vec<Value>,
     status: Option<String>,
 }
@@ -3132,7 +3131,6 @@ fn plan_checked_upgrade(
         return CheckedPlan {
             operations: vec![],
             confirmation: String::new(),
-            details: String::new(),
             items: vec![],
             status: Some("No selected packages can be updated.".into()),
         };
@@ -3145,7 +3143,6 @@ fn plan_checked_upgrade(
         .join("\n\n");
     CheckedPlan {
         confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nOther packages may also change. If one update fails, the others can still finish.", if count == 1 { "package" } else { "packages" }),
-        details: String::new(),
         items: update_items(&operations, packages),
         operations,
         status: None,
@@ -3380,18 +3377,21 @@ fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
     }
     label
 }
-/// One row of a confirmation's list: grouped by source, with the version
-/// change, size and a note when known.
-fn confirm_item(package: &Package) -> Value {
-    let name = if package.display_name.is_empty() {
+/// The name a confirmation row shows for `package`.
+fn confirm_title(package: &Package) -> &str {
+    if package.display_name.is_empty() {
         package_name(&package.id)
     } else {
         &package.display_name
-    };
+    }
+}
+/// One row of a confirmation's list: grouped by source, with the version
+/// change and a note when known.
+fn confirm_item(package: &Package) -> Value {
     json!({
         "group": source_display_name(&package.id.backend),
         "icon_name": package.id.backend,
-        "title": name,
+        "title": confirm_title(package),
         "from": package.installed_version,
         "to": package.candidate_version,
         "icon": package.icon,
@@ -3429,26 +3429,20 @@ fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
             _ => {}
         }
     }
-    let title = |package: &Package| -> String {
-        if package.display_name.is_empty() {
-            package_name(&package.id).to_owned()
-        } else {
-            package.display_name.clone()
-        }
-    };
+    let mut seen: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+    for package in &chosen {
+        *seen
+            .entry((package.id.backend.as_str(), confirm_title(package)))
+            .or_default() += 1;
+    }
     chosen
         .iter()
         .map(|package| {
             let mut item = confirm_item(package);
-            let repeated = chosen
-                .iter()
-                .filter(|other| {
-                    other.id.backend == package.id.backend && title(other) == title(package)
-                })
-                .count()
-                > 1;
+            let title = confirm_title(package);
+            let repeated = seen[&(package.id.backend.as_str(), title)] > 1;
             if repeated && !package.id.architecture.is_empty() {
-                item["title"] = json!(format!("{} ({})", title(package), package.id.architecture));
+                item["title"] = json!(format!("{title} ({})", package.id.architecture));
             }
             item
         })
@@ -4684,10 +4678,13 @@ impl ffi::PackageController {
                 .filter_map(|((operation, outcome), line)| match outcome {
                     Outcome::Finished => Some((operation, None)),
                     Outcome::Failed => {
+                        // A denial is rewritten while its `title: ` label
+                        // is still there to match.
+                        let line = batch_status_text(line, sudo);
                         let reason = line
                             .strip_prefix(&format!("{}: ", operation_title(&operation)))
-                            .unwrap_or(line);
-                        Some((operation, Some(batch_status_text(reason, sudo))))
+                            .unwrap_or(&line);
+                        Some((operation, Some(reason.to_owned())))
                     }
                     _ => None,
                 })
@@ -4839,7 +4836,7 @@ impl ffi::PackageController {
         }
         self.set_failure("{}".into());
     }
-    /// Run again what the banner reports as failed. The change was already
+    /// Run again what the failure reports as failed. The change was already
     /// confirmed, and it is reviewed again before it runs, like any other.
     pub fn retry_change(mut self: Pin<&mut Self>) {
         let Some(job) = self.as_mut().rust_mut().retry_job.take() else {
@@ -6009,21 +6006,6 @@ impl ffi::PackageController {
             }
             return;
         }
-        if action == "clean-all" {
-            // Data that may be the only copy, such as container volumes, is
-            // only ever cleaned on its own.
-            let cleanup = self.rust().cleanup.clone();
-            let items: Vec<_> = cleanup
-                .iter()
-                .filter(|item| item.kind.in_clean_all())
-                .collect();
-            if items.is_empty() {
-                return;
-            }
-            let ids: Vec<_> = items.iter().map(|item| item.id.clone()).collect();
-            self.as_mut().propose_clean_checked(encoded(json!(ids)));
-            return;
-        }
         if action == "adopt-all" {
             // Every AppImage installed some other way that PkgDeck can move in.
             let apps: Vec<_> = self
@@ -6241,7 +6223,7 @@ impl ffi::PackageController {
                 ""
             };
             self.as_mut().set_confirmation_data(encoded(
-                json!({"action":"Update", "body": plan.confirmation, "summary": format!("Update {count} selected {noun}{warning}"), "details": plan.details, "items": plan.items}),
+                json!({"action":"Update", "body": plan.confirmation, "summary": format!("Update {count} selected {noun}{warning}"), "items": plan.items}),
             ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
@@ -12216,7 +12198,7 @@ mod tests {
             controller.rust().pending,
             Some(Job::Write(Operation::Clean(_), _))
         ));
-        controller.as_mut().propose("clean-all".into(), 0);
+        propose_every_cleanup(&mut controller);
         assert!(controller
             .confirmation()
             .to_string()
@@ -12244,7 +12226,7 @@ mod tests {
         assert!(controller.rows().to_string().contains("failure"));
         controller.as_mut().select(0);
         assert!(controller.details().to_string().contains("homebrew"));
-        controller.as_mut().propose("clean-all".into(), 0);
+        propose_every_cleanup(&mut controller);
         assert!(controller.confirmation().is_empty());
     }
     #[test]
@@ -13273,6 +13255,43 @@ mod tests {
         );
         assert_eq!(notice["title"], "Clean cache (APT) failed");
         assert_eq!(notice["detail"], "Clean cache (APT): disk full");
+    }
+    #[test]
+    fn a_refused_password_reads_as_plain_advice_on_its_row() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let package = synthetic_package("htop", "htop");
+        let upgrade = Operation::Upgrade(package.id.clone());
+        finish_write(
+            &mut controller,
+            Job::UpgradeAll(vec![upgrade.clone()], None),
+            Ok(Payload::Batch(
+                format!(
+                    "Completed 0 of 1 updates.\n{}{DENIED}",
+                    operation_title(&upgrade)
+                ),
+                vec![Outcome::Failed],
+            )),
+        );
+        let advice = plain_error(
+            &EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied),
+            None,
+            false,
+        );
+        assert_eq!(parsed(controller.failed_rows())[0]["reason"], advice);
+    }
+    /// Proposes every listed cleanup task, as Clean all does.
+    fn propose_every_cleanup(controller: &mut Pin<&mut ffi::PackageController>) {
+        let ids: Vec<_> = controller
+            .rust()
+            .cleanup
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        controller
+            .as_mut()
+            .propose_clean_checked(encoded(json!(ids)));
     }
     /// Lets `job` finish with `result`, as its worker would.
     fn finish_write(
@@ -14796,7 +14815,6 @@ mod tests {
         assert_eq!(plan.items[0]["group"], "fixture");
         assert_eq!(plan.items[0]["from"], "1");
         assert_eq!(plan.items[0]["to"], "2");
-        assert!(plan.details.is_empty());
         // Update all lists every package its sources would update.
         let all = update_items(
             &[Operation::UpgradeAll {
@@ -16549,7 +16567,7 @@ mod tests {
             kind: CleanupKind::OrphanDependencies,
             bytes: None,
         }];
-        controller.as_mut().propose("clean-all".into(), -1);
+        propose_every_cleanup(&mut controller);
         assert!(controller
             .confirmation()
             .to_string()
@@ -18825,7 +18843,7 @@ mod tests {
         assert!(!controller.confirmation().to_string().contains("Frees"));
         controller.as_mut().confirm(false);
         // Clean all: everything but the volumes, with what each frees.
-        controller.as_mut().propose("clean-all".into(), 0);
+        propose_every_cleanup(&mut controller);
         let pending = controller.rust().pending.as_ref();
         assert!(matches!(pending, Some(Job::CleanAll(_))));
         assert_eq!(
@@ -18850,7 +18868,7 @@ mod tests {
                 items: vec![volumes.clone()],
                 failures: vec![],
             })));
-        controller.as_mut().propose("clean-all".into(), 0);
+        propose_every_cleanup(&mut controller);
         assert!(controller.rust().pending.is_none());
         // Sizes that can't be told keep the plain status.
         controller

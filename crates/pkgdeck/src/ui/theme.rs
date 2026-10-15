@@ -357,10 +357,13 @@ impl Palette {
             // fields darker still.
             (Family::Retro, true) => (0x3a3a3a, 0x1f1f1f, 0xeeeeee, 0xb0b0b0),
             (Family::Retro, false) => (0xc0c0c0, 0xffffff, 0x000000, 0x404040),
-            (Family::Luna, true) => (0x1d2230, 0x282e3e, 0xf0f2f6, 0xa9b1c2),
+            // XP's slate and Media Center's navy are blue walls, so dark goes
+            // near black in every accent. The accent is left to the frame
+            // and selection.
+            (Family::Luna, true) => (0x1f2023, 0x2a2b2f, 0xf0f2f6, 0xa9b1c2),
             (Family::Luna, false) => (0xece9d8, 0xffffff, 0x000000, 0x575757),
-            // Explorer's white; in the dark, Media Center's blue.
-            (Family::Glass, true) => (0x04142f, 0x0b2148, 0xeef3fa, 0x9fb4d3),
+            // Explorer's white.
+            (Family::Glass, true) => (0x0e0f11, 0x17191c, 0xeef3fa, 0x9fb4d3),
             (Family::Glass, false) => (0xffffff, 0xffffff, 0x000000, 0x5a6270),
             (Family::Gel, true) => (0x1f1f1f, 0x2b2b2b, 0xe6e6e6, 0x9c9c9c),
             (Family::Gel, false) => (0xececec, 0xffffff, 0x000000, 0x555555),
@@ -397,7 +400,6 @@ impl Palette {
             _ if !scheme.tint_backgrounds => 0.0,
             (Family::Modern | Family::Fluent | Family::Liquid, _) if dark => 0.05,
             (Family::Modern | Family::Fluent | Family::Liquid, _) => 0.04,
-            (Family::Glass, false) => 0.08,
             (_, true) => 0.06,
             (_, false) => 0.08,
         };
@@ -408,17 +410,12 @@ impl Palette {
         } else {
             tone(canvas, 1.0)
         };
-        let surface = tone(rgb(surface), 0.5);
-        // Media Center's navy and XP's slate are blue walls, so dark goes
-        // near black in every accent, its own blue included. The accent is
-        // left to the frame and selection.
-        let (canvas, surface) = if dark && scheme.style.family() == Family::Glass {
-            (tone(rgb(0x0e0f11), 1.0), tone(rgb(0x17191c), 1.0))
-        } else if dark && scheme.style.family() == Family::Luna {
-            (tone(rgb(0x1f2023), 1.0), tone(rgb(0x2a2b2f), 1.0))
-        } else {
-            (canvas, surface)
+        // Dark XP and Windows 7 panels take as much tint as their canvas.
+        let surface_share = match scheme.style.family() {
+            Family::Glass | Family::Luna if dark => 1.0,
+            _ => 0.5,
         };
+        let surface = tone(rgb(surface), surface_share);
         // Picked colours are made to read on the tinted canvas.
         let accent = match custom {
             Some(color) => readable_accent(color, canvas, dark),
@@ -1009,11 +1006,10 @@ pub fn logo_rgba(hue: Color32, size: u32) -> Vec<u8> {
     let colors = logo_colors(hue);
     let scale = 128.0 / size as f32;
     let inside = |face: &[(f32, f32); 4], x: f32, y: f32| {
-        let sides = (0..4).map(|i| {
+        let sides: [f32; 4] = std::array::from_fn(|i| {
             let ((ax, ay), (bx, by)) = (face[i], face[(i + 1) % 4]);
             (bx - ax) * (y - ay) - (by - ay) * (x - ax)
         });
-        let sides: Vec<f32> = sides.collect();
         sides.iter().all(|&side| side >= 0.0) || sides.iter().all(|&side| side <= 0.0)
     };
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);

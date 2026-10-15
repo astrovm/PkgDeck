@@ -656,8 +656,9 @@ fn start_runner(
         None => Ok(None),
     }
 }
-/// The authorization prompt that starts `runner`, a packaged host runner
-/// or (with `true`) an AppImage launcher that starts its bundled runner.
+/// The authorization prompt that starts `runner`: a packaged host runner,
+/// or (with `true`) a program that runs it with `--batch-runner`, such as
+/// an AppImage launcher or a debug `pkgdeck`.
 fn runner_command(
     host: &Host,
     authorization: Authorization,

@@ -27,7 +27,7 @@ while IFS= read -r entry; do
     entry=${entry%\"*}
     [[ $entry == "$keychain" ]] || search+=("$entry")
 done < <(security list-keychains -d user)
-security list-keychains -d user -s "${search[@]}" "$keychain"
+security list-keychains -d user -s ${search[@]+"${search[@]}"} "$keychain"
 identities=$(security find-identity -p codesigning "$keychain" |
     awk '/[0-9]+\) [0-9A-F]{40} / {print $2}' | sort -u)
 [[ -n $identities && $(wc -w <<< "$identities") -eq 1 ]] || {

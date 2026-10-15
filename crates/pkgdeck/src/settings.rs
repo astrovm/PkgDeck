@@ -117,11 +117,11 @@ pub enum Style {
     /// Mac OS X's Aqua, as Tiger drew it: gel buttons, plain grey title bars.
     #[serde(alias = "tiger", alias = "gel", alias = "panther", alias = "platinum")]
     Aqua,
-    /// Windows 11: Fluent, flat panes on Mica with a pill for the page you
+    /// Windows 11: Fluent, flat panes on Mica with a bar beside the page you
     /// are on.
     #[serde(alias = "win11")]
     Fluent,
-    /// macOS 27: Liquid Glass, an edge-to-edge sidebar and glass traffic
+    /// macOS 27: Liquid Glass, an edge-to-edge sidebar and flat traffic
     /// lights.
     #[serde(alias = "tahoe", alias = "macos")]
     Liquid,

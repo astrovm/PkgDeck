@@ -622,10 +622,11 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     let mut scroll = super::scrollbar::vertical()
         .id_salt(list_id)
         .auto_shrink([false, false]);
+    // Where the list was scrolled last frame, kept here because the area's
+    // own state sits under ids this function doesn't build.
+    let offset_key = list_id.with("scroll-offset");
     if let Some(index) = reveal {
-        let state =
-            egui::scroll_area::State::load(&ctx, ui.make_persistent_id(list_id).with("scroll"));
-        let current = state.map_or(0.0, |s| s.offset.y);
+        let current = ctx.data(|d| d.get_temp::<f32>(offset_key)).unwrap_or(0.0);
         let (row_top, row_bottom) = (offsets[index], offsets[index + 1]);
         let view = body.height();
         if row_top < current {
@@ -640,7 +641,7 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
             .max_rect(body)
             .id_salt(list_id.with("body")),
         |ui| {
-            scroll.show_viewport(ui, |ui, viewport| {
+            let out = scroll.show_viewport(ui, |ui, viewport| {
                 ui.set_height(total);
                 let origin = ui.min_rect().top();
                 let first = offsets
@@ -675,6 +676,7 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
                     }
                 }
             });
+            ctx.data_mut(|d| d.insert_temp(offset_key, out.state.offset.y));
         },
     );
     app.hovered_row(hovered_raw);
@@ -1112,10 +1114,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 _ => format!("{} {title} from {line}", action.label()),
             }
         };
-        if batch_state.is_some() {
-            // A batch is cancelled from its one card, not from every row.
-            // Its marks sit over the icons.
-        } else {
+        // A batch is cancelled from its one card, not from every row.
+        if batch_state.is_none() {
             let mut child = ui.new_child(UiBuilder::new().max_rect(button));
             if icon_button(&mut child, icon, &tip, color, enabled).clicked() {
                 if running {
@@ -1194,8 +1194,6 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     response.hovered().then_some(item.raw)
 }
 
-/// Where a row stands in a batch: waiting, working, or done, over its icon.
-/// One quiet mark per row, so the card's single bar is all that moves.
 /// The batch mark on a row: what the running batch does to it. Once the
 /// batch ends, the rows it finished stay Done until the reload confirms them.
 fn batch_mark(
@@ -1215,6 +1213,8 @@ fn batch_mark(
     }
 }
 
+/// Where a row stands in a batch: waiting, working, or done, over its icon.
+/// One quiet mark per row, so the card's single bar is all that moves.
 fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Palette) {
     ui.painter().rect_filled(
         icon,

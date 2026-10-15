@@ -7,7 +7,11 @@ The **Updates** badge counts the updates found.
 The **Activity** button in the header opens a drawer from the right, with
 running and finished work. Its badge counts changes waiting their turn.
 
-In narrow windows the sidebar shows only icons.
+When a change fails, a short message says so, with **Details**. The failure
+then waits in **Activity**, marked by a dot, with **Retry** and **Dismiss**.
+
+Drag the sidebar's edge to resize it. Drag it thin, or make the window
+narrow, and it shows only icons. Double-click the edge to reset it.
 
 <img src="screenshots/narrow.png" width="280" alt="PkgDeck in a narrow window, with the sidebar as an icon rail">
 
@@ -126,7 +130,7 @@ other sources still appear as they answer.
   pipx, RubyGems and the Mac App Store say which package they're on, and
   PkgDeck updates Cargo, uv, pip, Composer, rustup, pixi, Nix and Conda
   packages one at a time itself. For managers that don't say (npm, for
-  one), all of their rows show progress until they finish.
+  one), all of their rows show as updating until they finish.
 - An update that failed shows a warning on its row. **Update all**, **Update
   selected** and automatic updates skip it until there's a newer version, so
   one broken update doesn't fail every run. Its row's arrow tries it again,
@@ -166,7 +170,7 @@ that shows the package, source, scope, and the extra changes, with
   restarts your computer.
 - **Update all** retries sources that failed to check. If a source still
   fails, the confirmation says so and its updates are skipped. The
-  rest still work, and **Retry** is available in the error notice.
+  rest still work, and **Retry** waits in **Activity**.
 
 ### Cancelling
 
@@ -174,8 +178,8 @@ Cancel stops work that hasn't started yet. If a package manager is already
 making changes, PkgDeck lets it finish first. Finished changes are not undone
 if a later step fails. Click **Refresh** to see the current state.
 
-While a change runs, its row shows a progress bar and its button turns into
-**Cancel**. When it finishes, a short message at the bottom of the window says
+While a change runs, a card at the bottom of the list shows its progress
+and **Cancel**. A single change's row button also turns into **Cancel**. When it finishes, a short message at the bottom of the window says
 so; for a single install or remove it offers **Undo**, which asks before
 reversing the change. Removing something PkgDeck can't install again, such as
 a standalone tool or an app from macOS Applications, has no Undo.
@@ -241,7 +245,9 @@ work like on Updates. Volumes are cleaned individually.
   - **Keep if files are new or edited**: loses ignored files, like `.env`.
   - **Keep only if files are edited**: loses new and ignored files, like
     `.env`.
-  - Locked worktrees and unfinished branches stay with every choice.
+  - Locked worktrees and unfinished branches stay with every choice. So does
+    a worktree whose submodule has unpushed commits or stashes. A
+    submodule's files follow the same choice.
 - **Folders**: where PkgDeck looks for projects. Your home folder by default,
   without hidden folders and, on macOS, without Library. **Add folder** adds
   another one.
@@ -265,8 +271,9 @@ Turn on **Clean automatically** in **Settings** → **Clean**. It needs
 ## Sources
 
 **Settings** → **Sources** lists the package managers found on this
-computer. Turn one off and PkgDeck stops checking it. A source whose check
-failed shows why in red, with **Try again** under it.
+computer. Turn one off and PkgDeck stops checking it. Clean still lists
+every source; its checkboxes choose what runs. A source whose check failed
+shows why in red, with **Try again** under it.
 
 The sources filter only filters one page. Neither one turns repositories on
 or off.
@@ -599,15 +606,14 @@ and **About**.
   - Every style has the same layout. The older ones draw icons in colour,
     and Mac OS X Tiger stripes its lists in pale blue. Windows 11 and macOS 27 are flat
     like **Modern**.
-  - In dark mode, the older styles keep their shapes and their own title
-    bar and selection colours, and turn the rest dark: Windows 98's bevels
-    on dark grey, XP's blue frame around slate, Media Center's blue for
-    Windows 7, and Mac OS X Tiger's blue gel on charcoal.
+  - In dark mode, the older styles keep their shapes and turn the rest
+    dark: Windows 98's bevels on dark grey, XP's and Windows 7's frames
+    around near black, and Mac OS X Tiger's blue gel on charcoal.
   - **Windows 7** blurs what's behind the window on KDE Plasma
     and macOS. Elsewhere, on Plasma and GNOME, the glass shows a blurred
     copy of your wallpaper; other desktops get painted glass. Set
     `PKGDECK_NO_BLUR=1` to never blur.
-  - Picking a style never changes the accent, so your choice stays on.
+  - Picking a style never changes the accent or **Tint backgrounds**.
 - **Colours** (Modern only): the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
   blue-grey of earlier versions). In light mode, **Classic** (blue-grey, the
@@ -616,20 +622,18 @@ and **About**.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well. Blue is the
-  default in every style. The accent
-  also tints the background, panels and buttons, and colours the PkgDeck logo
-  in the sidebar and title bar.
+  default in every style. The accent also colours the PkgDeck logo in the
+  sidebar, the title bar, the Dock (macOS) and the tray (Linux).
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
   tints the background, panels and buttons, the same way in every accent. Leave
   it off to keep those greys neutral. The accent still colours selection, links
-  and controls. Picking a style never changes it, so your choice stays on.
+  and controls.
 - **Tint window bar** (under **Accent**): only **Windows 98**, **Windows XP**
   and **Windows 7** draw an accent title bar, so only they show it. When on, the
   accent colours that title bar. Turn it off for a neutral grey bar. The accent
   still colours selection, links and controls. Each style keeps its own choice,
-  so changing it in one style doesn't change the others. Picking a style never
-  changes it. It starts on for **Windows 98** and **Windows XP**, and off for
-  **Windows 7**.
+  so changing it in one style doesn't change the others. It starts on for
+  **Windows 98** and **Windows XP**, and off for **Windows 7**.
 - **Roundness** (all but Windows 98): from square corners to twice the
   style's own.
 - **Density**: **Compact**, **Normal** or **Roomy** rows.

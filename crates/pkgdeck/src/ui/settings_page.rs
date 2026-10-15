@@ -125,7 +125,7 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(title.to_owned(), font, group.ink);
+        .layout_no_wrap(title.to_owned(), font, palette.ink);
     let title_height = galley.size().y;
     if group.on_line {
         ui.add_space(title_height / 2.0);
@@ -165,7 +165,7 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
             palette.canvas,
         );
     }
-    ui.painter().galley(at, galley, group.ink);
+    ui.painter().galley(at, galley, palette.ink);
 }
 
 /// A label with an optional line under it, and a control `size` big: on

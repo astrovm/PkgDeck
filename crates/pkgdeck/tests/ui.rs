@@ -1116,6 +1116,41 @@ fn arrow_keys_on_an_empty_list_do_nothing() {
 }
 
 #[test]
+fn keys_bring_the_chosen_row_back_into_view() {
+    let mut app = app();
+    let rows: Vec<_> = (0..80)
+        .map(|n| {
+            json!({
+                "kind": "package", "name": format!("tool{n:02}"),
+                "display_name": format!("Tool {n:02}"), "source": "apt",
+                "architecture": "x86_64", "scope": "system", "scope_label": "System",
+                "installed": "1.0", "candidate": null, "update": "current",
+                "summary": "Synthetic tool",
+            })
+        })
+        .collect();
+    app.c().set_rows(json!(rows).to_string().into());
+    app.react();
+    app.page = Page::Installed;
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.state_mut().1.ui.focus_list = true;
+    harness.run_steps(2);
+    let shown = |harness: &Harness<'static, (bool, App)>, label: &str| {
+        harness.query_all_by_label_contains(label).next().is_some()
+    };
+    harness.key_press(egui::Key::End);
+    harness.run_steps(4);
+    assert!(shown(&harness, "Tool 79"));
+    assert!(!shown(&harness, "Tool 00"));
+    // Back at the top, the first row shows again.
+    harness.key_press(egui::Key::Home);
+    harness.run_steps(4);
+    assert_eq!(harness.state().1.selected_row().unwrap().name, "tool00");
+    assert!(shown(&harness, "Tool 00"));
+}
+
+#[test]
 fn a_list_that_loads_late_does_not_steal_typing_from_search() {
     let mut harness = show(Page::Updates);
     let rows = harness.state().1.rows.clone();
@@ -1249,7 +1284,8 @@ fn clean_all_works_while_lists_load_but_waits_for_a_change() {
     {
         let app = &mut harness.state_mut().1;
         app.busy = false;
-        app.retained = Some(Vec::new());
+        // A change keeps its rows on screen while it runs.
+        app.retained = Some(app.rows.clone());
     }
     harness.run_steps(2);
     assert!(!enabled(&harness));
