@@ -55,7 +55,6 @@ mod native {
         fn pkgdeck_mac_set_tray(visible: c_int, png: *const c_uchar, length: c_ulong);
         fn pkgdeck_mac_activate();
         fn pkgdeck_mac_set_dock_visible(visible: c_int);
-        fn pkgdeck_mac_set_app_icon(png: *const c_uchar, length: c_ulong);
         fn pkgdeck_mac_pump(seconds: f64);
         fn pkgdeck_mac_watch_reopen(watching: c_int);
         fn pkgdeck_mac_tray_titles() -> *mut c_char;
@@ -118,9 +117,6 @@ mod native {
     }
     pub fn set_dock_visible(visible: bool) {
         unsafe { pkgdeck_mac_set_dock_visible(visible.into()) }
-    }
-    pub fn set_app_icon(png: &[u8]) {
-        unsafe { pkgdeck_mac_set_app_icon(png.as_ptr(), png.len() as c_ulong) }
     }
     pub fn pump(seconds: f64) {
         unsafe { pkgdeck_mac_pump(seconds) }
@@ -587,24 +583,18 @@ impl Platform {
         #[cfg(target_os = "macos")]
         {
             native::set_dock_visible(visible);
-            // Coming back, the Dock may show the bundle's icon again.
-            if visible && self.icon != blue() {
-                native::set_app_icon(&logo_png(self.icon, DOCK_SIZE));
-            }
         }
         #[cfg(not(target_os = "macos"))]
         let _ = visible;
     }
 
-    /// Draws the Dock icon (macOS) and tray icon (Linux) in `hue`, the
-    /// accent. The menu bar icon stays the system's black or white.
+    /// Draws the Linux tray icon in the accent. macOS keeps the bundle's
+    /// Dock icon and the system's black or white menu bar template.
     pub fn set_icon(&mut self, hue: Color32) {
         if hue == self.icon {
             return;
         }
         self.icon = hue;
-        #[cfg(target_os = "macos")]
-        native::set_app_icon(&logo_png(hue, DOCK_SIZE));
         #[cfg(target_os = "linux")]
         if let Some(tray) = &self.tray {
             let (icon, named) = (tray_icon(hue), hue == blue());
@@ -632,22 +622,6 @@ fn tray_icon(hue: Color32) -> Vec<ksni::Icon> {
         height: SIZE as i32,
         data,
     }]
-}
-
-/// The Dock draws icons up to 256 points, twice that on a Retina screen.
-#[cfg(target_os = "macos")]
-const DOCK_SIZE: u32 = 512;
-
-/// The cube in `hue` as a PNG `size` pixels square.
-#[cfg(any(target_os = "macos", test))]
-fn logo_png(hue: Color32, size: u32) -> Vec<u8> {
-    let mut png = Vec::new();
-    let image = image::RgbaImage::from_raw(size, size, theme::logo_rgba(hue, size))
-        .expect("the logo fills its square");
-    image
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .expect("PNG encodes into memory");
-    png
 }
 
 /// Fills the Mac window behind its content and system title bar with
@@ -817,15 +791,6 @@ fn wallpaper_setting(home: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_dock_icon_is_the_cube_in_the_accent() {
-        let green = theme::logo_tint(crate::settings::Accent::Green, None);
-        let png = logo_png(green, 32);
-        let image = image::load_from_memory(&png).unwrap().to_rgba8();
-        assert_eq!(image.dimensions(), (32, 32));
-        assert_eq!(image.into_raw(), theme::logo_rgba(green, 32));
-    }
 
     #[test]
     fn events_reach_the_window_and_wake_it() {

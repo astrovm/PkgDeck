@@ -623,7 +623,8 @@ and **About**.
   red, orange, green, teal, graphite, navy or lavender. The last swatch picks
   any colour; PkgDeck lightens or darkens it until it reads well. Blue is the
   default in every style. The accent also colours the PkgDeck logo in the
-  sidebar, the title bar, the Dock (macOS) and the tray (Linux).
+  sidebar, the title bar and the tray (Linux). On macOS, the Dock keeps the
+  installed app icon and the menu bar follows the system's light or dark appearance.
 - **Tint backgrounds** (off by default, under **Accent**): when on, the accent
   tints the background, panels and buttons, the same way in every accent. Leave
   it off to keep those greys neutral. The accent still colours selection, links
