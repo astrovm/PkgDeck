@@ -231,7 +231,8 @@ fn main() {
     let home = var("HOME")
         .filter(|home| home.starts_with('/'))
         .map(std::path::PathBuf::from);
-    let (store, settings) = settings::Store::open(settings::directory(var), home.as_deref());
+    let (store, mut settings) = settings::Store::open(settings::directory(var), home.as_deref());
+    settings.follow_desktop(pkgdeck::ui::desktop().style());
     let media = (!rustix::process::geteuid().is_root() && var("PKGDECK_NO_CACHE").is_none())
         .then(|| {
             var("XDG_CACHE_HOME")

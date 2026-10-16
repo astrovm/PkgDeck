@@ -591,7 +591,13 @@ and **About**.
 - **Theme**: **System**, **Light** or **Dark**.
 - **Style**: the shape of everything, shown as small previews. Each comes in
   light and dark.
-  - **Modern**: flat and rounded, the default.
+  - **Automatic**: the style of the desktop you're on, the default.
+    **macOS 27** on the Mac, **KDE Plasma 6** on KDE Plasma, **GNOME 51**
+    on GNOME, and **Modern** everywhere else. Its card shows the style it
+    picked. It picks again each time PkgDeck starts, so it follows you
+    between desktops. If you used PkgDeck before **Automatic** existed,
+    you keep the style you had.
+  - **Modern**: flat and rounded.
   - **Windows 98**: grey 3D bevels, square corners and a title bar in the
     accent, fading to a lighter shade of it.
   - **Windows XP**: glossy blue bars and rounded buttons.

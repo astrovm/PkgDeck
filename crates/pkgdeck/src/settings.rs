@@ -320,8 +320,16 @@ pub struct Settings {
     pub accent: Accent,
     #[serde(deserialize_with = "or_default")]
     pub text_size: TextSize,
+    /// The style on screen. With [`Settings::automatic_style`] it's the one
+    /// the desktop matches, picked again at each start.
     #[serde(deserialize_with = "or_default")]
     pub style: Style,
+    /// Whether the style follows the desktop: macOS 27 on the Mac, KDE
+    /// Plasma 6 on Plasma, GNOME 51 on GNOME, Modern elsewhere. New
+    /// settings start on; saved ones from before it stay on the style they
+    /// had.
+    #[serde(default)]
+    pub automatic_style: bool,
     /// The accent picked by hand, as `#rrggbb`, for [`Accent::Custom`].
     pub custom_accent: String,
     /// Whether the accent tints the window's backgrounds, panels and
@@ -386,6 +394,7 @@ impl Default for Settings {
             accent: Accent::Blue,
             text_size: TextSize::Normal,
             style: Style::Modern,
+            automatic_style: true,
             custom_accent: String::new(),
             tint_backgrounds: false,
             window_bar_tints: BTreeMap::new(),
@@ -420,6 +429,14 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Takes `native`, the style the desktop matches, when the style is
+    /// **Automatic**.
+    pub fn follow_desktop(&mut self, native: Style) {
+        if self.automatic_style {
+            self.style = native;
+        }
+    }
+
     /// Whether `style`'s title bar takes the accent. Each style keeps its own
     /// choice, so picking another style doesn't change it.
     pub fn window_bar_tint(&self, style: Style) -> bool {
@@ -875,6 +892,34 @@ mod tests {
         };
         let read: Settings = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
         assert_eq!(read, saved);
+    }
+
+    #[test]
+    fn new_settings_follow_the_desktop_and_saved_ones_keep_their_style() {
+        let mut fresh = Settings::default();
+        assert!(fresh.automatic_style);
+        fresh.follow_desktop(Style::Breeze);
+        assert_eq!(fresh.style, Style::Breeze);
+        // Settings saved before Automatic existed keep the style they had,
+        // Modern included, since there's no telling it was never picked.
+        for text in [r#"{"style":"modern"}"#, r#"{"style":"luna"}"#, "{}"] {
+            let mut saved: Settings = serde_json::from_str(text).unwrap();
+            assert!(!saved.automatic_style, "{text}");
+            let style = saved.style;
+            saved.follow_desktop(Style::Adwaita);
+            assert_eq!(saved.style, style, "{text}");
+        }
+        // Either choice reads back as saved.
+        for automatic in [true, false] {
+            let saved = Settings {
+                automatic_style: automatic,
+                style: Style::Liquid,
+                ..Settings::default()
+            };
+            let text = serde_json::to_string(&saved).unwrap();
+            let read: Settings = serde_json::from_str(&text).unwrap();
+            assert_eq!(read, saved, "{text}");
+        }
     }
 
     #[test]

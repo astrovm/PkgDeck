@@ -54,6 +54,7 @@ pub enum Desktop {
     Other,
     Kde,
     Mac,
+    Gnome,
 }
 
 impl Desktop {
@@ -65,12 +66,31 @@ impl Desktop {
             Self::of(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref())
         }
     }
-    /// The Linux desktop `XDG_CURRENT_DESKTOP` names.
+    /// The Linux desktop `XDG_CURRENT_DESKTOP` names. Budgie lists GNOME
+    /// too, as what it's built on, but looks nothing like it.
     pub fn of(names: Option<&str>) -> Self {
+        let listed = |desktop: &str| {
+            names
+                .unwrap_or_default()
+                .split(':')
+                .any(|name| name.eq_ignore_ascii_case(desktop))
+        };
         if crate::backdrop::is_kde(names) {
             Self::Kde
+        } else if listed("gnome") && !listed("budgie") {
+            Self::Gnome
         } else {
             Self::Other
+        }
+    }
+    /// The style **Automatic** picks here: the one that copies this
+    /// desktop, else Modern.
+    pub fn style(self) -> Style {
+        match self {
+            Self::Other => Style::Modern,
+            Self::Kde => Style::Breeze,
+            Self::Mac => Style::Liquid,
+            Self::Gnome => Style::Adwaita,
         }
     }
 }
@@ -93,6 +113,7 @@ impl Desktop {
         match code {
             1 => Self::Kde,
             2 => Self::Mac,
+            3 => Self::Gnome,
             _ => Self::Other,
         }
     }
@@ -1410,19 +1431,58 @@ mod tests {
         assert_eq!(Desktop::of(Some("KDE")), Desktop::Kde);
         assert_eq!(Desktop::of(Some("ubuntu:KDE")), Desktop::Kde);
         for names in [
+            "GNOME",
+            "gnome",
+            "ubuntu:GNOME",
+            "GNOME-Classic:GNOME",
+            "GNOME-Flashback:GNOME",
+            "pop:GNOME",
+        ] {
+            assert_eq!(Desktop::of(Some(names)), Desktop::Gnome, "{names}");
+        }
+        for names in [
             None,
             Some(""),
-            Some("GNOME"),
-            Some("ubuntu:GNOME"),
             Some("KDEX"),
+            Some("GNOMEX"),
+            Some("Budgie:GNOME"),
+            Some("X-Cinnamon"),
+            Some("XFCE"),
+            Some("MATE"),
+            Some("COSMIC"),
+            Some("LXQt"),
+            Some("Pantheon"),
+            Some("sway"),
+            Some("Hyprland"),
         ] {
             assert_eq!(Desktop::of(names), Desktop::Other, "{names:?}");
         }
     }
 
     #[test]
+    fn automatic_picks_the_style_that_copies_the_desktop() {
+        assert_eq!(Desktop::Mac.style(), Style::Liquid);
+        assert_eq!(Desktop::Kde.style(), Style::Breeze);
+        assert_eq!(Desktop::Gnome.style(), Style::Adwaita);
+        assert_eq!(Desktop::Other.style(), Style::Modern);
+        // Where Automatic copies the desktop's own look, the system's frame
+        // stays, but GNOME draws none for apps.
+        for desktop in [Desktop::Other, Desktop::Kde, Desktop::Mac] {
+            assert!(system_frame(desktop.style(), desktop), "{desktop:?}");
+        }
+        assert!(!system_frame(Style::Adwaita, Desktop::Gnome));
+    }
+
+    #[test]
+    fn the_desktop_set_reads_back() {
+        for desktop in [Desktop::Kde, Desktop::Mac, Desktop::Gnome, Desktop::Other] {
+            assert_eq!(Desktop::from_code(desktop as u8), desktop);
+        }
+    }
+
+    #[test]
     fn a_style_keeps_the_system_frame_on_the_desktop_it_copies() {
-        let desktops = [Desktop::Other, Desktop::Kde, Desktop::Mac];
+        let desktops = [Desktop::Other, Desktop::Kde, Desktop::Mac, Desktop::Gnome];
         for style in Style::ALL {
             for desktop in desktops {
                 let system = matches!(
