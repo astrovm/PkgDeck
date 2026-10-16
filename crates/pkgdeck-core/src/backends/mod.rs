@@ -7,6 +7,7 @@ mod appimage_github;
 mod aur;
 mod cleanup;
 mod conda;
+pub(crate) use conda::compare_versions;
 mod container;
 mod desktop_exec;
 mod dev_caches;
@@ -1691,12 +1692,15 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                     "Installing Flatpak bundle {}.",
                     id.name
                 )));
+                // A bundle replaces an installed copy, newer or not, so its
+                // page can offer Update, Reinstall or Downgrade.
                 let result = self.call(
                     &[
                         scope,
                         "install",
                         "--noninteractive",
                         "--assumeyes",
+                        "--reinstall",
                         "--bundle",
                         &staged.path().to_string_lossy(),
                     ],
@@ -1745,6 +1749,7 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                                 "install",
                                 "--noninteractive",
                                 "--assumeyes",
+                                "--reinstall",
                                 "--from",
                                 &source,
                             ],

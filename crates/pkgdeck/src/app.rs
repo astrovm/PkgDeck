@@ -1239,6 +1239,10 @@ impl App {
 
     pub fn open_page(&mut self, page: Page) {
         self.drawer_open = false;
+        // Going to a page leaves an opened file's page, as Back does.
+        if self.opened.is_some() {
+            self.close_page();
+        }
         let changed = page != self.page;
         if changed {
             self.page = page;

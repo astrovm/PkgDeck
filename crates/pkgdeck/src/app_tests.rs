@@ -796,6 +796,20 @@ fn opened_files_get_a_page_and_its_main_action() {
 }
 
 #[test]
+fn going_to_another_page_leaves_an_opened_file() {
+    for page in [Page::Updates, Page::Search] {
+        let mut app = app();
+        app.c().set_opened(json!({"package": row("tool", json!({"installed": null, "candidate": "1"})), "action": "Install", "description": "d"}).to_string().into());
+        app.react();
+        assert!(app.opened.is_some());
+        app.open_page(page);
+        app.react();
+        assert!(app.opened.is_none(), "{page:?}");
+        assert_ne!(app.page_key().as_deref(), Some("opened"), "{page:?}");
+    }
+}
+
+#[test]
 fn flatpak_copies_switch_scope_and_reselect_when_one_goes() {
     let mut app = app();
     app.page = Page::Installed;
