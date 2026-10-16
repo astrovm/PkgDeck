@@ -364,6 +364,27 @@ impl Desktop {
         self.key("ctrl+l");
         self.key("Home");
     }
+    /// When PkgDeck last changed the user's own copies of package indexes,
+    /// which a check refreshes without an operation of its own.
+    fn indexes_changed() -> Option<std::time::SystemTime> {
+        fn newest(dir: &Path, depth: usize) -> Option<std::time::SystemTime> {
+            let mut found = fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+            for entry in fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                let time = if path.is_dir() && depth > 0 {
+                    newest(&path, depth - 1)
+                } else {
+                    entry.metadata().and_then(|meta| meta.modified()).ok()
+                };
+                found = found.max(time);
+            }
+            found
+        }
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+        newest(&base.join("pkgdeck/indexes"), 3)
+    }
     pub fn write(&mut self, op: &str, name: &str) {
         let history = self.dir.0.join("pkgdeck/activity.json");
         let entries = || -> Vec<Value> {
@@ -389,6 +410,10 @@ impl Desktop {
                 .last()
                 .is_some_and(|entry| entry["id"].as_u64().unwrap_or(0) > previous)
         };
+        let indexes = Self::indexes_changed();
+        // System managers refresh their own copy as the check reads them,
+        // with no operation in history.
+        let refreshed = || op == "refresh" && Self::indexes_changed() > indexes;
         // idle() gives up after two seconds, and the shortcuts are disabled
         // while the app is busy. A slow details query on a real manager can
         // swallow both keys. History records an operation when it begins, so
@@ -408,11 +433,16 @@ impl Desktop {
                 self.key(confirm);
             }
             let wait = Instant::now() + Duration::from_secs(15);
-            while !started() && Instant::now() < wait {
+            while !started() && !refreshed() && Instant::now() < wait {
                 sleep(Duration::from_millis(50));
             }
             if started() {
                 break;
+            }
+            if refreshed() {
+                // The check goes on to read every source.
+                self.settle(Duration::from_secs(60));
+                return;
             }
             assert!(attempt < 3, "{op} did not start\n{}", self.logs());
         }
