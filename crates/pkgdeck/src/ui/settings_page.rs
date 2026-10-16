@@ -397,13 +397,17 @@ fn styles(app: &mut App, ui: &mut Ui) {
     let width = ui.available_width();
     let columns =
         (((width + PREVIEW_GAP) / (PREVIEW.x + PREVIEW_GAP)).floor() as usize).clamp(1, 6);
-    let rows = Style::ALL.len().div_ceil(columns);
+    // Automatic first, showing the style it picks here, then each style.
+    let cards: Vec<Option<Style>> = std::iter::once(None).chain(Style::ALL.map(Some)).collect();
+    let rows = cards.len().div_ceil(columns);
     let cell = vec2(PREVIEW.x, PREVIEW.y + 24.0);
     let (rect, _) = ui.allocate_exact_size(
         vec2(width, rows as f32 * (cell.y + PREVIEW_GAP)),
         Sense::hover(),
     );
-    for (index, style) in Style::ALL.into_iter().enumerate() {
+    for (index, card_style) in cards.into_iter().enumerate() {
+        let style = card_style.unwrap_or_else(|| super::desktop().style());
+        let label = card_style.map_or("Automatic", Style::name);
         let at = rect.min
             + vec2(
                 (index % columns) as f32 * (cell.x + PREVIEW_GAP),
@@ -413,9 +417,12 @@ fn styles(app: &mut App, ui: &mut Ui) {
         let response = ui
             .interact(card, Id::unique("style").with(index), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
-        let current = app.settings.style == style;
+        let current = match card_style {
+            None => app.settings.automatic_style,
+            Some(style) => !app.settings.automatic_style && app.settings.style == style,
+        };
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::Role::RadioButton, true, current, style.name())
+            egui::WidgetInfo::selected(egui::Role::RadioButton, true, current, label)
         });
         let mut scheme = theme::Scheme::of(&app.settings);
         scheme.style = style;
@@ -450,16 +457,11 @@ fn styles(app: &mut App, ui: &mut Ui) {
             theme::font(13.0)
         };
         // A long name shrinks rather than run into its neighbour.
-        let name = fitted(
-            ui.painter(),
-            style.name(),
-            font,
-            ink,
-            PREVIEW.x + PREVIEW_GAP,
-        );
+        let name = fitted(ui.painter(), label, font, ink, PREVIEW.x + PREVIEW_GAP);
         let at = egui::pos2(card.center().x, card.bottom() + 14.0) - name.size() / 2.0;
         ui.painter().galley(at, name, ink);
         if response.clicked() && !current {
+            app.settings.automatic_style = card_style.is_none();
             app.settings.style = style;
         }
     }
