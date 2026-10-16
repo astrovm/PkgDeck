@@ -493,15 +493,15 @@ fn automatic_style_follows_the_desktop_until_a_style_is_picked() {
     // New settings start on Automatic, which picks Modern on a desktop
     // with no style of its own. Only Automatic shows as chosen.
     assert!(harness.state().1.settings.automatic_style);
-    assert_eq!(selected(&harness, "Automatic"), true);
-    assert_eq!(selected(&harness, "Modern"), false);
+    assert!(selected(&harness, "Automatic"));
+    assert!(!selected(&harness, "Modern"));
     // Picking a style, even the one Automatic chose, stops following.
     harness.get_by_label("Modern").click();
     harness.run_steps(3);
     assert!(!harness.state().1.settings.automatic_style);
     assert_eq!(harness.state().1.settings.style, Style::Modern);
-    assert_eq!(selected(&harness, "Modern"), true);
-    assert_eq!(selected(&harness, "Automatic"), false);
+    assert!(selected(&harness, "Modern"));
+    assert!(!selected(&harness, "Automatic"));
     harness.get_by_label("Windows 98").click();
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.style, Style::Retro);
