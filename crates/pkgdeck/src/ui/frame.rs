@@ -1439,6 +1439,36 @@ mod tests {
     }
 
     #[test]
+    fn gnome_51s_header_is_flat_over_the_page() {
+        for dark in [false, true] {
+            let palette = palette(Style::Adwaita, dark);
+            let metrics = metrics(Style::Adwaita).expect("GNOME 51 draws a frame");
+            let (bar, _) = layout(metrics, window(), false);
+            let shapes = in_style(Style::Adwaita, || {
+                theme::painted(|ui| {
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(Id::unique("sidebar-extent"), 200.0_f32));
+                    show(ui, window(), "PkgDeck", &palette);
+                })
+            });
+            for shape in &shapes {
+                match shape {
+                    // No line under the header, over the sidebar or the page.
+                    Shape::LineSegment { points, .. } => assert!(
+                        points[0].y != points[1].y || (points[0].y - bar.bottom()).abs() > 1.0,
+                        "a line under the header: {shape:?}"
+                    ),
+                    // Beside the sidebar the header is the page's colour.
+                    Shape::Rect(rect) if rect.rect.right() > 202.0 && rect.fill.a() > 0 => {
+                        assert_eq!(rect.fill, palette.canvas, "dark {dark}: {shape:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_desktop_comes_from_its_names() {
         assert_eq!(Desktop::of(Some("KDE")), Desktop::Kde);
         assert_eq!(Desktop::of(Some("ubuntu:KDE")), Desktop::Kde);

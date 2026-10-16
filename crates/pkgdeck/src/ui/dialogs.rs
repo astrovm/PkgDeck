@@ -47,29 +47,38 @@ fn modal(
     }
     let screen = ctx.content_rect();
     let width = width.min(screen.width() - 32.0);
-    let response =
-        egui::Modal::new(Id::unique(id))
-            .backdrop_color(Color32::from_black_alpha(
-                ((if palette.dark { 130.0 } else { 70.0 }) * shown) as u8,
-            ))
-            .frame(card(&palette).inner_margin(egui::Margin::same(22)).shadow(
-                egui::epaint::Shadow {
-                    offset: [0, 10],
-                    blur: 40,
-                    spread: 0,
-                    color: Color32::from_black_alpha(if palette.dark { 120 } else { 45 }),
-                },
-            ))
-            .area(
-                egui::Modal::default_area(Id::unique(id))
-                    .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, (1.0 - shown) * 12.0)),
-            )
-            .show(ctx, |ui| {
+    let dim = Color32::from_black_alpha(((if palette.dark { 130.0 } else { 70.0 }) * shown) as u8);
+    let card = card(&palette)
+        .inner_margin(egui::Margin::same(22))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 40,
+            spread: 0,
+            color: Color32::from_black_alpha(if palette.dark { 120 } else { 45 }),
+        });
+    // egui's own backdrop is square, so it would fill the see-through
+    // corners of a rounded window. The page dims here instead, inside
+    // them, under the card.
+    let response = egui::Modal::new(Id::unique(id))
+        .backdrop_color(Color32::TRANSPARENT)
+        .frame(egui::Frame::NONE)
+        .area(
+            egui::Modal::default_area(Id::unique(id))
+                .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, (1.0 - shown) * 12.0)),
+        )
+        .show(ctx, |ui| {
+            ctx.layer_painter(ui.layer_id()).rect_filled(
+                screen,
+                super::frame::fit(ctx, screen),
+                dim,
+            );
+            card.show(ui, |ui| {
                 ui.multiply_opacity(shown);
                 ui.set_width(width - 44.0);
                 ui.set_max_height(screen.height() - 80.0);
                 content(ui);
             });
+        });
     !(open && response.should_close())
 }
 
@@ -1202,6 +1211,62 @@ mod tests {
         assert!(!repo_url_valid("https://.flatpakrepo"));
         assert!(!repo_url_valid("http://x/y.flatpakrepo"));
         assert!(!repo_url_valid("https://x/y.flatpakref"));
+    }
+
+    #[test]
+    fn the_page_dims_inside_the_windows_rounded_corners() {
+        use crate::settings::Style;
+        use eframe::egui::epaint::Shape;
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 400.0));
+        let ctx = egui::Context::default();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        crate::setup(&ctx, &fixtures, None);
+        super::super::widgets::set_reduce_motion(&ctx, true);
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        for style in [Style::Adwaita, Style::Liquid, Style::Fluent, Style::Modern] {
+            let skin = theme::Skin {
+                style,
+                ..theme::Skin::default()
+            };
+            let mut output = theme::with_skin(skin, || {
+                let frame = |ui: &mut Ui| {
+                    let palette = Palette::current(ui.ctx());
+                    super::super::frame::show(ui, ui.max_rect(), "PkgDeck", &palette);
+                    modal(ui.ctx(), "dim-test", true, 300.0, |ui| {
+                        ui.label("Hello");
+                    });
+                };
+                ctx.run_ui(input(), frame).textures_delta.clear();
+                ctx.run_ui(input(), frame)
+            });
+            output.textures_delta.clear();
+            fn flatten(shape: &Shape, out: &mut Vec<Shape>) {
+                match shape {
+                    Shape::Vec(shapes) => shapes.iter().for_each(|shape| flatten(shape, out)),
+                    shape => out.push(shape.clone()),
+                }
+            }
+            let mut shapes = Vec::new();
+            for clipped in &output.shapes {
+                flatten(&clipped.shape, &mut shapes);
+            }
+            let dim_color =
+                Color32::from_black_alpha(if Palette::current(&ctx).dark { 130 } else { 70 });
+            let dim = shapes
+                .iter()
+                .find_map(|shape| match shape {
+                    Shape::Rect(rect) if rect.rect == screen && rect.fill == dim_color => {
+                        Some(rect.corner_radius)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{style:?}: no dimmed page"));
+            let corners = theme::with_skin(skin, || super::super::frame::window_corners(false));
+            assert_eq!(dim, corners, "{style:?}");
+        }
     }
 
     fn picker_harness(page: Page, duplicates: bool) -> egui_kittest::Harness<'static, (bool, App)> {
