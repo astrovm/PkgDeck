@@ -226,7 +226,13 @@ impl<'a> Button<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui) -> Response {
+    /// The width with its label, even when only the icon is shown.
+    pub fn full_width(&self, ui: &Ui) -> f32 {
+        self.layout(ui, true).1
+    }
+
+    /// The label to paint, if shown, and the button's width.
+    fn layout(&self, ui: &Ui, show_label: bool) -> (Option<std::sync::Arc<egui::Galley>>, f32) {
         let palette = Palette::current(ui.ctx());
         let height = if self.small { 30.0 } else { CONTROL_HEIGHT };
         let font = if self.small {
@@ -242,10 +248,9 @@ impl<'a> Button<'a> {
         let strong = matches!(self.look, Look::Primary | Look::Solid(_) | Look::Soft(_));
         let text_font = if strong { bold_font } else { font };
         let icon_size = if self.small { 16.0 } else { 18.0 };
-        let show_label = !self.icon_only || self.icon.is_none();
         let galley = show_label.then(|| {
             ui.painter()
-                .layout_no_wrap(self.label.to_owned(), text_font.clone(), palette.ink)
+                .layout_no_wrap(self.label.to_owned(), text_font, palette.ink)
         });
         let padding = if show_label {
             14.0
@@ -262,7 +267,17 @@ impl<'a> Button<'a> {
                 width += 8.0;
             }
         }
-        let width = width.max(self.min_width).max(height) + self.trailing;
+        (
+            galley,
+            width.max(self.min_width).max(height) + self.trailing,
+        )
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let palette = Palette::current(ui.ctx());
+        let height = if self.small { 30.0 } else { CONTROL_HEIGHT };
+        let icon_size = if self.small { 16.0 } else { 18.0 };
+        let (galley, width) = self.layout(ui, !self.icon_only || self.icon.is_none());
         let sense = if self.enabled {
             Sense::click()
         } else {
