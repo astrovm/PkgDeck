@@ -153,8 +153,8 @@ mod linux {
     use ksni::blocking::TrayMethods;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Once;
-    use zbus::blocking::Connection;
-    use zbus::zvariant::{OwnedValue, Value};
+    use zbus::wire::{OwnedVariant, Variant};
+    use zbus::Connection;
 
     pub struct Tray {
         pub icon: Vec<ksni::Icon>,
@@ -228,7 +228,7 @@ mod linux {
                     let mut connection = None;
                     loop {
                         if connection.is_none() {
-                            connection = Connection::session().ok();
+                            connection = zbus::block_on(Connection::session()).ok();
                         }
                         let reduced = connection.as_ref().is_some_and(read_motion);
                         REDUCE_MOTION.store(reduced, Ordering::Relaxed);
@@ -250,33 +250,32 @@ mod linux {
     /// once more.
     fn read(connection: &Connection, namespace: &str, key: &str) -> Option<super::Setting> {
         let reply = ["ReadOne", "Read"].into_iter().find_map(|method| {
-            connection
-                .call_method(
-                    Some("org.freedesktop.portal.Desktop"),
-                    "/org/freedesktop/portal/desktop",
-                    Some("org.freedesktop.portal.Settings"),
-                    method,
-                    &(namespace, key),
-                )
-                .ok()
+            zbus::block_on(connection.call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                Some("org.freedesktop.portal.Settings"),
+                method,
+                &(namespace, key),
+            ))
+            .ok()
         })?;
-        let value: OwnedValue = reply.body().deserialize().ok()?;
+        let value: OwnedVariant = reply.body().deserialize().ok()?;
         setting(value.into())
     }
 
     /// A portal value as a [`super::Setting`], unwrapped however deep.
-    pub(super) fn setting(mut value: Value) -> Option<super::Setting> {
-        while let Value::Value(inner) = value {
+    pub(super) fn setting(mut value: Variant) -> Option<super::Setting> {
+        while let Variant::Variant(inner) = value {
             value = *inner;
         }
         use super::Setting::*;
         Some(match value {
-            Value::Bool(on) => Flag(on),
-            Value::U8(n) => Number(n.into()),
-            Value::I32(n) => Number(n.into()),
-            Value::U32(n) => Number(n.into()),
-            Value::F64(n) => Number(n),
-            Value::Str(text) => Text(text.to_string()),
+            Variant::Bool(on) => Flag(on),
+            Variant::U8(n) => Number(n.into()),
+            Variant::I32(n) => Number(n.into()),
+            Variant::U32(n) => Number(n.into()),
+            Variant::F64(n) => Number(n),
+            Variant::Str(text) => Text(text.to_string()),
             _ => return None,
         })
     }
@@ -682,16 +681,15 @@ fn desktop_blurs(_desktop: Option<&str>) -> bool {
 /// Asks KWin whether its blur effect is on.
 #[cfg(target_os = "linux")]
 fn kwin_blur_loaded() -> Option<bool> {
-    let connection = zbus::blocking::Connection::session().ok()?;
-    let reply = connection
-        .call_method(
-            Some("org.kde.KWin"),
-            "/Effects",
-            Some("org.kde.kwin.Effects"),
-            "isEffectLoaded",
-            &("blur",),
-        )
-        .ok()?;
+    let connection = zbus::block_on(zbus::Connection::session()).ok()?;
+    let reply = zbus::block_on(connection.call_method(
+        Some("org.kde.KWin"),
+        "/Effects",
+        Some("org.kde.kwin.Effects"),
+        "isEffectLoaded",
+        &("blur",),
+    ))
+    .ok()?;
     reply.body().deserialize::<bool>().ok()
 }
 
@@ -863,18 +861,18 @@ mod tests {
     #[test]
     fn portal_values_become_settings() {
         use linux::setting;
-        use zbus::zvariant::Value;
+        use zbus::wire::Variant;
         use Setting::*;
-        assert_eq!(setting(Value::Bool(false)), Some(Flag(false)));
-        assert_eq!(setting(Value::U8(1)), Some(Number(1.0)));
-        assert_eq!(setting(Value::I32(-1)), Some(Number(-1.0)));
-        assert_eq!(setting(Value::U32(1)), Some(Number(1.0)));
-        assert_eq!(setting(Value::F64(0.5)), Some(Number(0.5)));
-        assert_eq!(setting(Value::from("0")), Some(Text("0".into())));
+        assert_eq!(setting(Variant::Bool(false)), Some(Flag(false)));
+        assert_eq!(setting(Variant::U8(1)), Some(Number(1.0)));
+        assert_eq!(setting(Variant::I32(-1)), Some(Number(-1.0)));
+        assert_eq!(setting(Variant::U32(1)), Some(Number(1.0)));
+        assert_eq!(setting(Variant::F64(0.5)), Some(Number(0.5)));
+        assert_eq!(setting(Variant::from("0")), Some(Text("0".into())));
         // `Read` wraps the value once more.
-        let wrapped = Value::Value(Box::new(Value::Value(Box::new(Value::U32(1)))));
+        let wrapped = Variant::Variant(Box::new(Variant::Variant(Box::new(Variant::U32(1)))));
         assert_eq!(setting(wrapped), Some(Number(1.0)));
-        assert_eq!(setting(Value::I64(1)), None);
+        assert_eq!(setting(Variant::I64(1)), None);
     }
 
     #[test]

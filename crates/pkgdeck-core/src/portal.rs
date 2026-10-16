@@ -16,9 +16,10 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
-use zbus::blocking::{Connection, MessageIterator};
+use futures_lite::StreamExt;
 use zbus::message::Type;
 use zbus::MatchRule;
+use zbus::{Connection, MessageStream};
 
 const DESTINATION: &str = "org.freedesktop.Flatpak";
 const PATH: &str = "/org/freedesktop/Flatpak/Development";
@@ -125,11 +126,14 @@ fn shared() -> io::Result<Arc<Bus>> {
 
 /// The bus in `slot`, opened with `open` when there is none or it was lost.
 /// `info` is the file only a real sandbox has.
-fn share(
+fn share<F>(
     slot: &Mutex<Option<Arc<Bus>>>,
     info: &Path,
-    open: impl Fn() -> zbus::Result<Connection>,
-) -> io::Result<Arc<Bus>> {
+    open: impl Fn() -> F,
+) -> io::Result<Arc<Bus>>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     // Held while connecting, so commands starting together share one try.
     let mut slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
     if let Some(bus) = slot.as_ref().filter(|bus| !bus.lost()) {
@@ -150,10 +154,13 @@ fn share(
     Ok(bus)
 }
 
-fn connect(open: impl Fn() -> zbus::Result<Connection>) -> zbus::Result<Connection> {
+fn connect<F>(open: impl Fn() -> F) -> zbus::Result<Connection>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     let mut attempt = 0;
     loop {
-        match open() {
+        match zbus::block_on(open()) {
             Err(error) if attempt < 5 && transient(&error) => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(20 << attempt));
@@ -168,26 +175,39 @@ fn connect(open: impl Fn() -> zbus::Result<Connection>) -> zbus::Result<Connecti
 /// (no such program) gives the same answer again.
 fn transient(error: &zbus::Error) -> bool {
     match error {
-        zbus::Error::InputOutput(_) => true,
-        zbus::Error::MethodError(name, _, _) => matches!(
-            name.as_str(),
-            "org.freedesktop.DBus.Error.NoReply"
-                | "org.freedesktop.DBus.Error.ServiceUnknown"
-                | "org.freedesktop.DBus.Error.NameHasNoOwner"
-                | "org.freedesktop.DBus.Error.LimitsExceeded"
-                | "org.freedesktop.DBus.Error.Disconnected"
-                | "org.freedesktop.DBus.Error.Timeout"
-                | "org.freedesktop.DBus.Error.TimedOut"
-        ),
+        zbus::Error::InputOutput(_) | zbus::Error::Connection(_, _) => true,
+        zbus::Error::FDO(error) => transient_name(zbus::DBusError::name(error.as_ref()).as_str()),
+        zbus::Error::MethodError(name, _, _) => transient_name(name.as_str()),
         _ => false,
     }
+}
+
+fn transient_name(name: &str) -> bool {
+    matches!(
+        name,
+        "org.freedesktop.DBus.Error.NoReply"
+            | "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            | "org.freedesktop.DBus.Error.LimitsExceeded"
+            | "org.freedesktop.DBus.Error.Disconnected"
+            | "org.freedesktop.DBus.Error.Timeout"
+            | "org.freedesktop.DBus.Error.TimedOut"
+    )
 }
 
 fn io_error(error: zbus::Error) -> io::Error {
     match error {
         // "Failed to start command: Failed to execute child process …"
         zbus::Error::MethodError(_, Some(message), _) => io::Error::other(message),
-        zbus::Error::InputOutput(error) => io::Error::new(error.kind(), error.to_string()),
+        zbus::Error::FDO(error) => io::Error::other(
+            zbus::DBusError::description(error.as_ref())
+                .filter(|message| !message.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string()),
+        ),
+        zbus::Error::InputOutput(error) | zbus::Error::Connection(error, _) => {
+            io::Error::new(error.kind(), error.to_string())
+        }
         error => io::Error::other(error.to_string()),
     }
 }
@@ -220,11 +240,13 @@ impl Bus {
         // Listen before the first command, so no end is missed.
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
-            .path(PATH)?
-            .interface(INTERFACE)?
-            .member("HostCommandExited")?
-            .build();
-        let ends = MessageIterator::for_match_rule(rule, &connection, Some(1024))?;
+            .path(PATH)
+            .interface(INTERFACE)
+            .member("HostCommandExited")
+            .build()?;
+        let ends =
+            MessageStream::for_match_rule(rule, &connection, std::num::NonZeroUsize::new(1024));
+        let ends = zbus::block_on(ends)?;
         let bus = Arc::new(Self {
             connection,
             state: Mutex::default(),
@@ -238,8 +260,8 @@ impl Bus {
         Ok(bus)
     }
 
-    fn listen(ends: MessageIterator, bus: Weak<Self>) {
-        for message in ends {
+    fn listen(mut ends: MessageStream, bus: Weak<Self>) {
+        while let Some(message) = zbus::block_on(ends.next()) {
             let (Ok(message), Some(bus)) = (message, bus.upgrade()) else {
                 break;
             };
@@ -289,10 +311,10 @@ impl Bus {
             bytes
         };
         let argv: Vec<Vec<u8>> = argv.iter().map(|arg| bytes(arg)).collect();
-        let fds: HashMap<u32, zbus::zvariant::Fd<'_>> = stdio
+        let fds: HashMap<u32, zbus::wire::Fd<'_>> = stdio
             .iter()
             .enumerate()
-            .map(|(number, fd)| (number as u32, zbus::zvariant::Fd::from(fd)))
+            .map(|(number, fd)| (number as u32, zbus::wire::Fd::from(fd)))
             .collect();
         let variables: HashMap<String, String> = env
             .into_iter()
@@ -305,36 +327,35 @@ impl Bus {
             })
             .collect();
         let flags = if env.is_some() { CLEAR_ENV } else { 0 };
-        let reply = self.connection.call_method(
+        let reply = zbus::block_on(self.connection.call_method(
             Some(DESTINATION),
             PATH,
             Some(INTERFACE),
             "HostCommand",
             &(bytes(OsStr::new("/")), argv, fds, variables, flags),
-        )?;
+        ))?;
         reply.body().deserialize()
     }
 
     fn signal(&self, pid: u32, signal: i32) -> io::Result<()> {
         // Host commands lead their own process group, so the group is
         // the command and whatever it started.
-        self.connection
-            .call_method(
-                Some(DESTINATION),
-                PATH,
-                Some(INTERFACE),
-                "HostCommandSignal",
-                &(pid, signal as u32, true),
-            )
-            .map(drop)
-            .map_err(io_error)
+        zbus::block_on(self.connection.call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(INTERFACE),
+            "HostCommandSignal",
+            &(pid, signal as u32, true),
+        ))
+        .map(drop)
+        .map_err(io_error)
     }
 }
 
 impl Drop for Bus {
     fn drop(&mut self) {
         // Ends the listening thread, which holds the connection too.
-        let _ = self.connection.clone().close();
+        let _ = zbus::block_on(self.connection.clone().close());
     }
 }
 
@@ -441,12 +462,12 @@ mod fake {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    use zbus::blocking::connection::Builder;
+    use zbus::connection::Builder;
 
     type HostCommand = (
         Vec<u8>,
         Vec<Vec<u8>>,
-        HashMap<u32, zbus::zvariant::OwnedFd>,
+        HashMap<u32, zbus::wire::OwnedFd>,
         HashMap<String, String>,
         u32,
     );
@@ -470,18 +491,13 @@ mod fake {
             let server_end = server.try_clone().unwrap();
             let guid = zbus::Guid::generate();
             let server = std::thread::spawn(move || {
-                Builder::async_io_unix_stream(server)
-                    .server(guid)
-                    .unwrap()
-                    .p2p()
-                    .build()
-                    .unwrap()
+                zbus::block_on(Builder::unix_stream(server).server(guid).p2p().build()).unwrap()
             });
-            let client = Builder::async_io_unix_stream(client).p2p().build().unwrap();
+            let client = zbus::block_on(Builder::unix_stream(client).p2p().build()).unwrap();
             let server = server.join().unwrap();
             // Listening before the first call: a message nobody listens for
             // yet is dropped.
-            let calls = MessageIterator::from(&server);
+            let calls = MessageStream::from(&server);
             let bridge = bridge.to_owned();
             let held = server.clone();
             std::thread::spawn(move || serve(&server, calls, &bridge, refusals));
@@ -496,26 +512,28 @@ mod fake {
 
     fn serve(
         connection: &Connection,
-        calls: MessageIterator,
+        mut calls: MessageStream,
         bridge: &Path,
         refusals: Vec<&'static str>,
     ) {
         let mut refusals = refusals.into_iter();
-        for message in calls {
+        while let Some(message) = zbus::block_on(calls.next()) {
             let Ok(message) = message else { break };
             let header = message.header();
             // Only HostCommand and HostCommandSignal get called.
             let _ = if header.member().map(|member| member.as_str()) == Some("HostCommand") {
                 let call: HostCommand = message.body().deserialize().unwrap();
                 match refusals.next() {
-                    Some(name) => connection.reply_error(&header, name, &"turned down"),
+                    Some(name) => {
+                        zbus::block_on(connection.reply_error(&header, name, &"turned down"))
+                    }
                     None => match start(connection, bridge, call) {
-                        Ok(pid) => connection.reply(&header, &pid),
-                        Err(error) => connection.reply_error(
+                        Ok(pid) => zbus::block_on(connection.reply(&header, &pid)),
+                        Err(error) => zbus::block_on(connection.reply_error(
                             &header,
                             "org.freedesktop.DBus.Error.Failed",
                             &format!("Failed to start command: {error}"),
-                        ),
+                        )),
                     },
                 }
             } else {
@@ -523,12 +541,12 @@ mod fake {
                 let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
                 let signal = rustix::process::Signal::from_named_raw(signal as i32).unwrap();
                 match rustix::process::kill_process_group(pid, signal) {
-                    Ok(()) => connection.reply(&header, &()),
-                    Err(error) => connection.reply_error(
+                    Ok(()) => zbus::block_on(connection.reply(&header, &())),
+                    Err(error) => zbus::block_on(connection.reply_error(
                         &header,
                         "org.freedesktop.DBus.Error.Failed",
                         &error.to_string(),
-                    ),
+                    )),
                 }
             };
         }
@@ -570,13 +588,13 @@ mod fake {
         let connection = connection.clone();
         std::thread::spawn(move || {
             let status = child.wait().unwrap();
-            let _ = connection.emit_signal(
+            let _ = zbus::block_on(connection.emit_signal(
                 None::<&str>,
                 PATH,
                 INTERFACE,
                 "HostCommandExited",
                 &(pid, status.into_raw() as u32),
-            );
+            ));
         });
         Ok(pid)
     }
@@ -616,12 +634,11 @@ mod tests {
     }
 
     fn method_error(name: &str) -> zbus::Error {
-        let message = zbus::Message::method_call("/", "Call")
-            .unwrap()
+        let message = zbus::Message::method_call("/", "Call").build(&()).unwrap();
+        zbus::Message::error(&message.header(), name)
             .build(&())
-            .unwrap();
-        let name = zbus::names::ErrorName::try_from(name).unwrap();
-        zbus::Error::MethodError(name.into(), None, message)
+            .unwrap()
+            .into()
     }
 
     fn broken() -> zbus::Error {
@@ -741,11 +758,11 @@ mod tests {
         let tries = Cell::new(0);
         let open = || {
             tries.set(tries.get() + 1);
-            if tries.get() % 3 == 0 {
+            std::future::ready(if tries.get() % 3 == 0 {
                 Ok(fake::Peer::new(&bridge, Vec::new()).client)
             } else {
                 Err(broken())
-            }
+            })
         };
         // Turned away twice, then connected.
         let bus = share(&slot, &info, open).unwrap();
@@ -764,16 +781,18 @@ mod tests {
         assert_eq!(error.to_string(), UNAVAILABLE);
         assert_eq!(tries.get(), 6);
 
-        let error = share(&Mutex::new(None), &info, || Err(zbus::Error::Unsupported))
-            .err()
-            .unwrap();
+        let error = share(&Mutex::new(None), &info, || {
+            std::future::ready(Err(zbus::Error::Unsupported))
+        })
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
         assert!(error.to_string().starts_with(UNAVAILABLE), "{error}");
 
         let tries = Cell::new(0);
         let error = connect(|| {
             tries.set(tries.get() + 1);
-            Err(broken())
+            std::future::ready(Err(broken()))
         })
         .err()
         .unwrap();
@@ -796,7 +815,14 @@ mod tests {
             let error = method_error(&format!("org.freedesktop.DBus.Error.{name}"));
             assert!(transient(&error), "{name}");
         }
+        let connection = zbus::Error::Connection(
+            Arc::new(io::Error::from(io::ErrorKind::WouldBlock)),
+            Box::new(zbus::Address::try_from("unix:path=/missing-bus").unwrap()),
+        );
+        assert!(transient(&connection));
+        assert_eq!(io_error(connection).kind(), io::ErrorKind::WouldBlock);
         assert!(transient(&broken()));
+        assert!(!transient(&method_error("org.pkgdeck.CustomError")));
         assert!(!transient(&method_error(
             "org.freedesktop.DBus.Error.Failed"
         )));
@@ -817,5 +843,18 @@ mod tests {
                 .contains("org.freedesktop.DBus.Error.Failed"),
             "{error}"
         );
+        // With one, only the message is kept, whoever named the error.
+        for name in [
+            "org.freedesktop.DBus.Error.Failed",
+            "org.pkgdeck.CustomError",
+        ] {
+            let call = zbus::Message::method_call("/", "Call").build(&()).unwrap();
+            let reply = zbus::Message::error(&call.header(), name)
+                .build(&("Failed to start command",))
+                .unwrap();
+            let error = io_error(reply.into());
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "Failed to start command", "{name}");
+        }
     }
 }

@@ -9,10 +9,11 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use zbus::blocking::{Connection, MessageIterator};
+use futures_lite::StreamExt;
 use zbus::message::Type;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::wire::{OwnedObjectPath, OwnedVariant};
 use zbus::MatchRule;
+use zbus::{Connection, MessageStream};
 
 use crate::process::{Cancellation, Completion, ExecutionError};
 
@@ -52,14 +53,17 @@ pub fn refresh(source: &str, cancel: &Cancellation) -> Result<bool, ExecutionErr
     refresh_with(source, cancel, contained, Connection::system)
 }
 /// [`refresh`], with the bus from `connect` unless `contained`.
-fn refresh_with(
+fn refresh_with<F>(
     source: &str,
     cancel: &Cancellation,
     contained: bool,
-    connect: impl FnOnce() -> zbus::Result<Connection>,
-) -> Result<bool, ExecutionError> {
+    connect: impl FnOnce() -> F,
+) -> Result<bool, ExecutionError>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     match (backend_for(source), contained) {
-        (Some(backend), false) => match connect() {
+        (Some(backend), false) => match zbus::block_on(connect()) {
             Ok(bus) => refresh_on(&bus, backend, cancel, TIMEOUT),
             Err(_) => Ok(false),
         },
@@ -81,10 +85,15 @@ pub(crate) fn refresh_on(
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
         .interface(TRANSACTION)
-        .and_then(|rule| rule.path(transaction.as_str()))
-        .map_err(failed)?
-        .build();
-    let signals = MessageIterator::for_match_rule(rule, bus, Some(16)).map_err(failed)?;
+        .path(transaction.as_str())
+        .build()
+        .map_err(failed)?;
+    let mut signals = zbus::block_on(MessageStream::for_match_rule(
+        rule,
+        bus,
+        std::num::NonZeroUsize::new(16),
+    ))
+    .map_err(failed)?;
     // Without a password; a prompt would wait for nobody.
     call::<_, ()>(
         bus,
@@ -97,7 +106,7 @@ pub(crate) fn refresh_on(
     std::thread::spawn(move || {
         let mut details = String::new();
         // Ends when the bus closes, which drops `sender`.
-        for message in signals.map_while(Result::ok) {
+        while let Some(Ok(message)) = zbus::block_on(signals.next()) {
             let header = message.header();
             match header.member().map(|member| member.as_str()) {
                 Some("ErrorCode") => {
@@ -162,7 +171,7 @@ pub(crate) fn refresh_on(
 /// Whether PackageKit is there, drives `backend`, and may refresh without
 /// asking for a password.
 fn can_refresh(bus: &Connection, backend: &str) -> bool {
-    let name = call::<_, OwnedValue>(
+    let name = call::<_, OwnedVariant>(
         bus,
         PATH,
         "org.freedesktop.DBus.Properties",
@@ -184,10 +193,10 @@ fn call<B, R>(
     body: &B,
 ) -> Result<R, ExecutionError>
 where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
-    R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
+    B: serde::Serialize + zbus::wire::DynamicType,
+    R: for<'d> zbus::wire::DynamicDeserialize<'d>,
 {
-    bus.call_method(Some(DESTINATION), path, Some(interface), method, body)
+    zbus::block_on(bus.call_method(Some(DESTINATION), path, Some(interface), method, body))
         .and_then(|reply| reply.body().deserialize::<R>())
         .map_err(failed)
 }
@@ -213,7 +222,7 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
     use std::sync::{Arc, Mutex};
-    use zbus::blocking::connection::Builder;
+    use zbus::connection::Builder;
 
     /// How the fake daemon behaves.
     #[derive(Clone)]
@@ -252,24 +261,25 @@ mod tests {
         let (client, server) = UnixStream::pair().unwrap();
         let guid = zbus::Guid::generate();
         let server = std::thread::spawn(move || {
-            Builder::async_io_unix_stream(server)
-                .server(guid)
-                .unwrap()
-                .p2p()
-                .build()
-                .unwrap()
+            zbus::block_on(Builder::unix_stream(server).server(guid).p2p().build()).unwrap()
         });
-        let client = Builder::async_io_unix_stream(client).p2p().build().unwrap();
+        let client = zbus::block_on(Builder::unix_stream(client).p2p().build()).unwrap();
         let server = server.join().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let messages = MessageIterator::from(&server);
+        let mut messages = MessageStream::from(&server);
         std::thread::spawn(move || {
             const TID: &str = "/1_abc";
             let finish = |exit: u32| {
-                let _ = server.emit_signal(None::<()>, TID, TRANSACTION, "Finished", &(exit, 5u32));
+                let _ = zbus::block_on(server.emit_signal(
+                    None::<()>,
+                    TID,
+                    TRANSACTION,
+                    "Finished",
+                    &(exit, 5u32),
+                ));
             };
-            let calls = messages
+            let calls = std::iter::from_fn(|| zbus::block_on(messages.next()))
                 .map_while(Result::ok)
                 .filter(|message| message.header().message_type() == Type::MethodCall);
             for message in calls {
@@ -277,57 +287,59 @@ mod tests {
                 let member = header.member().unwrap().to_string();
                 seen.lock().unwrap().push(member.clone());
                 if member == daemon.fails {
-                    let _ = server.reply_error(
+                    let _ = zbus::block_on(server.reply_error(
                         &header,
                         "org.freedesktop.DBus.Error.Failed",
                         &"refused",
-                    );
+                    ));
                     continue;
                 }
                 if member == "RefreshCache" && daemon.hangs_up {
-                    let _ = server.reply(&header, &());
+                    let _ = zbus::block_on(server.reply(&header, &()));
                     // Dropping the last handle closes the connection.
                     return;
                 }
                 let _ = match member.as_str() {
-                    "Get" => server.reply(&header, &zbus::zvariant::Value::from(daemon.backend)),
-                    "CanAuthorize" => server.reply(&header, &daemon.authorize),
-                    "CreateTransaction" => {
-                        server.reply(&header, &zbus::zvariant::ObjectPath::try_from(TID).unwrap())
-                    }
+                    "Get" => zbus::block_on(
+                        server.reply(&header, &zbus::wire::Variant::from(daemon.backend)),
+                    ),
+                    "CanAuthorize" => zbus::block_on(server.reply(&header, &daemon.authorize)),
+                    "CreateTransaction" => zbus::block_on(
+                        server.reply(&header, &zbus::wire::ObjectPath::try_from(TID).unwrap()),
+                    ),
                     "RefreshCache" => {
-                        let replied = server.reply(&header, &());
+                        let replied = zbus::block_on(server.reply(&header, &()));
                         // Progress the client doesn't follow.
-                        let _ = server.emit_signal(
+                        let _ = zbus::block_on(server.emit_signal(
                             None::<()>,
                             TID,
                             TRANSACTION,
                             "ItemProgress",
                             &("id", 1u32, 50u32),
-                        );
+                        ));
                         std::thread::sleep(daemon.takes);
                         if let Some((exit, error)) = daemon.finish {
                             if let Some(error) = error {
-                                let _ = server.emit_signal(
+                                let _ = zbus::block_on(server.emit_signal(
                                     None::<()>,
                                     TID,
                                     TRANSACTION,
                                     "ErrorCode",
                                     &(7u32, error),
-                                );
+                                ));
                             }
                             finish(exit);
                         }
                         replied
                     }
                     "Cancel" => {
-                        let replied = server.reply(&header, &());
+                        let replied = zbus::block_on(server.reply(&header, &()));
                         if daemon.honours_cancel {
                             finish(CANCELLED);
                         }
                         replied
                     }
-                    _ => server.reply(&header, &()),
+                    _ => zbus::block_on(server.reply(&header, &())),
                 };
             }
         });
@@ -446,13 +458,13 @@ mod tests {
     #[test]
     fn outside_a_container_the_system_bus_is_asked() {
         let cancel = Cancellation::default();
-        let fake = || Ok(serve(Daemon::default()).0);
+        let fake = || std::future::ready(Ok(serve(Daemon::default()).0));
         assert_eq!(refresh_with("apt", &cancel, false, fake), Ok(true));
         // In a container the bus is the host's, and so are its lists.
-        let never = || -> zbus::Result<Connection> { panic!("asked the bus") };
+        let never = || -> std::future::Ready<zbus::Result<Connection>> { panic!("asked the bus") };
         assert_eq!(refresh_with("apt", &cancel, true, never), Ok(false));
         assert_eq!(refresh_with("flatpak", &cancel, false, never), Ok(false));
-        let absent = || Err(zbus::Error::Unsupported);
+        let absent = || std::future::ready(Err(zbus::Error::Unsupported));
         assert_eq!(refresh_with("apt", &cancel, false, absent), Ok(false));
         // Sources PackageKit doesn't refresh never reach the bus.
         assert_eq!(refresh("flatpak", &cancel), Ok(false));
