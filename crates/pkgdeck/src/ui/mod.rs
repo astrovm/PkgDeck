@@ -700,29 +700,16 @@ fn header(app: &mut App, ui: &mut Ui) {
                         .icon("cancel")
                         .loading(true)
                         .icon_only(compact)
-                        .tooltip(if app.page == Page::Updates {
-                            "Stop checking for updates"
-                        } else {
-                            "Stop refreshing this page"
-                        })
+                        .tooltip("Stop refreshing this page")
                         .show(ui);
                     if response.clicked() {
                         app.cancel();
                     }
                 } else {
-                    let label = if app.page == Page::Updates {
-                        "Check for updates"
-                    } else {
-                        "Refresh"
-                    };
-                    let response = Button::new(Look::Secondary, label)
+                    let response = Button::new(Look::Secondary, "Refresh")
                         .icon("refresh")
                         .icon_only(compact)
-                        .tooltip(if app.page == Page::Updates {
-                            "Refresh sources and check for updates (Ctrl+R)"
-                        } else {
-                            "Refresh this page (Ctrl+R)"
-                        })
+                        .tooltip("Refresh this page (Ctrl+R)")
                         .enabled(!app.busy && app.confirmation.is_none())
                         .show(ui);
                     if response.clicked() {
@@ -1737,7 +1724,7 @@ mod header_tests {
     }
 
     #[test]
-    fn clean_all_says_what_it_frees_without_the_data_it_leaves() {
+    fn clean_selected_says_what_it_frees_without_unchecked_data() {
         let clean = |tasks: &[(&str, Option<u64>)]| {
             let mut app = app(Page::Clean, 0);
             app.rows = tasks
@@ -1746,7 +1733,7 @@ mod header_tests {
                 .map(|(i, (kind, bytes))| {
                     serde_json::from_value(serde_json::json!({
                         "kind": "cleanup", "name": format!("task-{i}"), "source": "apt",
-                        "cleanup_kind": kind, "bytes": bytes,
+                        "cleanup_kind": kind, "bytes": bytes, "cleanup_opt_in": *kind == "data",
                     }))
                     .unwrap()
                 })
@@ -1754,7 +1741,7 @@ mod header_tests {
             app.invalidate();
             app.refresh_items();
             let harness = draw(app, page_actions);
-            ["Clean all", "Clean all (2.5 GB)"]
+            ["Clean selected", "Clean selected (2.5 GB)"]
                 .into_iter()
                 .find(|label| harness.query_by_label(label).is_some())
                 .map(str::to_owned)
@@ -1767,11 +1754,11 @@ mod header_tests {
                 ("package_cache", None),
             ])
             .as_deref(),
-            Some("Clean all (2.5 GB)")
+            Some("Clean selected (2.5 GB)")
         );
         assert_eq!(
             clean(&[("package_cache", None), ("data", Some(9))]).as_deref(),
-            Some("Clean all")
+            Some("Clean selected")
         );
     }
 

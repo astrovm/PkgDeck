@@ -7280,6 +7280,11 @@ mod tests {
         pacman.arm_update_check(Some(7));
         assert_eq!(pacman.refresh_update_index(&cancel), Ok(()));
         assert_eq!(kit.ran(), ["packagekit pacman"]);
+        // A missing manager is no such excuse: the check says so.
+        let kit = Kit::new(Ok(false), "").copies(false).missing("zypper");
+        let mut zypper = SystemManager::zypper(kit.clone());
+        zypper.arm_update_check(Some(7));
+        assert!(zypper.refresh_update_index(&cancel).is_err());
     }
 
     #[test]
@@ -7379,6 +7384,16 @@ mod tests {
             Bare.refresh_index("dnf", &[], &cancel),
             Err(ExecutionError::Disabled("dnf not found".into()))
         );
+    }
+
+    #[test]
+    fn only_system_managers_refresh_as_root() {
+        for id in ["apt", "dnf", "pacman", "zypper", "apk", "xbps", "macports"] {
+            assert!(refresh_needs_root(id), "{id}");
+        }
+        for id in ["flatpak", "snap", "brew", "cargo", "npm"] {
+            assert!(!refresh_needs_root(id), "{id}");
+        }
     }
 
     #[test]
@@ -7628,6 +7643,29 @@ mod tests {
         let calls = calls.0.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1], calls[0][1..]);
+        drop(calls);
+        // Other managers have no online fallback: a failed listing is asked once.
+        #[derive(Clone)]
+        struct Down(Arc<Mutex<usize>>);
+        impl Transport for Down {
+            fn system_manager(
+                &self,
+                _: &str,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                *self.0.lock().unwrap() += 1;
+                Err(ExecutionError::Failed(completion(1, "")))
+            }
+        }
+        let down = Down(Arc::default());
+        let pacman = SystemManager::pacman(down.clone());
+        assert_eq!(
+            pacman.updates(&Cancellation::default()),
+            Ok(BTreeMap::new())
+        );
+        assert_eq!(*down.0.lock().unwrap(), 1);
     }
 
     #[test]

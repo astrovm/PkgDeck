@@ -980,7 +980,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 .cleanup(cancel)
                 .items
                 .into_iter()
-                .filter(|item| preferences.includes(&item.id) && ((caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects")))
+                .filter(|item| preferences.includes_item(item) && ((caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects")))
                 .collect();
             let operations: Vec<_> = items
                 .iter()
@@ -5663,6 +5663,16 @@ impl ffi::PackageController {
         sources.dedup();
         let catalog: Vec<Value> =
             serde_json::from_str(self.source_catalog().as_str()).unwrap_or_default();
+        // A source that can't run here, like a macOS one on Linux, is
+        // skipped, as on any Updates load: it hasn't failed a check.
+        sources.retain(|source| {
+            !catalog.iter().any(|row| {
+                row["source"].as_str() == Some(source.as_str()) && row["available"] == false
+            })
+        });
+        if sources.is_empty() {
+            return;
+        }
         let operations = sources
             .iter()
             .filter(|source| {
@@ -6108,9 +6118,7 @@ impl ffi::PackageController {
         let items: Vec<_> = cleanup
             .iter()
             .filter(|item| {
-                item.kind.in_clean_all()
-                    && wanted.contains(&item.id)
-                    && self.rust().cleanup_preferences.includes(&item.id)
+                wanted.contains(&item.id) && self.rust().cleanup_preferences.includes_item(item)
             })
             .collect();
         if items.is_empty() {
@@ -6663,6 +6671,7 @@ impl ffi::PackageController {
                             "kind": "cleanup", "name": item.title, "display_name": item.title,
                             "source": item.id.backend, "summary": item.summary,
                             "cleanup_key": item.id.key, "cleanup_kind": item.kind,
+                            "cleanup_opt_in": item.opt_in(),
                             "preview": item.preview, "bytes": item.bytes
                         })
                     })
@@ -13214,6 +13223,7 @@ mod tests {
         assert_eq!(parsed(controller.failed_rows())[0]["reason"], advice);
     }
     /// Proposes every listed cleanup task, as Clean all does.
+    /// Checks every task, then cleans the checked ones.
     fn propose_every_cleanup(controller: &mut Pin<&mut ffi::PackageController>) {
         let ids: Vec<_> = controller
             .rust()
@@ -13221,6 +13231,10 @@ mod tests {
             .iter()
             .map(|item| item.id.clone())
             .collect();
+        for id in &ids {
+            let preferences = &mut controller.as_mut().rust_mut().cleanup_preferences;
+            preferences.set_included(id.clone(), true);
+        }
         controller
             .as_mut()
             .propose_clean_checked(encoded(json!(ids)));
@@ -18212,6 +18226,24 @@ mod tests {
         assert_eq!(state["failures"], json!([]));
     }
     #[test]
+    fn refresh_skips_sources_that_cannot_run_here() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().set_source_catalog(encoded(json!([
+            {"source":"macos-apps", "available":false, "capabilities":["installed"]},
+            {"source":"pip", "available":false, "capabilities":["installed"]},
+            {"source":"npm", "available":true, "capabilities":["installed"]}
+        ])));
+        ctl.as_mut().check_for_updates("macos-apps,npm,pip".into());
+        let job = &ctl.rust().worker.as_ref().unwrap().job;
+        let sources = expect!(job, Job::CheckUpdates(_, sources) => sources);
+        assert_eq!(*sources, ["npm"]);
+        settle(&mut ctl);
+        // Nothing left to check: nothing starts.
+        ctl.as_mut().check_for_updates("macos-apps,pip".into());
+        assert!(ctl.rust().worker.is_none());
+    }
+    #[test]
     fn refresh_a_real_error_still_reports_its_source_next_to_missing_ones() {
         fn engine(
             _: &[String],
@@ -18397,8 +18429,8 @@ mod tests {
     }
 
     #[test]
-    fn refresh_explicit_check_source_selection_is_deduplicated_and_uses_only_refresh_capabilities()
-    {
+    fn refresh_explicit_check_source_selection_is_deduplicated_skips_unavailable_and_uses_only_refresh_capabilities(
+    ) {
         // Exhaust every subset: selection, availability and refresh capability
         // are independent, and rereading registries must not depend on refresh.
         for chosen in 1..8_u8 {
@@ -18417,11 +18449,21 @@ mod tests {
                     ctl.as_mut().check_for_updates(
                         format!("{},{}", sources.join(","), sources.join(",")).into(),
                     );
-                    assert!(ctl.checking_updates());
-                    let job = &ctl.rust().worker.as_ref().unwrap().job;
+                    // Sources that can't run here are skipped.
+                    let checked: Vec<_> = ids
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| chosen & available & (1 << i) != 0)
+                        .map(|(_, id)| *id)
+                        .collect();
+                    assert_eq!(ctl.checking_updates(), !checked.is_empty());
+                    let Some(worker) = ctl.rust().worker.as_ref() else {
+                        continue;
+                    };
+                    let job = &worker.job;
                     let (ops, selected) =
                         expect!(job, Job::CheckUpdates(ops, selected) => (ops, selected));
-                    assert_eq!(selected, &sources);
+                    assert_eq!(selected, &checked);
                     let expected: Vec<_> = ids
                         .iter()
                         .enumerate()
@@ -18636,7 +18678,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_shows_what_it_frees_and_clean_all_leaves_data_alone() {
+    fn cleanup_shows_what_it_frees_and_clean_all_waits_for_data_to_be_checked() {
         let mut controller = synthetic_controller();
         let mut controller = controller.pin_mut();
         let volumes = sized(
@@ -18697,8 +18739,17 @@ mod tests {
         controller.as_mut().propose("clean".into(), 3);
         assert!(!controller.confirmation().to_string().contains("Frees"));
         controller.as_mut().confirm(false);
-        // Clean all: everything but the volumes, with what each frees.
-        propose_every_cleanup(&mut controller);
+        // Clean all: every checked task, with what each frees. The volumes
+        // wait to be checked.
+        let ids: Vec<_> = controller
+            .rust()
+            .cleanup
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        controller
+            .as_mut()
+            .propose_clean_checked(encoded(json!(ids)));
         let pending = controller.rust().pending.as_ref();
         assert!(matches!(pending, Some(Job::CleanAll(_))));
         assert_eq!(
@@ -18716,14 +18767,30 @@ mod tests {
         assert!(body.contains("clean task (APT)\nEmpties clean"));
         assert!(!body.contains("unused-volumes"));
         controller.as_mut().confirm(false);
-        // Only data: nothing for Clean all to do.
+        // Once checked, they go with the rest.
+        propose_every_cleanup(&mut controller);
+        assert_eq!(
+            controller
+                .rust()
+                .pending
+                .as_ref()
+                .map(Job::operations)
+                .unwrap_or_default(),
+            [&volumes, &cargo, &build, &unknown].map(|item| Operation::Clean(item.id.clone()))
+        );
+        controller.as_mut().confirm(false);
+        // Unchecked again: nothing for Clean all to do.
         controller
             .as_mut()
             .apply(Ok(Payload::Cleanup(CleanupReport {
                 items: vec![volumes.clone()],
                 failures: vec![],
             })));
-        propose_every_cleanup(&mut controller);
+        let preferences = &mut controller.as_mut().rust_mut().cleanup_preferences;
+        preferences.set_included(volumes.id.clone(), false);
+        controller
+            .as_mut()
+            .propose_clean_checked(encoded(json!([volumes.id])));
         assert!(controller.rust().pending.is_none());
         // Sizes that can't be told keep the plain status.
         controller
@@ -18800,7 +18867,7 @@ mod tests {
         }
     }
     #[test]
-    fn automatic_cleaning_runs_only_what_needs_no_review() {
+    fn automatic_cleaning_runs_every_checked_task_that_needs_no_password() {
         let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let mut engine = Engine::default();
         engine
@@ -18840,7 +18907,27 @@ mod tests {
         ));
         let mut cleaned = ran.lock().unwrap().clone();
         cleaned.sort();
+        // Stopped containers wait to be checked.
         assert_eq!(cleaned, ["broken", "cache", "images"]);
+        // Once checked, they go too.
+        let mut preferences = CleanupPreferences::default();
+        preferences.set_included(
+            CleanupId {
+                backend: "fixture".into(),
+                key: "stopped-containers".into(),
+            },
+            true,
+        );
+        ran.lock().unwrap().clear();
+        let auto = Job::AutoClean {
+            caches: true,
+            worktrees: false,
+            preferences,
+        };
+        run_job(&mut engine, auto, &Cancellation::default());
+        let mut cleaned = ran.lock().unwrap().clone();
+        cleaned.sort();
+        assert_eq!(cleaned, ["broken", "cache", "images", "stopped-containers"]);
         // Nothing to clean: nothing runs.
         let mut idle = Engine::default();
         idle.register(Cleaner {
@@ -18871,7 +18958,7 @@ mod tests {
                 bytes: 0
             })))
         ));
-        assert_eq!(ran.lock().unwrap().len(), 3);
+        assert_eq!(ran.lock().unwrap().len(), 4);
         assert!(Job::AutoClean {
             caches: true,
             worktrees: false,
@@ -18929,7 +19016,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_cleanup_uses_current_exact_keys_deduplicates_and_excludes_data() {
+    fn checked_cleanup_uses_current_exact_keys_deduplicates_and_skips_unchecked_data() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
         let items = vec![

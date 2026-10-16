@@ -90,6 +90,8 @@ pub struct Row {
     pub failure_kind: String,
     pub cleanup_key: String,
     pub cleanup_kind: String,
+    /// Whether the task waits to be checked the first time it shows up.
+    pub cleanup_opt_in: bool,
     pub preview: String,
     /// About how much disk space a cleanup task frees, when it can tell.
     pub bytes: Option<u64>,
@@ -131,9 +133,9 @@ impl Row {
             &self.display_name
         }
     }
-    /// Only cleanup tasks that can be included in a batch.
+    /// Cleanup tasks, which the checked ones clean together.
     pub fn batch_cleanable(&self) -> bool {
-        self.kind == "cleanup" && self.cleanup_kind != "data"
+        self.kind == "cleanup"
     }
     /// What a failed change names this row by; see `FailedRow::key`.
     pub fn failure_key(&self) -> String {

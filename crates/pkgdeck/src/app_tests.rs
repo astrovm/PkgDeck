@@ -1413,7 +1413,7 @@ fn clean_selected_reviews_only_the_checked_batch_tasks() {
     let rows = json!([
         {"kind":"cleanup", "name":"one", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache"},
         {"kind":"cleanup", "name":"two", "source":"dev-caches", "cleanup_key":"two", "cleanup_kind":"package_cache"},
-        {"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data"}
+        {"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "cleanup_opt_in":true}
     ]);
     app.c().set_rows(rows.to_string().into());
     app.react();
@@ -1432,6 +1432,13 @@ fn clean_selected_reviews_only_the_checked_batch_tasks() {
             .unwrap()
             .identity()
     ));
+    // A volume goes once it's checked.
+    let vol: Row = serde_json::from_value(rows[2].clone()).unwrap();
+    assert!(!app.row_checked(&vol));
+    app.set_row_checked(&vol, true);
+    app.clean_selected();
+    assert_eq!(app.active_rows.len(), 2);
+    assert!(app.active_rows.contains(&vol.identity()));
     // Nothing checked: nothing to review.
     let mut app = self::app();
     app.page = Page::Clean;

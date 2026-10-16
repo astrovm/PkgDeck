@@ -229,6 +229,8 @@ mod tests {
         fails: &'static str,
         /// Whether the daemon goes away once the refresh starts.
         hangs_up: bool,
+        /// How long the refresh takes.
+        takes: Duration,
     }
 
     impl Default for Daemon {
@@ -240,6 +242,7 @@ mod tests {
                 honours_cancel: true,
                 fails: "",
                 hangs_up: false,
+                takes: Duration::ZERO,
             }
         }
     }
@@ -302,6 +305,7 @@ mod tests {
                             "ItemProgress",
                             &("id", 1u32, 50u32),
                         );
+                        std::thread::sleep(daemon.takes);
                         if let Some((exit, error)) = daemon.finish {
                             if let Some(error) = error {
                                 let _ = server.emit_signal(
@@ -474,6 +478,17 @@ mod tests {
             refresh_on(&bus, "apt", &cancel, TIMEOUT),
             Err(ExecutionError::Cancelled)
         );
+    }
+
+    #[test]
+    fn a_slow_refresh_is_waited_for_until_its_deadline() {
+        let (bus, seen) = serve(Daemon {
+            takes: CANCEL_GRACE * 2,
+            ..Daemon::default()
+        });
+        let cancel = Cancellation::default();
+        assert_eq!(refresh_on(&bus, "apt", &cancel, TIMEOUT), Ok(true));
+        assert!(!calls(&seen).contains(&"Cancel".to_string()));
     }
 
     #[test]

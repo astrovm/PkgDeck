@@ -128,28 +128,33 @@ pub enum CleanupKind {
     /// A Git worktree that is merged, clean, or already gone.
     Worktree,
     /// Data nothing uses right now but that may be the only copy, such as a
-    /// container volume. Clean all leaves it alone.
+    /// container volume.
     Data,
 }
 
 impl CleanupKind {
-    /// Whether **Clean all** includes tasks of this kind. Data never goes
-    /// without being picked on its own.
+    /// Whether `pkd clean --all` includes tasks of this kind. Data only
+    /// goes by name there.
     pub fn in_clean_all(&self) -> bool {
         *self != Self::Data
     }
 }
 
 impl CleanupItem {
-    /// Whether automatic cleaning may run this with nobody watching: only
-    /// what tools download or build again on their own, from a source that
-    /// runs as the user, so it never asks for a password. Stopped containers
-    /// may still hold work, so they always wait for someone to look.
-    pub fn automatic(&self) -> bool {
+    /// Whether the task waits to be checked the first time it shows up:
+    /// what may hold work or data, or doesn't come back on its own. Once
+    /// checked, it's cleaned like any other.
+    pub fn opt_in(&self) -> bool {
         matches!(
             self.kind,
-            CleanupKind::PackageCache | CleanupKind::BuildFiles | CleanupKind::Unused
-        ) && self.id.key != "stopped-containers"
+            CleanupKind::Data | CleanupKind::OrphanDependencies | CleanupKind::DuplicateCopy
+        ) || self.id.key == "stopped-containers"
+    }
+    /// Whether automatic cleaning can run this with nobody watching: a
+    /// source that runs as the user, so it never asks for a password.
+    /// Worktrees have their own switch.
+    pub fn automatic(&self) -> bool {
+        self.kind != CleanupKind::Worktree
             && crate::unattended::unattended(&self.id.backend)
                 == crate::unattended::Unattended::User
     }
@@ -161,6 +166,8 @@ impl CleanupItem {
 #[serde(default)]
 pub struct CleanupPreferences {
     pub excluded: Vec<CleanupId>,
+    /// Opt-in tasks that were checked (see [`CleanupItem::opt_in`]).
+    pub chosen: Vec<CleanupId>,
 }
 impl Default for CleanupPreferences {
     fn default() -> Self {
@@ -169,16 +176,28 @@ impl Default for CleanupPreferences {
                 backend: "dev-caches".into(),
                 key: "sccache".into(),
             }],
+            chosen: Vec::new(),
         }
     }
 }
 impl CleanupPreferences {
-    pub fn includes(&self, id: &CleanupId) -> bool {
-        !self.excluded.contains(id)
+    /// Whether the task is checked. An opt-in one only once it was.
+    pub fn includes(&self, id: &CleanupId, opt_in: bool) -> bool {
+        if opt_in {
+            self.chosen.contains(id)
+        } else {
+            !self.excluded.contains(id)
+        }
+    }
+    pub fn includes_item(&self, item: &CleanupItem) -> bool {
+        self.includes(&item.id, item.opt_in())
     }
     pub fn set_included(&mut self, id: CleanupId, included: bool) {
         self.excluded.retain(|excluded| excluded != &id);
-        if !included {
+        self.chosen.retain(|chosen| chosen != &id);
+        if included {
+            self.chosen.push(id);
+        } else {
             self.excluded.push(id);
         }
     }
@@ -800,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn only_what_comes_back_on_its_own_is_cleaned_without_a_look() {
+    fn what_may_hold_work_waits_to_be_checked_and_automatic_skips_the_password() {
         let item = |backend: &str, key: &str, kind: CleanupKind| CleanupItem {
             id: CleanupId {
                 backend: backend.into(),
@@ -812,31 +831,44 @@ mod tests {
             preview: String::new(),
             bytes: Some(1),
         };
-        for automatic in [
+        let volumes = item("docker", "unused-volumes", CleanupKind::Data);
+        let containers = item("docker", "stopped-containers", CleanupKind::Unused);
+        let orphans = item("homebrew", "autoremove", CleanupKind::OrphanDependencies);
+        let copy = item(
+            "appimage",
+            "/home/me/App.AppImage",
+            CleanupKind::DuplicateCopy,
+        );
+        for unattended in [
             item("dev-caches", "cargo", CleanupKind::PackageCache),
             item("projects", "build:/home/me/app", CleanupKind::BuildFiles),
             item("docker", "unused-images", CleanupKind::Unused),
             item("homebrew", "cleanup", CleanupKind::PackageCache),
+            volumes.clone(),
+            containers.clone(),
+            orphans.clone(),
+            copy.clone(),
         ] {
-            assert!(automatic.automatic(), "{automatic:?}");
-            assert!(automatic.kind.in_clean_all());
+            assert!(unattended.automatic(), "{unattended:?}");
         }
-        for reviewed in [
-            item("docker", "stopped-containers", CleanupKind::Unused),
+        for watched in [
+            // Worktrees have their own switch.
             item("projects", "worktrees:/home/me/app", CleanupKind::Worktree),
-            item("docker", "unused-volumes", CleanupKind::Data),
-            item("homebrew", "autoremove", CleanupKind::OrphanDependencies),
-            item(
-                "appimage",
-                "/home/me/App.AppImage",
-                CleanupKind::DuplicateCopy,
-            ),
             // System managers ask for a password.
             item("apt", "clean", CleanupKind::PackageCache),
             item("fwupd", "cache", CleanupKind::PackageCache),
         ] {
-            assert!(!reviewed.automatic(), "{reviewed:?}");
+            assert!(!watched.automatic(), "{watched:?}");
         }
+        for opt_in in [&volumes, &containers, &orphans, &copy] {
+            assert!(opt_in.opt_in(), "{opt_in:?}");
+        }
+        assert!(!item("docker", "unused-images", CleanupKind::Unused).opt_in());
+        assert!(!item("projects", "worktrees:/a", CleanupKind::Worktree).opt_in());
+        let choices = CleanupPreferences::default();
+        assert!(!choices.includes_item(&volumes));
+        assert!(choices.includes_item(&item("docker", "unused-images", CleanupKind::Unused)));
+        // The command line still takes data by name only.
         assert!(!CleanupKind::Data.in_clean_all());
         assert!(CleanupKind::Worktree.in_clean_all());
         // How much a plan frees may change; the plan itself doesn't.
@@ -868,11 +900,18 @@ mod tests {
                     };
                     choices.set_included(target.clone(), enabled);
                     choices.set_included(target.clone(), enabled);
-                    assert_eq!(choices.includes(&target), enabled);
-                    assert!(choices.includes(&other));
+                    for opt_in in [false, true] {
+                        assert_eq!(choices.includes(&target, opt_in), enabled);
+                    }
+                    assert!(choices.includes(&other, false));
+                    assert!(!choices.includes(&other, true));
                     assert_eq!(
                         choices.excluded.iter().filter(|id| *id == &target).count(),
                         usize::from(!enabled)
+                    );
+                    assert_eq!(
+                        choices.chosen.iter().filter(|id| *id == &target).count(),
+                        usize::from(enabled)
                     );
                     let read: CleanupPreferences =
                         serde_json::from_str(&serde_json::to_string(&choices).unwrap()).unwrap();
@@ -885,9 +924,12 @@ mod tests {
         // Source switches are gone; a saved one is dropped, not an error.
         let saved: CleanupPreferences =
             serde_json::from_str(r#"{"excluded":[],"disabled_sources":["apt"]}"#).unwrap();
-        assert!(saved.includes(&CleanupId {
+        let cache = CleanupId {
             backend: "apt".into(),
-            key: "cache".into()
-        }));
+            key: "cache".into(),
+        };
+        assert!(saved.includes(&cache, false));
+        // Settings from before opt-in tasks leave them unchecked.
+        assert!(!saved.includes(&cache, true));
     }
 }
