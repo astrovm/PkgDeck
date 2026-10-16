@@ -1460,6 +1460,34 @@ impl Host {
         }
     }
 
+    /// Refresh an index the user owns, such as DNF's user cache or one of
+    /// PkgDeck's own copies (see `private_index`). The first one downloads
+    /// every index, which can take minutes.
+    pub fn refresh_index(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let path = self
+            .resolve(executable)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{executable} not found")))?;
+        let result = process::run(
+            self.command(&path, args)?,
+            Limits {
+                timeout: std::time::Duration::from_secs(600),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            false,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
     fn privileged(
         &self,
         executable: &Path,

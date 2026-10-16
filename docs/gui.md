@@ -125,7 +125,7 @@ other sources still appear as they answer.
 - Check several rows and click **Update selected**. When every row is checked,
   the button reads **Update all**.
 - **Update all** runs one update command per package manager, so you
-  approve and enter your password once. The progress bar still counts
+  approve and enter your password once, refreshes included. The progress bar still counts
   packages and names the one being updated, and each row shows whether it's
   done, updating, or waiting. PkgDeck reads this from each manager's output:
   Homebrew, APT, DNF, Zypper, Pacman, apk, XBPS, MacPorts, Flatpak, Snap,
@@ -282,21 +282,24 @@ or off.
 
 **Check for updates** in the **Updates** header refreshes the selected
 sources' package lists, then checks every selected source for updates.
-**Ctrl+R** does the same. A check never installs, upgrades or removes
-anything.
+**Ctrl+R** does the same. A check never asks for your password, and never
+installs, upgrades or removes anything.
 
-- Flatpak app data, firmware metadata, Snap and Homebrew refresh without a
-  password.
-- APT, Pacman and Zypper refresh through PackageKit when it's installed, with
-  no password in your own session at the computer.
-- DNF refreshes the copy of its lists that PkgDeck reads, kept for you, with no
-  password. Updating packages still uses the system's.
-- Without PackageKit, or over SSH, APT, Pacman, Zypper, apk and XBPS ask for
-  your password once per check.
+- Flatpak app data, firmware metadata, Snap and Homebrew refresh as you.
+- APT, Pacman and Zypper refresh through PackageKit when it's installed and
+  you're in your own session at the computer.
+- Otherwise APT, Pacman, Zypper and apk refresh their own copy of the lists,
+  kept for you in `~/.cache/pkgdeck/indexes`. PkgDeck reads it while it's
+  newer than the system's. APT's takes about 80 MB. Pacman's needs
+  `fakeroot`; without it, Pacman's updates show as of its last refresh.
+- DNF refreshes the copy of its lists it keeps for you. XBPS reads its
+  repositories fresh each time.
 - MacPorts keeps its current ports tree, because its refresh can update
   MacPorts itself.
-- Automatic checks in the background only refresh what needs no password.
-  The rest use their current lists.
+- Updating packages refreshes the system's lists first, under the same
+  approval: APT refreshes them before its update, and DNF, Pacman, apk and
+  XBPS refresh as they update. APT checks the update against the fresh lists,
+  and asks you to review it again if it changed.
 
 The button stays in the same place for empty and populated lists. During a check
 it becomes one **Cancel** button with a spinner. Existing rows stay visible. The

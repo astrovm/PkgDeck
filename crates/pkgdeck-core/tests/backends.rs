@@ -6145,7 +6145,7 @@ fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
         ("xbps-install -Mun", "acl-2.4.1_1 update aarch64 https://repo-default.voidlinux.org/current/aarch64 6112808 2556855\njq-1.8.2_1 install aarch64 https://repo 1 1\n"),
         ("xbps-query -Rs jq", "[-] ijq-1.4.0_1                        Interactive jq tool for the terminal\n[*] jq-1.8.2_1                         Command-line JSON processor\n"),
         ("xbps-remove", ""),
-        ("xbps-install -yu", ""),
+        ("xbps-install -Syu", ""),
     ]);
     let mut xbps = SystemManager::xbps(script.clone());
     let installed = xbps.installed(&cancel).unwrap();
@@ -6179,7 +6179,7 @@ fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
         "{calls:?}"
     );
     assert!(
-        calls.contains(&"xbps-install -yu acl (write)".into()),
+        calls.contains(&"xbps-install -Syu acl (write)".into()),
         "{calls:?}"
     );
 }

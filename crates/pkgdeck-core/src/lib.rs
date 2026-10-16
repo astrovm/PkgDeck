@@ -13,6 +13,7 @@ pub mod inspection;
 pub mod packagekit;
 #[cfg(target_os = "linux")]
 mod portal;
+pub mod private_index;
 pub mod process;
 mod spawn;
 

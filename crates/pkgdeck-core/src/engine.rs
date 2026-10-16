@@ -248,6 +248,16 @@ pub trait Backend: Send {
     fn refresh_without_password(&mut self, _cancel: &Cancellation) -> Result<bool, EngineError> {
         Ok(false)
     }
+    /// Run before `operation`'s checks: APT refreshes the system's lists
+    /// before an update, so the reviewed plan is checked against them.
+    fn prepare(
+        &mut self,
+        _operation: &Operation,
+        _cancel: &Cancellation,
+        _progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
     /// Failures from skipped portions of the most recent successful search or
     /// installed query. These accompany usable rows, but prevent the source
     /// from being treated as complete. Cached queries must retain their errors.
@@ -1288,6 +1298,13 @@ impl Engine {
         if let Some(result) = self.refresh_without_password(operation, cancel, events) {
             return result;
         }
+        // Several commands as root share one approval, like a batch.
+        if crate::batch::protected_commands(operation).is_ok_and(|commands| commands.len() > 1) {
+            return self
+                .execute_batch(std::slice::from_ref(operation), cancel, events)
+                .pop()
+                .unwrap_or(Err(EngineError::Cancelled));
+        }
         self.execute_started(operation, cancel, events, false)
     }
 
@@ -1348,6 +1365,12 @@ impl Engine {
         let result = self
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
+                backend.prepare(operation, cancel, &mut |progress| {
+                    events(Event::Progress {
+                        operation: operation.clone(),
+                        progress,
+                    })
+                })?;
                 if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                     let current = backend.apt_upgrade_plan(cancel)?;
                     if expected_apt.as_ref() != Some(&current) {
@@ -1590,9 +1613,23 @@ impl Engine {
                         events(Event::Started(member.clone()));
                     }
                 }
+                let prepared =
+                    self.ready("apt", operation.capability(), cancel)
+                        .and_then(|backend| {
+                            backend.prepare(operation, cancel, &mut |progress| {
+                                events(Event::Progress {
+                                    operation: operation.clone(),
+                                    progress,
+                                })
+                            })
+                        });
                 let rechecked = operations[index..end]
                     .iter()
-                    .map(|member| self.preflight(member, cancel))
+                    .map(|member| {
+                        prepared
+                            .clone()
+                            .and_then(|()| self.preflight(member, cancel))
+                    })
                     .collect::<Vec<_>>();
                 let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
                     Err(error)
@@ -1709,6 +1746,88 @@ mod apt_upgrade_tests {
             }
             assert_eq!(engine.execute(&op, &cancel, &mut |_| {}).is_ok(), succeeds);
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(succeeds));
+        }
+    }
+
+    #[test]
+    fn an_apt_update_checks_its_plan_against_the_lists_it_refreshed() {
+        struct Refreshing {
+            newer_lists: bool,
+            refreshed: bool,
+            log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+        impl Backend for Refreshing {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Upgrade]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn prepare(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<(), EngineError> {
+                self.log.lock().unwrap().push("refresh");
+                self.refreshed = true;
+                Ok(())
+            }
+            fn apt_upgrade_plan(
+                &mut self,
+                _: &Cancellation,
+            ) -> Result<AptUpgradePlan, EngineError> {
+                self.log.lock().unwrap().push("plan");
+                Ok(AptUpgradePlan {
+                    preview: if self.refreshed && self.newer_lists {
+                        "Inst newer"
+                    } else {
+                        "Inst reviewed"
+                    }
+                    .into(),
+                    upgrades: vec!["synthetic".into()],
+                    installs: vec![],
+                    removals: vec![],
+                })
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.log.lock().unwrap().push("upgrade");
+                Ok(OperationOutcome::default())
+            }
+        }
+        let cancel = Cancellation::default();
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        for newer_lists in [false, true] {
+            let log = Arc::default();
+            let mut engine = Engine::default();
+            engine
+                .register(Refreshing {
+                    newer_lists,
+                    refreshed: false,
+                    log: Arc::clone(&log),
+                })
+                .unwrap();
+            engine.plan_apt_upgrade(&cancel).unwrap();
+            let result = engine.execute(&op, &cancel, &mut |_| {});
+            // The refresh comes before the check, so a plan that changed
+            // with it is reviewed again instead of installed.
+            if newer_lists {
+                assert!(result.is_err());
+                assert_eq!(*log.lock().unwrap(), ["plan", "refresh", "plan"]);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(*log.lock().unwrap(), ["plan", "refresh", "plan", "upgrade"]);
+            }
         }
     }
 

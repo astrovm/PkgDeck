@@ -826,7 +826,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             // refresh operation fetch below, so don't fetch them twice.
             let refreshing: Vec<_> = operations.iter().map(|op| op.backend().to_owned()).collect();
             let mut failures = engine.refresh_update_indexes(&refreshing, cancel);
-            let (status, outcomes) = check_refreshes(engine, &operations, cancel, &mut |reply| {
+            let (status, outcomes) = batch(engine, &operations, vec![], cancel, &mut |reply| {
                 if let Reply::ProgressEvent(Event::Finished { operation, result: Err(error) }) = &reply {
                     failures.push(BackendFailure { backend: operation.backend().into(), error: error.clone() });
                 }
@@ -1081,41 +1081,12 @@ fn batch(
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> (String, Vec<Outcome>) {
-    batch_runs(engine, operations, held, cancel, send, false)
-}
-/// The refreshes of a check. With at most one that needs root, each runs
-/// on its own, as a single refresh always has: the batch runner is only
-/// worth its prompt for several, and narrower sudo rules allow only the
-/// manager itself.
-fn check_refreshes(
-    engine: &mut Engine,
-    operations: &[Operation],
-    cancel: &Cancellation,
-    send: &mut dyn FnMut(Reply),
-) -> (String, Vec<Outcome>) {
-    let elevated = operations
-        .iter()
-        .filter(|operation| {
-            pkgdeck_core::batch::protected_commands(operation)
-                .is_ok_and(|commands| !commands.is_empty())
-        })
-        .count();
-    batch_runs(engine, operations, vec![], cancel, send, elevated <= 1)
-}
-fn batch_runs(
-    engine: &mut Engine,
-    operations: &[Operation],
-    held: Vec<(Operation, String)>,
-    cancel: &Cancellation,
-    send: &mut dyn FnMut(Reply),
-    separately: bool,
-) -> (String, Vec<Outcome>) {
     let runnable: Vec<_> = operations
         .iter()
         .filter(|op| !held.iter().any(|(held, _)| held == *op))
         .cloned()
         .collect();
-    let mut on_event = |event: Event| {
+    let ran = engine.execute_batch(&runnable, cancel, &mut |event| {
         if let Event::Progress {
             operation,
             progress: Progress::Message(message),
@@ -1135,15 +1106,7 @@ fn batch_runs(
         ) {
             send(Reply::ProgressEvent(event));
         }
-    };
-    let ran = if separately {
-        runnable
-            .iter()
-            .map(|operation| engine.execute(operation, cancel, &mut on_event))
-            .collect::<Vec<_>>()
-    } else {
-        engine.execute_batch(&runnable, cancel, &mut on_event)
-    };
+    });
     let mut ran = ran.into_iter();
     let results: Vec<Result<OperationOutcome, (EngineError, Option<String>)>> = operations
         .iter()
@@ -5703,9 +5666,10 @@ impl ffi::PackageController {
         let operations = sources
             .iter()
             .filter(|source| {
-                // MacPorts' refresh can update MacPorts itself, and a check
-                // never installs anything.
-                source.as_str() != "macports"
+                // A check never asks for a password: system managers refresh
+                // through PackageKit or the user's own copy of their index
+                // instead, as the check reads them.
+                !pkgdeck_core::backends::refresh_needs_root(source)
                     && catalog.iter().any(|row| {
                         row["source"].as_str() == Some(source.as_str())
                             && row["available"] == true
@@ -18127,18 +18091,14 @@ mod tests {
         ctl.as_mut().check_for_updates("snap,macports,apt".into());
         let job = &ctl.rust().worker.as_ref().unwrap().job;
         let (ops, sources) = expect!(job, Job::CheckUpdates(ops, sources) => (ops, sources));
-        // Snap's refresh only lists snaps, and APT's only fetches its lists.
-        // MacPorts' could update MacPorts, so it keeps its ports tree.
+        // Snap's refresh only lists snaps. APT refreshes as the check reads
+        // it, without a password, and MacPorts keeps its ports tree: its
+        // refresh could update MacPorts.
         assert_eq!(
             ops,
-            &[
-                Operation::Refresh {
-                    backend: "apt".into()
-                },
-                Operation::Refresh {
-                    backend: "snap".into()
-                }
-            ]
+            &[Operation::Refresh {
+                backend: "snap".into()
+            }]
         );
         assert_eq!(sources, &["apt", "macports", "snap"]);
         settle(&mut ctl);
@@ -18465,9 +18425,10 @@ mod tests {
                     let expected: Vec<_> = ids
                         .iter()
                         .enumerate()
-                        // APT refreshes too, through PackageKit or with
-                        // the password.
-                        .filter(|(i, _)| chosen & available & refresh & (1 << i) != 0)
+                        // APT refreshes as the check reads it instead.
+                        .filter(|(i, id)| {
+                            chosen & available & refresh & (1 << i) != 0 && **id != "apt"
+                        })
                         .map(|(_, id)| Operation::Refresh {
                             backend: (*id).into(),
                         })
@@ -18540,18 +18501,20 @@ mod tests {
     }
 
     #[test]
-    fn refresh_a_check_refreshes_every_source_but_macports() {
-        // Each refreshes without a password where it can (see
-        // Engine::execute_batch); MacPorts' could update MacPorts itself.
+    fn refresh_a_check_never_runs_a_refresh_that_needs_root() {
+        // System managers refresh through PackageKit or the user's own copy
+        // of their index as the check reads them (refresh_update_index).
         for (source, refreshes) in [
-            ("apt", true),
-            ("dnf", true),
-            ("pacman", true),
-            ("zypper", true),
+            ("apt", false),
+            ("dnf", false),
+            ("pacman", false),
+            ("zypper", false),
+            ("apk", false),
+            ("xbps", false),
+            ("macports", false),
             ("flatpak", true),
             ("snap", true),
             ("fwupd", true),
-            ("macports", false),
         ] {
             let mut controller = synthetic_controller();
             let mut ctl = controller.pin_mut();
@@ -18639,80 +18602,6 @@ mod tests {
             .view_cache
             .get(&cache_key("Updates", "", &["npm".into()], false))
             .is_some());
-    }
-
-    #[test]
-    fn a_check_runs_one_root_refresh_on_its_own_and_several_together() {
-        struct Lists(&'static str, std::sync::Arc<std::sync::atomic::AtomicUsize>);
-        impl pkgdeck_core::engine::Backend for Lists {
-            fn id(&self) -> &str {
-                self.0
-            }
-            fn capabilities(&self) -> &[pkgdeck_core::package::Capability] {
-                &[pkgdeck_core::package::Capability::Refresh]
-            }
-            fn detect(
-                &mut self,
-                _: &Cancellation,
-            ) -> Result<pkgdeck_core::package::Availability, EngineError> {
-                Ok(pkgdeck_core::package::Availability::Available)
-            }
-            fn execute(
-                &mut self,
-                _: &Operation,
-                _: &Cancellation,
-                _: &mut dyn FnMut(pkgdeck_core::package::Progress),
-            ) -> Result<OperationOutcome, EngineError> {
-                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(OperationOutcome::default())
-            }
-        }
-        let refresh = |backend: &str| Operation::Refresh {
-            backend: backend.into(),
-        };
-        for (sources, together) in [
-            (vec!["dnf", "flatpak"], false),
-            (vec!["dnf", "pacman"], true),
-        ] {
-            let count = std::sync::Arc::default();
-            let mut engine = Engine::default();
-            for source in &sources {
-                engine
-                    .register(Lists(source, std::sync::Arc::clone(&count)))
-                    .unwrap();
-            }
-            // No PATH, so no helper: nothing here can ask for a password.
-            engine.enable_batch_authorization(
-                pkgdeck_core::host::Host::new(
-                    pkgdeck_core::host::Runtime::Native,
-                    Default::default(),
-                ),
-                Authorization::SudoNonInteractive,
-            );
-            let operations: Vec<_> = sources.iter().map(|source| refresh(source)).collect();
-            let mut said = Vec::new();
-            let (_, outcomes) = check_refreshes(
-                &mut engine,
-                &operations,
-                &Cancellation::default(),
-                &mut |reply| {
-                    if let Reply::Progress(text) = reply {
-                        said.push(text);
-                    }
-                },
-            );
-            assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
-            assert!(
-                outcomes.iter().all(|o| *o == Outcome::Finished),
-                "{outcomes:?}"
-            );
-            // Only several root refreshes go through the batch runner.
-            assert_eq!(
-                said.iter().any(|text| text.contains("Authorizing")),
-                together,
-                "{sources:?}: {said:?}"
-            );
-        }
     }
 
     #[test]

@@ -136,6 +136,14 @@ int main(int argc, char **argv) {
     _error->DumpErrors();
     return 1;
   }
+  // A check's own copy of the lists, which it refreshed as the user. The
+  // system's cache files describe the system's lists, so build in memory.
+  const char *lists = std::getenv("PKGDECK_APT_LISTS");
+  if (lists != nullptr && *lists != '\0') {
+    _config->Set("Dir::State::Lists", std::string(lists) + "/");
+    _config->Set("Dir::Cache::pkgcache", "");
+    _config->Set("Dir::Cache::srcpkgcache", "");
+  }
   // There's no dpkg in the sandbox to ask for foreign architectures; dpkg
   // keeps them in its arch file. Settings that name them still win.
   if (host != nullptr && *host != '\0' &&
