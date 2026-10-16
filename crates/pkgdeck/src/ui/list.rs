@@ -992,7 +992,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         // An update reads the same on every page: the new version, and
         // what it replaces under it.
         if row.has_update() {
-            let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
+            let new = model::new_version(&row);
             let mut left = v.left();
             if let Some(held) = &held {
                 let mark = Rect::from_center_size(

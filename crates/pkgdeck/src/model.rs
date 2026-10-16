@@ -1069,6 +1069,15 @@ pub fn cleanup_type(kind: &str) -> &'static str {
     }
 }
 
+/// The version an update brings. Flatpak reports an empty one for an app
+/// whose AppStream data names no release.
+pub fn new_version(row: &Row) -> String {
+    row.candidate
+        .clone()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "Unknown".into())
+}
+
 /// The version column's text.
 pub fn version_text(row: &Row) -> String {
     let known = |value: &Option<String>| value.clone().filter(|v| !v.is_empty());
