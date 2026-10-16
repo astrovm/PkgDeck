@@ -281,9 +281,10 @@ shows why in red, with **Try again** under it.
 The sources filter only filters one page. Neither one turns repositories on
 or off.
 
-**Check for updates** in the **Updates** header refreshes the selected
-sources' package lists, then checks every selected source for updates.
-**Ctrl+R** does the same. A check never asks for your password, and never
+**Refresh** in the **Updates** header refreshes the selected sources'
+package lists, then checks every selected source for updates. **Ctrl+R**
+does the same. Sources that can't run here, such as macOS-only ones on
+Linux, are skipped. A check never asks for your password, and never
 installs, upgrades or removes anything.
 
 - Flatpak app data, firmware metadata, Snap and Homebrew refresh as you.

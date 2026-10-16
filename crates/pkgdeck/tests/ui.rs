@@ -831,20 +831,16 @@ fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
                 app.invalidate();
                 let mut h = harness_at(app, size);
                 h.run_steps(4);
-                let label = if page == Page::Updates {
-                    "Check for updates"
-                } else {
-                    "Refresh"
-                };
                 assert_eq!(
-                    h.query_all_by_role_and_label(Role::Button, label).count(),
+                    h.query_all_by_role_and_label(Role::Button, "Refresh")
+                        .count(),
                     1,
                     "{page:?} {empty} {size:?}"
                 );
-                for obsolete in ["Check again", "Reload (Ctrl+R)"] {
+                for obsolete in ["Check again", "Reload (Ctrl+R)", "Check for updates"] {
                     assert!(h.query_by_label(obsolete).is_none(), "{obsolete}");
                 }
-                h.get_by_role_and_label(Role::Button, label).click();
+                h.get_by_role_and_label(Role::Button, "Refresh").click();
                 h.run_steps(2);
                 assert!(h.state().1.busy);
                 assert_eq!(h.state().1.checking_updates, page == Page::Updates);
@@ -904,8 +900,7 @@ fn one_button_refreshes_the_sources_and_checks_for_updates() {
     assert!(!h.state().1.checking_updates);
     assert!(h.state().1.confirmation.is_none());
     // One click refreshes and checks, with no review first.
-    h.get_by_role_and_label(Role::Button, "Check for updates")
-        .click();
+    h.get_by_role_and_label(Role::Button, "Refresh").click();
     h.run_steps(2);
     assert!(h.state().1.checking_updates);
     assert!(h.state().1.confirmation.is_none());
@@ -1678,7 +1673,7 @@ fn refresh_a_failed_list_uses_the_header_check_and_offers_details() {
     app.invalidate();
     let mut harness = harness(app);
     harness.run_steps(4);
-    for label in ["Check for updates", "Details"] {
+    for label in ["Refresh", "Details"] {
         assert!(
             harness
                 .query_by_role_and_label(Role::Button, label)
@@ -1692,10 +1687,28 @@ fn refresh_a_failed_list_uses_the_header_check_and_offers_details() {
         .click();
     harness.run_steps(3);
     assert!(harness.state().1.ui.checks_open);
+    // Copy diagnostics hands the failures to the clipboard.
+    harness
+        .get_by_role_and_label(Role::Button, "Copy diagnostics")
+        .click();
+    harness.step();
+    let copied: Vec<_> = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied.len(), 1, "{copied:?}");
+    assert!(copied[0].contains("View: Updates"), "{}", copied[0]);
+    assert!(copied[0].contains("apt (failed): "), "{}", copied[0]);
     harness.state_mut().1.ui.checks_open = false;
     harness.run_steps(3);
     harness
-        .get_by_role_and_label(Role::Button, "Check for updates")
+        .get_by_role_and_label(Role::Button, "Refresh")
         .click();
     harness.run_steps(3);
     assert!(harness

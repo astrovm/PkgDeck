@@ -5663,6 +5663,16 @@ impl ffi::PackageController {
         sources.dedup();
         let catalog: Vec<Value> =
             serde_json::from_str(self.source_catalog().as_str()).unwrap_or_default();
+        // A source that can't run here, like a macOS one on Linux, is
+        // skipped, as on any Updates load: it hasn't failed a check.
+        sources.retain(|source| {
+            !catalog.iter().any(|row| {
+                row["source"].as_str() == Some(source.as_str()) && row["available"] == false
+            })
+        });
+        if sources.is_empty() {
+            return;
+        }
         let operations = sources
             .iter()
             .filter(|source| {
@@ -18216,6 +18226,24 @@ mod tests {
         assert_eq!(state["failures"], json!([]));
     }
     #[test]
+    fn refresh_skips_sources_that_cannot_run_here() {
+        let mut controller = synthetic_controller();
+        let mut ctl = controller.pin_mut();
+        ctl.as_mut().set_source_catalog(encoded(json!([
+            {"source":"macos-apps", "available":false, "capabilities":["installed"]},
+            {"source":"pip", "available":false, "capabilities":["installed"]},
+            {"source":"npm", "available":true, "capabilities":["installed"]}
+        ])));
+        ctl.as_mut().check_for_updates("macos-apps,npm,pip".into());
+        let job = &ctl.rust().worker.as_ref().unwrap().job;
+        let sources = expect!(job, Job::CheckUpdates(_, sources) => sources);
+        assert_eq!(*sources, ["npm"]);
+        settle(&mut ctl);
+        // Nothing left to check: nothing starts.
+        ctl.as_mut().check_for_updates("macos-apps,pip".into());
+        assert!(ctl.rust().worker.is_none());
+    }
+    #[test]
     fn refresh_a_real_error_still_reports_its_source_next_to_missing_ones() {
         fn engine(
             _: &[String],
@@ -18401,8 +18429,8 @@ mod tests {
     }
 
     #[test]
-    fn refresh_explicit_check_source_selection_is_deduplicated_and_uses_only_refresh_capabilities()
-    {
+    fn refresh_explicit_check_source_selection_is_deduplicated_skips_unavailable_and_uses_only_refresh_capabilities(
+    ) {
         // Exhaust every subset: selection, availability and refresh capability
         // are independent, and rereading registries must not depend on refresh.
         for chosen in 1..8_u8 {
@@ -18421,11 +18449,21 @@ mod tests {
                     ctl.as_mut().check_for_updates(
                         format!("{},{}", sources.join(","), sources.join(",")).into(),
                     );
-                    assert!(ctl.checking_updates());
-                    let job = &ctl.rust().worker.as_ref().unwrap().job;
+                    // Sources that can't run here are skipped.
+                    let checked: Vec<_> = ids
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| chosen & available & (1 << i) != 0)
+                        .map(|(_, id)| *id)
+                        .collect();
+                    assert_eq!(ctl.checking_updates(), !checked.is_empty());
+                    let Some(worker) = ctl.rust().worker.as_ref() else {
+                        continue;
+                    };
+                    let job = &worker.job;
                     let (ops, selected) =
                         expect!(job, Job::CheckUpdates(ops, selected) => (ops, selected));
-                    assert_eq!(selected, &sources);
+                    assert_eq!(selected, &checked);
                     let expected: Vec<_> = ids
                         .iter()
                         .enumerate()

@@ -700,29 +700,16 @@ fn header(app: &mut App, ui: &mut Ui) {
                         .icon("cancel")
                         .loading(true)
                         .icon_only(compact)
-                        .tooltip(if app.page == Page::Updates {
-                            "Stop checking for updates"
-                        } else {
-                            "Stop refreshing this page"
-                        })
+                        .tooltip("Stop refreshing this page")
                         .show(ui);
                     if response.clicked() {
                         app.cancel();
                     }
                 } else {
-                    let label = if app.page == Page::Updates {
-                        "Check for updates"
-                    } else {
-                        "Refresh"
-                    };
-                    let response = Button::new(Look::Secondary, label)
+                    let response = Button::new(Look::Secondary, "Refresh")
                         .icon("refresh")
                         .icon_only(compact)
-                        .tooltip(if app.page == Page::Updates {
-                            "Refresh sources and check for updates (Ctrl+R)"
-                        } else {
-                            "Refresh this page (Ctrl+R)"
-                        })
+                        .tooltip("Refresh this page (Ctrl+R)")
                         .enabled(!app.busy && app.confirmation.is_none())
                         .show(ui);
                     if response.clicked() {
