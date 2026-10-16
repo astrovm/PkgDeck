@@ -488,7 +488,8 @@ mod tests {
         }
     }
 
-    /// A read that runs past its limit, in a fresh folder for its marker files.
+    /// A read stopped once it's ready, in a fresh folder for its marker
+    /// files, and how long it took to answer after the stop.
     fn stopped_read(name: &str, script: &str) -> (std::path::PathBuf, Duration) {
         let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -496,20 +497,22 @@ mod tests {
         let ready = dir.join("ready");
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script, "sh"]).arg(&dir);
-        let start = Instant::now();
         let thread = std::thread::spawn(move || {
             let cancel = Cancellation::default();
             let stopper = cancel.clone();
+            // Timed from the stop: a slow runner may take long to start the shell.
             let watcher = std::thread::spawn(move || {
                 wait_for(Duration::from_secs(10), || ready.exists());
                 stopper.cancel();
+                Instant::now()
             });
             let result = run(command, Limits::default(), &cancel, false);
-            watcher.join().unwrap();
-            result
+            let stopped = watcher.join().unwrap();
+            (result, stopped.elapsed())
         });
-        assert_eq!(thread.join().unwrap(), Err(ExecutionError::Cancelled));
-        (dir, start.elapsed())
+        let (result, elapsed) = thread.join().unwrap();
+        assert_eq!(result, Err(ExecutionError::Cancelled));
+        (dir, elapsed)
     }
 
     #[test]
@@ -523,8 +526,11 @@ mod tests {
              : > \"$1/ready\"; \
              while :; do sleep 0.01; done",
         );
-        // The trap runs beside the answer, before any SIGKILL.
-        assert!(wait_for(STOP_GRACE, || dir.join("terminated").exists()));
+        // The trap runs beside the answer. Its marker can only appear if it
+        // ran before the SIGKILL that follows the grace.
+        assert!(wait_for(Duration::from_secs(5), || dir
+            .join("terminated")
+            .exists()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
