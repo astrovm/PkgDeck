@@ -7638,6 +7638,29 @@ mod tests {
         let calls = calls.0.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1], calls[0][1..]);
+        drop(calls);
+        // Other managers have no online fallback: a failed listing is asked once.
+        #[derive(Clone)]
+        struct Down(Arc<Mutex<usize>>);
+        impl Transport for Down {
+            fn system_manager(
+                &self,
+                _: &str,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                *self.0.lock().unwrap() += 1;
+                Err(ExecutionError::Failed(completion(1, "")))
+            }
+        }
+        let down = Down(Arc::default());
+        let pacman = SystemManager::pacman(down.clone());
+        assert_eq!(
+            pacman.updates(&Cancellation::default()),
+            Ok(BTreeMap::new())
+        );
+        assert_eq!(*down.0.lock().unwrap(), 1);
     }
 
     #[test]
