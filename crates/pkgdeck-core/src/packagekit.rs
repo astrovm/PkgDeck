@@ -50,19 +50,20 @@ pub fn refresh(source: &str, cancel: &Cancellation) -> Result<bool, ExecutionErr
     let contained = ["/run/.containerenv", "/.dockerenv"]
         .iter()
         .any(|marker| std::path::Path::new(marker).exists());
-    refresh_with(source, cancel, contained, || {
-        zbus::block_on(Connection::system())
-    })
+    refresh_with(source, cancel, contained, Connection::system)
 }
 /// [`refresh`], with the bus from `connect` unless `contained`.
-fn refresh_with(
+fn refresh_with<F>(
     source: &str,
     cancel: &Cancellation,
     contained: bool,
-    connect: impl FnOnce() -> zbus::Result<Connection>,
-) -> Result<bool, ExecutionError> {
+    connect: impl FnOnce() -> F,
+) -> Result<bool, ExecutionError>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     match (backend_for(source), contained) {
-        (Some(backend), false) => match connect() {
+        (Some(backend), false) => match zbus::block_on(connect()) {
             Ok(bus) => refresh_on(&bus, backend, cancel, TIMEOUT),
             Err(_) => Ok(false),
         },
@@ -457,13 +458,13 @@ mod tests {
     #[test]
     fn outside_a_container_the_system_bus_is_asked() {
         let cancel = Cancellation::default();
-        let fake = || Ok(serve(Daemon::default()).0);
+        let fake = || std::future::ready(Ok(serve(Daemon::default()).0));
         assert_eq!(refresh_with("apt", &cancel, false, fake), Ok(true));
         // In a container the bus is the host's, and so are its lists.
-        let never = || -> zbus::Result<Connection> { panic!("asked the bus") };
+        let never = || -> std::future::Ready<zbus::Result<Connection>> { panic!("asked the bus") };
         assert_eq!(refresh_with("apt", &cancel, true, never), Ok(false));
         assert_eq!(refresh_with("flatpak", &cancel, false, never), Ok(false));
-        let absent = || Err(zbus::Error::Unsupported);
+        let absent = || std::future::ready(Err(zbus::Error::Unsupported));
         assert_eq!(refresh_with("apt", &cancel, false, absent), Ok(false));
         // Sources PackageKit doesn't refresh never reach the bus.
         assert_eq!(refresh("flatpak", &cancel), Ok(false));

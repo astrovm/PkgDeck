@@ -121,18 +121,19 @@ impl HostProgram {
 /// The connection every host command shares; a lost one is made again.
 fn shared() -> io::Result<Arc<Bus>> {
     static SHARED: Mutex<Option<Arc<Bus>>> = Mutex::new(None);
-    share(&SHARED, Path::new("/.flatpak-info"), || {
-        zbus::block_on(Connection::session())
-    })
+    share(&SHARED, Path::new("/.flatpak-info"), Connection::session)
 }
 
 /// The bus in `slot`, opened with `open` when there is none or it was lost.
 /// `info` is the file only a real sandbox has.
-fn share(
+fn share<F>(
     slot: &Mutex<Option<Arc<Bus>>>,
     info: &Path,
-    open: impl Fn() -> zbus::Result<Connection>,
-) -> io::Result<Arc<Bus>> {
+    open: impl Fn() -> F,
+) -> io::Result<Arc<Bus>>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     // Held while connecting, so commands starting together share one try.
     let mut slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
     if let Some(bus) = slot.as_ref().filter(|bus| !bus.lost()) {
@@ -153,10 +154,13 @@ fn share(
     Ok(bus)
 }
 
-fn connect(open: impl Fn() -> zbus::Result<Connection>) -> zbus::Result<Connection> {
+fn connect<F>(open: impl Fn() -> F) -> zbus::Result<Connection>
+where
+    F: std::future::Future<Output = zbus::Result<Connection>>,
+{
     let mut attempt = 0;
     loop {
-        match open() {
+        match zbus::block_on(open()) {
             Err(error) if attempt < 5 && transient(&error) => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(20 << attempt));
@@ -240,11 +244,9 @@ impl Bus {
             .interface(INTERFACE)
             .member("HostCommandExited")
             .build()?;
-        let ends = zbus::block_on(MessageStream::for_match_rule(
-            rule,
-            &connection,
-            std::num::NonZeroUsize::new(1024),
-        ))?;
+        let ends =
+            MessageStream::for_match_rule(rule, &connection, std::num::NonZeroUsize::new(1024));
+        let ends = zbus::block_on(ends)?;
         let bus = Arc::new(Self {
             connection,
             state: Mutex::default(),
@@ -756,11 +758,11 @@ mod tests {
         let tries = Cell::new(0);
         let open = || {
             tries.set(tries.get() + 1);
-            if tries.get() % 3 == 0 {
+            std::future::ready(if tries.get() % 3 == 0 {
                 Ok(fake::Peer::new(&bridge, Vec::new()).client)
             } else {
                 Err(broken())
-            }
+            })
         };
         // Turned away twice, then connected.
         let bus = share(&slot, &info, open).unwrap();
@@ -779,16 +781,18 @@ mod tests {
         assert_eq!(error.to_string(), UNAVAILABLE);
         assert_eq!(tries.get(), 6);
 
-        let error = share(&Mutex::new(None), &info, || Err(zbus::Error::Unsupported))
-            .err()
-            .unwrap();
+        let error = share(&Mutex::new(None), &info, || {
+            std::future::ready(Err(zbus::Error::Unsupported))
+        })
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
         assert!(error.to_string().starts_with(UNAVAILABLE), "{error}");
 
         let tries = Cell::new(0);
         let error = connect(|| {
             tries.set(tries.get() + 1);
-            Err(broken())
+            std::future::ready(Err(broken()))
         })
         .err()
         .unwrap();
@@ -839,5 +843,15 @@ mod tests {
                 .contains("org.freedesktop.DBus.Error.Failed"),
             "{error}"
         );
+        // With one, only the message is kept, whoever named the error.
+        for name in ["org.freedesktop.DBus.Error.Failed", "org.pkgdeck.CustomError"] {
+            let call = zbus::Message::method_call("/", "Call").build(&()).unwrap();
+            let reply = zbus::Message::error(&call.header(), name)
+                .build(&("Failed to start command",))
+                .unwrap();
+            let error = io_error(reply.into());
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "Failed to start command", "{name}");
+        }
     }
 }
