@@ -7,6 +7,14 @@ scripts/tests/homebrew-style.sh
 # when nobody picked an app. Discover's Flatpak link handler has 5.
 preference=$(sed -n 's/^InitialPreference=//p' assets/io.github.astrovm.PkgDeck.desktop)
 (( ${preference:-0} > 5 )) || { echo "InitialPreference must beat Discover's 5"; exit 1; }
+# Flatpak shows the version of the newest AppStream release, so each
+# version bump adds one.
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+release=$(grep -o '<release version="[^"]*"' assets/io.github.astrovm.PkgDeck.metainfo.xml | head -1)
+[[ $release == "<release version=\"$version\"" ]] || {
+    echo "The newest AppStream release must be $version, found ${release:-none}"
+    exit 1
+}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 expect_code() {

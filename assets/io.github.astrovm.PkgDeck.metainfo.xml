@@ -9,4 +9,18 @@
   <launchable type="desktop-id">io.github.astrovm.PkgDeck.desktop</launchable>
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.11.4" date="2026-10-16">
+      <description>
+        <p>Fixes for opened files, Homebrew Casks and KDE.</p>
+        <ul>
+          <li>An opened file for something already installed offers Update, or for Flatpak, Reinstall or Downgrade, instead of Install</li>
+          <li>Going to another page leaves an opened file's page</li>
+          <li>Flatpak links open in PkgDeck on KDE</li>
+          <li>Homebrew Casks searches no longer fail on casks with no version for this system</li>
+          <li>Header buttons drop their labels before covering the page title</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
 </component>
