@@ -580,10 +580,9 @@ fn clear_filter_button(ui: &mut Ui, chip: Rect) -> bool {
 fn header(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
-    let compact = width < 600.0;
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
-        ui.vertical(|ui| {
+        let title = ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.label(
                 egui::RichText::new(app.page.name())
@@ -610,6 +609,8 @@ fn header(app: &mut App, ui: &mut Ui) {
                 });
             }
         });
+        let room = width - title.response.rect.width();
+        let mut fit = Fit::new(ui.ctx(), width < 600.0, room);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
@@ -622,18 +623,19 @@ fn header(app: &mut App, ui: &mut Ui) {
                 };
                 // The clear button sits inside the filter's right end, so
                 // turning a filter on doesn't move the button or its menu.
-                let response = Button::new(
-                    if filtered {
-                        Look::Soft(Tone::Accent)
-                    } else {
-                        Look::Secondary
-                    },
-                    &label,
-                )
-                .icon("filter")
-                .icon_only(compact)
-                .trailing(if filtered { CLEAR_WIDTH } else { 0.0 })
-                .show(ui);
+                let response = fit.show(
+                    ui,
+                    Button::new(
+                        if filtered {
+                            Look::Soft(Tone::Accent)
+                        } else {
+                            Look::Secondary
+                        },
+                        &label,
+                    )
+                    .icon("filter")
+                    .trailing(if filtered { CLEAR_WIDTH } else { 0.0 }),
+                );
                 let cleared = filtered && clear_filter_button(ui, response.rect);
                 if cleared {
                     dialogs::clear_filter(app);
@@ -647,18 +649,19 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
             let working = app.writing;
             let count = app.queued_count() + usize::from(working);
-            let response = Button::new(
-                if working {
-                    Look::Soft(Tone::Accent)
-                } else {
-                    Look::Secondary
-                },
-                if working { "Working" } else { "Activity" },
-            )
-            .icon("activity")
-            .icon_only(compact)
-            .tooltip("Activity (Ctrl+J)")
-            .show(ui);
+            let response = fit.show(
+                ui,
+                Button::new(
+                    if working {
+                        Look::Soft(Tone::Accent)
+                    } else {
+                        Look::Secondary
+                    },
+                    if working { "Working" } else { "Activity" },
+                )
+                .icon("activity")
+                .tooltip("Activity (Ctrl+J)"),
+            );
             let pop = ui.ctx().animate_bool_with_time_and_easing(
                 Id::unique("activity-badge"),
                 count > 0,
@@ -696,37 +699,41 @@ fn header(app: &mut App, ui: &mut Ui) {
                 let refreshing = app.busy && (!app.writing || app.checking_updates);
                 if refreshing {
                     // One control: the spinner shows the work, a click stops it.
-                    let response = Button::new(Look::Secondary, "Cancel")
-                        .icon("cancel")
-                        .loading(true)
-                        .icon_only(compact)
-                        .tooltip("Stop refreshing this page")
-                        .show(ui);
+                    let response = fit.show(
+                        ui,
+                        Button::new(Look::Secondary, "Cancel")
+                            .icon("cancel")
+                            .loading(true)
+                            .tooltip("Stop refreshing this page"),
+                    );
                     if response.clicked() {
                         app.cancel();
                     }
                 } else {
-                    let response = Button::new(Look::Secondary, "Refresh")
-                        .icon("refresh")
-                        .icon_only(compact)
-                        .tooltip("Refresh this page (Ctrl+R)")
-                        .enabled(!app.busy && app.confirmation.is_none())
-                        .show(ui);
+                    let response = fit.show(
+                        ui,
+                        Button::new(Look::Secondary, "Refresh")
+                            .icon("refresh")
+                            .tooltip("Refresh this page (Ctrl+R)")
+                            .enabled(!app.busy && app.confirmation.is_none()),
+                    );
                     if response.clicked() {
                         app.refresh_page();
                     }
                 }
             }
-            source_checks_button(app, ui, compact);
+            source_checks_button(app, ui, &mut fit);
             let adoptable = adoptable_appimages(app);
             if adoptable > 0 {
                 let label = format!("Manage {adoptable} AppImages");
-                if Button::new(Look::Secondary, &label)
-                    .icon("install")
-                    .icon_only(compact)
-                    .tooltip(format!("Manage {adoptable} AppImages with PkgDeck"))
-                    .enabled(app.can_act() && app.retained.is_none())
-                    .show(ui)
+                if fit
+                    .show(
+                        ui,
+                        Button::new(Look::Secondary, &label)
+                            .icon("install")
+                            .tooltip(format!("Manage {adoptable} AppImages with PkgDeck"))
+                            .enabled(app.can_act() && app.retained.is_none()),
+                    )
                     .clicked()
                 {
                     app.propose("adopt-all");
@@ -734,12 +741,13 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
             if app.page == Page::Search && can_open_files && app.opened.is_none() {
-                let response = Button::new(Look::Secondary, "Install from file…")
-                    .icon("package")
-                    .icon_only(compact)
-                    .tooltip("Install from a file or link")
-                    .enabled(!app.writing)
-                    .show(ui);
+                let response = fit.show(
+                    ui,
+                    Button::new(Look::Secondary, "Install from file…")
+                        .icon("package")
+                        .tooltip("Install from a file or link")
+                        .enabled(!app.writing),
+                );
                 if response.clicked() {
                     app.c().check_sources();
                     app.react();
@@ -747,8 +755,47 @@ fn header(app: &mut App, ui: &mut Ui) {
                     app.ui.open_dialog = true;
                 }
             }
+            fit.keep(ui.ctx());
         });
     });
+}
+
+/// Whether the header's buttons show their labels: only while they all fit
+/// beside the title. Their labelled width is measured as they are drawn and
+/// used from the next frame; a frame drawn the wrong way is discarded.
+struct Fit {
+    compact: bool,
+    narrow: bool,
+    room: f32,
+    needed: f32,
+}
+
+impl Fit {
+    fn id() -> Id {
+        Id::unique("header-labelled-width")
+    }
+
+    fn new(ctx: &egui::Context, narrow: bool, room: f32) -> Self {
+        let needed = ctx.data(|data| data.get_temp::<f32>(Self::id()));
+        Self {
+            compact: narrow || needed.is_some_and(|needed| needed > room),
+            narrow,
+            room,
+            needed: 0.0,
+        }
+    }
+
+    fn show(&mut self, ui: &mut Ui, button: Button<'_>) -> egui::Response {
+        self.needed += button.full_width(ui) + ui.spacing().item_spacing.x;
+        button.icon_only(self.compact).show(ui)
+    }
+
+    fn keep(self, ctx: &egui::Context) {
+        ctx.data_mut(|data| data.insert_temp(Self::id(), self.needed));
+        if self.compact != (self.narrow || self.needed > self.room) {
+            ctx.request_discard("header labels");
+        }
+    }
 }
 
 fn search_field(app: &mut App, ui: &mut Ui) {
@@ -994,7 +1041,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
 /// Sources this page couldn't check, as one small button beside Activity
 /// instead of a banner. It opens the checks, with Retry and Turn off. An
 /// empty list says so in its place instead.
-fn source_checks_button(app: &mut App, ui: &mut Ui, compact: bool) {
+fn source_checks_button(app: &mut App, ui: &mut Ui, fit: &mut Fit) {
     if !app.page.lists() || app.opened.is_some() || app.items.is_empty() {
         return;
     }
@@ -1008,11 +1055,13 @@ fn source_checks_button(app: &mut App, ui: &mut Ui, compact: bool) {
     } else {
         title.clone()
     };
-    if Button::new(Look::Soft(Tone::Warning), &title)
-        .icon("warning")
-        .icon_only(compact)
-        .tooltip(tooltip)
-        .show(ui)
+    if fit
+        .show(
+            ui,
+            Button::new(Look::Soft(Tone::Warning), &title)
+                .icon("warning")
+                .tooltip(tooltip),
+        )
         .clicked()
     {
         app.ui.checks_open = true;
@@ -1667,6 +1716,36 @@ mod header_tests {
         // Nothing failed: no button.
         let harness = draw(self::app(Page::Installed, 1), header);
         assert!(harness.query_by_label("Couldn't check APT").is_none());
+    }
+
+    #[test]
+    fn header_buttons_drop_their_labels_before_covering_the_title() {
+        for (width, labelled) in [(650.0, false), (1000.0, true)] {
+            let mut app = app(Page::Installed, 1);
+            app.rows.push(
+                serde_json::from_value(serde_json::json!({"kind": "failure", "name": "apt",
+                    "source": "apt", "failure_kind": "unavailable", "summary": "apt is broken"}))
+                .unwrap(),
+            );
+            app.invalidate();
+            app.refresh_items();
+            let mut harness = draw(app, header);
+            harness.set_size(vec2(width, 600.0));
+            harness.run_steps(3);
+            let title = harness.get_by_label("Installed").rect();
+            for label in ["Couldn't check APT", "Refresh", "Activity"] {
+                let button = harness.get_by_label(label).rect();
+                assert!(
+                    button.min.x >= title.max.x,
+                    "{label} covers the title at {width}"
+                );
+                assert_eq!(
+                    button.width() > CONTROL_HEIGHT,
+                    labelled,
+                    "{label} at {width}"
+                );
+            }
+        }
     }
 
     #[test]
