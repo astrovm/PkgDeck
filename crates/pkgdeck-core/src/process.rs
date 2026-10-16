@@ -411,9 +411,12 @@ mod tests {
     #[test]
     fn everything_left_in_a_grown_pipe_is_read_after_the_program_exits() {
         // uutils' head grows its pipe like this, then exits at once.
-        if !std::path::Path::new("/usr/bin/python3").exists() {
-            return;
+        if std::path::Path::new("/usr/bin/python3").exists() {
+            grown_pipe();
         }
+    }
+    #[cfg(target_os = "linux")]
+    fn grown_pipe() {
         let mut command = Command::new("/usr/bin/python3");
         command.args([
             "-c",

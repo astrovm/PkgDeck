@@ -2003,17 +2003,11 @@ mod apt_upgrade_tests {
         );
         // An install has one, and runs on its own.
         let (mut engine, _) = lists_engine(Ok(()), true);
-        let mut said = vec![];
+        let mut events = vec![];
         let _ = engine.execute(&Operation::Install(apt_id("one")), &cancel, &mut |event| {
-            if let Event::Progress {
-                progress: Progress::Message(message),
-                ..
-            } = event
-            {
-                said.push(message);
-            }
+            events.push(event)
         });
-        assert!(!said.iter().any(|m| m.contains("Authorizing")), "{said:?}");
+        assert!(!format!("{events:?}").contains("Authorizing"), "{events:?}");
     }
 
     #[test]
