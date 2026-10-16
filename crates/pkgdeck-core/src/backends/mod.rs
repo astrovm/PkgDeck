@@ -7280,6 +7280,11 @@ mod tests {
         pacman.arm_update_check(Some(7));
         assert_eq!(pacman.refresh_update_index(&cancel), Ok(()));
         assert_eq!(kit.ran(), ["packagekit pacman"]);
+        // A missing manager is no such excuse: the check says so.
+        let kit = Kit::new(Ok(false), "").copies(false).missing("zypper");
+        let mut zypper = SystemManager::zypper(kit.clone());
+        zypper.arm_update_check(Some(7));
+        assert!(zypper.refresh_update_index(&cancel).is_err());
     }
 
     #[test]
