@@ -85,7 +85,7 @@ const SIDEBAR_FLOOR: f32 = 168.0;
 const SIDEBAR_MAX: f32 = 360.0;
 /// The sidebar's width with icons only, in the style being drawn.
 fn rail_width() -> f32 {
-    if theme::skin().style.family() == crate::settings::Family::Liquid {
+    if frame::seamless_title_bar(theme::skin().style) {
         LIQUID_RAIL_WIDTH
     } else {
         RAIL_WIDTH
@@ -161,8 +161,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     sidebar_ui(app, ui, sidebar, rail);
     let resizing_sidebar = if !narrow {
         let mut resize_border = sidebar;
-        if theme::skin().style.family() == crate::settings::Family::Liquid {
-            // The visible sidebar continues behind the title bar.
+        if frame::seamless_title_bar(theme::skin().style) {
+            // Nothing sets the title bar apart, so the border runs up
+            // through it.
             resize_border.min.y = window.top();
         }
         sidebar_splitter(app, ui, resize_border, splitter)
@@ -1579,19 +1580,69 @@ mod header_tests {
     }
 
     #[test]
-    fn liquid_sidebar_resizes_along_the_whole_border() {
-        for y in [9.0, 16.0, 40.0, 60.0, 300.0, 590.0] {
+    fn a_seamless_title_bar_resizes_the_sidebar_along_the_whole_border() {
+        use crate::settings::Style;
+        for style in [Style::Liquid, Style::Fluent, Style::Adwaita] {
+            for y in [9.0, 16.0, 40.0, 60.0, 300.0, 590.0] {
+                let mut app = app(Page::Search, 0);
+                app.settings.style = style;
+                app.settings.reduce_motion = true;
+                let mut harness = draw(app, draw_window);
+                // The test root has an eight-point margin around the window,
+                // and the sidebar starts inside the frame's edge.
+                let left = 8.0 + frame::metrics(style).map_or(0.0, |bar| bar.side);
+                drag_sidebar(
+                    &mut harness,
+                    pos2(left + SIDEBAR_DEFAULT, y),
+                    pos2(left + 300.0, y),
+                );
+                assert_eq!(
+                    harness.state().1.settings.sidebar_width,
+                    300.0,
+                    "{style:?} y={y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_title_bar_of_its_own_moves_the_window_above_the_sidebar_border() {
+        use crate::settings::Style;
+        for style in Style::ALL {
+            if frame::seamless_title_bar(style) || frame::metrics(style).is_none() {
+                continue;
+            }
             let mut app = app(Page::Search, 0);
-            app.settings.style = crate::settings::Style::Liquid;
+            app.settings.style = style;
             app.settings.reduce_motion = true;
             let mut harness = draw(app, draw_window);
-            // The test root has an eight-point margin around the window.
-            drag_sidebar(
-                &mut harness,
-                pos2(8.0 + SIDEBAR_DEFAULT, y),
-                pos2(8.0 + 300.0, y),
+            // Halfway down the title bar, on the line of the border.
+            let bar = frame::metrics(style).unwrap();
+            let from = pos2(
+                8.0 + bar.side + SIDEBAR_DEFAULT,
+                8.0 + bar.top + bar.title / 2.0,
             );
-            assert_eq!(harness.state().1.settings.sidebar_width, 300.0, "y={y}");
+            harness.hover_at(from);
+            harness.run_steps(2);
+            harness.drag_at(from);
+            harness.step();
+            harness.hover_at(from + vec2(50.0, 0.0));
+            harness.step();
+            assert!(
+                harness.output().viewport_output.values().any(|viewport| {
+                    viewport
+                        .commands
+                        .contains(&egui::ViewportCommand::StartDrag)
+                }),
+                "{style:?}"
+            );
+            harness.drop_at(from + vec2(50.0, 0.0));
+            harness.run_steps(2);
+            assert_eq!(
+                harness.state().1.settings.sidebar_width,
+                SIDEBAR_DEFAULT,
+                "{style:?}"
+            );
         }
     }
 
@@ -1614,6 +1665,7 @@ mod header_tests {
         for style in [
             crate::settings::Style::Liquid,
             crate::settings::Style::Fluent,
+            crate::settings::Style::Adwaita,
         ] {
             let mut app = app(Page::Search, 0);
             app.settings.style = style;
