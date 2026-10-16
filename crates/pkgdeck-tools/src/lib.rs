@@ -148,6 +148,29 @@ fn settled_cpu(pid: u32) -> Option<u64> {
     }
     Some(ticks)
 }
+/// The command lines of `pid`'s running child processes.
+fn helpers(pid: u32) -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let stat = fs::read_to_string(dir.join("stat")).ok()?;
+            let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            (fields.get(1) == Some(&pid.to_string().as_str()) && fields.first() != Some(&"Z"))
+                .then(|| fs::read(dir.join("cmdline")).ok())
+                .flatten()
+                .map(|line| {
+                    String::from_utf8_lossy(&line)
+                        .replace('\0', " ")
+                        .trim()
+                        .to_owned()
+                })
+        })
+        .collect()
+}
 pub struct Desktop {
     server: Process,
     process: Option<Process>,
@@ -272,20 +295,37 @@ impl Desktop {
         );
         self.idle();
     }
-    fn logs(&self) -> String {
-        fs::read_to_string(self.dir.0.join("application.log")).unwrap_or_default()
+    /// The app's output, then whether it exited and which helpers it is
+    /// running, so a failure says what the app was doing.
+    fn logs(&mut self) -> String {
+        let mut text = fs::read_to_string(self.dir.0.join("application.log")).unwrap_or_default();
+        if let Some(process) = self.process.as_mut() {
+            match process.0.try_wait() {
+                Ok(Some(status)) => text.push_str(&format!("\napp exited: {status}")),
+                _ => {
+                    let helpers = helpers(process.0.id());
+                    text.push_str(&format!("\napp running, helpers: {helpers:?}"));
+                }
+            }
+        }
+        text
     }
     /// Wait until the app has settled: no helper process is running and the
     /// app has used no CPU for a short quiet period. Anything still busy
     /// after two seconds (an animation, a slow helper) waits the full time.
     pub fn idle(&mut self) {
+        self.settle(Duration::from_secs(2));
+    }
+    /// [`Self::idle`], waiting up to `limit` for a slow helper, such as a
+    /// search or `brew update` on a busy runner.
+    fn settle(&mut self, limit: Duration) {
         let pid = self.process.as_ref().unwrap().0.id();
         let start = Instant::now();
         let quiet_for = Duration::from_millis(300);
         sleep(Duration::from_millis(150));
         let mut last = settled_cpu(pid);
         let mut quiet_since = Instant::now();
-        while start.elapsed() < Duration::from_secs(2) {
+        while start.elapsed() < limit {
             sleep(Duration::from_millis(50));
             let now = settled_cpu(pid);
             if now.is_none() || now != last {
@@ -317,6 +357,9 @@ impl Desktop {
         self.key("ctrl+a");
         self.xdo(&["type", "--clearmodifiers", "--delay", "0", name]);
         self.key("Return");
+        // The list can only take focus once the results are in, and a
+        // manager's query can take longer than idle() waits.
+        self.settle(Duration::from_secs(30));
         // Focusing the list selects its first row.
         self.key("ctrl+l");
         self.key("Home");
@@ -340,12 +383,6 @@ impl Desktop {
             "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
-        // Refresh sources lives on Updates; open it and let it load first.
-        if op == "refresh" {
-            self.key("ctrl+3");
-        } else {
-            self.search(name);
-        }
         let started = || {
             entries()
                 .last()
@@ -355,7 +392,16 @@ impl Desktop {
         // while the app is busy. A slow details query on a real manager can
         // swallow both keys. History records an operation when it begins, so
         // nothing was applied until an entry appears and resending is safe.
+        // Each try starts over from the search: a slow query can leave
+        // nothing selected, and resending the keys alone can't fix that.
         for attempt in 1.. {
+            // Refresh sources lives on Updates; open it and let it load first.
+            if op == "refresh" {
+                self.key("ctrl+3");
+                self.settle(Duration::from_secs(30));
+            } else {
+                self.search(name);
+            }
             self.key(propose);
             self.key(confirm);
             let wait = Instant::now() + Duration::from_secs(15);

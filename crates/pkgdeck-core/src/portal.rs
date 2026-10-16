@@ -457,6 +457,8 @@ mod fake {
         /// The sockets under each end, to break the connection.
         pub(super) client_end: UnixStream,
         pub(super) server_end: UnixStream,
+        /// The portal's end. Held, it stays open after the portal stops.
+        pub(super) server: Connection,
     }
 
     impl Peer {
@@ -481,11 +483,13 @@ mod fake {
             // yet is dropped.
             let calls = MessageIterator::from(&server);
             let bridge = bridge.to_owned();
+            let held = server.clone();
             std::thread::spawn(move || serve(&server, calls, &bridge, refusals));
             Self {
                 client,
                 client_end,
                 server_end,
+                server: held,
             }
         }
     }
@@ -671,6 +675,10 @@ mod tests {
         let bridge = fake_bridge(&dir);
         let peer = fake::Peer::new(&bridge, Vec::new());
         let end = peer.client_end.try_clone().unwrap();
+        // The portal's end stays open, so only the start finds the break.
+        // Closed, it could tell the listener first, and the start would
+        // never try.
+        let _portal_end = peer.server.clone();
         let broken = portal(peer);
         let started = program(&broken, "exit 0");
         end.shutdown(Shutdown::Write).unwrap();

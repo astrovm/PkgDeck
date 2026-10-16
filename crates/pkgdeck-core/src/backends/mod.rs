@@ -2832,8 +2832,11 @@ impl<T: Transport> Backend for Homebrew<T> {
         // Formulae and casks both enter here. The first `brew update` wins;
         // the other waits and reuses its result. A different check waits its
         // turn, then fetches again.
+        // It runs as a read: only fetched data changes, so a cancel or a quit
+        // stops it at once and a stalled fetch times out. As a write, quitting
+        // waited for it to end.
         crate::engine::once_per_check(token, || {
-            brew_update(cancel, || self.call(&["update"], cancel, true))?;
+            brew_update(cancel, || self.call(&["update"], cancel, false))?;
             Ok(())
         })
     }
@@ -3146,7 +3149,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         };
         self.found.clear();
         crate::engine::once_per_check(token, || {
-            brew_update(cancel, || self.call(&["update"], cancel, true))?;
+            brew_update(cancel, || self.call(&["update"], cancel, false))?;
             Ok(())
         })
     }
@@ -6641,6 +6644,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct LockedBrew {
         calls: Arc<Mutex<Vec<String>>>,
+        writes: Arc<Mutex<Vec<bool>>>,
     }
     impl Transport for LockedBrew {
         fn brew(
@@ -6657,7 +6661,7 @@ mod tests {
             let mut calls = self.calls.lock().unwrap();
             calls.push(line.clone());
             assert_eq!(line, "update");
-            assert!(write);
+            self.writes.lock().unwrap().push(write);
             let locked = calls.len() == 1;
             brew_run(i32::from(locked), if locked { BREW_LOCKED } else { "" })
         }
@@ -6674,6 +6678,7 @@ mod tests {
             .unwrap();
         crate::engine::end_update_check_token(token);
         assert_eq!(*formulae.calls.lock().unwrap(), ["update", "update"]);
+        assert_eq!(*formulae.writes.lock().unwrap(), [false, false]);
 
         let token = crate::engine::begin_update_check_token();
         let casks = LockedBrew::default();
@@ -6682,6 +6687,7 @@ mod tests {
         cask.refresh_update_index(&Cancellation::default()).unwrap();
         crate::engine::end_update_check_token(token);
         assert_eq!(*casks.calls.lock().unwrap(), ["update", "update"]);
+        assert_eq!(*casks.writes.lock().unwrap(), [false, false]);
     }
 
     #[test]
@@ -6710,6 +6716,7 @@ mod tests {
                 ["update", "update"],
                 "{backend}"
             );
+            assert_eq!(*brew.writes.lock().unwrap(), [true, true], "{backend}");
         }
     }
 

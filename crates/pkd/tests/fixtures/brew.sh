@@ -12,12 +12,20 @@ case "$1" in
     formulae) echo fixture ;;
     info)
         echo info >>"$HOME/queries.log"
+        # A slow query, as Homebrew's can be on a cold runner.
+        if [[ -f $HOME/slow-query ]]; then
+            /bin/sleep "$(/bin/cat "$HOME/slow-query")"
+        fi
         /usr/bin/jq -n --argjson s "$state" --arg args "$*" '{formulae: (if ($args|contains("--installed")) and $s.installed == null then [] else [{full_name:"fixture",desc:"Synthetic fixture",homepage:"",versions:{stable:$s.candidate},revision:0,installed:(if $s.installed then [{version:$s.installed}] else [] end),outdated:($s.installed != null and $s.installed != $s.candidate),dependencies:[]}] end)}'
         ;;
     update | install | upgrade | uninstall)
         case "$1" in
             update)
                 [[ $# == 1 ]]
+                # A slow index refresh, as `brew update` can be on a busy runner.
+                if [[ -f $HOME/slow-update ]]; then
+                    /bin/sleep "$(/bin/cat "$HOME/slow-update")"
+                fi
                 if [[ -f $HOME/fail-update ]]; then
                     echo 'synthetic update failure' >&2
                     exit 1
