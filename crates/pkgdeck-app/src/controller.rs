@@ -623,7 +623,19 @@ fn opened_payload(package: Package) -> Payload {
         package,
     }))
 }
+/// An opened file or link, with the copy already installed, if any, so its
+/// page can offer an update or a reinstall instead of an install.
 fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
+    let mut payload = inspect_open_file(input, cancel)?;
+    if let Payload::OpenPackage(details) = &mut payload {
+        let package = &mut details.package;
+        if package.id.backend != "appimage" && package.installed_version.is_none() {
+            package.installed_version = pkgdeck_core::installed_copy::version(&package.id, cancel);
+        }
+    }
+    Ok(payload)
+}
+fn inspect_open_file(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
     if let Some(url) = input.strip_prefix("flatpak+") {
         return pkgdeck_core::flatpak_ref::inspect(url, cancel).map(opened_payload);
     }
@@ -6289,7 +6301,7 @@ impl ffi::PackageController {
                 let action = if package.adopt_with.as_deref() == Some("appimage") {
                     "Manage"
                 } else {
-                    "Install"
+                    pkgdeck_core::installed_copy::action(&package)
                 };
                 let data = opened_page(&details, action);
                 self.as_mut().set_opened(encoded(data));
@@ -7881,7 +7893,13 @@ mod tests {
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
             let curl = base.join("curl");
-            let script = "#!/bin/sh\nout=''\nfor arg; do\n  if [ \"$previous\" = '--output' ]; then out=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \"$arg\" in\n  *.flatpakref) printf '[Flatpak Ref]\\nName=org.example.Synthetic\\nUrl=https://example.invalid/repo\\n' ;;\n  *.flatpakrepo) printf '[Flatpak Repo]\\nName=synthetic\\nUrl=https://example.invalid/repo\\nGPGKey=c3ludGhldGlj\\n' ;;\n  *.flatpak) printf 'synthetic bundle bytes' > \"$out\" ;;\nesac\n";
+            // A real bundle's header, written with the shell's own printf.
+            let bundle: String =
+                include_bytes!("../../pkgdeck-core/src/backends/fixtures/synthetic.flatpak")
+                    .iter()
+                    .map(|byte| format!("\\{byte:03o}"))
+                    .collect();
+            let script = format!("#!/bin/sh\nout=''\nfor arg; do\n  if [ \"$previous\" = '--output' ]; then out=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \"$arg\" in\n  *.flatpakref) printf '[Flatpak Ref]\\nName=org.example.Synthetic\\nUrl=https://example.invalid/repo\\n' ;;\n  *.flatpakrepo) printf '[Flatpak Repo]\\nName=synthetic\\nUrl=https://example.invalid/repo\\nGPGKey=c3ludGhldGlj\\n' ;;\n  *.flatpak) printf '{bundle}' > \"$out\" ;;\nesac\n");
             std::fs::write(&curl, script).unwrap();
             std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -7917,6 +7935,9 @@ mod tests {
             inspect_open_input("https://example.invalid/synthetic.flatpak", &cancel).unwrap();
         let opened = expect!(preview, Payload::OpenPackage(opened) => opened);
         assert_eq!(opened.package.id.backend, "flatpak");
+        // Named by the app inside, not the file.
+        assert_eq!(opened.package.id.name, "org.example.Synthetic");
+        assert_eq!(opened.package.candidate_version.as_deref(), Some("1.0"));
         assert!(inspect_open_input("https://example.invalid/unsupported.bin", &cancel).is_err());
     }
     #[test]
@@ -8512,6 +8533,27 @@ mod tests {
             )["review"],
             true
         );
+    }
+    #[test]
+    fn an_opened_file_already_installed_offers_update_or_reinstall() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        for (backend, installed, candidate, action) in [
+            ("flatpak", None, "0.4.1", "Install"),
+            ("flatpak", Some("0.4.1"), "0.4.1", "Reinstall"),
+            ("flatpak", Some("0.3.2"), "0.4.1", "Update"),
+            ("apt", Some("1.0"), "1.1", "Update"),
+            ("apt", Some("1.1"), "1.1", ""),
+        ] {
+            let mut package = synthetic_package("org.example.Synthetic", "Synthetic");
+            package.id.backend = backend.into();
+            package.installed_version = installed.map(str::to_owned);
+            package.candidate_version = Some(candidate.into());
+            controller.as_mut().apply(Ok(opened_payload(package)));
+            let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+            assert_eq!(page["action"], action, "{backend} {installed:?}");
+            assert_eq!(page["package"]["installed"], json!(installed), "{backend}");
+        }
     }
     #[test]
     fn opened_files_show_a_page_until_back_and_installed_after_their_install() {

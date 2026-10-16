@@ -43,7 +43,7 @@ struct Environment {
 /// Conda versions: dot, dash, or underscore separated segments of numbers
 /// and letters. Letters sort before numbers (`1.0rc1 < 1.0`), except `post`,
 /// and missing segments count as zero (`1.1 == 1.1.0`).
-pub(super) fn compare_versions(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
     enum Part {
         Dev,

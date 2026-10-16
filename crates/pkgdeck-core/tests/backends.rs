@@ -1113,6 +1113,7 @@ fn flatpak_reference_install_revalidates_and_cleans_temporary_file() {
         .unwrap();
     assert!(*write && !*system);
     assert_eq!(args[0], "--user");
+    assert!(args.contains(&"--reinstall".into()));
     let temporary = std::path::Path::new(args.last().unwrap());
     assert!(!temporary.exists());
     drop(calls);
@@ -5342,7 +5343,11 @@ fn flatpak_bundle_install_uses_a_private_reviewed_file() {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     let bundle = base.join("synthetic.flatpak");
-    std::fs::write(&bundle, b"synthetic flatpak bundle").unwrap();
+    std::fs::write(
+        &bundle,
+        include_bytes!("../src/backends/fixtures/synthetic.flatpak"),
+    )
+    .unwrap();
     let cancel = Cancellation::default();
     let package = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel).unwrap();
     let fixture = FlatpakFixture::default();
@@ -5358,6 +5363,7 @@ fn flatpak_bundle_install_uses_a_private_reviewed_file() {
     let (args, write, system) = calls.last().unwrap();
     assert!(*write && !*system);
     assert!(args.contains(&"--bundle".into()));
+    assert!(args.contains(&"--reinstall".into()));
     let path = std::path::Path::new(args.last().unwrap());
     assert_ne!(path, bundle);
     assert!(!path.exists());

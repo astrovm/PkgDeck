@@ -366,7 +366,11 @@ fn app_page(
                 PageButton::Main => match &main {
                     Some(Main::Opened(action)) => {
                         if Button::new(Look::Solid(Tone::Success), action)
-                            .icon("install")
+                            .icon(if action == "Update" {
+                                "updates"
+                            } else {
+                                "install"
+                            })
                             .enabled(can_act)
                             .show(ui)
                             .clicked()

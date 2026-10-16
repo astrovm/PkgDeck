@@ -493,10 +493,12 @@ fn inspect_staged(
                     format!("AppImage: {name}"),
                 )
             } else {
+                // The app's own ID, so an installed copy is recognized.
+                let bundle = crate::flatpak_bundle::read(&staged.path).map_err(invalid)?;
                 (
-                    name,
-                    String::new(),
-                    std::env::consts::ARCH.into(),
+                    bundle.id,
+                    bundle.version.unwrap_or_default(),
+                    bundle.arch,
                     "Flatpak bundle; Flatpak checks its contents during install".into(),
                 )
             }
@@ -724,10 +726,16 @@ mod tests {
             ("sample.rpm", "dnf", "synthetic-rpm"),
             ("sample.pkg.tar.xz", "pacman", "synthetic-arch"),
             ("sample.snap", "snap", "synthetic-snap"),
-            ("sample.flatpak", "flatpak", "sample.flatpak"),
+            // A bundle is named by the app inside, not the file.
+            ("sample.flatpak", "flatpak", "org.example.Synthetic"),
         ] {
             let path = base.join(file);
-            fs::write(&path, b"synthetic package payload").unwrap();
+            let payload: &[u8] = if file.ends_with(".flatpak") {
+                include_bytes!("backends/fixtures/synthetic.flatpak")
+            } else {
+                b"synthetic package payload"
+            };
+            fs::write(&path, payload).unwrap();
             if file.ends_with(".snap") {
                 fs::write(base.join("sample.assert"), b"synthetic signed assertion").unwrap();
             }
@@ -737,10 +745,7 @@ mod tests {
             let staged = stage_with_host(&package.id, &cancel, &host)
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                fs::read(staged.path()).unwrap(),
-                b"synthetic package payload"
-            );
+            assert_eq!(fs::read(staged.path()).unwrap(), payload);
             if file.ends_with(".snap") {
                 assert!(staged.assertion().is_some());
             }

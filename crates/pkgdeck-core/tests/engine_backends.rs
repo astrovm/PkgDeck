@@ -436,7 +436,11 @@ fn flatpak_reports_failed_listings_searches_and_writes() {
 fn flatpak_bundles_check_scope_before_fetching_and_report_failed_installs() {
     let base = temp_dir("bundle");
     let bundle = base.join("synthetic.flatpak");
-    std::fs::write(&bundle, b"synthetic bundle with a failing install").unwrap();
+    std::fs::write(
+        &bundle,
+        include_bytes!("../src/backends/fixtures/synthetic.flatpak"),
+    )
+    .unwrap();
     let cancel = Cancellation::default();
     let package = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel).unwrap();
     let script = Script::new(|_| failed(1));
@@ -451,7 +455,9 @@ fn flatpak_bundles_check_scope_before_fetching_and_report_failed_installs() {
     native_failure(run(&mut flatpak, &Operation::Install(package.id)), 1);
     let calls = script.calls();
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].starts_with("w:flatpak --user install --noninteractive --assumeyes --bundle "));
+    assert!(calls[0].starts_with(
+        "w:flatpak --user install --noninteractive --assumeyes --reinstall --bundle "
+    ));
     std::fs::remove_dir_all(base).unwrap();
 }
 
@@ -1373,7 +1379,11 @@ fn flatpak_update_checks_and_bundle_scopes() {
     // cannot be moved to the system installation.
     let base = temp_dir("system-bundle");
     let bundle = base.join("synthetic.flatpak");
-    std::fs::write(&bundle, b"synthetic system-scope bundle").unwrap();
+    std::fs::write(
+        &bundle,
+        include_bytes!("../src/backends/fixtures/synthetic.flatpak"),
+    )
+    .unwrap();
     let mut id = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel)
         .unwrap()
         .id;
