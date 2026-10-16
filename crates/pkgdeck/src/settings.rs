@@ -125,20 +125,25 @@ pub enum Style {
     /// lights.
     #[serde(alias = "tahoe", alias = "macos")]
     Liquid,
-    /// KDE 3: Plastik's soft grey gradients and a title bar in the accent.
-    #[serde(alias = "kde3")]
-    Plastik,
-    /// KDE 4: Oxygen's glowing, rounded controls on a softly lit grey.
-    #[serde(alias = "kde4")]
-    Oxygen,
-    /// KDE Plasma 6: Breeze, flat and light, with blue outlines.
-    #[serde(alias = "plasma", alias = "kde")]
+    /// KDE Plasma 6: Breeze, flat and light, with blue outlines. KDE 3 and
+    /// KDE 4 read as it.
+    #[serde(
+        alias = "plasma",
+        alias = "kde",
+        alias = "plastik",
+        alias = "kde3",
+        alias = "oxygen",
+        alias = "kde4"
+    )]
     Breeze,
-    /// GNOME 2: Clearlooks' glossy controls and a blue title bar.
-    #[serde(alias = "gnome2")]
-    Clearlooks,
-    /// GNOME 51: Adwaita, a header bar and rounded cards.
-    #[serde(alias = "gnome", alias = "libadwaita")]
+    /// GNOME 51: Adwaita, a header bar and rounded cards. GNOME 2 reads as
+    /// it.
+    #[serde(
+        alias = "gnome",
+        alias = "libadwaita",
+        alias = "clearlooks",
+        alias = "gnome2"
+    )]
     Adwaita,
 }
 
@@ -159,14 +164,8 @@ pub enum Family {
     Fluent,
     /// macOS 27.
     Liquid,
-    /// KDE 3.
-    Plastik,
-    /// KDE 4.
-    Oxygen,
     /// KDE Plasma 6.
     Breeze,
-    /// GNOME 2.
-    Clearlooks,
     /// GNOME 51.
     Adwaita,
 }
@@ -185,7 +184,7 @@ impl Family {
 impl Style {
     /// In the order the picker shows them: Windows oldest to newest, then
     /// the Mac, KDE and GNOME.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 9] = [
         Self::Modern,
         Self::Retro,
         Self::Luna,
@@ -193,10 +192,7 @@ impl Style {
         Self::Fluent,
         Self::Aqua,
         Self::Liquid,
-        Self::Plastik,
-        Self::Oxygen,
         Self::Breeze,
-        Self::Clearlooks,
         Self::Adwaita,
     ];
     pub fn name(self) -> &'static str {
@@ -208,10 +204,7 @@ impl Style {
             Self::Aqua => "Mac OS X Tiger",
             Self::Fluent => "Windows 11",
             Self::Liquid => "macOS 27",
-            Self::Plastik => "KDE 3",
-            Self::Oxygen => "KDE 4",
             Self::Breeze => "KDE Plasma 6",
-            Self::Clearlooks => "GNOME 2",
             Self::Adwaita => "GNOME 51",
         }
     }
@@ -225,20 +218,14 @@ impl Style {
             Self::Aqua => Family::Gel,
             Self::Fluent => Family::Fluent,
             Self::Liquid => Family::Liquid,
-            Self::Plastik => Family::Plastik,
-            Self::Oxygen => Family::Oxygen,
             Self::Breeze => Family::Breeze,
-            Self::Clearlooks => Family::Clearlooks,
             Self::Adwaita => Family::Adwaita,
         }
     }
     /// Whether the style's title bar takes the accent, so the window bar
     /// tint does something.
     pub fn tints_window_bar(self) -> bool {
-        matches!(
-            self.family(),
-            Family::Retro | Family::Luna | Family::Glass | Family::Plastik | Family::Clearlooks
-        )
+        matches!(self.family(), Family::Retro | Family::Luna | Family::Glass)
     }
     /// Whether the window bar tint starts on in this style: Windows 7 starts
     /// off, the rest start on.
@@ -975,10 +962,7 @@ mod tests {
     #[test]
     fn only_styles_with_an_accent_title_bar_offer_the_window_bar_tint() {
         for style in Style::ALL {
-            let tinted = matches!(
-                style,
-                Style::Retro | Style::Luna | Style::Glass | Style::Plastik | Style::Clearlooks
-            );
+            let tinted = matches!(style, Style::Retro | Style::Luna | Style::Glass);
             assert_eq!(style.tints_window_bar(), tinted, "{style:?}");
         }
     }
@@ -1000,10 +984,7 @@ mod tests {
                 Family::Fluent,
                 Family::Gel,
                 Family::Liquid,
-                Family::Plastik,
-                Family::Oxygen,
                 Family::Breeze,
-                Family::Clearlooks,
                 Family::Adwaita,
             ]
         );
@@ -1025,6 +1006,9 @@ mod tests {
             ("\"gel\"", Style::Aqua),
             ("\"panther\"", Style::Aqua),
             ("\"platinum\"", Style::Aqua),
+            ("\"plastik\"", Style::Breeze),
+            ("\"oxygen\"", Style::Breeze),
+            ("\"clearlooks\"", Style::Adwaita),
         ] {
             assert_eq!(serde_json::from_str::<Style>(text).unwrap(), style);
         }
