@@ -108,4 +108,27 @@ printf '#include "%s";\nDebug::pkgCacheGen "true";\n' "$work/config" >"$work/deb
 log=$(APT_CONFIG="$work/debug-config" "$helper" installed '' '' 2>&1 >/dev/null)
 [[ $log == *'srcpkgcache.bin is valid'* && $log != *'NOT valid'* ]]
 [[ $(sha256sum "$work/var/cache/apt/"*.bin) == "$caches" ]]
-echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state, read-only caches and JSON escaping'
+# A check's own copy of the lists, filled as the user the way PkgDeck fills
+# it, is read only when PKGDECK_APT_LISTS names it.
+copy="$work/copy"
+mkdir -p "$copy/lists/partial" "$copy/cache/archives/partial"
+printf '#clear APT::Update::Post-Invoke-Success;\n' >"$copy/apt.conf"
+cat >>"$work/repo/Packages" <<'PACKAGE'
+Package: pkgdeck-fixture
+Architecture: amd64
+Version: 4.0
+Description: Synthetic newer fixture
+Filename: fixture-4.0.deb
+Size: 1
+
+PACKAGE
+APT_CONFIG="$work/config" apt-get -qq -c "$copy/apt.conf" -o Dir::State::Lists="$copy/lists" \
+    -o Dir::Cache="$copy/cache" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
+    -o Acquire::GzipIndexes=true -o Debug::NoLocking=1 update
+query details pkgdeck-fixture amd64 | jq -e '.[0].package.candidate_version=="2.0"'
+PKGDECK_APT_LISTS="$copy/lists" query details pkgdeck-fixture amd64 | jq -e '.[0].package.candidate_version=="4.0"'
+PKGDECK_APT_LISTS="$copy/lists" query search 'newer' '' | jq -e 'length==1'
+# The system's cache files describe the system's lists; the copy never uses
+# or changes them.
+[[ $(sha256sum "$work/var/cache/apt/"*.bin) == "$caches" ]]
+echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state, read-only caches, private lists and JSON escaping'

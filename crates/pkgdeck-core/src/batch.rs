@@ -2061,6 +2061,75 @@ done"#;
         drop(scope);
     }
 
+    /// The APT backend itself, run through a session whose runner approves
+    /// what `batch_commands` planned and logs each command it's asked for.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apt_updates_send_the_refresh_then_the_update_in_one_session() {
+        use crate::engine::Backend;
+        use std::collections::BTreeMap;
+        // The host must have APT for its commands to be built.
+        if !Path::new("/usr/bin/apt-get").exists() {
+            return;
+        }
+        let log = std::env::temp_dir().join(format!("pkgdeck-apt-session-{}", std::process::id()));
+        let script = format!(
+            r#"IFS= read -r start
+printf '%s\n' '{{"type":"ready","protocol":2}}'
+while IFS= read -r request; do
+  printf '%s\n' "$request" >>'{}'
+  printf '%s\n' '{{"type":"completed","completion":{{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}}}'
+done"#,
+            log.display()
+        );
+        let session = |operations: &[Operation]| {
+            let _ = fs::remove_file(&log);
+            let mut child = Command::new("/bin/sh");
+            child.arg("-c").arg(&script);
+            let commands = batch_commands(operations).unwrap();
+            let scope = begin_session(child, operations, commands, &Cancellation::default())
+                .unwrap()
+                .unwrap();
+            set_operation(0);
+            scope
+        };
+        let requests = || fs::read_to_string(&log).unwrap_or_default();
+        let mut apt = crate::backends::Apt::new(crate::backends::NativeTransport {
+            host: Host::new(Runtime::Native, BTreeMap::new()),
+            authorization: Authorization::Polkit,
+        });
+        let cancel = Cancellation::default();
+        let all = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        let scope = session(std::slice::from_ref(&all));
+        apt.prepare(&all, &cancel, &mut |_| {}).unwrap();
+        apt.execute(&all, &cancel, &mut |_| {}).unwrap();
+        drop(scope);
+        assert_eq!(
+            requests(),
+            "{\"type\":\"run\",\"operation\":0,\"command\":0}\n{\"type\":\"run\",\"operation\":0,\"command\":1}\n"
+        );
+        // Grouped updates: one refresh, then the group.
+        let updates = [
+            Operation::Upgrade(id("apt", "one")),
+            Operation::Upgrade(id("apt", "two")),
+        ];
+        let scope = session(&updates);
+        apt.prepare(&updates[0], &cancel, &mut |_| {}).unwrap();
+        apt.execute_group(&updates, &cancel, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        drop(scope);
+        assert_eq!(requests().lines().count(), 2);
+        // Skipping the refresh is refused before anything runs as root.
+        let scope = session(std::slice::from_ref(&all));
+        assert!(apt.execute(&all, &cancel, &mut |_| {}).is_err());
+        drop(scope);
+        assert_eq!(requests(), "");
+        let _ = fs::remove_file(&log);
+    }
+
     #[test]
     fn apt_grouping_stops_at_other_backends_and_preserves_each_verb() {
         let operations = [

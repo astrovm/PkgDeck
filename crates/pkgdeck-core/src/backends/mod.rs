@@ -338,9 +338,14 @@ pub trait Transport: Send {
         let _ = source;
         None
     }
-    /// That folder, ready for a refresh. `None` when there's none.
-    fn prepare_private_index(&self, source: &str) -> Result<Option<PathBuf>, ExecutionError> {
-        let _ = source;
+    /// That folder, ready for a refresh and held until it's dropped.
+    /// `None` when there's none.
+    fn prepare_private_index(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+        let _ = (source, cancel);
         Ok(None)
     }
     /// Refresh an index the user owns: a read that can download for minutes.
@@ -622,7 +627,7 @@ fn apt_query_executable(
 /// status and its pending journal), package lists, APT configuration,
 /// sources, pins, and the machine id that phased updates use. Inside the
 /// Flatpak, the host's /etc is under /run/host.
-fn apt_watches(host: &Host) -> Vec<crate::cache::Watch> {
+fn apt_watches(host: &Host, copy: Option<PathBuf>) -> Vec<crate::cache::Watch> {
     use crate::cache::Watch;
     let etc = |path: &str| host.filesystem_path(std::path::Path::new(path));
     vec![
@@ -635,8 +640,16 @@ fn apt_watches(host: &Host) -> Vec<crate::cache::Watch> {
         Watch::file(etc("/etc/machine-id")),
     ]
     .into_iter()
-    .chain(crate::private_index::dir("apt").map(|dir| Watch::tree(dir.join("lists"), 1)))
+    .chain(copy.map(|dir| Watch::tree(dir.join("lists"), 1)))
     .collect()
+}
+
+/// What the APT helper is told: inside the Flatpak, where the host's /etc
+/// is; and a check's own copy of the lists while it's newer.
+fn apt_helper_env(flatpak: bool, lists: Option<PathBuf>) -> Vec<(&'static str, String)> {
+    let host = flatpak.then(|| ("PKGDECK_APT_HOST", "/run/host".to_owned()));
+    let lists = lists.map(|lists| ("PKGDECK_APT_LISTS", lists.to_string_lossy().into_owned()));
+    host.into_iter().chain(lists).collect()
 }
 
 /// What `flatpak search` answers from: the installation's AppStream data
@@ -809,8 +822,12 @@ impl Transport for NativeTransport {
     fn private_index(&self, source: &str) -> Option<PathBuf> {
         crate::private_index::fresher(source)
     }
-    fn prepare_private_index(&self, source: &str) -> Result<Option<PathBuf>, ExecutionError> {
-        crate::private_index::prepare(source).map_err(|e| ExecutionError::Io(e.to_string()))
+    fn prepare_private_index(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+        crate::private_index::prepare(source, cancel)
     }
     fn refresh_index(
         &self,
@@ -848,14 +865,14 @@ impl Transport for NativeTransport {
         }
         // Inside the Flatpak the bundled helper reads the host's /var as is,
         // and its /etc under /run/host.
-        let host_root = (self.host.runtime == crate::host::Runtime::Flatpak)
-            .then_some(("PKGDECK_APT_HOST", "/run/host"));
-        // A check's own copy of the lists, while it's newer.
-        let lists = self
-            .private_index("apt")
-            .map(|dir| dir.join("lists").to_string_lossy().into_owned());
-        let lists = lists.as_deref().map(|lists| ("PKGDECK_APT_LISTS", lists));
-        let env: Vec<_> = host_root.into_iter().chain(lists).collect();
+        let env = apt_helper_env(
+            self.host.runtime == crate::host::Runtime::Flatpak,
+            self.private_index("apt").map(|dir| dir.join("lists")),
+        );
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
         let executable = apt_query_executable(
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
@@ -870,7 +887,7 @@ impl Transport for NativeTransport {
             "apt",
             mode,
             &[query, arch],
-            &apt_watches(&self.host),
+            &apt_watches(&self.host, crate::private_index::dir("apt")),
             &[helper.as_deref().unwrap_or_default()],
             || {
                 self.host.read_bundled(
@@ -2322,11 +2339,11 @@ impl<T: Transport> Backend for Apt<T> {
             return Ok(());
         }
         // Without PackageKit, the check fills its own copy of the lists.
-        let Some(dir) = self.transport.prepare_private_index("apt")? else {
+        let Some(copy) = self.transport.prepare_private_index("apt", cancel)? else {
             return Ok(());
         };
         self.looked_up.clear();
-        let args = crate::private_index::apt_refresh_args(&dir);
+        let args = crate::private_index::apt_refresh_args(&copy.dir);
         bytes(
             "apt",
             self.transport.refresh_index("apt-get", &args, cancel)?,
@@ -4175,10 +4192,13 @@ impl<T: Transport> Backend for SystemManager<T> {
             return Ok(());
         }
         // Without PackageKit, the check fills its own copy of the index.
-        let Some(dir) = self.transport.prepare_private_index(self.kind.id())? else {
+        let Some(copy) = self
+            .transport
+            .prepare_private_index(self.kind.id(), cancel)?
+        else {
             return Ok(());
         };
-        let dir = dir.into_os_string();
+        let dir = copy.dir.clone().into_os_string();
         let (executable, args): (&str, Vec<OsString>) = match self.kind {
             // The way checkupdates does it: under fakeroot, pacman fills a
             // database the user owns.
@@ -7069,8 +7089,14 @@ mod tests {
         fn private_index(&self, source: &str) -> Option<PathBuf> {
             self.fresher.then(|| PathBuf::from(format!("/c/{source}")))
         }
-        fn prepare_private_index(&self, source: &str) -> Result<Option<PathBuf>, ExecutionError> {
-            Ok(self.copies.then(|| PathBuf::from(format!("/c/{source}"))))
+        fn prepare_private_index(
+            &self,
+            source: &str,
+            _: &Cancellation,
+        ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+            Ok(self
+                .copies
+                .then(|| crate::private_index::Copy::unlocked(format!("/c/{source}"))))
         }
         fn refresh_index(
             &self,
@@ -7081,7 +7107,12 @@ mod tests {
             if executable == self.missing {
                 return Err(ExecutionError::Disabled(format!("{executable} not found")));
             }
-            self.system_manager(executable, args, cancel, false)
+            // Marked apart from a plain read, which gives up after seconds.
+            let result = self.system_manager(executable, args, cancel, false);
+            let mut ran = self.ran.lock().unwrap();
+            let line = ran.pop().unwrap();
+            ran.push(format!("fetch {line}"));
+            result
         }
         fn apt_write(
             &self,
@@ -7162,7 +7193,7 @@ mod tests {
         let mut dnf = SystemManager::dnf(kit.clone());
         dnf.arm_update_check(Some(7));
         dnf.refresh_update_index(&cancel).unwrap();
-        assert_eq!(kit.ran(), ["dnf --refresh --quiet makecache"]);
+        assert_eq!(kit.ran(), ["fetch dnf --refresh --quiet makecache"]);
         // Without PackageKit's copy or one of its own, apk leaves its index.
         kit.clear();
         let mut apk = SystemManager::apk(kit.clone());
@@ -7203,7 +7234,7 @@ mod tests {
         assert_eq!(ran[0], "packagekit apt");
         assert!(
             ran[1].starts_with(
-                "apt-get -q -o Dir::State::Lists=/c/apt/lists -o Dir::Cache=/c/apt/cache"
+                "fetch apt-get -q -c /c/apt/apt.conf -o Dir::State::Lists=/c/apt/lists -o Dir::Cache=/c/apt/cache"
             ) && ran[1].ends_with(" update"),
             "{ran:?}"
         );
@@ -7211,11 +7242,11 @@ mod tests {
         for (mut manager, refresh) in [
             (
                 SystemManager::pacman(kit.clone()),
-                "fakeroot -- pacman -Sy --dbpath /c/pacman --logfile /dev/null",
+                "fetch fakeroot -- pacman -Sy --dbpath /c/pacman --logfile /dev/null",
             ),
             (
                 SystemManager::zypper(kit.clone()),
-                "zypper --cache-dir /c/zypper --quiet --non-interactive list-updates",
+                "fetch zypper --cache-dir /c/zypper --quiet --non-interactive list-updates",
             ),
         ] {
             kit.clear();
@@ -7233,7 +7264,7 @@ mod tests {
         apk.refresh_update_index(&cancel).unwrap();
         assert_eq!(
             kit.ran(),
-            ["apk --cache-dir /c/apk --update-cache list --upgradable"]
+            ["fetch apk --cache-dir /c/apk --update-cache list --upgradable"]
         );
         // Not armed: Installed never refreshes anything.
         kit.clear();
@@ -7268,8 +7299,12 @@ mod tests {
         #[derive(Clone)]
         struct Offline;
         impl Transport for Offline {
-            fn prepare_private_index(&self, _: &str) -> Result<Option<PathBuf>, ExecutionError> {
-                Ok(Some(PathBuf::from("/c/apt")))
+            fn prepare_private_index(
+                &self,
+                _: &str,
+                _: &Cancellation,
+            ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+                Ok(Some(crate::private_index::Copy::unlocked("/c/apt")))
             }
             fn system_manager(
                 &self,
@@ -7325,6 +7360,109 @@ mod tests {
             }
             let _ = Apt::new(kit.clone()).apt_upgrade_plan(&cancel);
             assert_eq!(kit.ran(), expected);
+        }
+    }
+
+    #[test]
+    fn every_root_command_is_the_one_the_batch_helper_approves() {
+        // The runner refuses any command it didn't approve, so a manager's
+        // write and its approved command must never drift apart.
+        let cancel = Cancellation::default();
+        type Make = fn(Kit) -> SystemManager<Kit>;
+        let managers: [(&str, Make); 4] = [
+            ("dnf", SystemManager::dnf),
+            ("pacman", SystemManager::pacman),
+            ("zypper", SystemManager::zypper),
+            ("snap", SystemManager::snap),
+        ];
+        let mut approved_lines = BTreeMap::new();
+        for (backend, manager) in managers {
+            let id = PackageId {
+                backend: backend.into(),
+                name: "synthetic".into(),
+                architecture: "x86_64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            };
+            let mut operations = vec![
+                Operation::Install(id.clone()),
+                Operation::Remove(id.clone()),
+                Operation::Upgrade(id),
+                Operation::UpgradeAll {
+                    backend: backend.into(),
+                },
+            ];
+            // Snap's refresh only lists snaps, as the user.
+            if backend != "snap" {
+                operations.push(Operation::Refresh {
+                    backend: backend.into(),
+                });
+            }
+            for operation in operations {
+                let kit = Kit::new(Ok(false), "");
+                manager(kit.clone())
+                    .execute(&operation, &cancel, &mut |_| {})
+                    .unwrap();
+                let ran: Vec<String> = kit
+                    .ran()
+                    .into_iter()
+                    .filter(|line| line.starts_with("root "))
+                    .collect();
+                let approved: Vec<String> = crate::batch::protected_commands(&operation)
+                    .unwrap()
+                    .iter()
+                    .map(|command| {
+                        let program = std::path::Path::new(&command.program);
+                        let program = program.file_name().unwrap().to_string_lossy();
+                        format!("root {program} {}", command.args.join(" "))
+                    })
+                    .collect();
+                assert_eq!(ran, approved, "{operation:?}");
+                approved_lines.insert(format!("{operation:?}"), approved.join("; "));
+            }
+        }
+        // Updates refresh the system's index first; a check refreshed only
+        // the user's copy. Installs leave it, and pacman upgrades everything.
+        let line = |op: &str, backend: &str| {
+            approved_lines
+                .iter()
+                .find(|(key, _)| key.starts_with(op) && key.contains(&format!("\"{backend}\"")))
+                .map(|(_, line)| line.clone())
+                .unwrap()
+        };
+        assert_eq!(line("UpgradeAll", "dnf"), "root dnf -y --refresh upgrade");
+        assert!(line("Upgrade(", "dnf").starts_with("root dnf -y --refresh upgrade -- "));
+        assert_eq!(line("UpgradeAll", "pacman"), "root pacman -Syu --noconfirm");
+        assert!(line("Upgrade(", "pacman").starts_with("root pacman -Sy --noconfirm --needed -- "));
+        assert!(line("Install", "pacman").starts_with("root pacman -S --noconfirm --needed -- "));
+        assert_eq!(line("Refresh", "pacman"), "root pacman -Sy --noconfirm");
+    }
+
+    #[test]
+    fn a_single_apt_update_previews_from_a_fresher_copy() {
+        let cancel = Cancellation::default();
+        let id = PackageId {
+            backend: "apt".into(),
+            name: "curl".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        for (fresher, expected) in [
+            (
+                true,
+                "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists install curl:amd64",
+            ),
+            (
+                false,
+                "apt-get --simulate -o Debug::NoLocking=1 install curl:amd64",
+            ),
+        ] {
+            let kit = Kit::new(Ok(false), "").copies(fresher);
+            let _ = Apt::new(kit.clone()).operation_plan(&Operation::Upgrade(id.clone()), &cancel);
+            assert_eq!(kit.ran(), [expected]);
         }
     }
 
@@ -7702,12 +7840,35 @@ mod tests {
                 .iter()
                 .any(|watch| watch.path.ends_with("appstream"))
         );
-        let watches = apt_watches(&Host::new(crate::host::Runtime::Native, Default::default()));
+        let host = Host::new(crate::host::Runtime::Native, Default::default());
+        let watches = apt_watches(&host, None);
         for path in ["/var/lib/dpkg/status", "/etc/apt", "/etc/machine-id"] {
             assert!(watches
                 .iter()
                 .any(|watch| watch.path == std::path::Path::new(path)));
         }
+        // A check's own copy of the lists changes the answers too.
+        assert!(!watches.iter().any(|watch| watch.path.starts_with("/c")));
+        let watches = apt_watches(&host, Some("/c/apt".into()));
+        assert!(watches
+            .iter()
+            .any(|watch| watch.path == std::path::Path::new("/c/apt/lists")));
+    }
+
+    #[test]
+    fn the_apt_helper_hears_of_the_flatpak_and_of_a_fresher_copy() {
+        assert!(apt_helper_env(false, None).is_empty());
+        assert_eq!(
+            apt_helper_env(true, Some("/c/apt/lists".into())),
+            [
+                ("PKGDECK_APT_HOST", "/run/host".to_owned()),
+                ("PKGDECK_APT_LISTS", "/c/apt/lists".to_owned()),
+            ]
+        );
+        assert_eq!(
+            apt_helper_env(false, Some("/c/apt/lists".into())),
+            [("PKGDECK_APT_LISTS", "/c/apt/lists".to_owned())]
+        );
     }
 
     #[test]

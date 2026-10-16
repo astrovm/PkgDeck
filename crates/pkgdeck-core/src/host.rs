@@ -2438,6 +2438,44 @@ mod boundary_tests {
     }
 
     #[test]
+    fn refreshing_an_index_runs_as_the_user_and_reports_how_it_ended() {
+        let root = scratch("refresh-index");
+        executable(&root.join("fetch"), "echo fetched; echo \"$@\"");
+        executable(&root.join("broken"), "echo unreachable >&2; exit 3");
+        // Its PATH is only this folder.
+        executable(&root.join("slow"), "exec /bin/sleep 30");
+        let host = host(Runtime::Native, &[("PATH", &root)]);
+        let cancel = Cancellation::default();
+        let done = host
+            .refresh_index("fetch", &["-Sy".into()], &cancel)
+            .unwrap();
+        assert_eq!(done.stdout, b"fetched\n-Sy\n");
+        assert!(matches!(
+            host.refresh_index("broken", &[], &cancel),
+            Err(ExecutionError::Failed(result)) if result.code == Some(3) && result.stderr == b"unreachable\n"
+        ));
+        assert!(matches!(
+            host.refresh_index("absent", &[], &cancel),
+            Err(ExecutionError::Disabled(reason)) if reason == "absent not found"
+        ));
+        // Cancelling stops a download in progress.
+        let cancel = Cancellation::default();
+        let stop = cancel.clone();
+        let started = std::time::Instant::now();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            stop.cancel();
+        });
+        assert!(matches!(
+            host.refresh_index("slow", &[], &cancel),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        stopper.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn only_writes_as_root_are_refused() {
         assert!(matches!(
             refuse_root_as(true, true),

@@ -1831,6 +1831,182 @@ mod apt_upgrade_tests {
         }
     }
 
+    /// APT whose refresh before an update works or fails, logging what
+    /// the engine asked of it.
+    struct Lists {
+        refresh: Result<(), EngineError>,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Backend for Lists {
+        fn id(&self) -> &str {
+            "apt"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn prepare(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<(), EngineError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("refresh before {operation:?}"));
+            self.refresh.clone()
+        }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            self.log.lock().unwrap().push("plan".into());
+            Ok(empty_plan())
+        }
+        fn execute(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.log.lock().unwrap().push(format!("run {operation:?}"));
+            Ok(OperationOutcome::default())
+        }
+        fn execute_group(
+            &mut self,
+            operations: &[Operation],
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("group of {}", operations.len()));
+            Some(Ok(vec![OperationOutcome::default(); operations.len()]))
+        }
+    }
+    fn empty_plan() -> AptUpgradePlan {
+        AptUpgradePlan {
+            preview: String::new(),
+            upgrades: vec![],
+            installs: vec![],
+            removals: vec![],
+        }
+    }
+    fn apt_id(name: &str) -> PackageId {
+        PackageId {
+            backend: "apt".into(),
+            name: name.into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        }
+    }
+    fn lists_engine(
+        refresh: Result<(), EngineError>,
+        authorized: bool,
+    ) -> (Engine, Arc<std::sync::Mutex<Vec<String>>>) {
+        let log = Arc::default();
+        let mut engine = Engine::default();
+        engine
+            .register(Lists {
+                refresh,
+                log: Arc::clone(&log),
+            })
+            .unwrap();
+        if authorized {
+            // No PATH, so no helper: the batch runs without a prompt.
+            engine.enable_batch_authorization(
+                crate::host::Host::new(Runtime::Native, Default::default()),
+                crate::host::Authorization::SudoNonInteractive,
+            );
+        }
+        (engine, log)
+    }
+
+    #[test]
+    fn a_failed_refresh_stops_the_update_before_its_check() {
+        let cancel = Cancellation::default();
+        let failed = EngineError::Execution(crate::process::ExecutionError::Invalid(
+            "mirror unreachable".into(),
+        ));
+        let (mut engine, log) = lists_engine(Err(failed.clone()), false);
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        assert_eq!(
+            engine.execute(&op, &cancel, &mut |_| {}),
+            Err(failed.clone())
+        );
+        assert_eq!(*log.lock().unwrap(), [format!("refresh before {op:?}")]);
+        // A group of updates stops as one.
+        let (mut engine, log) = lists_engine(Err(failed.clone()), true);
+        let ops = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+        ];
+        let results = engine.execute_batch(&ops, &cancel, &mut |_| {});
+        assert_eq!(results, [Err(failed.clone()), Err(failed)]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [format!("refresh before {:?}", ops[0])]
+        );
+    }
+
+    #[test]
+    fn grouped_apt_updates_refresh_once_and_a_single_one_uses_the_batch() {
+        let cancel = Cancellation::default();
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let ops = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+        ];
+        let results = engine.execute_batch(&ops, &cancel, &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [format!("refresh before {:?}", ops[0]), "group of 2".into()]
+        );
+        // One update has two commands as root, so it shares one approval
+        // like a batch does.
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let mut said = vec![];
+        engine
+            .execute(&ops[0], &cancel, &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    said.push(message);
+                }
+            })
+            .unwrap();
+        assert!(said.iter().any(|m| m.contains("Authorizing")), "{said:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                format!("refresh before {:?}", ops[0]),
+                format!("run {:?}", ops[0])
+            ]
+        );
+        // An install has one, and runs on its own.
+        let (mut engine, _) = lists_engine(Ok(()), true);
+        let mut said = vec![];
+        let _ = engine.execute(&Operation::Install(apt_id("one")), &cancel, &mut |event| {
+            if let Event::Progress {
+                progress: Progress::Message(message),
+                ..
+            } = event
+            {
+                said.push(message);
+            }
+        });
+        assert!(!said.iter().any(|m| m.contains("Authorizing")), "{said:?}");
+    }
+
     #[test]
     fn changed_later_plan_blocks_every_batch_write_before_authorization() {
         struct UserFixture(Arc<AtomicUsize>);
