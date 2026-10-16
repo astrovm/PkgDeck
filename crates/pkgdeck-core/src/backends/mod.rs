@@ -2799,7 +2799,9 @@ struct Cask {
     name: Vec<String>,
     desc: Option<String>,
     homepage: String,
-    version: String,
+    /// `null` when the cask has no version for this system, such as
+    /// `discord` on Linux, which only has a macOS download.
+    version: Option<String>,
     installed: Option<String>,
     outdated: bool,
     #[serde(default)]
@@ -3199,7 +3201,7 @@ impl<T: Transport> HomebrewCask<T> {
                             UpdateAvailability::Unknown
                         },
                         installed_version: installed,
-                        candidate_version: Some(c.version),
+                        candidate_version: c.version,
                         icon: None,
                         component_ids: vec![],
                         homepages: if c.homepage.is_empty() {
@@ -8578,6 +8580,14 @@ mod tests {
                 "info --json=v2 --cask -- codex" => {
                     cask("codex", serde_json::json!([{"binary": ["codex"]}]))
                 }
+                // Homebrew 7.0.9 on Linux: no version for a Mac-only cask.
+                "info --json=v2 --cask -- discord" => serde_json::json!({"casks": [{
+                    "full_token": "discord", "name": ["Discord"], "desc": null,
+                    "homepage": "https://discord.com/", "version": null,
+                    "installed": null, "outdated": false, "depends_on": {"macos": {}},
+                    "artifacts": [{"app": ["Discord.app"]}],
+                }]})
+                .to_string(),
                 "info --json=v2 --cask -- codex-cli" => {
                     cask("codex-cli", serde_json::json!([{"binary": ["codex"]}]))
                 }
@@ -9112,6 +9122,14 @@ mod tests {
         let found = casks.lookup("codex", &cancel).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id.name, "codex");
+        // A cask with no version here reads as one, not as a broken report.
+        let discord = casks.lookup("discord", &cancel).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(discord.len(), 1);
+            assert_eq!(discord[0].candidate_version, None);
+        } else {
+            assert!(discord.is_empty());
+        }
         // Not a cask, or not a cask name at all: nothing, without an error.
         assert!(casks.lookup("no-such-cask", &cancel).unwrap().is_empty());
         let calls = brew.calls.lock().unwrap().len();
