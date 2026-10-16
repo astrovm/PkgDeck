@@ -204,8 +204,6 @@ that failed are shown separately.
 | Developer caches | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
 | Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while |
 
-- Unused volumes hold data. **Clean all** leaves them alone, and their row
-  says **Not in Clean all**. Clean them on their own.
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and its local files meet your chosen protection rule. Removing it keeps the branch.
 - Old project build files wait while something is being built.
@@ -215,11 +213,16 @@ that failed are shown separately.
 
 Select cleanup tasks with their checkboxes, then choose **Clean selected**.
 These checkboxes are the one list of what to clean: **Clean all** and
-automatic cleaning use them too. sccache is unchecked by default because it
-manages its own size limit. A task that shows up for the first time starts
-checked.
+automatic cleaning use them too. A task that shows up for the first time
+starts checked, except:
+
+- Tasks that may hold your work or data: unused volumes, stopped containers,
+  unused dependencies and extra copies of apps. Check them once, and they're
+  cleaned like the rest from then on.
+- sccache, because it manages its own size limit.
+
 Its button shows the space those tasks free. **Select all** and **Select none**
-work like on Updates. Volumes are cleaned individually.
+work like on Updates.
 
 ### Clean settings
 
@@ -260,12 +263,10 @@ Turn on **Clean automatically** in **Settings** → **Clean**. It needs
 **Background checks**.
 
 - At most once a day, after a background check.
-- Only tasks checked on Clean, and of those only what comes back on its
-  own: download caches, unused images, build caches, and build files of old
-  projects.
-- Never unused dependencies, extra copies, stopped containers or volumes.
-  Worktrees have their own switch, **Clean finished worktrees**.
-- Only sources that run as you, so it never asks for a password.
+- Every task checked on Clean, volumes included.
+- Only sources that run as you, so it never asks for a password. APT and
+  other system cleanups wait for you.
+- Worktrees have their own switch, **Clean finished worktrees**.
 - Like automatic updates, it waits for the charger, for builds, and for other
   changes to finish.
 - A notification says how much space it freed.

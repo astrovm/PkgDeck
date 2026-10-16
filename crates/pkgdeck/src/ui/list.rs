@@ -278,7 +278,7 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
     let share = |dragged: f32, default: f32| if dragged > 0.0 { dragged } else { default };
     // Sizes are short, and task names long.
     let (name_share, version_share, medium_version, least) = if page == Page::Clean {
-        // Room for the size and "Not in Clean all" under it.
+        // Room for the size and the task's type.
         (0.42, 0.18, 0.26, 104.0)
     } else {
         (0.36, 0.2, 0.32, 80.0)
@@ -682,13 +682,6 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     app.hovered_row(hovered_raw);
 }
 
-/// What a task that Clean all skips says under its size.
-const LEFT_OUT: &str = "Not in Clean all";
-
-fn left_out_of_clean_all(row: &Row) -> bool {
-    row.kind == "cleanup" && row.cleanup_kind == "data"
-}
-
 /// Seconds since rows first showed after the page was opened. Reloads,
 /// searches and filters that empty the list for a moment don't count, so
 /// rows only rise into place when the person arrives.
@@ -894,7 +887,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     let compact = width == Width::Compact;
 
-    // Checkboxes on Updates and Clean. Data tasks are cleaned individually.
+    // Checkboxes on Updates and Clean.
     if let Some(tick) = cols.tick {
         let enabled = app.page != Page::Clean || row.batch_cleanable();
         let checked = enabled && app.row_checked(&row);
@@ -966,8 +959,6 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         // task here is a cache unless it says otherwise.
         let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
             String::new()
-        } else if left_out_of_clean_all(&row) {
-            format!("{version}, {LEFT_OUT}")
         } else {
             version.clone()
         };
@@ -1034,21 +1025,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 theme::font(13.0)
             };
             let galley = one_line(ui, &version, font, version_color, v.width());
-            if left_out_of_clean_all(&row) {
-                painter.galley(
-                    pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
-                    galley,
-                    version_color,
-                );
-                let tag = one_line(ui, LEFT_OUT, theme::font(12.0), palette.warning, v.width());
-                painter.galley(pos2(v.left(), rect.center().y + 2.0), tag, palette.warning);
-            } else {
-                painter.galley(
-                    pos2(v.left(), rect.center().y - galley.size().y / 2.0),
-                    galley,
-                    version_color,
-                );
-            }
+            painter.galley(
+                pos2(v.left(), rect.center().y - galley.size().y / 2.0),
+                galley,
+                version_color,
+            );
         }
     }
     if let Some(s) = cols.summary {

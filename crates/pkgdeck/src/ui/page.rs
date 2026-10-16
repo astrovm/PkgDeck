@@ -181,15 +181,6 @@ fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &
     if !summary.is_empty() {
         ui.add(egui::Label::new(egui::RichText::new(summary).color(palette.ink)).wrap());
     }
-    if row.cleanup_kind == "data" {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new("Not in Clean all. Clean it on its own.")
-                    .color(palette.warning),
-            )
-            .wrap(),
-        );
-    }
     let (note, items) = model::cleanup_preview(preview);
     if !note.is_empty() {
         ui.add(egui::Label::new(egui::RichText::new(note).color(palette.muted)).wrap());

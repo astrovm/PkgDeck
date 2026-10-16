@@ -1046,13 +1046,13 @@ impl App {
     pub fn row_checked(&self, row: &Row) -> bool {
         if row.kind == "cleanup" {
             row.batch_cleanable()
-                && self
-                    .settings
-                    .cleanup
-                    .includes(&pkgdeck_core::package::CleanupId {
+                && self.settings.cleanup.includes(
+                    &pkgdeck_core::package::CleanupId {
                         backend: row.source.clone(),
                         key: row.cleanup_key.clone(),
-                    })
+                    },
+                    row.cleanup_opt_in,
+                )
         } else {
             !self.unchecked.contains(&row.identity())
         }

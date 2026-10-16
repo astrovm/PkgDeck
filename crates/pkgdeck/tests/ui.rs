@@ -1531,15 +1531,18 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     let rows = json!([
         {"kind":"cleanup", "name":"one", "display_name":"First cache", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache", "bytes":1_000_000},
         {"kind":"cleanup", "name":"two", "display_name":"Second cache", "source":"dev-caches", "cleanup_key":"two", "cleanup_kind":"build_files", "bytes":2_000_000},
-        {"kind":"cleanup", "name":"volume", "display_name":"Volume", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "bytes":9_000_000}
+        {"kind":"cleanup", "name":"volume", "display_name":"Volume", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "cleanup_opt_in":true, "bytes":9_000_000}
     ]);
     app.c().set_rows(rows.to_string().into());
     app.react();
     let mut harness = harness(app);
     harness.run_steps(4);
-    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    // The volume waits to be checked.
+    assert!(harness.query_by_label("Clean selected (3.0 MB)").is_some());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Select Volume");
+    assert!(harness.query_by_label("Clean all (12 MB)").is_some());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select First cache");
-    assert!(harness.query_by_label("Clean selected (2.0 MB)").is_some());
+    assert!(harness.query_by_label("Clean selected (11 MB)").is_some());
     assert_eq!(
         harness
             .get_by_role_and_label(Role::CheckBox, "Select all tasks")
@@ -1550,18 +1553,14 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     // Some checked: one button, to check the rest.
     assert!(harness.query_by_label("Select none").is_none());
     click_in_view(&mut harness, None, "Select all");
-    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
+    assert!(harness.query_by_label("Clean all (12 MB)").is_some());
     assert!(harness.query_by_label("Select all").is_none());
     click_in_view(&mut harness, None, "Select none");
     assert!(harness.query_by_label_contains("Clean selected").is_none());
     click_in_view(&mut harness, None, "Select all");
-    assert!(harness.query_by_label("Clean all (3.0 MB)").is_some());
-    assert!(harness
-        .get_by_role_and_label(Role::CheckBox, "Select Volume")
-        .accesskit_node()
-        .is_disabled());
+    assert!(harness.query_by_label("Clean all (12 MB)").is_some());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
-    assert!(harness.query_by_label("Clean all (3.0 MB)").is_none());
+    assert!(harness.query_by_label("Clean all (12 MB)").is_none());
 }
 
 #[test]
@@ -1713,9 +1712,9 @@ fn nothing_to_select_offers_no_select_button() {
     for page in [Page::Updates, Page::Clean] {
         let mut app = app();
         app.page = page;
-        // Only a task Clean all leaves alone, or no updates at all.
+        // Only a source that failed, or no updates at all.
         let rows = if page == Page::Clean {
-            json!([{"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data"}])
+            json!([{"kind":"failure", "name":"docker", "source":"docker", "summary":"Docker is not running", "available":false}])
         } else {
             json!([])
         };

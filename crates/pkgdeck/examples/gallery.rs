@@ -149,7 +149,7 @@ fn clean_rows(app: &mut App) {
     let task = |name: &str, display: &str, source: &str, kind: &str, summary: &str, bytes: u64| {
         serde_json::from_value::<model::Row>(json!({
                 "kind": "cleanup", "name": name, "display_name": display, "source": source,
-                "cleanup_key": name, "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
+                "cleanup_key": name, "cleanup_kind": kind, "cleanup_opt_in": matches!(kind, "data" | "orphan_dependencies" | "duplicate_copy"), "summary": summary, "preview": "", "bytes": bytes,
             }))
             .unwrap()
     };
