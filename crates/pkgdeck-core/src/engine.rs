@@ -1842,7 +1842,7 @@ mod apt_upgrade_tests {
             "apt"
         }
         fn capabilities(&self) -> &[Capability] {
-            &[Capability::Upgrade]
+            &[Capability::Upgrade, Capability::Install]
         }
         fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
             Ok(Availability::Available)
@@ -2002,12 +2002,19 @@ mod apt_upgrade_tests {
             ]
         );
         // An install has one, and runs on its own.
-        let (mut engine, _) = lists_engine(Ok(()), true);
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let install = Operation::Install(apt_id("one"));
         let mut events = vec![];
-        let _ = engine.execute(&Operation::Install(apt_id("one")), &cancel, &mut |event| {
-            events.push(event)
-        });
+        let done = engine.execute(&install, &cancel, &mut |event| events.push(event));
+        assert_eq!(done, Ok(OperationOutcome::default()));
         assert!(!format!("{events:?}").contains("Authorizing"), "{events:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                format!("refresh before {install:?}"),
+                format!("run {install:?}")
+            ]
+        );
     }
 
     #[test]

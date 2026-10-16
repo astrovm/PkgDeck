@@ -248,9 +248,28 @@ mod tests {
             dir_with("pacman", xdg, false),
             Some(PathBuf::from("/x/pkgdeck/indexes/pacman"))
         );
+        for source in ["zypper", "apk"] {
+            assert_eq!(
+                dir_with(source, xdg, false),
+                Some(PathBuf::from(format!("/x/pkgdeck/indexes/{source}")))
+            );
+        }
         assert_eq!(dir_with("apt", var, true), None);
         assert_eq!(dir_with("dnf", var, false), None);
         assert_eq!(dir_with("apt", |_| None, false), None);
+    }
+
+    #[test]
+    fn files_deeper_than_the_index_are_not_looked_at() {
+        let root = scratch("depth");
+        let (copy, system) = (root.join("copy"), root.join("system"));
+        file(&system.join("a_InRelease"), 100);
+        // APT's lists sit right in the folder, so this one isn't an index.
+        file(&copy.join("lists/nested/deeper/a_InRelease"), 200);
+        assert!(!fresher_than("apt", &copy, &system));
+        file(&copy.join("lists/a_InRelease"), 150);
+        assert!(fresher_than("apt", &copy, &system));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

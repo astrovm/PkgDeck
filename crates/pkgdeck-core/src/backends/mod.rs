@@ -7382,6 +7382,16 @@ mod tests {
     }
 
     #[test]
+    fn only_system_managers_refresh_as_root() {
+        for id in ["apt", "dnf", "pacman", "zypper", "apk", "xbps", "macports"] {
+            assert!(refresh_needs_root(id), "{id}");
+        }
+        for id in ["flatpak", "snap", "brew", "cargo", "npm"] {
+            assert!(!refresh_needs_root(id), "{id}");
+        }
+    }
+
+    #[test]
     fn the_native_transport_refreshes_indexes_as_the_user() {
         let root =
             std::env::temp_dir().join(format!("pkgdeck-native-index-{}", std::process::id()));
