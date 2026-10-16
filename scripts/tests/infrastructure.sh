@@ -3,6 +3,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 scripts/tests/release-packages.sh
 scripts/tests/homebrew-style.sh
+# KDE opens links and package files with the highest InitialPreference
+# when nobody picked an app. Discover's Flatpak link handler has 5.
+preference=$(sed -n 's/^InitialPreference=//p' assets/io.github.astrovm.PkgDeck.desktop)
+(( ${preference:-0} > 5 )) || { echo "InitialPreference must beat Discover's 5"; exit 1; }
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 expect_code() {
