@@ -18503,15 +18503,18 @@ mod tests {
     }
 
     #[test]
-    fn refresh_a_check_only_refreshes_sources_that_need_no_password() {
+    fn refresh_a_check_refreshes_every_source_but_macports() {
+        // Each refreshes without a password where it can (see
+        // Engine::execute_batch); MacPorts' could update MacPorts itself.
         for (source, refreshes) in [
-            ("apt", false),
-            ("dnf", false),
-            ("pacman", false),
-            ("zypper", false),
+            ("apt", true),
+            ("dnf", true),
+            ("pacman", true),
+            ("zypper", true),
             ("flatpak", true),
             ("snap", true),
             ("fwupd", true),
+            ("macports", false),
         ] {
             let mut controller = synthetic_controller();
             let mut ctl = controller.pin_mut();
@@ -18527,10 +18530,10 @@ mod tests {
                     &[Operation::Refresh {
                         backend: source.into()
                     }],
-                    "{source} check should refresh without a password"
+                    "{source} check should refresh first"
                 );
             } else {
-                assert!(ops.is_empty(), "{source} check queued a password refresh");
+                assert!(ops.is_empty(), "{source} check refreshed");
             }
             assert!(
                 ctl.rust().confirmed_queue.is_empty(),

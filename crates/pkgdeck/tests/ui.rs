@@ -900,10 +900,6 @@ fn one_button_refreshes_the_sources_and_checks_for_updates() {
         .is_none());
     // The old shortcut for a separate refresh does nothing now.
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
-    h.key_press_modifiers(
-        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-        egui::Key::R,
-    );
     h.run_steps(2);
     assert!(!h.state().1.checking_updates);
     assert!(h.state().1.confirmation.is_none());
