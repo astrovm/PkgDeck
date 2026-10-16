@@ -412,6 +412,19 @@ fn source_lines_say_where_a_row_comes_from() {
 }
 
 #[test]
+fn an_update_with_no_version_reads_unknown() {
+    let new = |value: Value| new_version(&row(value));
+    assert_eq!(
+        new(json!({"installed": "1", "candidate": "2", "update": "available"})),
+        "2"
+    );
+    for candidate in [json!(""), json!(null)] {
+        let update = json!({"installed": "", "candidate": candidate, "update": "available"});
+        assert_eq!(new(update), "Unknown");
+    }
+}
+
+#[test]
 fn versions_read_by_kind_and_state() {
     let version = |value: Value| version_text(&row(value));
     // A newer version the source doesn't offer as an update isn't one.
