@@ -163,6 +163,16 @@ pub fn per_package_upgrades(id: &str) -> bool {
     never_installs(id) || matches!(id, "pixi" | "rustup" | "nix")
 }
 
+/// System managers whose source refresh runs as root. A check never runs
+/// one: it reads PackageKit's refresh or the user's own copy of the index
+/// instead (see `refresh_update_index`), and an update refreshes first.
+pub fn refresh_needs_root(id: &str) -> bool {
+    matches!(
+        id,
+        "apt" | "dnf" | "pacman" | "zypper" | "apk" | "xbps" | "macports"
+    )
+}
+
 /// The package a line of a manager's output says it is working on, when it
 /// is one of the lines that name each package during an update: Homebrew's
 /// "==> Upgrading firefox", APT's "Unpacking curl:amd64 (8.5) over ...",
@@ -311,6 +321,41 @@ pub trait Transport: Send {
         Err(ExecutionError::Disabled(
             "Software Sources editor unavailable".into(),
         ))
+    }
+    /// Refresh `source`'s lists through PackageKit, without a password.
+    /// `Ok(false)` when PackageKit can't; fixtures never refresh there.
+    fn packagekit_refresh(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<bool, ExecutionError> {
+        let _ = (source, cancel);
+        Ok(false)
+    }
+    /// The folder of `source`'s own copy of its index (see
+    /// `private_index`), while it's newer than the system's.
+    fn private_index(&self, source: &str) -> Option<PathBuf> {
+        let _ = source;
+        None
+    }
+    /// That folder, ready for a refresh and held until it's dropped.
+    /// `None` when there's none.
+    fn prepare_private_index(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+        let _ = (source, cancel);
+        Ok(None)
+    }
+    /// Refresh an index the user owns: a read that can download for minutes.
+    fn refresh_index(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.system_manager(executable, args, cancel, false)
     }
     // Fixtures only implement the managers their adapter drives; the native
     // transport overrides every one of these.
@@ -582,7 +627,7 @@ fn apt_query_executable(
 /// status and its pending journal), package lists, APT configuration,
 /// sources, pins, and the machine id that phased updates use. Inside the
 /// Flatpak, the host's /etc is under /run/host.
-fn apt_watches(host: &Host) -> Vec<crate::cache::Watch> {
+fn apt_watches(host: &Host, copy: Option<PathBuf>) -> Vec<crate::cache::Watch> {
     use crate::cache::Watch;
     let etc = |path: &str| host.filesystem_path(std::path::Path::new(path));
     vec![
@@ -594,6 +639,17 @@ fn apt_watches(host: &Host) -> Vec<crate::cache::Watch> {
         Watch::tree(etc("/etc/apt"), 2),
         Watch::file(etc("/etc/machine-id")),
     ]
+    .into_iter()
+    .chain(copy.map(|dir| Watch::tree(dir.join("lists"), 1)))
+    .collect()
+}
+
+/// What the APT helper is told: inside the Flatpak, where the host's /etc
+/// is; and a check's own copy of the lists while it's newer.
+fn apt_helper_env(flatpak: bool, lists: Option<PathBuf>) -> Vec<(&'static str, String)> {
+    let host = flatpak.then(|| ("PKGDECK_APT_HOST", "/run/host".to_owned()));
+    let lists = lists.map(|lists| ("PKGDECK_APT_LISTS", lists.to_string_lossy().into_owned()));
+    host.into_iter().chain(lists).collect()
 }
 
 /// What `flatpak search` answers from: the installation's AppStream data
@@ -755,6 +811,32 @@ impl NativeTransport {
 }
 
 impl Transport for NativeTransport {
+    #[cfg(target_os = "linux")]
+    fn packagekit_refresh(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<bool, ExecutionError> {
+        crate::packagekit::refresh(source, cancel)
+    }
+    fn private_index(&self, source: &str) -> Option<PathBuf> {
+        crate::private_index::fresher(source)
+    }
+    fn prepare_private_index(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+        crate::private_index::prepare(source, cancel)
+    }
+    fn refresh_index(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.refresh_index(executable, args, cancel)
+    }
     fn system_flatpak_writable(&self) -> bool {
         self.host.system_flatpak_available()
     }
@@ -783,8 +865,14 @@ impl Transport for NativeTransport {
         }
         // Inside the Flatpak the bundled helper reads the host's /var as is,
         // and its /etc under /run/host.
-        let host_root = (self.host.runtime == crate::host::Runtime::Flatpak)
-            .then_some(("PKGDECK_APT_HOST", "/run/host"));
+        let env = apt_helper_env(
+            self.host.runtime == crate::host::Runtime::Flatpak,
+            self.private_index("apt").map(|dir| dir.join("lists")),
+        );
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
         let executable = apt_query_executable(
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
@@ -799,13 +887,13 @@ impl Transport for NativeTransport {
             "apt",
             mode,
             &[query, arch],
-            &apt_watches(&self.host),
+            &apt_watches(&self.host, crate::private_index::dir("apt")),
             &[helper.as_deref().unwrap_or_default()],
             || {
                 self.host.read_bundled(
                     &executable,
                     &[mode.into(), query.into(), arch.into()],
-                    host_root.as_slice(),
+                    &env,
                     Limits {
                         timeout: Duration::from_secs(120),
                         output_bytes: 32 * 1024 * 1024,
@@ -950,6 +1038,8 @@ pub struct Apt<T = NativeTransport> {
     /// (`pkd info`) come from here instead of a second helper run. Read
     /// once; changes clear it.
     looked_up: Vec<PackageDetails>,
+    /// Set during an update check, which refreshes the lists first.
+    update_check: Option<u64>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -958,6 +1048,7 @@ impl<T> Apt<T> {
             desktop_entries: None,
             components: None,
             looked_up: vec![],
+            update_check: None,
         }
     }
 }
@@ -2164,13 +2255,8 @@ impl<T: Transport> Apt<T> {
         } else {
             self.target(id)?
         };
-        let args = [
-            OsString::from("--simulate"),
-            OsString::from("-o"),
-            OsString::from("Debug::NoLocking=1"),
-            OsString::from(verb),
-            OsString::from(target),
-        ];
+        let mut args = self.simulate_args();
+        args.extend([OsString::from(verb), OsString::from(target)]);
         let output = bytes(
             "apt",
             self.transport
@@ -2179,13 +2265,27 @@ impl<T: Transport> Apt<T> {
         parse_apt_transaction_plan(operation, &output).map(Some)
     }
     fn simulated_upgrade(&self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
-        let args = ["--simulate", "-o", "Debug::NoLocking=1", "dist-upgrade"].map(OsString::from);
+        let mut args = self.simulate_args();
+        args.push("dist-upgrade".into());
         let output = bytes(
             "apt",
             self.transport
                 .system_manager("apt-get", &args, cancel, false)?,
         )?;
         parse_apt_upgrade_plan(&output)
+    }
+    /// A dry run reads a check's own copy of the lists while it's newer,
+    /// like every other APT query. The change itself refreshes the
+    /// system's lists first (see `prepare`).
+    fn simulate_args(&self) -> Vec<OsString> {
+        let mut args = ["--simulate", "-o", "Debug::NoLocking=1"]
+            .map(OsString::from)
+            .to_vec();
+        if let Some(dir) = self.transport.private_index("apt") {
+            args.push("-o".into());
+            args.push(format!("Dir::State::Lists={}", dir.join("lists").display()).into());
+        }
+        args
     }
     fn query(
         &self,
@@ -2227,6 +2327,35 @@ impl<T: Transport> Apt<T> {
 impl<T: Transport> Backend for Apt<T> {
     fn id(&self) -> &str {
         "apt"
+    }
+    fn has_update_index(&self) -> bool {
+        true
+    }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        if self.update_check.is_none() || self.refresh_without_password(cancel)? {
+            return Ok(());
+        }
+        // Without PackageKit, the check fills its own copy of the lists.
+        let Some(copy) = self.transport.prepare_private_index("apt", cancel)? else {
+            return Ok(());
+        };
+        self.looked_up.clear();
+        let args = crate::private_index::apt_refresh_args(&copy.dir);
+        bytes(
+            "apt",
+            self.transport.refresh_index("apt-get", &args, cancel)?,
+        )
+        .map(|_| ())
+    }
+    fn refresh_without_password(&mut self, cancel: &Cancellation) -> Result<bool, EngineError> {
+        let refreshed = self.transport.packagekit_refresh("apt", cancel)?;
+        if refreshed {
+            self.looked_up.clear();
+        }
+        Ok(refreshed)
     }
     fn capabilities(&self) -> &[Capability] {
         CLEAN_CAPABILITIES
@@ -2347,6 +2476,23 @@ impl<T: Transport> Backend for Apt<T> {
     }
     fn apt_upgrade_plan(&mut self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
         self.simulated_upgrade(cancel)
+    }
+    fn prepare(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), EngineError> {
+        if !matches!(
+            operation,
+            Operation::UpgradeAll { .. } | Operation::Upgrade(_)
+        ) {
+            return Ok(());
+        }
+        self.looked_up.clear();
+        progress(Progress::Message("Refreshing package lists.".into()));
+        self.transport.apt_write(AptAction::Refresh, cancel)?;
+        Ok(())
     }
     fn operation_plan(
         &mut self,
@@ -3361,15 +3507,34 @@ impl ManagerKind {
             _ => self.executable(),
         }
     }
-    /// Where the manager lists pending updates, if it can without writing.
-    fn update_args(self) -> Option<(&'static str, &'static [&'static str])> {
+    /// Where the manager lists pending updates, without writing.
+    fn update_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
-            Self::Snap => Some(("snap", &["refresh", "--list"])),
-            Self::Apk => Some(("apk", &["list", "--upgradable"])),
+            Self::Snap => ("snap", &["refresh", "--list"]),
+            Self::Apk => ("apk", &["list", "--upgradable"]),
+            // -C reads the cache a check just refreshed; without one, it's
+            // asked again online.
+            Self::Dnf => (
+                "dnf",
+                &[
+                    "-C",
+                    "--quiet",
+                    "repoquery",
+                    "--upgrades",
+                    "--latest-limit",
+                    "1",
+                    "--queryformat",
+                    "%{name}|%{arch}|%{version}-%{release}\n",
+                ],
+            ),
+            Self::Pacman => ("pacman", &["-Qu"]),
+            Self::Zypper => (
+                "zypper",
+                &["--quiet", "--xmlout", "--non-interactive", "list-updates"],
+            ),
             // -M reads the repository index into memory; -n only reports.
-            Self::Xbps => Some(("xbps-install", &["-Mun"])),
-            Self::MacPorts => Some(("port", &["-q", "outdated"])),
-            _ => None,
+            Self::Xbps => ("xbps-install", &["-Mun"]),
+            Self::MacPorts => ("port", &["-q", "outdated"]),
         }
     }
     fn read_args(self, installed: bool, query: &str) -> Vec<OsString> {
@@ -3443,17 +3608,19 @@ impl ManagerKind {
             (Self::Dnf, Operation::Refresh { .. }) => vec!["-y", "makecache"],
             (Self::Dnf, Operation::Install(_)) => vec!["-y", "install", "--"],
             (Self::Dnf, Operation::Remove(_)) => vec!["-y", "remove", "--"],
-            (Self::Dnf, Operation::Upgrade(_)) => vec!["-y", "upgrade", "--"],
-            (Self::Dnf, Operation::UpgradeAll { .. }) => vec!["-y", "upgrade"],
+            // A check refreshes only the user's own copy of each index, so
+            // an update refreshes the system's first.
+            (Self::Dnf, Operation::Upgrade(_)) => vec!["-y", "--refresh", "upgrade", "--"],
+            (Self::Dnf, Operation::UpgradeAll { .. }) => vec!["-y", "--refresh", "upgrade"],
             (Self::Pacman, Operation::Refresh { .. }) => vec!["-Sy", "--noconfirm"],
             (Self::Pacman, Operation::Install(_)) => {
                 vec!["-S", "--noconfirm", "--needed", "--"]
             }
             (Self::Pacman, Operation::Remove(_)) => vec!["-Rns", "--noconfirm", "--"],
             (Self::Pacman, Operation::Upgrade(_)) => {
-                vec!["-S", "--noconfirm", "--needed", "--"]
+                vec!["-Sy", "--noconfirm", "--needed", "--"]
             }
-            (Self::Pacman, Operation::UpgradeAll { .. }) => vec!["-Su", "--noconfirm"],
+            (Self::Pacman, Operation::UpgradeAll { .. }) => vec!["-Syu", "--noconfirm"],
             (Self::Zypper, Operation::Refresh { .. }) => vec!["--non-interactive", "refresh"],
             (Self::Zypper, Operation::Install(_)) => vec![
                 "--non-interactive",
@@ -3471,11 +3638,11 @@ impl ManagerKind {
             (Self::Apk, Operation::Refresh { .. }) => vec!["update"],
             (Self::Apk, Operation::Install(_)) => vec!["add", "--"],
             (Self::Apk, Operation::Remove(_)) => vec!["del", "--"],
-            (Self::Apk, Operation::Upgrade(_)) => vec!["upgrade", "--"],
-            (Self::Apk, Operation::UpgradeAll { .. }) => vec!["upgrade"],
+            (Self::Apk, Operation::Upgrade(_)) => vec!["upgrade", "--update-cache", "--"],
+            (Self::Apk, Operation::UpgradeAll { .. }) => vec!["upgrade", "--update-cache"],
             (Self::Xbps, Operation::Refresh { .. }) => vec!["-S"],
             (Self::Xbps, Operation::Install(_) | Operation::Remove(_)) => vec!["-y"],
-            (Self::Xbps, Operation::Upgrade(_) | Operation::UpgradeAll { .. }) => vec!["-yu"],
+            (Self::Xbps, Operation::Upgrade(_) | Operation::UpgradeAll { .. }) => vec!["-Syu"],
             // -N never asks; MacPorts keeps each port's variants on upgrade.
             (Self::MacPorts, Operation::Refresh { .. }) => vec!["-N", "selfupdate"],
             (Self::MacPorts, Operation::Install(_)) => vec!["-N", "install"],
@@ -3486,6 +3653,30 @@ impl ManagerKind {
             (Self::Snap, Operation::Refresh { .. }) | (_, Operation::Clean(_)) => return None,
         })
     }
+}
+
+/// Package updates from `zypper --xmlout list-updates`, by name. Patches
+/// and products are left out; their packages are listed too.
+fn zypper_updates(xml: &str) -> BTreeMap<String, String> {
+    xml.split("<update ")
+        .skip(1)
+        .filter_map(|entry| {
+            let tag = entry.split_once('>').map_or(entry, |(tag, _)| tag);
+            let attr = |key: &str| {
+                tag.split_once(&format!(" {key}=\""))
+                    .or_else(|| {
+                        tag.strip_prefix(&format!("{key}=\""))
+                            .map(|tail| ("", tail))
+                    })
+                    .and_then(|(_, tail)| tail.split_once('"'))
+                    .map(|(value, _)| value)
+            };
+            (attr("kind")? == "package")
+                .then(|| Some((attr("name")?.to_owned(), attr("edition")?.to_owned())))
+                .flatten()
+                .filter(|(name, edition)| !name.is_empty() && !edition.is_empty())
+        })
+        .collect()
 }
 
 /// `name-1.2.3-r0` into (`name`, `1.2.3-r0`).
@@ -3510,6 +3701,8 @@ pub struct SystemManager<T = NativeTransport> {
     /// name, so the details that follow it (`pkd info`) come from here.
     /// Read once; changes clear it.
     looked_up: Vec<Package>,
+    /// Set during an update check, which refreshes the lists first.
+    update_check: Option<u64>,
 }
 pub type Dnf<T = NativeTransport> = SystemManager<T>;
 pub type Pacman<T = NativeTransport> = SystemManager<T>;
@@ -3521,6 +3714,7 @@ impl<T: Transport> SystemManager<T> {
             kind,
             transport,
             looked_up: vec![],
+            update_check: None,
         }
     }
     pub fn dnf(transport: T) -> Self {
@@ -3566,15 +3760,28 @@ impl<T: Transport> SystemManager<T> {
     /// Pending updates by package name. An unavailable listing leaves every
     /// row's update status as it was rather than failing the inventory.
     fn updates(&self, cancel: &Cancellation) -> Result<BTreeMap<String, String>, EngineError> {
-        let Some((executable, args)) = self.kind.update_args() else {
-            return Ok(BTreeMap::new());
+        let (executable, args) = self.kind.update_args();
+        let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        // A check's own copy of the index, while it's newer.
+        if let Some(dir) = self.transport.private_index(self.kind.id()) {
+            let dir = dir.into_os_string();
+            match self.kind {
+                ManagerKind::Pacman => args.extend(["--dbpath".into(), dir]),
+                ManagerKind::Zypper => {
+                    args.splice(0..0, ["--cache-dir".into(), dir, "--no-refresh".into()]);
+                }
+                ManagerKind::Apk => {
+                    args.splice(0..0, ["--cache-dir".into(), dir]);
+                }
+                _ => {}
+            }
+        }
+        let result = match self.call_with(executable, args.clone(), cancel, false) {
+            Err(EngineError::Execution(ExecutionError::Failed(_))) if args[0] == "-C" => {
+                self.call_with(executable, args[1..].to_vec(), cancel, false)
+            }
+            result => result,
         };
-        let result = self.call_with(
-            executable,
-            args.iter().map(OsString::from).collect(),
-            cancel,
-            false,
-        );
         let text = match result {
             Ok(done) => String::from_utf8_lossy(&bytes(self.kind.id(), done)?).into_owned(),
             Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
@@ -3583,11 +3790,28 @@ impl<T: Transport> SystemManager<T> {
             Err(error) if matches!(self.kind, ManagerKind::Snap) => return Err(error),
             Err(_) => return Ok(BTreeMap::new()),
         };
+        if matches!(self.kind, ManagerKind::Zypper) {
+            return Ok(zypper_updates(&text));
+        }
         Ok(text
             .lines()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 match self.kind {
+                    ManagerKind::Dnf => {
+                        let fields: Vec<&str> = line.split('|').collect();
+                        match fields[..] {
+                            [name, _, version] if !version.is_empty() => {
+                                Some((name, version.to_owned()))
+                            }
+                            _ => None,
+                        }
+                    }
+                    // "name 1.0-1 -> 1.1-1", with " [ignored]" after the
+                    // ones pacman.conf holds back: an upgrade skips those.
+                    ManagerKind::Pacman if fields.len() == 4 && fields[2] == "->" => {
+                        Some((fields[0], fields[3].to_owned()))
+                    }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
                     ManagerKind::Apk => apk_pkgver(fields.first()?),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
@@ -3948,6 +4172,92 @@ impl<T: Transport> SystemManager<T> {
 impl<T: Transport> Backend for SystemManager<T> {
     fn id(&self) -> &str {
         self.kind.id()
+    }
+    fn has_update_index(&self) -> bool {
+        matches!(
+            self.kind,
+            ManagerKind::Dnf | ManagerKind::Pacman | ManagerKind::Zypper | ManagerKind::Apk
+        )
+    }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        if self.update_check.is_none() || self.refresh_without_password(cancel)? {
+            return Ok(());
+        }
+        // Without PackageKit, the check fills its own copy of the index.
+        let Some(copy) = self
+            .transport
+            .prepare_private_index(self.kind.id(), cancel)?
+        else {
+            return Ok(());
+        };
+        let dir = copy.dir.clone().into_os_string();
+        let (executable, args): (&str, Vec<OsString>) = match self.kind {
+            // The way checkupdates does it: under fakeroot, pacman fills a
+            // database the user owns.
+            ManagerKind::Pacman => (
+                "fakeroot",
+                vec![
+                    "--".into(),
+                    "pacman".into(),
+                    "-Sy".into(),
+                    "--dbpath".into(),
+                    dir,
+                    "--logfile".into(),
+                    "/dev/null".into(),
+                ],
+            ),
+            // zypper refreshes the copy's metadata as it lists updates.
+            ManagerKind::Zypper => (
+                "zypper",
+                vec![
+                    "--cache-dir".into(),
+                    dir,
+                    "--quiet".into(),
+                    "--non-interactive".into(),
+                    "list-updates".into(),
+                ],
+            ),
+            ManagerKind::Apk => (
+                "apk",
+                vec![
+                    "--cache-dir".into(),
+                    dir,
+                    "--update-cache".into(),
+                    "list".into(),
+                    "--upgradable".into(),
+                ],
+            ),
+            // Nothing else keeps one.
+            _ => return Ok(()),
+        };
+        self.looked_up.clear();
+        match self.transport.refresh_index(executable, &args, cancel) {
+            // Without fakeroot, updates stay as the system last saw them.
+            Err(ExecutionError::Disabled(_)) if executable == "fakeroot" => Ok(()),
+            result => bytes(self.kind.id(), result?).map(|_| ()),
+        }
+    }
+    fn refresh_without_password(&mut self, cancel: &Cancellation) -> Result<bool, EngineError> {
+        let refreshed = match self.kind {
+            // DNF run as the user keeps its own cache, the one PkgDeck reads,
+            // and refreshes it without root. Upgrades refresh the system's.
+            ManagerKind::Dnf => {
+                let args = ["--refresh", "--quiet", "makecache"].map(OsString::from);
+                bytes("dnf", self.transport.refresh_index("dnf", &args, cancel)?)?;
+                true
+            }
+            ManagerKind::Pacman | ManagerKind::Zypper => {
+                self.transport.packagekit_refresh(self.kind.id(), cancel)?
+            }
+            _ => false,
+        };
+        if refreshed {
+            self.looked_up.clear();
+        }
+        Ok(refreshed)
     }
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
@@ -6619,6 +6929,17 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    fn completion(code: i32, stdout: &str) -> Completion {
+        Completion {
+            code: Some(code),
+            signal: None,
+            stdout: stdout.into(),
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+
     fn brew_run(code: i32, stderr: &str) -> Result<Completion, ExecutionError> {
         let result = Completion {
             code: Some(code),
@@ -6718,6 +7039,595 @@ mod tests {
             );
             assert_eq!(*brew.writes.lock().unwrap(), [true, true], "{backend}");
         }
+    }
+
+    /// A system with PackageKit (or not), whose managers print `listing`
+    /// for any read, and the commands they ran. With `copies`, the user's
+    /// own copies of indexes live under /c, newer than the system's when
+    /// `fresher`.
+    #[derive(Clone)]
+    struct Kit {
+        packagekit: Result<bool, ExecutionError>,
+        listing: &'static str,
+        copies: bool,
+        fresher: bool,
+        missing: &'static str,
+        ran: Arc<Mutex<Vec<String>>>,
+    }
+    impl Kit {
+        fn new(packagekit: Result<bool, ExecutionError>, listing: &'static str) -> Self {
+            Self {
+                packagekit,
+                listing,
+                copies: false,
+                fresher: false,
+                missing: "",
+                ran: Arc::default(),
+            }
+        }
+        fn copies(mut self, fresher: bool) -> Self {
+            self.copies = true;
+            self.fresher = fresher;
+            self
+        }
+        fn missing(mut self, executable: &'static str) -> Self {
+            self.missing = executable;
+            self
+        }
+        fn ran(&self) -> Vec<String> {
+            self.ran.lock().unwrap().clone()
+        }
+        fn clear(&self) {
+            self.ran.lock().unwrap().clear();
+        }
+    }
+    impl Transport for Kit {
+        fn private_index(&self, source: &str) -> Option<PathBuf> {
+            self.fresher.then(|| PathBuf::from(format!("/c/{source}")))
+        }
+        fn prepare_private_index(
+            &self,
+            source: &str,
+            _: &Cancellation,
+        ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+            Ok(self
+                .copies
+                .then(|| crate::private_index::Copy::unlocked(format!("/c/{source}"))))
+        }
+        fn refresh_index(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            if executable == self.missing {
+                return Err(ExecutionError::Disabled(format!("{executable} not found")));
+            }
+            // Marked apart from a plain read, which gives up after seconds.
+            let result = self.system_manager(executable, args, cancel, false);
+            let mut ran = self.ran.lock().unwrap();
+            let line = ran.pop().unwrap();
+            ran.push(format!("fetch {line}"));
+            result
+        }
+        fn apt_write(
+            &self,
+            action: AptAction,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            self.ran
+                .lock()
+                .unwrap()
+                .push(format!("root apt {action:?}"));
+            Ok(completion(0, ""))
+        }
+        fn packagekit_refresh(
+            &self,
+            source: &str,
+            _: &Cancellation,
+        ) -> Result<bool, ExecutionError> {
+            self.ran
+                .lock()
+                .unwrap()
+                .push(format!("packagekit {source}"));
+            self.packagekit.clone()
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = std::iter::once(executable.to_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.ran
+                .lock()
+                .unwrap()
+                .push(if write { format!("root {line}") } else { line });
+            Ok(completion(0, self.listing))
+        }
+    }
+
+    #[test]
+    fn a_check_refreshes_through_packagekit_only_when_armed() {
+        let cancel = Cancellation::default();
+        let kit = Kit::new(Ok(true), "");
+        let mut apt = Apt::new(kit.clone());
+        assert!(apt.has_update_index());
+        // Listing Installed never refreshes.
+        apt.refresh_update_index(&cancel).unwrap();
+        assert!(kit.ran().is_empty());
+        apt.arm_update_check(Some(7));
+        apt.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["packagekit apt"]);
+        for (manager, source) in [
+            (SystemManager::pacman(kit.clone()), "pacman"),
+            (SystemManager::zypper(kit.clone()), "zypper"),
+        ] {
+            let mut manager = manager;
+            kit.ran.lock().unwrap().clear();
+            assert!(manager.has_update_index());
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert_eq!(kit.ran(), [format!("packagekit {source}")]);
+        }
+        // DNF refreshes its own cache as the user, never as root.
+        kit.ran.lock().unwrap().clear();
+        let mut dnf = SystemManager::dnf(kit.clone());
+        dnf.arm_update_check(Some(7));
+        dnf.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["fetch dnf --refresh --quiet makecache"]);
+        // Without PackageKit's copy or one of its own, apk leaves its index.
+        kit.clear();
+        let mut apk = SystemManager::apk(kit.clone());
+        assert!(apk.has_update_index());
+        apk.arm_update_check(Some(7));
+        apk.refresh_update_index(&cancel).unwrap();
+        assert!(kit.ran().is_empty());
+        // The rest have no index of their own to refresh.
+        for mut manager in [
+            SystemManager::xbps(kit.clone()),
+            SystemManager::snap(kit.clone()),
+            SystemManager::macports(kit.clone()),
+        ] {
+            kit.ran.lock().unwrap().clear();
+            assert!(!manager.has_update_index());
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert!(!manager.refresh_without_password(&cancel).unwrap());
+            assert!(kit.ran().is_empty(), "{}", manager.id());
+        }
+    }
+
+    #[test]
+    fn without_packagekit_a_check_fills_its_own_copy_as_the_user() {
+        let cancel = Cancellation::default();
+        // Root, or no home folder: nothing to fill, so the lists stay.
+        let kit = Kit::new(Ok(false), "");
+        let mut apt = Apt::new(kit.clone());
+        apt.arm_update_check(Some(7));
+        apt.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["packagekit apt"]);
+
+        let kit = Kit::new(Ok(false), "").copies(false);
+        let mut apt = Apt::new(kit.clone());
+        apt.arm_update_check(Some(7));
+        apt.refresh_update_index(&cancel).unwrap();
+        let ran = kit.ran();
+        assert_eq!(ran[0], "packagekit apt");
+        assert!(
+            ran[1].starts_with(
+                "fetch apt-get -q -c /c/apt/apt.conf -o Dir::State::Lists=/c/apt/lists -o Dir::Cache=/c/apt/cache"
+            ) && ran[1].ends_with(" update"),
+            "{ran:?}"
+        );
+        assert_eq!(ran.len(), 2);
+        for (mut manager, refresh) in [
+            (
+                SystemManager::pacman(kit.clone()),
+                "fetch fakeroot -- pacman -Sy --dbpath /c/pacman --logfile /dev/null",
+            ),
+            (
+                SystemManager::zypper(kit.clone()),
+                "fetch zypper --cache-dir /c/zypper --quiet --non-interactive list-updates",
+            ),
+        ] {
+            kit.clear();
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert_eq!(
+                kit.ran(),
+                [format!("packagekit {}", manager.id()), refresh.into()]
+            );
+        }
+        // apk has no PackageKit backend.
+        kit.clear();
+        let mut apk = SystemManager::apk(kit.clone());
+        apk.arm_update_check(Some(7));
+        apk.refresh_update_index(&cancel).unwrap();
+        assert_eq!(
+            kit.ran(),
+            ["fetch apk --cache-dir /c/apk --update-cache list --upgradable"]
+        );
+        // The rest keep no copy.
+        for mut manager in [
+            SystemManager::xbps(kit.clone()),
+            SystemManager::snap(kit.clone()),
+            SystemManager::macports(kit.clone()),
+        ] {
+            kit.clear();
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert!(kit.ran().is_empty(), "{}", manager.id());
+        }
+        // Not armed: Installed never refreshes anything.
+        kit.clear();
+        let mut pacman = SystemManager::pacman(kit.clone());
+        pacman.refresh_update_index(&cancel).unwrap();
+        assert!(kit.ran().is_empty());
+        // PackageKit's refresh is enough.
+        let kit = Kit::new(Ok(true), "").copies(false);
+        let mut zypper = SystemManager::zypper(kit.clone());
+        zypper.arm_update_check(Some(7));
+        zypper.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["packagekit zypper"]);
+        // Without fakeroot, pacman's updates stay as the system saw them.
+        let kit = Kit::new(Ok(false), "").copies(false).missing("fakeroot");
+        let mut pacman = SystemManager::pacman(kit.clone());
+        pacman.arm_update_check(Some(7));
+        assert_eq!(pacman.refresh_update_index(&cancel), Ok(()));
+        assert_eq!(kit.ran(), ["packagekit pacman"]);
+    }
+
+    #[test]
+    fn a_failed_refresh_shows_in_the_check() {
+        let cancel = Cancellation::default();
+        let failed = ExecutionError::Invalid("PackageKit: no network".into());
+        let mut pacman = SystemManager::pacman(Kit::new(Err(failed.clone()), "").copies(false));
+        pacman.arm_update_check(Some(7));
+        assert_eq!(
+            pacman.refresh_update_index(&cancel),
+            Err(EngineError::Execution(failed))
+        );
+        // apt-get can't reach a mirror.
+        #[derive(Clone)]
+        struct Offline;
+        impl Transport for Offline {
+            fn prepare_private_index(
+                &self,
+                _: &str,
+                _: &Cancellation,
+            ) -> Result<Option<crate::private_index::Copy>, ExecutionError> {
+                Ok(Some(crate::private_index::Copy::unlocked("/c/apt")))
+            }
+            fn system_manager(
+                &self,
+                _: &str,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Err(ExecutionError::Failed(completion(100, "")))
+            }
+        }
+        let mut apt = Apt::new(Offline);
+        apt.arm_update_check(Some(7));
+        assert!(matches!(
+            apt.refresh_update_index(&cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        let mut zypper = SystemManager::zypper(Offline);
+        zypper.arm_update_check(Some(7));
+        assert!(zypper.refresh_update_index(&cancel).is_err());
+    }
+
+    #[test]
+    fn updates_come_from_the_users_copy_only_while_it_is_newer() {
+        let cancel = Cancellation::default();
+        for (fresher, expected) in [
+            (
+                true,
+                [
+                    "pacman -Qu --dbpath /c/pacman",
+                    "zypper --cache-dir /c/zypper --no-refresh --quiet --xmlout --non-interactive list-updates",
+                    "apk --cache-dir /c/apk list --upgradable",
+                    "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists dist-upgrade",
+                ],
+            ),
+            (
+                false,
+                [
+                    "pacman -Qu",
+                    "zypper --quiet --xmlout --non-interactive list-updates",
+                    "apk list --upgradable",
+                    "apt-get --simulate -o Debug::NoLocking=1 dist-upgrade",
+                ],
+            ),
+        ] {
+            let kit = Kit::new(Ok(false), "").copies(fresher);
+            for manager in [
+                SystemManager::pacman(kit.clone()),
+                SystemManager::zypper(kit.clone()),
+                SystemManager::apk(kit.clone()),
+            ] {
+                manager.updates(&cancel).unwrap();
+            }
+            let _ = Apt::new(kit.clone()).apt_upgrade_plan(&cancel);
+            assert_eq!(kit.ran(), expected);
+            // The others keep their own: DNF's cache is the user's already.
+            kit.clear();
+            SystemManager::xbps(kit.clone()).updates(&cancel).unwrap();
+            assert_eq!(kit.ran(), ["xbps-install -Mun"]);
+        }
+    }
+
+    #[test]
+    fn a_transport_that_overrides_nothing_refreshes_nothing() {
+        struct Bare;
+        impl Transport for Bare {}
+        let cancel = Cancellation::default();
+        assert_eq!(Bare.packagekit_refresh("apt", &cancel), Ok(false));
+        assert_eq!(Bare.private_index("apt"), None);
+        assert!(Bare
+            .prepare_private_index("apt", &cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            Bare.refresh_index("dnf", &[], &cancel),
+            Err(ExecutionError::Disabled("dnf not found".into()))
+        );
+    }
+
+    #[test]
+    fn the_native_transport_refreshes_indexes_as_the_user() {
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-native-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fetch = root.join("fetch");
+        std::fs::write(&fetch, "#!/bin/sh\necho fetched\n").unwrap();
+        std::fs::set_permissions(&fetch, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let native = NativeTransport {
+            host: Host::new(
+                crate::host::Runtime::Native,
+                [(OsString::from("PATH"), root.clone().into_os_string())].into(),
+            ),
+            authorization: Authorization::Polkit,
+        };
+        let cancel = Cancellation::default();
+        assert_eq!(
+            native.refresh_index("fetch", &[], &cancel).unwrap().stdout,
+            b"fetched\n"
+        );
+        // DNF keeps its own cache, not one of PkgDeck's copies.
+        assert_eq!(native.private_index("dnf"), None);
+        assert!(native
+            .prepare_private_index("dnf", &cancel)
+            .unwrap()
+            .is_none());
+        // Only APT, Pacman and Zypper refresh through PackageKit.
+        assert_eq!(native.packagekit_refresh("flatpak", &cancel), Ok(false));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_root_command_is_the_one_the_batch_helper_approves() {
+        // The runner refuses any command it didn't approve, so a manager's
+        // write and its approved command must never drift apart.
+        let cancel = Cancellation::default();
+        type Make = fn(Kit) -> SystemManager<Kit>;
+        let managers: [(&str, Make); 4] = [
+            ("dnf", SystemManager::dnf),
+            ("pacman", SystemManager::pacman),
+            ("zypper", SystemManager::zypper),
+            ("snap", SystemManager::snap),
+        ];
+        let mut approved_lines = BTreeMap::new();
+        for (backend, manager) in managers {
+            let id = PackageId {
+                backend: backend.into(),
+                name: "synthetic".into(),
+                architecture: "x86_64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            };
+            let mut operations = vec![
+                Operation::Install(id.clone()),
+                Operation::Remove(id.clone()),
+                Operation::Upgrade(id),
+                Operation::UpgradeAll {
+                    backend: backend.into(),
+                },
+            ];
+            // Snap's refresh only lists snaps, as the user.
+            if backend != "snap" {
+                operations.push(Operation::Refresh {
+                    backend: backend.into(),
+                });
+            }
+            for operation in operations {
+                let kit = Kit::new(Ok(false), "");
+                manager(kit.clone())
+                    .execute(&operation, &cancel, &mut |_| {})
+                    .unwrap();
+                let ran: Vec<String> = kit
+                    .ran()
+                    .into_iter()
+                    .filter(|line| line.starts_with("root "))
+                    .collect();
+                let approved: Vec<String> = crate::batch::protected_commands(&operation)
+                    .unwrap()
+                    .iter()
+                    .map(|command| {
+                        let program = std::path::Path::new(&command.program);
+                        let program = program.file_name().unwrap().to_string_lossy();
+                        format!("root {program} {}", command.args.join(" "))
+                    })
+                    .collect();
+                assert_eq!(ran, approved, "{operation:?}");
+                approved_lines.insert(format!("{operation:?}"), approved.join("; "));
+            }
+        }
+        // Updates refresh the system's index first; a check refreshed only
+        // the user's copy. Installs leave it, and pacman upgrades everything.
+        let line = |op: &str, backend: &str| {
+            approved_lines
+                .iter()
+                .find(|(key, _)| key.starts_with(op) && key.contains(&format!("\"{backend}\"")))
+                .map(|(_, line)| line.clone())
+                .unwrap()
+        };
+        assert_eq!(line("UpgradeAll", "dnf"), "root dnf -y --refresh upgrade");
+        assert!(line("Upgrade(", "dnf").starts_with("root dnf -y --refresh upgrade -- "));
+        assert_eq!(line("UpgradeAll", "pacman"), "root pacman -Syu --noconfirm");
+        assert!(line("Upgrade(", "pacman").starts_with("root pacman -Sy --noconfirm --needed -- "));
+        assert!(line("Install", "pacman").starts_with("root pacman -S --noconfirm --needed -- "));
+        assert_eq!(line("Refresh", "pacman"), "root pacman -Sy --noconfirm");
+    }
+
+    #[test]
+    fn a_single_apt_update_previews_from_a_fresher_copy() {
+        let cancel = Cancellation::default();
+        let id = PackageId {
+            backend: "apt".into(),
+            name: "curl".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        for (fresher, expected) in [
+            (
+                true,
+                "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists install curl:amd64",
+            ),
+            (
+                false,
+                "apt-get --simulate -o Debug::NoLocking=1 install curl:amd64",
+            ),
+        ] {
+            let kit = Kit::new(Ok(false), "").copies(fresher);
+            let _ = Apt::new(kit.clone()).operation_plan(&Operation::Upgrade(id.clone()), &cancel);
+            assert_eq!(kit.ran(), [expected]);
+        }
+    }
+
+    #[test]
+    fn an_apt_update_refreshes_the_system_lists_first() {
+        let cancel = Cancellation::default();
+        let kit = Kit::new(Ok(true), "");
+        let mut apt = Apt::new(kit.clone());
+        let id = PackageId {
+            backend: "apt".into(),
+            name: "curl".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        for operation in [
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            Operation::Upgrade(id.clone()),
+        ] {
+            kit.clear();
+            let mut said = vec![];
+            apt.prepare(&operation, &cancel, &mut |progress| said.push(progress))
+                .unwrap();
+            // As root, not through PackageKit: the update's approval covers it.
+            assert_eq!(kit.ran(), ["root apt Refresh"], "{operation:?}");
+            assert_eq!(said.len(), 1);
+        }
+        kit.clear();
+        for operation in [
+            Operation::Install(id.clone()),
+            Operation::Remove(id),
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+        ] {
+            apt.prepare(&operation, &cancel, &mut |_| {}).unwrap();
+        }
+        assert!(kit.ran().is_empty());
+    }
+
+    #[test]
+    fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
+        let cancel = Cancellation::default();
+        let dnf = SystemManager::dnf(Kit::new(
+            Ok(false),
+            "htop|x86_64|3.4.1-1.fc44\nnot a row\n|x86_64|\nless|x86_64|704-4.fc44\n",
+        ));
+        assert_eq!(
+            dnf.updates(&cancel).unwrap(),
+            BTreeMap::from([
+                ("htop".to_owned(), "3.4.1-1.fc44".to_owned()),
+                ("less".to_owned(), "704-4.fc44".to_owned()),
+            ])
+        );
+        let pacman = SystemManager::pacman(Kit::new(
+            Ok(false),
+            "curl 8.22.0-1 -> 8.23.0-1\nlinux 6.1-1 -> 6.2-1 [ignored]\nzlib 1:1.3.2-3 -> 1:1.3.2-4\n",
+        ));
+        // Held back in pacman.conf, the kernel isn't one an upgrade installs.
+        assert_eq!(
+            pacman.updates(&cancel).unwrap(),
+            BTreeMap::from([
+                ("curl".to_owned(), "8.23.0-1".to_owned()),
+                ("zlib".to_owned(), "1:1.3.2-4".to_owned()),
+            ])
+        );
+        let zypper = SystemManager::zypper(Kit::new(
+            Ok(false),
+            r#"<?xml version='1.0'?>
+<stream>
+<update-status version="0.6">
+<update-list>
+<update kind="package" name="openSUSE-build-key" edition="1.0-69.1" arch="x86_64" edition-old="1.0-68.1"><summary>The public gpg keys</summary><description>Keys > 1</description><license/><source url="http://download.opensuse.org/update/tumbleweed/" alias="repo-update"/></update>
+<update kind="patch" name="openSUSE-2026-1" edition="1" arch="noarch"><summary>Fixes</summary></update>
+<update kind="package" name="" edition="2" arch="x86_64"></update>
+</update-list>
+</update-status>
+</stream>
+"#,
+        ));
+        assert_eq!(
+            zypper.updates(&cancel).unwrap(),
+            BTreeMap::from([("openSUSE-build-key".to_owned(), "1.0-69.1".to_owned())])
+        );
+    }
+
+    #[test]
+    fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
+        #[derive(Clone)]
+        struct NoCache(Arc<Mutex<Vec<Vec<OsString>>>>);
+        impl Transport for NoCache {
+            fn system_manager(
+                &self,
+                _: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push(args.to_vec());
+                if args[0] == "-C" {
+                    return Err(ExecutionError::Failed(completion(1, "")));
+                }
+                Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
+            }
+        }
+        let calls = NoCache(Arc::default());
+        let dnf = SystemManager::dnf(calls.clone());
+        assert_eq!(dnf.updates(&Cancellation::default()).unwrap().len(), 1);
+        let calls = calls.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1], calls[0][1..]);
     }
 
     #[test]
@@ -6981,12 +7891,35 @@ mod tests {
                 .iter()
                 .any(|watch| watch.path.ends_with("appstream"))
         );
-        let watches = apt_watches(&Host::new(crate::host::Runtime::Native, Default::default()));
+        let host = Host::new(crate::host::Runtime::Native, Default::default());
+        let watches = apt_watches(&host, None);
         for path in ["/var/lib/dpkg/status", "/etc/apt", "/etc/machine-id"] {
             assert!(watches
                 .iter()
                 .any(|watch| watch.path == std::path::Path::new(path)));
         }
+        // A check's own copy of the lists changes the answers too.
+        assert!(!watches.iter().any(|watch| watch.path.starts_with("/c")));
+        let watches = apt_watches(&host, Some("/c/apt".into()));
+        assert!(watches
+            .iter()
+            .any(|watch| watch.path == std::path::Path::new("/c/apt/lists")));
+    }
+
+    #[test]
+    fn the_apt_helper_hears_of_the_flatpak_and_of_a_fresher_copy() {
+        assert!(apt_helper_env(false, None).is_empty());
+        assert_eq!(
+            apt_helper_env(true, Some("/c/apt/lists".into())),
+            [
+                ("PKGDECK_APT_HOST", "/run/host".to_owned()),
+                ("PKGDECK_APT_LISTS", "/c/apt/lists".to_owned()),
+            ]
+        );
+        assert_eq!(
+            apt_helper_env(false, Some("/c/apt/lists".into())),
+            [("PKGDECK_APT_LISTS", "/c/apt/lists".to_owned())]
+        );
     }
 
     #[test]

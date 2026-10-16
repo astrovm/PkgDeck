@@ -246,11 +246,6 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::L) && !app.items.is_empty() {
         app.ui.focus_list = true;
     }
-    let refresh = if cfg!(target_os = "macos") {
-        ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
-    } else {
-        command(Key::M)
-    };
     if command(Key::R) && app.page.lists() {
         app.refresh_page();
     }
@@ -274,9 +269,6 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     }
     if command(Key::U) && can_change {
         app.propose("upgrade");
-    }
-    if refresh && can_change {
-        app.refresh_sources();
     }
     let back = ctx.input_mut(|i| {
         i.consume_key(Modifiers::ALT, Key::ArrowLeft)
@@ -727,7 +719,7 @@ fn header(app: &mut App, ui: &mut Ui) {
                         .icon("refresh")
                         .icon_only(compact)
                         .tooltip(if app.page == Page::Updates {
-                            "Refresh selected sources and check for updates (Ctrl+R)"
+                            "Refresh sources and check for updates (Ctrl+R)"
                         } else {
                             "Refresh this page (Ctrl+R)"
                         })
@@ -1218,25 +1210,6 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 let all: HashSet<String> =
                     app.items.iter().map(|i| rows[i.raw].identity()).collect();
                 app.unchecked = all;
-            }
-            // Package lists older than the last check can hide updates.
-            if !app.refreshable_sources().is_empty()
-                && Button::new(
-                    if total == 0 {
-                        Look::Primary
-                    } else {
-                        Look::Secondary
-                    },
-                    "Refresh sources",
-                )
-                .icon("refresh")
-                .icon_only(narrow && total > 0)
-                .tooltip("Download the latest package lists")
-                .enabled(app.can_act() && app.retained.is_none())
-                .show(ui)
-                .clicked()
-            {
-                app.refresh_sources();
             }
         }
         Page::Clean => {

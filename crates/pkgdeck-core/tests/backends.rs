@@ -282,6 +282,20 @@ impl Transport for Fixture {
             }
             return Ok(output(""));
         }
+        // Run as the user, makecache refreshes the user's own cache.
+        if args.last().is_some_and(|arg| arg.as_ref() == "makecache") {
+            *self.candidate.lock().unwrap() = "2.0".into();
+            return Ok(output(""));
+        }
+        if args.contains(&"--upgrades".into()) {
+            let candidate = self.candidate.lock().unwrap().clone();
+            return Ok(output(match self.installed.lock().unwrap().as_ref() {
+                Some(version) if *version != candidate => {
+                    format!("synthetic-fixture|x86_64|{candidate}\n")
+                }
+                _ => String::new(),
+            }));
+        }
         let installed = args.contains(&"--installed".into());
         let matches = (installed && self.installed.lock().unwrap().is_some())
             || (!installed
@@ -588,6 +602,19 @@ fn dnf_lifecycle() {
         .remove(0);
     assert_eq!(installed.installed_version.as_deref(), Some("0.9"));
     assert_eq!(installed.candidate_version.as_deref(), Some("1.0"));
+    // The inventory says which packages have an update.
+    let row = backend.installed(&cancel).unwrap().remove(0);
+    assert_eq!(row.update, UpdateAvailability::Available);
+    assert_eq!(row.candidate_version.as_deref(), Some("1.0"));
+    // A check refreshes the user's cache first, without root.
+    assert!(backend.refresh_without_password(&cancel).unwrap());
+    backend.arm_update_check(Some(1));
+    backend.refresh_update_index(&cancel).unwrap();
+    let row = backend.installed(&cancel).unwrap().remove(0);
+    assert_eq!(row.candidate_version.as_deref(), Some("2.0"));
+    *fixture.installed.lock().unwrap() = Some("2.0".into());
+    let row = backend.installed(&cancel).unwrap().remove(0);
+    assert_eq!(row.update, UpdateAvailability::Current);
 }
 
 #[test]
@@ -6118,7 +6145,7 @@ fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
         ("xbps-install -Mun", "acl-2.4.1_1 update aarch64 https://repo-default.voidlinux.org/current/aarch64 6112808 2556855\njq-1.8.2_1 install aarch64 https://repo 1 1\n"),
         ("xbps-query -Rs jq", "[-] ijq-1.4.0_1                        Interactive jq tool for the terminal\n[*] jq-1.8.2_1                         Command-line JSON processor\n"),
         ("xbps-remove", ""),
-        ("xbps-install -yu", ""),
+        ("xbps-install -Syu", ""),
     ]);
     let mut xbps = SystemManager::xbps(script.clone());
     let installed = xbps.installed(&cancel).unwrap();
@@ -6152,7 +6179,7 @@ fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
         "{calls:?}"
     );
     assert!(
-        calls.contains(&"xbps-install -yu acl (write)".into()),
+        calls.contains(&"xbps-install -Syu acl (write)".into()),
         "{calls:?}"
     );
 }

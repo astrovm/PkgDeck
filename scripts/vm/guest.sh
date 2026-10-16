@@ -9,7 +9,9 @@ cp /mnt/pkgdeck-bin/pkd /opt/pkgdeck-bin/
 cd /mnt/pkgdeck
 scripts/build-apt.sh /opt/pkgdeck-bin
 useradd -m pkgdeck-test
-printf 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/apt-get\n' >/etc/sudoers.d/pkgdeck-fixture
+# An APT update refreshes the lists first, so the GUI runs both through its
+# helper under one approval.
+printf 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/apt-get, /mnt/pkgdeck-app/usr/libexec/pkgdeck-host-runner\n' >/etc/sudoers.d/pkgdeck-fixture
 chmod 440 /etc/sudoers.d/pkgdeck-fixture
 source scripts/vm/lifecycle.sh
 # The fixture repo is all the tests need. Without Ubuntu's own sources, a

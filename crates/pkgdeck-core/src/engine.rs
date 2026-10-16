@@ -241,6 +241,23 @@ pub trait Backend: Send {
     fn refresh_update_index(&mut self, _cancel: &Cancellation) -> Result<(), EngineError> {
         Ok(())
     }
+    /// Refresh the package lists without asking for a password, where the
+    /// system has a way: PackageKit for APT, Pacman and Zypper, DNF's own
+    /// cache for the user. `Ok(false)` leaves it to [`Operation::Refresh`],
+    /// which may need one.
+    fn refresh_without_password(&mut self, _cancel: &Cancellation) -> Result<bool, EngineError> {
+        Ok(false)
+    }
+    /// Run before `operation`'s checks: APT refreshes the system's lists
+    /// before an update, so the reviewed plan is checked against them.
+    fn prepare(
+        &mut self,
+        _operation: &Operation,
+        _cancel: &Cancellation,
+        _progress: &mut dyn FnMut(Progress),
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
     /// Failures from skipped portions of the most recent successful search or
     /// installed query. These accompany usable rows, but prevent the source
     /// from being treated as complete. Cached queries must retain their errors.
@@ -1278,7 +1295,47 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Result<OperationOutcome, EngineError> {
+        if let Some(result) = self.refresh_without_password(operation, cancel, events) {
+            return result;
+        }
+        // Several commands as root share one approval, like a batch.
+        if crate::batch::protected_commands(operation).is_ok_and(|commands| commands.len() > 1) {
+            return self
+                .execute_batch(std::slice::from_ref(operation), cancel, events)
+                .pop()
+                .unwrap_or(Err(EngineError::Cancelled));
+        }
         self.execute_started(operation, cancel, events, false)
+    }
+
+    /// A refresh the system can do without a password, done that way, with
+    /// its events. `None` for every other operation, and for refreshes
+    /// that need the usual, authorized run.
+    fn refresh_without_password(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Option<Result<OperationOutcome, EngineError>> {
+        let Operation::Refresh { backend } = operation else {
+            return None;
+        };
+        if cancel.requested() {
+            return None;
+        }
+        let ready = self.ready(backend, Capability::Refresh, cancel).ok()?;
+        let result = match ready.refresh_without_password(cancel) {
+            Ok(false) => return None,
+            Ok(true) => Ok(OperationOutcome::default()),
+            Err(error) => Err(error),
+        };
+        events(Event::Started(operation.clone()));
+        crate::cache::invalidate(backend);
+        events(Event::Finished {
+            operation: operation.clone(),
+            result: result.clone(),
+        });
+        Some(result)
     }
 
     fn execute_started(
@@ -1308,6 +1365,12 @@ impl Engine {
         let result = self
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
+                backend.prepare(operation, cancel, &mut |progress| {
+                    events(Event::Progress {
+                        operation: operation.clone(),
+                        progress,
+                    })
+                })?;
                 if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                     let current = backend.apt_upgrade_plan(cancel)?;
                     if expected_apt.as_ref() != Some(&current) {
@@ -1418,13 +1481,37 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Vec<Result<OperationOutcome, EngineError>> {
+        // Refreshes that need no password run first, so the rest only ask
+        // for one if they still need it.
+        let done: Vec<_> = operations
+            .iter()
+            .map(|operation| self.refresh_without_password(operation, cancel, events))
+            .collect();
+        let rest: Vec<Operation> = operations
+            .iter()
+            .zip(&done)
+            .filter(|(_, done)| done.is_none())
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        let mut ran = self.execute_authorized(&rest, cancel, events).into_iter();
+        done.into_iter()
+            .map(|done| done.unwrap_or_else(|| ran.next().unwrap_or(Err(EngineError::Cancelled))))
+            .collect()
+    }
+
+    fn execute_authorized(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
         if operations.is_empty() {
             return vec![];
         }
         if self.batch_authorization.is_none() {
             return operations
                 .iter()
-                .map(|operation| self.execute(operation, cancel, events))
+                .map(|operation| self.execute_started(operation, cancel, events, false))
                 .collect();
         }
         let checked: Vec<_> = operations
@@ -1462,7 +1549,7 @@ impl Engine {
         if !protected {
             return operations
                 .iter()
-                .map(|operation| self.execute(operation, cancel, events))
+                .map(|operation| self.execute_started(operation, cancel, events, false))
                 .collect();
         }
         let (host, authorization) = self.batch_authorization.clone().expect("configured above");
@@ -1526,9 +1613,23 @@ impl Engine {
                         events(Event::Started(member.clone()));
                     }
                 }
+                let prepared =
+                    self.ready("apt", operation.capability(), cancel)
+                        .and_then(|backend| {
+                            backend.prepare(operation, cancel, &mut |progress| {
+                                events(Event::Progress {
+                                    operation: operation.clone(),
+                                    progress,
+                                })
+                            })
+                        });
                 let rechecked = operations[index..end]
                     .iter()
-                    .map(|member| self.preflight(member, cancel))
+                    .map(|member| {
+                        prepared
+                            .clone()
+                            .and_then(|()| self.preflight(member, cancel))
+                    })
                     .collect::<Vec<_>>();
                 let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
                     Err(error)
@@ -1649,6 +1750,267 @@ mod apt_upgrade_tests {
     }
 
     #[test]
+    fn an_apt_update_checks_its_plan_against_the_lists_it_refreshed() {
+        struct Refreshing {
+            newer_lists: bool,
+            refreshed: bool,
+            log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+        impl Backend for Refreshing {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Upgrade]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn prepare(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<(), EngineError> {
+                self.log.lock().unwrap().push("refresh");
+                self.refreshed = true;
+                Ok(())
+            }
+            fn apt_upgrade_plan(
+                &mut self,
+                _: &Cancellation,
+            ) -> Result<AptUpgradePlan, EngineError> {
+                self.log.lock().unwrap().push("plan");
+                Ok(AptUpgradePlan {
+                    preview: if self.refreshed && self.newer_lists {
+                        "Inst newer"
+                    } else {
+                        "Inst reviewed"
+                    }
+                    .into(),
+                    upgrades: vec!["synthetic".into()],
+                    installs: vec![],
+                    removals: vec![],
+                })
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.log.lock().unwrap().push("upgrade");
+                Ok(OperationOutcome::default())
+            }
+        }
+        let cancel = Cancellation::default();
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        for newer_lists in [false, true] {
+            let log = Arc::default();
+            let mut engine = Engine::default();
+            engine
+                .register(Refreshing {
+                    newer_lists,
+                    refreshed: false,
+                    log: Arc::clone(&log),
+                })
+                .unwrap();
+            engine.plan_apt_upgrade(&cancel).unwrap();
+            let result = engine.execute(&op, &cancel, &mut |_| {});
+            // The refresh comes before the check, so a plan that changed
+            // with it is reviewed again instead of installed.
+            if newer_lists {
+                assert!(result.is_err());
+                assert_eq!(*log.lock().unwrap(), ["plan", "refresh", "plan"]);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(*log.lock().unwrap(), ["plan", "refresh", "plan", "upgrade"]);
+            }
+        }
+    }
+
+    /// APT whose refresh before an update works or fails, logging what
+    /// the engine asked of it.
+    struct Lists {
+        refresh: Result<(), EngineError>,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Backend for Lists {
+        fn id(&self) -> &str {
+            "apt"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn prepare(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            progress: &mut dyn FnMut(Progress),
+        ) -> Result<(), EngineError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("refresh before {operation:?}"));
+            progress(Progress::Message("Refreshing package lists.".into()));
+            self.refresh.clone()
+        }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            self.log.lock().unwrap().push("plan".into());
+            Ok(empty_plan())
+        }
+        fn execute(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.log.lock().unwrap().push(format!("run {operation:?}"));
+            Ok(OperationOutcome::default())
+        }
+        fn execute_group(
+            &mut self,
+            operations: &[Operation],
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("group of {}", operations.len()));
+            Some(Ok(vec![OperationOutcome::default(); operations.len()]))
+        }
+    }
+    fn empty_plan() -> AptUpgradePlan {
+        AptUpgradePlan {
+            preview: String::new(),
+            upgrades: vec![],
+            installs: vec![],
+            removals: vec![],
+        }
+    }
+    fn apt_id(name: &str) -> PackageId {
+        PackageId {
+            backend: "apt".into(),
+            name: name.into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        }
+    }
+    fn lists_engine(
+        refresh: Result<(), EngineError>,
+        authorized: bool,
+    ) -> (Engine, Arc<std::sync::Mutex<Vec<String>>>) {
+        let log = Arc::default();
+        let mut engine = Engine::default();
+        engine
+            .register(Lists {
+                refresh,
+                log: Arc::clone(&log),
+            })
+            .unwrap();
+        if authorized {
+            // No PATH, so no helper: the batch runs without a prompt.
+            engine.enable_batch_authorization(
+                crate::host::Host::new(Runtime::Native, Default::default()),
+                crate::host::Authorization::SudoNonInteractive,
+            );
+        }
+        (engine, log)
+    }
+
+    #[test]
+    fn a_failed_refresh_stops_the_update_before_its_check() {
+        let cancel = Cancellation::default();
+        let failed = EngineError::Execution(crate::process::ExecutionError::Invalid(
+            "mirror unreachable".into(),
+        ));
+        let (mut engine, log) = lists_engine(Err(failed.clone()), false);
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        assert_eq!(
+            engine.execute(&op, &cancel, &mut |_| {}),
+            Err(failed.clone())
+        );
+        assert_eq!(*log.lock().unwrap(), [format!("refresh before {op:?}")]);
+        // A refresh that works goes on to the check.
+        let (mut engine, log) = lists_engine(Ok(()), false);
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let _ = engine.execute(&op, &cancel, &mut |_| {});
+        assert_eq!(
+            log.lock().unwrap()[..2],
+            [format!("refresh before {op:?}"), "plan".into()]
+        );
+        // A group of updates stops as one.
+        let (mut engine, log) = lists_engine(Err(failed.clone()), true);
+        let ops = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+        ];
+        let results = engine.execute_batch(&ops, &cancel, &mut |_| {});
+        assert_eq!(results, [Err(failed.clone()), Err(failed)]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [format!("refresh before {:?}", ops[0])]
+        );
+    }
+
+    #[test]
+    fn grouped_apt_updates_refresh_once_and_a_single_one_uses_the_batch() {
+        let cancel = Cancellation::default();
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let ops = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+        ];
+        let results = engine.execute_batch(&ops, &cancel, &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [format!("refresh before {:?}", ops[0]), "group of 2".into()]
+        );
+        // One update has two commands as root, so it shares one approval
+        // like a batch does.
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let mut said = vec![];
+        engine
+            .execute(&ops[0], &cancel, &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    said.push(message);
+                }
+            })
+            .unwrap();
+        assert!(said.iter().any(|m| m.contains("Authorizing")), "{said:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                format!("refresh before {:?}", ops[0]),
+                format!("run {:?}", ops[0])
+            ]
+        );
+        // An install has one, and runs on its own.
+        let (mut engine, _) = lists_engine(Ok(()), true);
+        let mut events = vec![];
+        let _ = engine.execute(&Operation::Install(apt_id("one")), &cancel, &mut |event| {
+            events.push(event)
+        });
+        assert!(!format!("{events:?}").contains("Authorizing"), "{events:?}");
+    }
+
+    #[test]
     fn changed_later_plan_blocks_every_batch_write_before_authorization() {
         struct UserFixture(Arc<AtomicUsize>);
         impl Backend for UserFixture {
@@ -1731,6 +2093,87 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
         assert!(results.iter().all(Result::is_ok));
         assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_refresh_without_a_password_never_authorizes_the_batch() {
+        struct Lists {
+            without_password: Result<bool, EngineError>,
+            writes: Arc<AtomicUsize>,
+        }
+        impl Backend for Lists {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Refresh]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn refresh_without_password(&mut self, _: &Cancellation) -> Result<bool, EngineError> {
+                self.without_password.clone()
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutcome::default())
+            }
+        }
+        let refresh = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        let cancel = Cancellation::default();
+        let failed = EngineError::Execution(ExecutionError::Invalid("no network".into()));
+        for (without_password, writes, succeeds) in [
+            (Ok(true), 0, true),
+            (Err(failed), 0, false),
+            (Ok(false), 1, true),
+        ] {
+            let needs_root = without_password == Ok(false);
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut engine = Engine::default();
+            engine
+                .register(Lists {
+                    without_password,
+                    writes: count.clone(),
+                })
+                .unwrap();
+            // An authorized batch would ask for the password first; one that
+            // still needs root runs here without it.
+            if !needs_root {
+                engine.enable_batch_authorization(
+                    Host::new(Runtime::Native, Default::default()),
+                    Authorization::Polkit,
+                );
+            }
+            let mut events = Vec::new();
+            let results =
+                engine.execute_batch(std::slice::from_ref(&refresh), &cancel, &mut |event| {
+                    events.push(event)
+                });
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is_ok(), succeeds);
+            assert_eq!(count.load(Ordering::SeqCst), writes);
+            assert!(!format!("{events:?}").contains("Authorizing"));
+            assert!(matches!(&events[0], Event::Started(op) if *op == refresh));
+            assert!(
+                matches!(events.last(), Some(Event::Finished { operation, .. }) if *operation == refresh)
+            );
+            // A single refresh goes the same way.
+            let single = engine.execute(&refresh, &cancel, &mut |_| {});
+            assert_eq!(single.is_ok(), succeeds);
+            assert_eq!(count.load(Ordering::SeqCst), writes * 2);
+            // A cancelled one never starts it.
+            let cancelled = Cancellation::default();
+            cancelled.cancel();
+            assert!(engine.execute(&refresh, &cancelled, &mut |_| {}).is_err());
+            assert_eq!(count.load(Ordering::SeqCst), writes * 2);
+        }
     }
 
     #[test]

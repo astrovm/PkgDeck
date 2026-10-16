@@ -112,17 +112,25 @@ fn flatpak_ref(id: &PackageId) -> Result<&str, ExecutionError> {
 pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>, ExecutionError> {
     let command = match operation {
         Operation::Refresh { backend } if backend == "apt" => apt_command(AptAction::Refresh)?,
+        // A check refreshes only the user's own copy of the lists, so an
+        // update refreshes the system's first, under the same approval.
         Operation::UpgradeAll { backend } if backend == "apt" => {
-            apt_command(AptAction::UpgradeAll)?
+            return Ok(vec![
+                apt_command(AptAction::Refresh)?,
+                apt_command(AptAction::UpgradeAll)?,
+            ]);
+        }
+        Operation::Upgrade(id) if id.backend == "apt" => {
+            return Ok(vec![
+                apt_command(AptAction::Refresh)?,
+                apt_command(AptAction::Upgrade(apt_target(id)?))?,
+            ]);
         }
         Operation::Install(id) if id.backend == "apt" => {
             apt_command(AptAction::Install(apt_target(id)?))?
         }
         Operation::Remove(id) if id.backend == "apt" => {
             apt_command(AptAction::Remove(apt_target(id)?))?
-        }
-        Operation::Upgrade(id) if id.backend == "apt" => {
-            apt_command(AptAction::Upgrade(apt_target(id)?))?
         }
         Operation::Clean(id) if id.backend == "apt" => match id.key.as_str() {
             "autoremove" => apt_command(AptAction::Autoremove)?,
@@ -265,7 +273,8 @@ fn runner_commands(
     if mode == (BatchMode::UpgradeOnly { removals: false }) {
         for (operation, commands) in operations.iter().zip(&mut commands) {
             if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
-                for command in commands {
+                // The upgrade, after the refresh.
+                if let Some(command) = commands.last_mut() {
                     let verb = command.args.len() - 1;
                     command.args.insert(verb, "--no-remove".into());
                 }
@@ -319,7 +328,13 @@ pub fn batch_commands(
             let args = AptAction::group_arguments(&actions)?
                 .into_iter()
                 .map(|arg| arg.to_string_lossy().into_owned());
-            commands[index] = vec![ProtectedCommand::new("apt-get", args)];
+            let group = ProtectedCommand::new("apt-get", args);
+            // Updates refresh the lists first, as one does on its own.
+            commands[index] = if matches!(operations[index], Operation::Upgrade(_)) {
+                vec![apt_command(AptAction::Refresh)?, group]
+            } else {
+                vec![group]
+            };
             for entry in &mut commands[index + 1..end] {
                 entry.clear();
             }
@@ -354,12 +369,13 @@ fn manager_command(
         ("dnf", "refresh") => &["-y", "makecache"],
         ("dnf", "install") => &["-y", "install", "--"],
         ("dnf", "remove") => &["-y", "remove", "--"],
-        ("dnf", "upgrade") => &["-y", "upgrade", "--"],
-        ("dnf", "all") => &["-y", "upgrade"],
+        ("dnf", "upgrade") => &["-y", "--refresh", "upgrade", "--"],
+        ("dnf", "all") => &["-y", "--refresh", "upgrade"],
         ("pacman", "refresh") => &["-Sy", "--noconfirm"],
-        ("pacman", "install" | "upgrade") => &["-S", "--noconfirm", "--needed", "--"],
+        ("pacman", "install") => &["-S", "--noconfirm", "--needed", "--"],
+        ("pacman", "upgrade") => &["-Sy", "--noconfirm", "--needed", "--"],
         ("pacman", "remove") => &["-Rns", "--noconfirm", "--"],
-        ("pacman", "all") => &["-Su", "--noconfirm"],
+        ("pacman", "all") => &["-Syu", "--noconfirm"],
         ("zypper", "refresh") => &["--non-interactive", "refresh"],
         ("zypper", "install") => &[
             "--non-interactive",
@@ -1164,8 +1180,11 @@ mod tests {
             runner_commands(BatchMode::UpgradeOnly { removals: false }, &operations).unwrap();
         assert_eq!(runner[0], reviewed[0]);
         assert_eq!(runner[2], reviewed[2]);
+        // The update refreshes the lists first, as reviewed.
+        assert_eq!(runner[1][0], reviewed[1][0]);
+        assert_eq!(runner[1][0].args.last().unwrap(), "update");
         assert_eq!(
-            runner[1][0].args,
+            runner[1][1].args,
             [
                 "--assume-yes",
                 "-o",
@@ -1456,7 +1475,19 @@ mod tests {
             ),
         ];
         for (operation, binary, verb) in targets {
-            let commands = protected_commands(&operation).unwrap();
+            let mut commands = protected_commands(&operation).unwrap();
+            // APT updates refresh the system's lists first: a check only
+            // refreshed the user's own copy.
+            if binary == "apt-get"
+                && matches!(
+                    operation,
+                    Operation::Upgrade(_) | Operation::UpgradeAll { .. }
+                )
+            {
+                assert_eq!(commands.len(), 2, "{operation:?}");
+                assert_eq!(commands[0], apt_command(AptAction::Refresh).unwrap());
+                commands.remove(0);
+            }
             assert_eq!(commands.len(), 1, "{operation:?}");
             assert_eq!(commands[0].program, format!("/usr/bin/{binary}"));
             assert!(
@@ -2030,6 +2061,78 @@ done"#;
         drop(scope);
     }
 
+    /// The APT backend itself, run through a session whose runner approves
+    /// what `batch_commands` planned and logs each command it's asked for.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apt_updates_send_the_refresh_then_the_update_in_one_session() {
+        // The host must have APT for its commands to be built.
+        if Path::new("/usr/bin/apt-get").exists() {
+            apt_session();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn apt_session() {
+        use crate::engine::Backend;
+        use std::collections::BTreeMap;
+        let log = std::env::temp_dir().join(format!("pkgdeck-apt-session-{}", std::process::id()));
+        let script = format!(
+            r#"IFS= read -r start
+printf '%s\n' '{{"type":"ready","protocol":2}}'
+while IFS= read -r request; do
+  printf '%s\n' "$request" >>'{}'
+  printf '%s\n' '{{"type":"completed","completion":{{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}}}'
+done"#,
+            log.display()
+        );
+        let session = |operations: &[Operation]| {
+            let _ = fs::remove_file(&log);
+            let mut child = Command::new("/bin/sh");
+            child.arg("-c").arg(&script);
+            let commands = batch_commands(operations).unwrap();
+            let scope = begin_session(child, operations, commands, &Cancellation::default())
+                .unwrap()
+                .unwrap();
+            set_operation(0);
+            scope
+        };
+        let requests = || fs::read_to_string(&log).unwrap_or_default();
+        let mut apt = crate::backends::Apt::new(crate::backends::NativeTransport {
+            host: Host::new(Runtime::Native, BTreeMap::new()),
+            authorization: Authorization::Polkit,
+        });
+        let cancel = Cancellation::default();
+        let all = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        let scope = session(std::slice::from_ref(&all));
+        apt.prepare(&all, &cancel, &mut |_| {}).unwrap();
+        apt.execute(&all, &cancel, &mut |_| {}).unwrap();
+        drop(scope);
+        assert_eq!(
+            requests(),
+            "{\"type\":\"run\",\"operation\":0,\"command\":0}\n{\"type\":\"run\",\"operation\":0,\"command\":1}\n"
+        );
+        // Grouped updates: one refresh, then the group.
+        let updates = [
+            Operation::Upgrade(id("apt", "one")),
+            Operation::Upgrade(id("apt", "two")),
+        ];
+        let scope = session(&updates);
+        apt.prepare(&updates[0], &cancel, &mut |_| {}).unwrap();
+        apt.execute_group(&updates, &cancel, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        drop(scope);
+        assert_eq!(requests().lines().count(), 2);
+        // Skipping the refresh is refused before anything runs as root.
+        let scope = session(std::slice::from_ref(&all));
+        assert!(apt.execute(&all, &cancel, &mut |_| {}).is_err());
+        drop(scope);
+        assert_eq!(requests(), "");
+        let _ = fs::remove_file(&log);
+    }
+
     #[test]
     fn apt_grouping_stops_at_other_backends_and_preserves_each_verb() {
         let operations = [
@@ -2048,9 +2151,13 @@ done"#;
         assert!(commands[0][0]
             .args
             .ends_with(&["one:amd64".into(), "two:amd64".into()]));
-        assert!(commands[3][0]
+        // One refresh before both updates.
+        assert_eq!(commands[3][0], apt_command(AptAction::Refresh).unwrap());
+        assert!(commands[3][1]
             .args
             .ends_with(&["four:amd64".into(), "five:amd64".into()]));
+        assert_eq!(commands[0].len(), 1);
+        assert_eq!(commands[5].len(), 1);
         assert_eq!(
             commands[0][0]
                 .args

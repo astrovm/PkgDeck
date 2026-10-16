@@ -1460,6 +1460,34 @@ impl Host {
         }
     }
 
+    /// Refresh an index the user owns, such as DNF's user cache or one of
+    /// PkgDeck's own copies (see `private_index`). The first one downloads
+    /// every index, which can take minutes.
+    pub fn refresh_index(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let path = self
+            .resolve(executable)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{executable} not found")))?;
+        let result = process::run(
+            self.command(&path, args)?,
+            Limits {
+                timeout: std::time::Duration::from_secs(600),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            false,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
     fn privileged(
         &self,
         executable: &Path,
@@ -2406,6 +2434,51 @@ mod boundary_tests {
         let native = run(host(Runtime::Native, &env));
         assert!(native.contains("HOME="));
         assert!(native.contains("PKGDECK_APT_HOST=/run/host\n"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refreshing_an_index_runs_as_the_user_and_reports_how_it_ended() {
+        let root = scratch("refresh-index");
+        executable(&root.join("fetch"), "echo fetched; echo \"$@\"");
+        executable(&root.join("broken"), "echo unreachable >&2; exit 3");
+        // Its PATH is only this folder.
+        executable(&root.join("slow"), "exec /bin/sleep 30");
+        executable(
+            &root.join("chatty"),
+            "exec /usr/bin/head -c 1048576 /dev/zero",
+        );
+        let host = host(Runtime::Native, &[("PATH", &root)]);
+        let cancel = Cancellation::default();
+        let done = host
+            .refresh_index("fetch", &["-Sy".into()], &cancel)
+            .unwrap();
+        assert_eq!(done.stdout, b"fetched\n-Sy\n");
+        // A long download log is kept whole.
+        let chatty = host.refresh_index("chatty", &[], &cancel).unwrap();
+        assert_eq!((chatty.stdout.len(), chatty.truncated), (1 << 20, false));
+        assert!(matches!(
+            host.refresh_index("broken", &[], &cancel),
+            Err(ExecutionError::Failed(result)) if result.code == Some(3) && result.stderr == b"unreachable\n"
+        ));
+        assert!(matches!(
+            host.refresh_index("absent", &[], &cancel),
+            Err(ExecutionError::Disabled(reason)) if reason == "absent not found"
+        ));
+        // Cancelling stops a download in progress.
+        let cancel = Cancellation::default();
+        let stop = cancel.clone();
+        let started = std::time::Instant::now();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            stop.cancel();
+        });
+        assert!(matches!(
+            host.refresh_index("slow", &[], &cancel),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        stopper.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

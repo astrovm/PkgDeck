@@ -190,23 +190,24 @@ fn drain(
     output: &mut Vec<u8>,
     limit: usize,
     truncated: &mut bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut buffer = [0; 4096];
     // Bound work per tick even if a child continuously produces output.
     for _ in 0..32 {
         match pipe.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) => return Ok(false),
             Ok(n) => {
                 let keep = n.min(limit.saturating_sub(output.len()));
                 output.extend_from_slice(&buffer[..keep]);
                 *truncated |= keep < n;
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    // There may be more.
+    Ok(true)
 }
 
 pub(crate) fn run(
@@ -286,16 +287,20 @@ pub(crate) fn run_observed(
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
         let cap = limits.output_bytes;
-        let mut drain_both = |result: &mut Completion| -> io::Result<()> {
-            drain(&mut stdout, &mut result.stdout, cap, &mut result.truncated)?;
-            drain(&mut stderr, &mut result.stderr, cap, &mut result.truncated)
+        // Whether either stream may hold more that would still be kept.
+        let mut drain_both = |result: &mut Completion| -> io::Result<bool> {
+            let out = drain(&mut stdout, &mut result.stdout, cap, &mut result.truncated)?;
+            let err = drain(&mut stderr, &mut result.stderr, cap, &mut result.truncated)?;
+            Ok(out && result.stdout.len() < cap || err && result.stderr.len() < cap)
         };
         loop {
             drain_both(&mut result)?;
             report(&result.stdout, false);
             if let Some(status) = child.try_wait()? {
                 reaped = true;
-                drain_both(&mut result)?;
+                // A program that grew its pipe (uutils does) can leave far
+                // more behind than one tick reads.
+                while drain_both(&mut result)? {}
                 report(&result.stdout, true);
                 result.code = status.code();
                 result.signal = status.signal();
@@ -382,7 +387,7 @@ mod tests {
             Ok(b"def"),
             Err(io::ErrorKind::WouldBlock.into()),
         ]);
-        drain(&mut pipe, &mut output, 4, &mut truncated).unwrap();
+        assert!(!drain(&mut pipe, &mut output, 4, &mut truncated).unwrap());
         assert_eq!(output, b"abcd");
         assert!(truncated);
         let mut broken = Scripted(vec![Err(io::ErrorKind::BrokenPipe.into())]);
@@ -392,6 +397,43 @@ mod tests {
                 .kind(),
             io::ErrorKind::BrokenPipe
         );
+    }
+    #[test]
+    fn a_long_output_is_read_a_bounded_amount_at_a_time() {
+        let mut pipe = io::repeat(7).take(200_000);
+        let (mut output, mut truncated) = (vec![], false);
+        assert!(drain(&mut pipe, &mut output, usize::MAX, &mut truncated).unwrap());
+        assert_eq!(output.len(), 32 * 4096);
+        assert!(!drain(&mut pipe, &mut output, usize::MAX, &mut truncated).unwrap());
+        assert_eq!((output.len(), truncated), (200_000, false));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn everything_left_in_a_grown_pipe_is_read_after_the_program_exits() {
+        // uutils' head grows its pipe like this, then exits at once.
+        if std::path::Path::new("/usr/bin/python3").exists() {
+            grown_pipe();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn grown_pipe() {
+        let mut command = Command::new("/usr/bin/python3");
+        command.args([
+            "-c",
+            "import fcntl, os; fcntl.fcntl(1, 1031, 1 << 20); os.write(1, bytes(900_000))",
+        ]);
+        let result = run(
+            command,
+            Limits {
+                output_bytes: 1 << 20,
+                ..Limits::default()
+            },
+            &Cancellation::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!((result.stdout.len(), result.truncated), (900_000, false));
     }
     #[test]
     fn failures_read_as_one_plain_sentence() {

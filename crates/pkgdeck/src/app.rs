@@ -1185,31 +1185,6 @@ impl App {
         }
     }
 
-    /// The sources on Updates that can download their package lists.
-    pub fn refreshable_sources(&self) -> Vec<String> {
-        let shown = self.effective_sources(Page::Updates);
-        all_sources(&self.catalog)
-            .into_iter()
-            .filter(|id| shown.contains(id))
-            .filter(|id| {
-                let entry = catalog_entry(&self.catalog, id);
-                entry.available && entry.capabilities.iter().any(|c| c == "refresh")
-            })
-            .collect()
-    }
-
-    /// Refresh sources on Updates: the package lists of every source it
-    /// shows, after one review.
-    pub fn refresh_sources(&mut self) {
-        let sources = self.refreshable_sources();
-        if sources.is_empty() || self.retained.is_some() {
-            return;
-        }
-        self.review_on = ReviewOn::Dialog;
-        self.c().propose_refresh(sources.join(",").into());
-        self.react();
-    }
-
     /// The header and Ctrl+R share one action. Updates fetches fresh indexes
     /// before listing; other pages only read their current contents again.
     pub fn refresh_page(&mut self) {

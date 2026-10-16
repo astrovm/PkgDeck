@@ -963,8 +963,8 @@ fn apk_xbps_and_macports_writes_use_fixed_noninteractive_commands() {
                 "w:apk update",
                 "w:apk add -- tool",
                 "w:apk del -- tool",
-                "w:apk upgrade -- tool",
-                "w:apk upgrade",
+                "w:apk upgrade --update-cache -- tool",
+                "w:apk upgrade --update-cache",
             ],
         ),
         (
@@ -973,8 +973,8 @@ fn apk_xbps_and_macports_writes_use_fixed_noninteractive_commands() {
                 "w:xbps-install -S",
                 "w:xbps-install -y tool",
                 "w:xbps-remove -y tool",
-                "w:xbps-install -yu tool",
-                "w:xbps-install -yu",
+                "w:xbps-install -Syu tool",
+                "w:xbps-install -Syu",
             ],
         ),
         (

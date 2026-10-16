@@ -364,6 +364,14 @@ impl Desktop {
         self.key("ctrl+l");
         self.key("Home");
     }
+    /// When PkgDeck last changed the user's own copies of package indexes,
+    /// which a check refreshes without an operation of its own.
+    fn indexes_changed() -> Option<std::time::SystemTime> {
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+        newest_change(&base.join("pkgdeck/indexes"), 3)
+    }
     pub fn write(&mut self, op: &str, name: &str) {
         let history = self.dir.0.join("pkgdeck/activity.json");
         let entries = || -> Vec<Value> {
@@ -380,7 +388,8 @@ impl Desktop {
             "install" => ("Return", "alt+i"),
             "remove" => ("ctrl+d", "alt+r"),
             "upgrade" => ("ctrl+u", "alt+u"),
-            "refresh" => ("ctrl+m", "alt+r"),
+            // Check for updates refreshes first, with no review.
+            "refresh" => ("ctrl+r", ""),
             _ => panic!("unknown operation"),
         };
         let started = || {
@@ -388,6 +397,10 @@ impl Desktop {
                 .last()
                 .is_some_and(|entry| entry["id"].as_u64().unwrap_or(0) > previous)
         };
+        let indexes = Self::indexes_changed();
+        // System managers refresh their own copy as the check reads them,
+        // with no operation in history.
+        let refreshed = || op == "refresh" && Self::indexes_changed() > indexes;
         // idle() gives up after two seconds, and the shortcuts are disabled
         // while the app is busy. A slow details query on a real manager can
         // swallow both keys. History records an operation when it begins, so
@@ -395,7 +408,7 @@ impl Desktop {
         // Each try starts over from the search: a slow query can leave
         // nothing selected, and resending the keys alone can't fix that.
         for attempt in 1.. {
-            // Refresh sources lives on Updates; open it and let it load first.
+            // Check for updates lives on Updates; open it and let it load first.
             if op == "refresh" {
                 self.key("ctrl+3");
                 self.settle(Duration::from_secs(30));
@@ -403,13 +416,20 @@ impl Desktop {
                 self.search(name);
             }
             self.key(propose);
-            self.key(confirm);
+            if !confirm.is_empty() {
+                self.key(confirm);
+            }
             let wait = Instant::now() + Duration::from_secs(15);
-            while !started() && Instant::now() < wait {
+            while !started() && !refreshed() && Instant::now() < wait {
                 sleep(Duration::from_millis(50));
             }
             if started() {
                 break;
+            }
+            if refreshed() {
+                // The check goes on to read every source.
+                self.settle(Duration::from_secs(60));
+                return;
             }
             assert!(attempt < 3, "{op} did not start\n{}", self.logs());
         }
@@ -457,6 +477,21 @@ impl Desktop {
         assert!(!self.logs().contains("panicked"), "{}", self.logs());
         let _ = &mut self.server;
     }
+}
+/// The latest change under `dir`, folders included: a folder changes when
+/// a download is renamed into it, whatever date the file itself carries.
+fn newest_change(dir: &Path, depth: usize) -> Option<std::time::SystemTime> {
+    let mut found = fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let time = if path.is_dir() && depth > 0 {
+            newest_change(&path, depth - 1)
+        } else {
+            entry.metadata().and_then(|meta| meta.modified()).ok()
+        };
+        found = found.max(time);
+    }
+    found
 }
 pub fn gui_lifecycle(args: &[String]) {
     let dir = fixture(false);
@@ -647,4 +682,37 @@ pub fn apt_lock_probe() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("APT is busy"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn at(path: &Path, seconds: u64) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_refreshed_copy_counts_as_a_change_even_with_old_file_dates() {
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-tools-indexes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(newest_change(&root, 3), None);
+        let lists = root.join("apt/lists");
+        fs::create_dir_all(&lists).unwrap();
+        let before = newest_change(&root, 3).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        // APT dates a list by the server's copy, often long ago.
+        let list = lists.join("example_Packages");
+        fs::write(&list, "").unwrap();
+        at(&list, 100);
+        assert!(newest_change(&root, 3).unwrap() > before);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

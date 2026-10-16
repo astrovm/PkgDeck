@@ -10,7 +10,10 @@ pub mod cache;
 pub mod host;
 pub mod inspection;
 #[cfg(target_os = "linux")]
+pub mod packagekit;
+#[cfg(target_os = "linux")]
 mod portal;
+pub mod private_index;
 pub mod process;
 mod spawn;
 
