@@ -844,7 +844,10 @@ mod tests {
             "{error}"
         );
         // With one, only the message is kept, whoever named the error.
-        for name in ["org.freedesktop.DBus.Error.Failed", "org.pkgdeck.CustomError"] {
+        for name in [
+            "org.freedesktop.DBus.Error.Failed",
+            "org.pkgdeck.CustomError",
+        ] {
             let call = zbus::Message::method_call("/", "Call").build(&()).unwrap();
             let reply = zbus::Message::error(&call.header(), name)
                 .build(&("Failed to start command",))
