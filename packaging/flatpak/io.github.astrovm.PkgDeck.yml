@@ -16,6 +16,8 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
   # Tray notifications (update alerts and the Settings test) use this service.
   - --talk-name=org.freedesktop.Notifications
+  # Checks refresh APT, Pacman and Zypper lists through PackageKit, with no password.
+  - --system-talk-name=org.freedesktop.PackageKit
   # PkgDeck manages host installations; reserved OS paths are exposed under /run/host.
   - --filesystem=host
   - --filesystem=host-os:ro

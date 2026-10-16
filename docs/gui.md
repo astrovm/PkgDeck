@@ -280,15 +280,23 @@ shows why in red, with **Try again** under it.
 The sources filter only filters one page. Neither one turns repositories on
 or off.
 
-**Check for updates** in the **Updates** header first refreshes the selected
-sources that need no password: Flatpak app data, firmware metadata, and Snap's
-list of snaps. A check never installs, upgrades or removes anything.
+**Check for updates** in the **Updates** header refreshes the selected
+sources' package lists, then checks every selected source for updates.
+**Ctrl+R** does the same. A check never installs, upgrades or removes
+anything.
 
-APT, DNF, Pacman and Zypper need your password to refresh their lists, so a
-check uses their current lists. Use **Refresh sources** to update them. It asks
-you to review first. MacPorts uses its current ports tree and never self-updates
-during a check. Sources without a list refresh are checked too. **Ctrl+R** runs
-the check.
+- Flatpak app data, firmware metadata, Snap and Homebrew refresh without a
+  password.
+- APT, Pacman and Zypper refresh through PackageKit when it's installed, with
+  no password in your own session at the computer.
+- DNF refreshes the copy of its lists that PkgDeck reads, kept for you, with no
+  password. Updating packages still uses the system's.
+- Without PackageKit, or over SSH, APT, Pacman, Zypper, apk and XBPS ask for
+  your password once per check.
+- MacPorts keeps its current ports tree, because its refresh can update
+  MacPorts itself.
+- Automatic checks in the background only refresh what needs no password.
+  The rest use their current lists.
 
 The button stays in the same place for empty and populated lists. During a check
 it becomes one **Cancel** button with a spinner. Existing rows stay visible. The
@@ -700,7 +708,6 @@ and **About**.
 | Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+R | Refresh the page, or check for updates on Updates |
-| Ctrl+M | Refresh sources on Updates after review (Linux) |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
 | Alt+C | Cancel the open confirmation |
 | Esc | Close Activity, clear the search, close the details, or go back from an app page |
@@ -708,8 +715,7 @@ and **About**.
 | Ctrl+Q | Quit (waits for any running package change to finish) |
 
 On macOS, Cmd takes the place of Ctrl and Settings shows the shortcuts with
-Mac key symbols. Refreshing package lists is Shift+Cmd+R there, because
-Cmd+M minimizes the window, and Cmd+W closes it.
+Mac key symbols. Cmd+M minimizes the window, and Cmd+W closes it.
 
 Use Tab to move between controls. Row actions and icon buttons have screen
 reader labels.

@@ -248,9 +248,6 @@ enum Job {
         preferences: CleanupPreferences,
     },
     CleanAll(Vec<Operation>),
-    /// Download the latest package lists of several sources, one after
-    /// another.
-    RefreshAll(Vec<Operation>),
     /// Refresh the selected sources, then read their updates in the same worker.
     CheckUpdates(Vec<Operation>, Vec<String>),
     ManifestExport(PathBuf, Vec<PackageId>),
@@ -265,7 +262,6 @@ impl Job {
                 | Self::AutoUpgrade(..)
                 | Self::AutoClean { .. }
                 | Self::CleanAll(_)
-                | Self::RefreshAll(_)
                 | Self::CheckUpdates(..)
                 | Self::Repositories(Some(_))
                 | Self::ImportRepository(_)
@@ -284,7 +280,6 @@ impl Job {
             Self::UpgradeAll(operations, _)
             | Self::AutoUpgrade(operations, _)
             | Self::CleanAll(operations)
-            | Self::RefreshAll(operations)
             | Self::CheckUpdates(operations, _) => operations.clone(),
             _ => vec![],
         }
@@ -977,7 +972,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let report = engine.cleanup(cancel);
             Ok(Payload::CleanPreview(operations, report.items))
         }
-        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => {
+        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
         Job::AutoClean { caches, worktrees, preferences } => {
@@ -2006,7 +2001,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
         Job::CheckUpdates(_, sources) => sources.clone(),
-        Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
@@ -2877,10 +2872,6 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
             let retry = keep(operations);
             (!retry.is_empty()).then_some(Job::CleanAll(retry))
         }
-        Job::RefreshAll(operations) => {
-            let retry = keep(operations);
-            (!retry.is_empty()).then(|| refresh_job(retry))
-        }
         Job::CheckUpdates(operations, sources) => {
             let retry = keep(operations);
             (!retry.is_empty()).then(|| Job::CheckUpdates(retry, sources.clone()))
@@ -2889,14 +2880,6 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
     }
 }
 
-/// Refreshing one source runs its own command, as any single change does.
-/// Several share one batch, so they ask for a password once.
-fn refresh_job(operations: Vec<Operation>) -> Job {
-    match <[Operation; 1]>::try_from(operations) {
-        Ok([operation]) => Job::Write(operation, None),
-        Err(operations) => Job::RefreshAll(operations),
-    }
-}
 /// An automatic run whose only failures are casks that need the password:
 /// nothing is broken, the person just updates them by hand.
 fn password_notice(
@@ -5654,9 +5637,10 @@ impl ffi::PackageController {
         self.as_mut().set_phase("loading");
         self.start(Job::RefreshSources(sources));
     }
-    /// One explicit update check. Refreshes only the sources whose refresh
-    /// needs no password, then checks every selected source, including
-    /// registries without indexes.
+    /// One explicit update check: refreshes every selected source that has
+    /// package lists, then checks them all, registries without lists
+    /// included. Refreshes go without a password where the system allows
+    /// (PackageKit, DNF's own cache); the rest ask for it once.
     pub fn check_for_updates(mut self: Pin<&mut Self>, sources: QString) {
         if self.rust().foreground_worker() || self.rust().pending.is_some() {
             return;
@@ -5682,15 +5666,9 @@ impl ffi::PackageController {
         let operations = sources
             .iter()
             .filter(|source| {
-                // A check runs only refreshes that need no password. Managers
-                // whose refresh would prompt wait for an explicit refresh.
-                // MacPorts can rebuild its own base, so it is never automatic.
-                let refresh = Operation::Refresh {
-                    backend: source.to_string(),
-                };
+                // MacPorts' refresh can update MacPorts itself, and a check
+                // never installs anything.
                 source.as_str() != "macports"
-                    && pkgdeck_core::batch::protected_commands(&refresh)
-                        .is_ok_and(|commands| commands.is_empty())
                     && catalog.iter().any(|row| {
                         row["source"].as_str() == Some(source.as_str())
                             && row["available"] == true
@@ -6122,53 +6100,6 @@ impl ffi::PackageController {
     /// re-resolved against the current package list: stale rows (moved on
     /// or vanished while streaming) are skipped, never guessed. An empty
     /// resolution clears any pending confirmation and says so in status.
-    /// Refresh the package lists of `sources`, comma-joined ids, with one
-    /// review: those the catalog says are there and can refresh.
-    pub fn propose_refresh(mut self: Pin<&mut Self>, sources: QString) {
-        let sources = sources.to_string();
-        let wanted: Vec<&str> = sources.split(',').map(str::trim).collect();
-        let catalog: Vec<Value> =
-            serde_json::from_str(&self.source_catalog().to_string()).unwrap_or_default();
-        let operations: Vec<Operation> = catalog
-            .iter()
-            .filter(|row| {
-                row["available"] == true
-                    && row["capabilities"]
-                        .as_array()
-                        .is_some_and(|all| all.iter().any(|c| c == "refresh"))
-            })
-            .filter_map(|row| row["source"].as_str())
-            .filter(|source| wanted.contains(source))
-            .map(|backend| Operation::Refresh {
-                backend: backend.into(),
-            })
-            .collect();
-        if operations.is_empty() {
-            return;
-        }
-        let names: Vec<String> = operations
-            .iter()
-            .map(|operation| source_display_name(operation.backend()))
-            .collect();
-        let count = operations.len();
-        let noun = if count == 1 { "source" } else { "sources" };
-        let body = format!(
-            "Downloads the latest package lists for {}.\nSome may ask for your password.",
-            names.join(", ")
-        );
-        self.as_mut().set_confirmation_data(encoded(json!({
-            "action": "Refresh",
-            "body": body,
-            "summary": format!("Refresh {count} {noun}"),
-            "items": operations.iter().map(|operation| json!({
-                "icon_name": operation.backend(),
-                "title": source_display_name(operation.backend()),
-            })).collect::<Vec<_>>(),
-        })));
-        self.as_mut()
-            .set_confirmation(format!("Refresh {count} {noun}?\n\n{body}").as_str().into());
-        self.rust_mut().pending = Some(refresh_job(operations));
-    }
     pub fn propose_clean_checked(mut self: Pin<&mut Self>, identities: QString) {
         let wanted: Vec<CleanupId> =
             serde_json::from_str(&identities.to_string()).unwrap_or_default();
@@ -18159,12 +18090,18 @@ mod tests {
         ctl.as_mut().check_for_updates("snap,macports,apt".into());
         let job = &ctl.rust().worker.as_ref().unwrap().job;
         let (ops, sources) = expect!(job, Job::CheckUpdates(ops, sources) => (ops, sources));
-        // Snap's refresh only lists snaps, so it runs; apt would prompt and waits.
+        // Snap's refresh only lists snaps, and APT's only fetches its lists.
+        // MacPorts' could update MacPorts, so it keeps its ports tree.
         assert_eq!(
             ops,
-            &[Operation::Refresh {
-                backend: "snap".into()
-            }]
+            &[
+                Operation::Refresh {
+                    backend: "apt".into()
+                },
+                Operation::Refresh {
+                    backend: "snap".into()
+                }
+            ]
         );
         assert_eq!(sources, &["apt", "macports", "snap"]);
         settle(&mut ctl);
@@ -18438,7 +18375,10 @@ mod tests {
                 backend: "flatpak".into(),
             },
         ];
-        assert_eq!(Job::RefreshAll(operations.clone()).operations(), operations);
+        assert_eq!(
+            Job::CheckUpdates(operations.clone(), vec![]).operations(),
+            operations
+        );
         let mut controller = synthetic_controller();
         let mut ctl = controller.pin_mut();
         ctl.as_mut().apply(Ok(Payload::CheckedUpdates(
@@ -18488,10 +18428,9 @@ mod tests {
                     let expected: Vec<_> = ids
                         .iter()
                         .enumerate()
-                        // Elevated refreshes (apt) never run in a check.
-                        .filter(|(i, id)| {
-                            chosen & available & refresh & (1 << i) != 0 && **id != "apt"
-                        })
+                        // APT refreshes too, through PackageKit or with
+                        // the password.
+                        .filter(|(i, _)| chosen & available & refresh & (1 << i) != 0)
                         .map(|(_, id)| Operation::Refresh {
                             backend: (*id).into(),
                         })
@@ -18663,97 +18602,10 @@ mod tests {
     }
 
     #[test]
-    fn refreshing_sources_reviews_only_those_that_can_refresh() {
-        let mut controller = ffi::create_controller();
-        let mut controller = controller.pin_mut();
-        controller.as_mut().set_source_catalog(
-            json!([
-                {"source": "apt", "available": true, "capabilities": ["installed", "refresh"]},
-                {"source": "npm", "available": true, "capabilities": ["installed"]},
-                {"source": "dnf", "available": false, "capabilities": ["refresh"]},
-                {"source": "flatpak", "available": true, "capabilities": ["refresh"]},
-                {"source": "homebrew", "available": true, "capabilities": ["refresh"]},
-            ])
-            .to_string()
-            .into(),
-        );
-        // Nothing that can refresh: no review at all.
-        controller
-            .as_mut()
-            .propose_refresh("npm,dnf,unknown".into());
-        assert!(controller.rust().pending.is_none());
-        assert_eq!(controller.confirmation().to_string(), "");
-        controller
-            .as_mut()
-            .propose_refresh("flatpak, apt,npm,dnf".into());
+    fn a_refresh_batch_counts_source_refreshes() {
         let refresh = |backend: &str| Operation::Refresh {
             backend: backend.into(),
         };
-        assert!(matches!(
-            &controller.rust().pending,
-            Some(Job::RefreshAll(operations)) if *operations == [refresh("apt"), refresh("flatpak")]
-        ));
-        let data: Value =
-            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
-        assert_eq!(data["summary"], "Refresh 2 sources");
-        let titles: Vec<_> = data["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| {
-                (
-                    item["title"].as_str().unwrap(),
-                    item["icon_name"].as_str().unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(titles, [("APT", "apt"), ("Flatpak", "flatpak")]);
-        assert!(data["details"].is_null());
-        assert!(data["body"].as_str().unwrap().contains("for APT, Flatpak."));
-        assert!(controller
-            .confirmation()
-            .to_string()
-            .starts_with("Refresh 2 sources?"));
-        controller.as_mut().propose_refresh("homebrew".into());
-        let data: Value =
-            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
-        assert_eq!(data["summary"], "Refresh 1 source");
-        assert!(matches!(
-            &controller.rust().pending,
-            Some(Job::Write(operation, None)) if *operation == refresh("homebrew")
-        ));
-        // A refresh batch writes, and Retry runs only the sources that failed.
-        let job = Job::RefreshAll(vec![refresh("apt"), refresh("flatpak")]);
-        assert!(job.writes());
-        let retry = retry_job(
-            &job,
-            &Ok(Payload::Batch(
-                String::new(),
-                vec![Outcome::Finished, Outcome::Failed],
-            )),
-        );
-        assert!(
-            matches!(retry, Some(Job::Write(operation, None)) if operation == refresh("flatpak"))
-        );
-        let three = Job::RefreshAll(vec![refresh("apt"), refresh("flatpak"), refresh("snap")]);
-        let retry = retry_job(
-            &three,
-            &Ok(Payload::Batch(
-                String::new(),
-                vec![Outcome::Finished, Outcome::Failed, Outcome::Failed],
-            )),
-        );
-        assert!(
-            matches!(retry, Some(Job::RefreshAll(operations)) if operations == [refresh("flatpak"), refresh("snap")])
-        );
-        assert!(retry_job(
-            &job,
-            &Ok(Payload::Batch(
-                String::new(),
-                vec![Outcome::Finished, Outcome::Finished]
-            ))
-        )
-        .is_none());
         // Its status line counts refreshes.
         let ran = std::sync::Arc::default();
         let mut engine = Engine::default();

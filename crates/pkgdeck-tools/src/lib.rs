@@ -380,7 +380,8 @@ impl Desktop {
             "install" => ("Return", "alt+i"),
             "remove" => ("ctrl+d", "alt+r"),
             "upgrade" => ("ctrl+u", "alt+u"),
-            "refresh" => ("ctrl+m", "alt+r"),
+            // Check for updates refreshes first, with no review.
+            "refresh" => ("ctrl+r", ""),
             _ => panic!("unknown operation"),
         };
         let started = || {
@@ -395,7 +396,7 @@ impl Desktop {
         // Each try starts over from the search: a slow query can leave
         // nothing selected, and resending the keys alone can't fix that.
         for attempt in 1.. {
-            // Refresh sources lives on Updates; open it and let it load first.
+            // Check for updates lives on Updates; open it and let it load first.
             if op == "refresh" {
                 self.key("ctrl+3");
                 self.settle(Duration::from_secs(30));
@@ -403,7 +404,9 @@ impl Desktop {
                 self.search(name);
             }
             self.key(propose);
-            self.key(confirm);
+            if !confirm.is_empty() {
+                self.key(confirm);
+            }
             let wait = Instant::now() + Duration::from_secs(15);
             while !started() && Instant::now() < wait {
                 sleep(Duration::from_millis(50));

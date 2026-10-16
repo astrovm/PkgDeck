@@ -241,6 +241,13 @@ pub trait Backend: Send {
     fn refresh_update_index(&mut self, _cancel: &Cancellation) -> Result<(), EngineError> {
         Ok(())
     }
+    /// Refresh the package lists without asking for a password, where the
+    /// system has a way: PackageKit for APT, Pacman and Zypper, DNF's own
+    /// cache for the user. `Ok(false)` leaves it to [`Operation::Refresh`],
+    /// which may need one.
+    fn refresh_without_password(&mut self, _cancel: &Cancellation) -> Result<bool, EngineError> {
+        Ok(false)
+    }
     /// Failures from skipped portions of the most recent successful search or
     /// installed query. These accompany usable rows, but prevent the source
     /// from being treated as complete. Cached queries must retain their errors.
@@ -1278,7 +1285,40 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Result<OperationOutcome, EngineError> {
+        if let Some(result) = self.refresh_without_password(operation, cancel, events) {
+            return result;
+        }
         self.execute_started(operation, cancel, events, false)
+    }
+
+    /// A refresh the system can do without a password, done that way, with
+    /// its events. `None` for every other operation, and for refreshes
+    /// that need the usual, authorized run.
+    fn refresh_without_password(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Option<Result<OperationOutcome, EngineError>> {
+        let Operation::Refresh { backend } = operation else {
+            return None;
+        };
+        if cancel.requested() {
+            return None;
+        }
+        let ready = self.ready(backend, Capability::Refresh, cancel).ok()?;
+        let result = match ready.refresh_without_password(cancel) {
+            Ok(false) => return None,
+            Ok(true) => Ok(OperationOutcome::default()),
+            Err(error) => Err(error),
+        };
+        events(Event::Started(operation.clone()));
+        crate::cache::invalidate(backend);
+        events(Event::Finished {
+            operation: operation.clone(),
+            result: result.clone(),
+        });
+        Some(result)
     }
 
     fn execute_started(
@@ -1418,13 +1458,37 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Vec<Result<OperationOutcome, EngineError>> {
+        // Refreshes that need no password run first, so the rest only ask
+        // for one if they still need it.
+        let done: Vec<_> = operations
+            .iter()
+            .map(|operation| self.refresh_without_password(operation, cancel, events))
+            .collect();
+        let rest: Vec<Operation> = operations
+            .iter()
+            .zip(&done)
+            .filter(|(_, done)| done.is_none())
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        let mut ran = self.execute_authorized(&rest, cancel, events).into_iter();
+        done.into_iter()
+            .map(|done| done.unwrap_or_else(|| ran.next().unwrap_or(Err(EngineError::Cancelled))))
+            .collect()
+    }
+
+    fn execute_authorized(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
         if operations.is_empty() {
             return vec![];
         }
         if self.batch_authorization.is_none() {
             return operations
                 .iter()
-                .map(|operation| self.execute(operation, cancel, events))
+                .map(|operation| self.execute_started(operation, cancel, events, false))
                 .collect();
         }
         let checked: Vec<_> = operations
@@ -1462,7 +1526,7 @@ impl Engine {
         if !protected {
             return operations
                 .iter()
-                .map(|operation| self.execute(operation, cancel, events))
+                .map(|operation| self.execute_started(operation, cancel, events, false))
                 .collect();
         }
         let (host, authorization) = self.batch_authorization.clone().expect("configured above");
@@ -1731,6 +1795,86 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
         assert!(results.iter().all(Result::is_ok));
         assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_refresh_without_a_password_never_authorizes_the_batch() {
+        struct Lists {
+            without_password: Result<bool, EngineError>,
+            writes: Arc<AtomicUsize>,
+        }
+        impl Backend for Lists {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Refresh]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn refresh_without_password(&mut self, _: &Cancellation) -> Result<bool, EngineError> {
+                self.without_password.clone()
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutcome::default())
+            }
+        }
+        let refresh = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        let cancel = Cancellation::default();
+        let failed = EngineError::Execution(ExecutionError::Invalid("no network".into()));
+        for (without_password, writes, succeeds) in [
+            (Ok(true), 0, true),
+            (Err(failed), 0, false),
+            (Ok(false), 1, true),
+        ] {
+            let needs_root = without_password == Ok(false);
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut engine = Engine::default();
+            engine
+                .register(Lists {
+                    without_password,
+                    writes: count.clone(),
+                })
+                .unwrap();
+            // An authorized batch would ask for the password first; one that
+            // still needs root runs here without it.
+            if !needs_root {
+                engine.enable_batch_authorization(
+                    Host::new(Runtime::Native, Default::default()),
+                    Authorization::Polkit,
+                );
+            }
+            let mut events = Vec::new();
+            let results =
+                engine.execute_batch(std::slice::from_ref(&refresh), &cancel, &mut |event| {
+                    events.push(event)
+                });
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is_ok(), succeeds);
+            assert_eq!(count.load(Ordering::SeqCst), writes);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Event::Progress { progress: Progress::Message(text), .. }
+                    if text.contains("Authorizing")
+            )));
+            assert!(matches!(&events[0], Event::Started(op) if *op == refresh));
+            assert!(
+                matches!(events.last(), Some(Event::Finished { operation, .. }) if *operation == refresh)
+            );
+            // A single refresh goes the same way.
+            let single = engine.execute(&refresh, &cancel, &mut |_| {});
+            assert_eq!(single.is_ok(), succeeds);
+            assert_eq!(count.load(Ordering::SeqCst), writes * 2);
+        }
     }
 
     #[test]

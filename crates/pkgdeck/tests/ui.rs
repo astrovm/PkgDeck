@@ -891,29 +891,28 @@ fn refresh_one_header_refresh_stays_visible_and_uses_the_same_shortcut() {
 }
 
 #[test]
-fn refresh_sources_is_reviewed_and_separate_from_the_routine_check() {
+fn one_button_refreshes_the_sources_and_checks_for_updates() {
     let mut h = harness(with_sources(app()));
     h.state_mut().1.page = Page::Updates;
     h.run_steps(3);
-    assert_eq!(
-        h.query_all_by_role_and_label(Role::Button, "Refresh sources")
-            .count(),
-        1
+    assert!(h
+        .query_by_role_and_label(Role::Button, "Refresh sources")
+        .is_none());
+    // The old shortcut for a separate refresh does nothing now.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::R,
     );
-    // The refresh shortcut asks for review instead of starting a silent refresh.
-    // Linux uses Ctrl+M; macOS uses Shift+Cmd+R (see ui/mod.rs).
-    if cfg!(target_os = "macos") {
-        h.key_press_modifiers(
-            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-            egui::Key::R,
-        );
-    } else {
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
-    }
     h.run_steps(2);
-    assert!(h.state().1.confirmation.is_some());
     assert!(!h.state().1.checking_updates);
-    assert!(!h.state().1.busy);
+    assert!(h.state().1.confirmation.is_none());
+    // One click refreshes and checks, with no review first.
+    h.get_by_role_and_label(Role::Button, "Check for updates")
+        .click();
+    h.run_steps(2);
+    assert!(h.state().1.checking_updates);
+    assert!(h.state().1.confirmation.is_none());
 }
 
 #[test]

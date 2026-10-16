@@ -77,6 +77,7 @@ fi
 grep -Fq -- '--share=network' "$work/release.yml"
 grep -Fq -- '--talk-name=org.kde.StatusNotifierWatcher' "$work/release.yml"
 grep -Fq -- '--talk-name=org.freedesktop.Notifications' "$work/release.yml"
+grep -Fq -- '--system-talk-name=org.freedesktop.PackageKit' "$work/release.yml"
 grep -Fq 'cargo build --release --locked' "$work/release.yml"
 grep -Fq "$(printf 'synthetic archive\n' | sha256sum | cut -d' ' -f1)" "$work/release.yml"
 

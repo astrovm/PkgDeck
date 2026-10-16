@@ -312,6 +312,16 @@ pub trait Transport: Send {
             "Software Sources editor unavailable".into(),
         ))
     }
+    /// Refresh `source`'s lists through PackageKit, without a password.
+    /// `Ok(false)` when PackageKit can't; fixtures never refresh there.
+    fn packagekit_refresh(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<bool, ExecutionError> {
+        let _ = (source, cancel);
+        Ok(false)
+    }
     // Fixtures only implement the managers their adapter drives; the native
     // transport overrides every one of these.
     fn apt_query(
@@ -755,6 +765,14 @@ impl NativeTransport {
 }
 
 impl Transport for NativeTransport {
+    #[cfg(target_os = "linux")]
+    fn packagekit_refresh(
+        &self,
+        source: &str,
+        cancel: &Cancellation,
+    ) -> Result<bool, ExecutionError> {
+        crate::packagekit::refresh(source, cancel)
+    }
     fn system_flatpak_writable(&self) -> bool {
         self.host.system_flatpak_available()
     }
@@ -950,6 +968,8 @@ pub struct Apt<T = NativeTransport> {
     /// (`pkd info`) come from here instead of a second helper run. Read
     /// once; changes clear it.
     looked_up: Vec<PackageDetails>,
+    /// Set during an update check, which refreshes the lists first.
+    update_check: Option<u64>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -958,6 +978,7 @@ impl<T> Apt<T> {
             desktop_entries: None,
             components: None,
             looked_up: vec![],
+            update_check: None,
         }
     }
 }
@@ -2228,6 +2249,25 @@ impl<T: Transport> Backend for Apt<T> {
     fn id(&self) -> &str {
         "apt"
     }
+    fn has_update_index(&self) -> bool {
+        true
+    }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        if self.update_check.is_none() {
+            return Ok(());
+        }
+        self.refresh_without_password(cancel).map(|_| ())
+    }
+    fn refresh_without_password(&mut self, cancel: &Cancellation) -> Result<bool, EngineError> {
+        let refreshed = self.transport.packagekit_refresh("apt", cancel)?;
+        if refreshed {
+            self.looked_up.clear();
+        }
+        Ok(refreshed)
+    }
     fn capabilities(&self) -> &[Capability] {
         CLEAN_CAPABILITIES
     }
@@ -3366,10 +3406,29 @@ impl ManagerKind {
         match self {
             Self::Snap => Some(("snap", &["refresh", "--list"])),
             Self::Apk => Some(("apk", &["list", "--upgradable"])),
+            // -C reads the cache a check just refreshed; without one, it's
+            // asked again online.
+            Self::Dnf => Some((
+                "dnf",
+                &[
+                    "-C",
+                    "--quiet",
+                    "repoquery",
+                    "--upgrades",
+                    "--latest-limit",
+                    "1",
+                    "--queryformat",
+                    "%{name}|%{arch}|%{version}-%{release}\n",
+                ],
+            )),
+            Self::Pacman => Some(("pacman", &["-Qu"])),
+            Self::Zypper => Some((
+                "zypper",
+                &["--quiet", "--xmlout", "--non-interactive", "list-updates"],
+            )),
             // -M reads the repository index into memory; -n only reports.
             Self::Xbps => Some(("xbps-install", &["-Mun"])),
             Self::MacPorts => Some(("port", &["-q", "outdated"])),
-            _ => None,
         }
     }
     fn read_args(self, installed: bool, query: &str) -> Vec<OsString> {
@@ -3488,6 +3547,30 @@ impl ManagerKind {
     }
 }
 
+/// Package updates from `zypper --xmlout list-updates`, by name. Patches
+/// and products are left out; their packages are listed too.
+fn zypper_updates(xml: &str) -> BTreeMap<String, String> {
+    xml.split("<update ")
+        .skip(1)
+        .filter_map(|entry| {
+            let tag = entry.split_once('>').map_or(entry, |(tag, _)| tag);
+            let attr = |key: &str| {
+                tag.split_once(&format!(" {key}=\""))
+                    .or_else(|| {
+                        tag.strip_prefix(&format!("{key}=\""))
+                            .map(|tail| ("", tail))
+                    })
+                    .and_then(|(_, tail)| tail.split_once('"'))
+                    .map(|(value, _)| value)
+            };
+            (attr("kind")? == "package")
+                .then(|| Some((attr("name")?.to_owned(), attr("edition")?.to_owned())))
+                .flatten()
+                .filter(|(name, edition)| !name.is_empty() && !edition.is_empty())
+        })
+        .collect()
+}
+
 /// `name-1.2.3-r0` into (`name`, `1.2.3-r0`).
 fn apk_pkgver(pkgver: &str) -> Option<(&str, String)> {
     let mut parts = pkgver.rsplitn(3, '-');
@@ -3510,6 +3593,8 @@ pub struct SystemManager<T = NativeTransport> {
     /// name, so the details that follow it (`pkd info`) come from here.
     /// Read once; changes clear it.
     looked_up: Vec<Package>,
+    /// Set during an update check, which refreshes the lists first.
+    update_check: Option<u64>,
 }
 pub type Dnf<T = NativeTransport> = SystemManager<T>;
 pub type Pacman<T = NativeTransport> = SystemManager<T>;
@@ -3521,6 +3606,7 @@ impl<T: Transport> SystemManager<T> {
             kind,
             transport,
             looked_up: vec![],
+            update_check: None,
         }
     }
     pub fn dnf(transport: T) -> Self {
@@ -3569,12 +3655,13 @@ impl<T: Transport> SystemManager<T> {
         let Some((executable, args)) = self.kind.update_args() else {
             return Ok(BTreeMap::new());
         };
-        let result = self.call_with(
-            executable,
-            args.iter().map(OsString::from).collect(),
-            cancel,
-            false,
-        );
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let result = match self.call_with(executable, args.clone(), cancel, false) {
+            Err(EngineError::Execution(ExecutionError::Failed(_))) if args[0] == "-C" => {
+                self.call_with(executable, args[1..].to_vec(), cancel, false)
+            }
+            result => result,
+        };
         let text = match result {
             Ok(done) => String::from_utf8_lossy(&bytes(self.kind.id(), done)?).into_owned(),
             Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
@@ -3583,11 +3670,28 @@ impl<T: Transport> SystemManager<T> {
             Err(error) if matches!(self.kind, ManagerKind::Snap) => return Err(error),
             Err(_) => return Ok(BTreeMap::new()),
         };
+        if matches!(self.kind, ManagerKind::Zypper) {
+            return Ok(zypper_updates(&text));
+        }
         Ok(text
             .lines()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 match self.kind {
+                    ManagerKind::Dnf => {
+                        let fields: Vec<&str> = line.split('|').collect();
+                        match fields[..] {
+                            [name, _, version] if !version.is_empty() => {
+                                Some((name, version.to_owned()))
+                            }
+                            _ => None,
+                        }
+                    }
+                    // "name 1.0-1 -> 1.1-1", with " [ignored]" after the
+                    // ones pacman.conf holds back: an upgrade skips those.
+                    ManagerKind::Pacman if fields.len() == 4 && fields[2] == "->" => {
+                        Some((fields[0], fields[3].to_owned()))
+                    }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
                     ManagerKind::Apk => apk_pkgver(fields.first()?),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
@@ -3948,6 +4052,43 @@ impl<T: Transport> SystemManager<T> {
 impl<T: Transport> Backend for SystemManager<T> {
     fn id(&self) -> &str {
         self.kind.id()
+    }
+    fn has_update_index(&self) -> bool {
+        matches!(
+            self.kind,
+            ManagerKind::Dnf | ManagerKind::Pacman | ManagerKind::Zypper
+        )
+    }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        if self.update_check.is_none() || !self.has_update_index() {
+            return Ok(());
+        }
+        self.refresh_without_password(cancel).map(|_| ())
+    }
+    fn refresh_without_password(&mut self, cancel: &Cancellation) -> Result<bool, EngineError> {
+        let refreshed = match self.kind {
+            // DNF run as the user keeps its own cache, the one PkgDeck reads,
+            // and refreshes it without root. Upgrades refresh the system's.
+            ManagerKind::Dnf => {
+                let args = ["--refresh", "--quiet", "makecache"];
+                bytes(
+                    "dnf",
+                    self.call(args.iter().map(OsString::from).collect(), cancel, false)?,
+                )?;
+                true
+            }
+            ManagerKind::Pacman | ManagerKind::Zypper => {
+                self.transport.packagekit_refresh(self.kind.id(), cancel)?
+            }
+            _ => false,
+        };
+        if refreshed {
+            self.looked_up.clear();
+        }
+        Ok(refreshed)
     }
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
@@ -6619,6 +6760,17 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    fn completion(code: i32, stdout: &str) -> Completion {
+        Completion {
+            code: Some(code),
+            signal: None,
+            stdout: stdout.into(),
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+
     fn brew_run(code: i32, stderr: &str) -> Result<Completion, ExecutionError> {
         let result = Completion {
             code: Some(code),
@@ -6718,6 +6870,201 @@ mod tests {
             );
             assert_eq!(*brew.writes.lock().unwrap(), [true, true], "{backend}");
         }
+    }
+
+    /// A system with PackageKit (or not), whose managers print `listing`
+    /// for any read, and the commands they ran.
+    #[derive(Clone)]
+    struct Kit {
+        packagekit: Result<bool, ExecutionError>,
+        listing: &'static str,
+        ran: Arc<Mutex<Vec<String>>>,
+    }
+    impl Kit {
+        fn new(packagekit: Result<bool, ExecutionError>, listing: &'static str) -> Self {
+            Self {
+                packagekit,
+                listing,
+                ran: Arc::default(),
+            }
+        }
+        fn ran(&self) -> Vec<String> {
+            self.ran.lock().unwrap().clone()
+        }
+    }
+    impl Transport for Kit {
+        fn packagekit_refresh(
+            &self,
+            source: &str,
+            _: &Cancellation,
+        ) -> Result<bool, ExecutionError> {
+            self.ran
+                .lock()
+                .unwrap()
+                .push(format!("packagekit {source}"));
+            self.packagekit.clone()
+        }
+        fn apt_query(
+            &self,
+            mode: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            self.ran.lock().unwrap().push(format!("apt {mode}"));
+            Ok(completion(0, ""))
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = std::iter::once(executable.to_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.ran
+                .lock()
+                .unwrap()
+                .push(if write { format!("root {line}") } else { line });
+            Ok(completion(0, self.listing))
+        }
+    }
+
+    #[test]
+    fn a_check_refreshes_through_packagekit_only_when_armed() {
+        let cancel = Cancellation::default();
+        let kit = Kit::new(Ok(true), "");
+        let mut apt = Apt::new(kit.clone());
+        assert!(apt.has_update_index());
+        // Listing Installed never refreshes.
+        apt.refresh_update_index(&cancel).unwrap();
+        assert!(kit.ran().is_empty());
+        apt.arm_update_check(Some(7));
+        apt.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["packagekit apt"]);
+        for (manager, source) in [
+            (SystemManager::pacman(kit.clone()), "pacman"),
+            (SystemManager::zypper(kit.clone()), "zypper"),
+        ] {
+            let mut manager = manager;
+            kit.ran.lock().unwrap().clear();
+            assert!(manager.has_update_index());
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert_eq!(kit.ran(), [format!("packagekit {source}")]);
+        }
+        // DNF refreshes its own cache as the user, never as root.
+        kit.ran.lock().unwrap().clear();
+        let mut dnf = SystemManager::dnf(kit.clone());
+        dnf.arm_update_check(Some(7));
+        dnf.refresh_update_index(&cancel).unwrap();
+        assert_eq!(kit.ran(), ["dnf --refresh --quiet makecache"]);
+        // The rest have no index of their own to refresh.
+        for mut manager in [
+            SystemManager::apk(kit.clone()),
+            SystemManager::xbps(kit.clone()),
+            SystemManager::snap(kit.clone()),
+            SystemManager::macports(kit.clone()),
+        ] {
+            kit.ran.lock().unwrap().clear();
+            assert!(!manager.has_update_index());
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert!(!manager.refresh_without_password(&cancel).unwrap());
+            assert!(kit.ran().is_empty(), "{}", manager.id());
+        }
+    }
+
+    #[test]
+    fn without_packagekit_a_check_leaves_the_lists_and_a_failure_shows() {
+        let cancel = Cancellation::default();
+        let mut apt = Apt::new(Kit::new(Ok(false), ""));
+        apt.arm_update_check(Some(7));
+        apt.refresh_update_index(&cancel).unwrap();
+        assert!(!apt.refresh_without_password(&cancel).unwrap());
+        let failed = ExecutionError::Invalid("PackageKit: no network".into());
+        let mut pacman = SystemManager::pacman(Kit::new(Err(failed.clone()), ""));
+        pacman.arm_update_check(Some(7));
+        assert_eq!(
+            pacman.refresh_update_index(&cancel),
+            Err(EngineError::Execution(failed))
+        );
+    }
+
+    #[test]
+    fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
+        let cancel = Cancellation::default();
+        let dnf = SystemManager::dnf(Kit::new(
+            Ok(false),
+            "htop|x86_64|3.4.1-1.fc44\nnot a row\n|x86_64|\nless|x86_64|704-4.fc44\n",
+        ));
+        assert_eq!(
+            dnf.updates(&cancel).unwrap(),
+            BTreeMap::from([
+                ("htop".to_owned(), "3.4.1-1.fc44".to_owned()),
+                ("less".to_owned(), "704-4.fc44".to_owned()),
+            ])
+        );
+        let pacman = SystemManager::pacman(Kit::new(
+            Ok(false),
+            "curl 8.22.0-1 -> 8.23.0-1\nlinux 6.1-1 -> 6.2-1 [ignored]\nzlib 1:1.3.2-3 -> 1:1.3.2-4\n",
+        ));
+        // Held back in pacman.conf, the kernel isn't one an upgrade installs.
+        assert_eq!(
+            pacman.updates(&cancel).unwrap(),
+            BTreeMap::from([
+                ("curl".to_owned(), "8.23.0-1".to_owned()),
+                ("zlib".to_owned(), "1:1.3.2-4".to_owned()),
+            ])
+        );
+        let zypper = SystemManager::zypper(Kit::new(
+            Ok(false),
+            r#"<?xml version='1.0'?>
+<stream>
+<update-status version="0.6">
+<update-list>
+<update kind="package" name="openSUSE-build-key" edition="1.0-69.1" arch="x86_64" edition-old="1.0-68.1"><summary>The public gpg keys</summary><description>Keys > 1</description><license/><source url="http://download.opensuse.org/update/tumbleweed/" alias="repo-update"/></update>
+<update kind="patch" name="openSUSE-2026-1" edition="1" arch="noarch"><summary>Fixes</summary></update>
+<update kind="package" name="" edition="2" arch="x86_64"></update>
+</update-list>
+</update-status>
+</stream>
+"#,
+        ));
+        assert_eq!(
+            zypper.updates(&cancel).unwrap(),
+            BTreeMap::from([("openSUSE-build-key".to_owned(), "1.0-69.1".to_owned())])
+        );
+    }
+
+    #[test]
+    fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
+        #[derive(Clone)]
+        struct NoCache(Arc<Mutex<Vec<Vec<OsString>>>>);
+        impl Transport for NoCache {
+            fn system_manager(
+                &self,
+                _: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push(args.to_vec());
+                if args[0] == "-C" {
+                    return Err(ExecutionError::Failed(completion(1, "")));
+                }
+                Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
+            }
+        }
+        let calls = NoCache(Arc::default());
+        let dnf = SystemManager::dnf(calls.clone());
+        assert_eq!(dnf.updates(&Cancellation::default()).unwrap().len(), 1);
+        let calls = calls.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1], calls[0][1..]);
     }
 
     #[test]

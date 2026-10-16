@@ -94,34 +94,6 @@ fn pages_keep_their_own_choice_of_sources() {
 }
 
 #[test]
-fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
-    let mut app = app();
-    app.refresh_sources();
-    assert!(app.confirmation.is_none());
-    app.c().set_source_catalog(
-        json!([
-            {"source": "apt", "available": true, "capabilities": ["installed", "refresh"]},
-            {"source": "npm", "available": true, "capabilities": ["installed"]},
-            {"source": "dnf", "available": false, "capabilities": ["refresh"]},
-        ])
-        .to_string()
-        .into(),
-    );
-    app.react();
-    assert_eq!(app.refreshable_sources(), ["apt"]);
-    app.retained = Some(vec![]);
-    app.refresh_sources();
-    assert!(app.confirmation.is_none());
-    app.retained = None;
-    app.refresh_sources();
-    assert!(app.confirmation.is_some());
-    // Only what Updates shows.
-    app.page_sources
-        .insert(Page::Updates, HashSet::from(["npm".to_owned()]));
-    assert!(app.refreshable_sources().is_empty());
-}
-
-#[test]
 fn refresh_the_page_refresh_checks_updates_once_and_retains_rows_until_it_finishes() {
     let mut app = app();
     app.page = Page::Updates;
