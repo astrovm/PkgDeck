@@ -254,11 +254,20 @@ pub(crate) mod tests {
     /// A bundle with these header entries, shaped like `flatpak
     /// build-bundle` writes them, and `tail` standing in for the rest.
     pub(crate) fn bundle(entries: &[(&str, &str, Vec<u8>)], tail: usize) -> Vec<u8> {
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|(key, ty, value)| entry(key, ty, value))
+            .collect();
+        framed_bundle(&entries, tail)
+    }
+
+    /// A bundle of already framed `{sv}` entries.
+    fn framed_bundle(entries: &[Vec<u8>], tail: usize) -> Vec<u8> {
         let mut dict = Vec::new();
         let mut ends = Vec::new();
-        for (key, ty, value) in entries {
+        for entry in entries {
             pad(&mut dict);
-            dict.extend(entry(key, ty, value));
+            dict.extend(entry);
             ends.push(dict.len() as u64);
         }
         let dict = framed(&dict, &ends);
@@ -348,6 +357,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn offsets_widen_with_the_container() {
+        for (len, size) in [
+            (0, 0),
+            (1, 1),
+            (0xff, 1),
+            (0x100, 2),
+            (0xffff, 2),
+            (0x1_0000, 4),
+            (0xffff_ffff, 4),
+            (0x1_0000_0000, 8),
+            (u64::MAX, 8),
+        ] {
+            assert_eq!(offset_size(len), size, "{len:#x}");
+        }
+    }
+
+    #[test]
     fn releases_are_read_only_from_a_release_version() {
         for (xml, expected) in [
             (r#"<releases><release version="3" /></releases>"#, Some("3")),
@@ -384,6 +410,15 @@ pub(crate) mod tests {
         assert!(parse(&bundle(&[("ref", "ay", b"app/a/b/c".to_vec())], 0)).is_err());
         let unterminated = bundle(&[("ref", "s", b"app/a/b/c".to_vec())], 0);
         assert!(parse(&unterminated).is_err());
+        // A ref too long to be one is not read.
+        let long = format!("app/{}/x86_64/stable\0", "a".repeat(2000));
+        assert!(parse(&bundle(&[("ref", "s", long.into_bytes())], 0)).is_err());
+        // A value with no zero byte before its type.
+        let mut body = b"ref\0".to_vec();
+        pad(&mut body);
+        body.extend_from_slice(b"app/a/b/cs");
+        let untyped = framed_bundle(&[framed(&body, &[4])], 0);
+        assert!(parse(&untyped).is_err());
         for bytes in [&b""[..], b"x", b"\x00", b"flatpak\x00\x01"] {
             assert!(parse(bytes).is_err());
         }
