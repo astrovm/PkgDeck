@@ -45,19 +45,26 @@ pub fn backend_for(source: &str) -> Option<&'static str> {
 /// `Ok(false)` when PackageKit can't do it without a password; the caller
 /// then refreshes the usual way.
 pub fn refresh(source: &str, cancel: &Cancellation) -> Result<bool, ExecutionError> {
-    let Some(backend) = backend_for(source) else {
-        return Ok(false);
-    };
     // In a container, the bus is the host's, and so are its lists.
-    if std::path::Path::new("/run/.containerenv").exists()
-        || std::path::Path::new("/.dockerenv").exists()
-    {
-        return Ok(false);
+    let contained = ["/run/.containerenv", "/.dockerenv"]
+        .iter()
+        .any(|marker| std::path::Path::new(marker).exists());
+    refresh_with(source, cancel, contained, Connection::system)
+}
+/// [`refresh`], with the bus from `connect` unless `contained`.
+fn refresh_with(
+    source: &str,
+    cancel: &Cancellation,
+    contained: bool,
+    connect: impl FnOnce() -> zbus::Result<Connection>,
+) -> Result<bool, ExecutionError> {
+    match (backend_for(source), contained) {
+        (Some(backend), false) => match connect() {
+            Ok(bus) => refresh_on(&bus, backend, cancel, TIMEOUT),
+            Err(_) => Ok(false),
+        },
+        _ => Ok(false),
     }
-    let Ok(bus) = Connection::system() else {
-        return Ok(false);
-    };
-    refresh_on(&bus, backend, cancel, TIMEOUT)
 }
 
 /// [`refresh`] over `bus`, giving up after `timeout`.
@@ -89,8 +96,8 @@ pub(crate) fn refresh_on(
     let (sender, outcome) = mpsc::channel();
     std::thread::spawn(move || {
         let mut details = String::new();
-        for message in signals {
-            let Ok(message) = message else { break };
+        // Ends when the bus closes, which drops `sender`.
+        for message in signals.map_while(Result::ok) {
             let header = message.header();
             match header.member().map(|member| member.as_str()) {
                 Some("ErrorCode") => {
@@ -109,7 +116,6 @@ pub(crate) fn refresh_on(
                 _ => {}
             }
         }
-        let _ = sender.send((0, "PackageKit stopped answering".into()));
     });
     call::<_, ()>(
         bus,
@@ -219,6 +225,10 @@ mod tests {
         finish: Option<(u32, Option<&'static str>)>,
         /// Whether `Cancel` ends the refresh.
         honours_cancel: bool,
+        /// A method that answers with an error.
+        fails: &'static str,
+        /// Whether the daemon goes away once the refresh starts.
+        hangs_up: bool,
     }
 
     impl Default for Daemon {
@@ -228,6 +238,8 @@ mod tests {
                 authorize: AUTHORIZED,
                 finish: Some((SUCCESS, None)),
                 honours_cancel: true,
+                fails: "",
+                hangs_up: false,
             }
         }
     }
@@ -254,14 +266,26 @@ mod tests {
             let finish = |exit: u32| {
                 let _ = server.emit_signal(None::<()>, TID, TRANSACTION, "Finished", &(exit, 5u32));
             };
-            for message in messages {
-                let Ok(message) = message else { break };
+            let calls = messages
+                .map_while(Result::ok)
+                .filter(|message| message.header().message_type() == Type::MethodCall);
+            for message in calls {
                 let header = message.header();
-                if header.message_type() != Type::MethodCall {
-                    continue;
-                }
                 let member = header.member().unwrap().to_string();
                 seen.lock().unwrap().push(member.clone());
+                if member == daemon.fails {
+                    let _ = server.reply_error(
+                        &header,
+                        "org.freedesktop.DBus.Error.Failed",
+                        &"refused",
+                    );
+                    continue;
+                }
+                if member == "RefreshCache" && daemon.hangs_up {
+                    let _ = server.reply(&header, &());
+                    // Dropping the last handle closes the connection.
+                    return;
+                }
                 let _ = match member.as_str() {
                     "Get" => server.reply(&header, &zbus::zvariant::Value::from(daemon.backend)),
                     "CanAuthorize" => server.reply(&header, &daemon.authorize),
@@ -270,6 +294,14 @@ mod tests {
                     }
                     "RefreshCache" => {
                         let replied = server.reply(&header, &());
+                        // Progress the client doesn't follow.
+                        let _ = server.emit_signal(
+                            None::<()>,
+                            TID,
+                            TRANSACTION,
+                            "ItemProgress",
+                            &("id", 1u32, 50u32),
+                        );
                         if let Some((exit, error)) = daemon.finish {
                             if let Some(error) = error {
                                 let _ = server.emit_signal(
@@ -405,6 +437,53 @@ mod tests {
             Duration::from_millis(50),
         );
         assert_eq!(result, Err(ExecutionError::TimedOut));
+    }
+
+    #[test]
+    fn outside_a_container_the_system_bus_is_asked() {
+        let cancel = Cancellation::default();
+        let fake = || Ok(serve(Daemon::default()).0);
+        assert_eq!(refresh_with("apt", &cancel, false, fake), Ok(true));
+        // In a container the bus is the host's, and so are its lists.
+        let never = || -> zbus::Result<Connection> { panic!("asked the bus") };
+        assert_eq!(refresh_with("apt", &cancel, true, never), Ok(false));
+        assert_eq!(refresh_with("flatpak", &cancel, false, never), Ok(false));
+        let absent = || Err(zbus::Error::Unsupported);
+        assert_eq!(refresh_with("apt", &cancel, false, absent), Ok(false));
+        // Sources PackageKit doesn't refresh never reach the bus.
+        assert_eq!(refresh("flatpak", &cancel), Ok(false));
+    }
+
+    #[test]
+    fn a_refused_step_or_a_refresh_cancelled_elsewhere_ends_it() {
+        let cancel = Cancellation::default();
+        for step in ["SetHints", "RefreshCache"] {
+            let (bus, _) = serve(Daemon {
+                fails: step,
+                ..Daemon::default()
+            });
+            let error = refresh_on(&bus, "apt", &cancel, TIMEOUT).unwrap_err();
+            assert!(error.to_string().contains("refused"), "{step}: {error}");
+        }
+        // Someone else cancelled it, say in another app.
+        let (bus, _) = serve(Daemon {
+            finish: Some((CANCELLED, None)),
+            ..Daemon::default()
+        });
+        assert_eq!(
+            refresh_on(&bus, "apt", &cancel, TIMEOUT),
+            Err(ExecutionError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_hangs_up_is_a_failure() {
+        let (bus, _) = serve(Daemon {
+            hangs_up: true,
+            ..Daemon::default()
+        });
+        let error = refresh_on(&bus, "apt", &Cancellation::default(), TIMEOUT).unwrap_err();
+        assert!(error.to_string().contains("stopped answering"), "{error}");
     }
 
     #[test]

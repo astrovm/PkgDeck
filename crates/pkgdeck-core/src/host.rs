@@ -2444,12 +2444,19 @@ mod boundary_tests {
         executable(&root.join("broken"), "echo unreachable >&2; exit 3");
         // Its PATH is only this folder.
         executable(&root.join("slow"), "exec /bin/sleep 30");
+        executable(
+            &root.join("chatty"),
+            "exec /usr/bin/head -c 1048576 /dev/zero",
+        );
         let host = host(Runtime::Native, &[("PATH", &root)]);
         let cancel = Cancellation::default();
         let done = host
             .refresh_index("fetch", &["-Sy".into()], &cancel)
             .unwrap();
         assert_eq!(done.stdout, b"fetched\n-Sy\n");
+        // A long download log is kept whole.
+        let chatty = host.refresh_index("chatty", &[], &cancel).unwrap();
+        assert_eq!((chatty.stdout.len(), chatty.truncated), (1 << 20, false));
         assert!(matches!(
             host.refresh_index("broken", &[], &cancel),
             Err(ExecutionError::Failed(result)) if result.code == Some(3) && result.stderr == b"unreachable\n"

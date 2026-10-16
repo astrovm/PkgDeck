@@ -3507,14 +3507,14 @@ impl ManagerKind {
             _ => self.executable(),
         }
     }
-    /// Where the manager lists pending updates, if it can without writing.
-    fn update_args(self) -> Option<(&'static str, &'static [&'static str])> {
+    /// Where the manager lists pending updates, without writing.
+    fn update_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
-            Self::Snap => Some(("snap", &["refresh", "--list"])),
-            Self::Apk => Some(("apk", &["list", "--upgradable"])),
+            Self::Snap => ("snap", &["refresh", "--list"]),
+            Self::Apk => ("apk", &["list", "--upgradable"]),
             // -C reads the cache a check just refreshed; without one, it's
             // asked again online.
-            Self::Dnf => Some((
+            Self::Dnf => (
                 "dnf",
                 &[
                     "-C",
@@ -3526,15 +3526,15 @@ impl ManagerKind {
                     "--queryformat",
                     "%{name}|%{arch}|%{version}-%{release}\n",
                 ],
-            )),
-            Self::Pacman => Some(("pacman", &["-Qu"])),
-            Self::Zypper => Some((
+            ),
+            Self::Pacman => ("pacman", &["-Qu"]),
+            Self::Zypper => (
                 "zypper",
                 &["--quiet", "--xmlout", "--non-interactive", "list-updates"],
-            )),
+            ),
             // -M reads the repository index into memory; -n only reports.
-            Self::Xbps => Some(("xbps-install", &["-Mun"])),
-            Self::MacPorts => Some(("port", &["-q", "outdated"])),
+            Self::Xbps => ("xbps-install", &["-Mun"]),
+            Self::MacPorts => ("port", &["-q", "outdated"]),
         }
     }
     fn read_args(self, installed: bool, query: &str) -> Vec<OsString> {
@@ -3760,9 +3760,7 @@ impl<T: Transport> SystemManager<T> {
     /// Pending updates by package name. An unavailable listing leaves every
     /// row's update status as it was rather than failing the inventory.
     fn updates(&self, cancel: &Cancellation) -> Result<BTreeMap<String, String>, EngineError> {
-        let Some((executable, args)) = self.kind.update_args() else {
-            return Ok(BTreeMap::new());
-        };
+        let (executable, args) = self.kind.update_args();
         let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
         // A check's own copy of the index, while it's newer.
         if let Some(dir) = self.transport.private_index(self.kind.id()) {
@@ -4185,10 +4183,7 @@ impl<T: Transport> Backend for SystemManager<T> {
         self.update_check = token;
     }
     fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
-        if self.update_check.is_none()
-            || !self.has_update_index()
-            || self.refresh_without_password(cancel)?
-        {
+        if self.update_check.is_none() || self.refresh_without_password(cancel)? {
             return Ok(());
         }
         // Without PackageKit, the check fills its own copy of the index.
@@ -4235,6 +4230,7 @@ impl<T: Transport> Backend for SystemManager<T> {
                     "--upgradable".into(),
                 ],
             ),
+            // Nothing else keeps one.
             _ => return Ok(()),
         };
         self.looked_up.clear();
@@ -7136,16 +7132,6 @@ mod tests {
                 .push(format!("packagekit {source}"));
             self.packagekit.clone()
         }
-        fn apt_query(
-            &self,
-            mode: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            self.ran.lock().unwrap().push(format!("apt {mode}"));
-            Ok(completion(0, ""))
-        }
         fn system_manager(
             &self,
             executable: &str,
@@ -7266,6 +7252,17 @@ mod tests {
             kit.ran(),
             ["fetch apk --cache-dir /c/apk --update-cache list --upgradable"]
         );
+        // The rest keep no copy.
+        for mut manager in [
+            SystemManager::xbps(kit.clone()),
+            SystemManager::snap(kit.clone()),
+            SystemManager::macports(kit.clone()),
+        ] {
+            kit.clear();
+            manager.arm_update_check(Some(7));
+            manager.refresh_update_index(&cancel).unwrap();
+            assert!(kit.ran().is_empty(), "{}", manager.id());
+        }
         // Not armed: Installed never refreshes anything.
         kit.clear();
         let mut pacman = SystemManager::pacman(kit.clone());
@@ -7360,7 +7357,61 @@ mod tests {
             }
             let _ = Apt::new(kit.clone()).apt_upgrade_plan(&cancel);
             assert_eq!(kit.ran(), expected);
+            // The others keep their own: DNF's cache is the user's already.
+            kit.clear();
+            SystemManager::xbps(kit.clone()).updates(&cancel).unwrap();
+            assert_eq!(kit.ran(), ["xbps-install -Mun"]);
         }
+    }
+
+    #[test]
+    fn a_transport_that_overrides_nothing_refreshes_nothing() {
+        struct Bare;
+        impl Transport for Bare {}
+        let cancel = Cancellation::default();
+        assert_eq!(Bare.packagekit_refresh("apt", &cancel), Ok(false));
+        assert_eq!(Bare.private_index("apt"), None);
+        assert!(Bare
+            .prepare_private_index("apt", &cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            Bare.refresh_index("dnf", &[], &cancel),
+            Err(ExecutionError::Disabled("dnf not found".into()))
+        );
+    }
+
+    #[test]
+    fn the_native_transport_refreshes_indexes_as_the_user() {
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-native-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fetch = root.join("fetch");
+        std::fs::write(&fetch, "#!/bin/sh\necho fetched\n").unwrap();
+        std::fs::set_permissions(&fetch, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let native = NativeTransport {
+            host: Host::new(
+                crate::host::Runtime::Native,
+                [(OsString::from("PATH"), root.clone().into_os_string())].into(),
+            ),
+            authorization: Authorization::Polkit,
+        };
+        let cancel = Cancellation::default();
+        assert_eq!(
+            native.refresh_index("fetch", &[], &cancel).unwrap().stdout,
+            b"fetched\n"
+        );
+        // DNF keeps its own cache, not one of PkgDeck's copies.
+        assert_eq!(native.private_index("dnf"), None);
+        assert!(native
+            .prepare_private_index("dnf", &cancel)
+            .unwrap()
+            .is_none());
+        // Only APT, Pacman and Zypper refresh through PackageKit.
+        assert_eq!(native.packagekit_refresh("flatpak", &cancel), Ok(false));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

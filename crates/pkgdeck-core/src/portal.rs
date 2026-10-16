@@ -723,8 +723,12 @@ mod tests {
 
         // Ended but not collected: the host has nothing left to signal.
         let gone = program(&portal, "exit 0").start(null(), false).unwrap();
-        while !gone.ended() {
+        // Each line runs however fast it ends, so coverage never flakes.
+        loop {
             std::thread::sleep(Duration::from_millis(10));
+            if gone.ended() {
+                break;
+            }
         }
         assert!(gone.signal(rustix::process::Signal::TERM).is_err());
         std::fs::remove_dir_all(dir).unwrap();

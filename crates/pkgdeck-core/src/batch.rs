@@ -2066,12 +2066,15 @@ done"#;
     #[cfg(target_os = "linux")]
     #[test]
     fn apt_updates_send_the_refresh_then_the_update_in_one_session() {
+        // The host must have APT for its commands to be built.
+        if Path::new("/usr/bin/apt-get").exists() {
+            apt_session();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn apt_session() {
         use crate::engine::Backend;
         use std::collections::BTreeMap;
-        // The host must have APT for its commands to be built.
-        if !Path::new("/usr/bin/apt-get").exists() {
-            return;
-        }
         let log = std::env::temp_dir().join(format!("pkgdeck-apt-session-{}", std::process::id()));
         let script = format!(
             r#"IFS= read -r start

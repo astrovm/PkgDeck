@@ -69,10 +69,9 @@ impl Copy {
 /// from the system's own `local` database. Waits while another check
 /// fills it.
 pub fn prepare(source: &str, cancel: &Cancellation) -> Result<Option<Copy>, ExecutionError> {
-    let Some(dir) = dir(source) else {
-        return Ok(None);
-    };
-    prepare_in(source, &dir, cancel).map(Some)
+    dir(source)
+        .map(|dir| prepare_in(source, &dir, cancel))
+        .transpose()
 }
 fn prepare_in(source: &str, dir: &Path, cancel: &Cancellation) -> Result<Copy, ExecutionError> {
     let io = |error: std::io::Error| ExecutionError::Io(format!("{}: {error}", dir.display()));
@@ -109,12 +108,11 @@ fn lock(path: &Path, cancel: &Cancellation) -> Result<fs::File, ExecutionError> 
         .map_err(io)?;
     loop {
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(file),
             Err(rustix::io::Errno::WOULDBLOCK) if !cancel.requested() => {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(rustix::io::Errno::WOULDBLOCK) => return Err(ExecutionError::Cancelled),
-            Err(error) => return Err(io(error.into())),
+            locked => return locked.map(|()| file).map_err(|error| io(error.into())),
         }
     }
 }
@@ -128,7 +126,9 @@ const APT_CONF: &str = "#clear APT::Update::Pre-Invoke;
 
 /// The copy's folder, while it's newer than the system's index.
 pub fn fresher(source: &str) -> Option<PathBuf> {
-    let dir = dir(source)?;
+    dir(source).and_then(|dir| fresher_at(source, dir))
+}
+fn fresher_at(source: &str, dir: PathBuf) -> Option<PathBuf> {
     let (_, system, _) = layout(source)?;
     fresher_than(source, &dir, Path::new(system)).then_some(dir)
 }
@@ -145,24 +145,21 @@ fn fresher_than(source: &str, dir: &Path, system: &Path) -> bool {
 /// The newest index file under `dir`, `depth` folders down at most.
 /// Downloads in progress and locks don't count.
 fn newest(dir: &Path, depth: usize) -> Option<SystemTime> {
+    let skipped = |name: &std::ffi::OsStr| {
+        ["partial", "lock", "db.lck"]
+            .iter()
+            .any(|skip| name == *skip)
+    };
     let mut found = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name();
-        if name == "partial" || name == "lock" || name == "db.lck" {
-            continue;
-        }
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let time = if kind.is_dir() {
-            depth
-                .checked_sub(1)
-                .filter(|depth| *depth > 0)
-                .and_then(|depth| newest(&entry.path(), depth))
-        } else if kind.is_file() {
-            entry.metadata().and_then(|meta| meta.modified()).ok()
-        } else {
+    for path in fs::read_dir(dir).ok()?.flatten().map(|entry| entry.path()) {
+        let time = if path.file_name().is_some_and(skipped) {
             None
+        } else if path.is_dir() {
+            Some(depth - 1)
+                .filter(|depth| *depth > 0)
+                .and_then(|depth| newest(&path, depth))
+        } else {
+            fs::metadata(&path).and_then(|meta| meta.modified()).ok()
         };
         found = found.max(time);
     }
@@ -236,10 +233,11 @@ mod tests {
 
     #[test]
     fn copies_live_in_the_users_cache_and_never_for_root() {
-        let var = |name: &str| match name {
-            "HOME" => Some(OsString::from("/home/fixture")),
-            "XDG_CACHE_HOME" => Some(OsString::from("relative")),
-            _ => None,
+        let var = |name: &str| {
+            [("HOME", "/home/fixture"), ("XDG_CACHE_HOME", "relative")]
+                .into_iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
         };
         assert_eq!(
             dir_with("apt", var, false),
@@ -306,6 +304,23 @@ mod tests {
         drop(prepare_in("apk", &root.join("apk"), &cancel).unwrap());
         assert!(root.join("apk/lock").is_file());
         assert!(!fresher_than("apk", &root.join("apk"), &root.join("none")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copies_are_found_only_for_managers_that_keep_one() {
+        let cancel = Cancellation::default();
+        assert!(prepare("dnf", &cancel).unwrap().is_none());
+        assert_eq!(fresher("dnf"), None);
+        let root = scratch("fresher-at");
+        // Nothing copied yet, so the system's lists win.
+        assert_eq!(fresher_at("apt", root.join("apt")), None);
+        assert_eq!(fresher_at("dnf", root.join("dnf")), None);
+        file(&root.join("pacman/sync/core.db"), u64::from(u32::MAX));
+        assert_eq!(
+            fresher_at("pacman", root.join("pacman")),
+            Some(root.join("pacman"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -388,11 +403,9 @@ mod tests {
                     newest[side] = newest[side].max(Some(time));
                 }
             }
-            let expected = match newest {
-                [None, _] => false,
-                [Some(_), None] => true,
-                [Some(copy), Some(system)] => copy > system,
-            };
+            let [copy_newest, system_newest] = newest;
+            let expected =
+                copy_newest.is_some_and(|copy| system_newest.is_none_or(|system| copy > system));
             assert_eq!(
                 fresher_than("zypper", &copy, &system),
                 expected,

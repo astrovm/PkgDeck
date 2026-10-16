@@ -1851,12 +1851,13 @@ mod apt_upgrade_tests {
             &mut self,
             operation: &Operation,
             _: &Cancellation,
-            _: &mut dyn FnMut(Progress),
+            progress: &mut dyn FnMut(Progress),
         ) -> Result<(), EngineError> {
             self.log
                 .lock()
                 .unwrap()
                 .push(format!("refresh before {operation:?}"));
+            progress(Progress::Message("Refreshing package lists.".into()));
             self.refresh.clone()
         }
         fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
@@ -1941,6 +1942,14 @@ mod apt_upgrade_tests {
             Err(failed.clone())
         );
         assert_eq!(*log.lock().unwrap(), [format!("refresh before {op:?}")]);
+        // A refresh that works goes on to the check.
+        let (mut engine, log) = lists_engine(Ok(()), false);
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let _ = engine.execute(&op, &cancel, &mut |_| {});
+        assert_eq!(
+            log.lock().unwrap()[..2],
+            [format!("refresh before {op:?}"), "plan".into()]
+        );
         // A group of updates stops as one.
         let (mut engine, log) = lists_engine(Err(failed.clone()), true);
         let ops = [
@@ -2156,11 +2165,7 @@ mod apt_upgrade_tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].is_ok(), succeeds);
             assert_eq!(count.load(Ordering::SeqCst), writes);
-            assert!(!events.iter().any(|event| matches!(
-                event,
-                Event::Progress { progress: Progress::Message(text), .. }
-                    if text.contains("Authorizing")
-            )));
+            assert!(!format!("{events:?}").contains("Authorizing"));
             assert!(matches!(&events[0], Event::Started(op) if *op == refresh));
             assert!(
                 matches!(events.last(), Some(Event::Finished { operation, .. }) if *operation == refresh)
@@ -2168,6 +2173,11 @@ mod apt_upgrade_tests {
             // A single refresh goes the same way.
             let single = engine.execute(&refresh, &cancel, &mut |_| {});
             assert_eq!(single.is_ok(), succeeds);
+            assert_eq!(count.load(Ordering::SeqCst), writes * 2);
+            // A cancelled one never starts it.
+            let cancelled = Cancellation::default();
+            cancelled.cancel();
+            assert!(engine.execute(&refresh, &cancelled, &mut |_| {}).is_err());
             assert_eq!(count.load(Ordering::SeqCst), writes * 2);
         }
     }
