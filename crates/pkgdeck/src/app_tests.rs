@@ -1633,6 +1633,39 @@ fn the_tray_icon_shows_always_with_updates_or_never() {
 }
 
 #[test]
+fn the_last_flatpak_link_scope_is_saved_and_starts_the_next_link() {
+    let dir = std::env::temp_dir().join(format!("pkgdeck-link-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (store, settings) = Store::open(Some(dir.clone()), None);
+    let mut app = App::with_controller(
+        create_synthetic_controller(empty),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    assert!(!app.ctl.flatpak_links_for_system());
+    app.choose_flatpak_link_scope(true);
+    assert!(app.ctl.flatpak_links_for_system());
+    assert!(app.store.saved().flatpak_links_for_system);
+    // The next start reads it back and tells the controller.
+    let (store, settings) = Store::open(Some(dir.clone()), None);
+    assert!(settings.flatpak_links_for_system);
+    let mut again = App::with_controller(
+        create_synthetic_controller(empty),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    assert!(again.ctl.flatpak_links_for_system());
+    again.choose_flatpak_link_scope(false);
+    assert!(!again.ctl.flatpak_links_for_system());
+    assert!(!again.store.saved().flatpak_links_for_system);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn settings_tell_the_controller_which_sources_to_leave_for_you() {
     let mut app = app();
     app.settings

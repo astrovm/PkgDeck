@@ -423,6 +423,9 @@ pub struct Settings {
     pub name_column: f32,
     pub version_column: f32,
     pub flatpak_scope_choices: String,
+    /// Flatpak links install for the whole system: the last choice in
+    /// their review.
+    pub flatpak_links_for_system: bool,
     pub search_hint: String,
 }
 
@@ -469,6 +472,7 @@ impl Default for Settings {
             name_column: 0.0,
             version_column: 0.0,
             flatpak_scope_choices: "{}".into(),
+            flatpak_links_for_system: false,
             search_hint: String::new(),
         }
     }

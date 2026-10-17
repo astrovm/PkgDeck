@@ -261,8 +261,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
     });
     app.ui.confirm_details_flipped = flipped && open;
     if let Some(system) = scope {
-        app.c().set_open_flatpak_scope(system);
-        app.react();
+        app.choose_flatpak_link_scope(system);
     }
     if open && !still && answer.is_none() {
         answer = Some(false);

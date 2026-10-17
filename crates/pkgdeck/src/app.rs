@@ -378,7 +378,19 @@ impl App {
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
         self.c().set_auto_clean_worktrees(worktrees);
+        let system = self.settings.flatpak_links_for_system;
+        self.c().set_flatpak_links_for_system(system);
         self.sync_cleanup_preferences();
+    }
+
+    /// Install a Flatpak link for the whole system or this user, and start
+    /// the next link there too.
+    pub fn choose_flatpak_link_scope(&mut self, system: bool) {
+        self.c().set_open_flatpak_scope(system);
+        self.c().set_flatpak_links_for_system(system);
+        self.settings.flatpak_links_for_system = system;
+        self.save_settings();
+        self.react();
     }
 
     /// What automatic updates and cleaning wait for, besides builds.
