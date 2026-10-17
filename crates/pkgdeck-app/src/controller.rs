@@ -4220,11 +4220,9 @@ impl ffi::PackageController {
         {
             let mut data: Value =
                 serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
-            if data["package"].is_object() {
-                data["package"]["scope"] = json!(scope);
-                data["package"]["scope_label"] = json!(scope_label(&scope));
-                self.as_mut().set_opened(encoded(data));
-            }
+            data["package"]["scope"] = json!(scope);
+            data["package"]["scope_label"] = json!(scope_label(&scope));
+            self.as_mut().set_opened(encoded(data));
         }
         let mut selected = previous;
         selected.scope = scope;
@@ -8742,10 +8740,10 @@ mod tests {
         let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
         assert_eq!(page["package"]["scope_label"], "System");
         assert_eq!(page["action"], "Install");
-        let Some(Job::Write(Operation::Install(installed), _)) = controller.rust().pending.clone()
-        else {
-            panic!("no install waits for review");
-        };
+        let installed = expect!(
+            controller.rust().pending.clone(),
+            Some(Job::Write(Operation::Install(installed), _)) => installed
+        );
         assert_eq!(installed.scope, Scope::System);
         controller.as_mut().mark_opened_installed(
             &Job::Write(Operation::Install(installed.clone()), None),
@@ -8755,7 +8753,24 @@ mod tests {
         assert_eq!(page["action"], "", "{page}");
         assert_eq!(page["package"]["installed"], "");
         assert_eq!(page["launchable"], true);
-        assert_eq!(controller.opened_flatpak(), Some(installed));
+        assert_eq!(controller.opened_flatpak(), Some(installed.clone()));
+        // Launch starts it from where it went; one PkgDeck can't start says why.
+        let mut elsewhere = installed;
+        elsewhere.scope = Scope::Environment {
+            path: "/opt/environment".into(),
+        };
+        controller
+            .as_mut()
+            .rust_mut()
+            .opened_package
+            .as_mut()
+            .unwrap()
+            .id = elsewhere;
+        assert!(controller
+            .as_mut()
+            .launch_opened()
+            .to_string()
+            .contains("only system and user apps can start"));
         // A runtime is installed too, but nothing starts it.
         let runtime = reference("Runtime");
         controller

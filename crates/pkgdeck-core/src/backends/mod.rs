@@ -59,9 +59,19 @@ pub use system_image::SystemImage;
 
 /// Start an installed Flatpak app, detached, as its menu entry would.
 pub fn launch_flatpak(id: &PackageId) -> Result<(), EngineError> {
-    let command = flatpak_launch_command(id)?;
     let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
         .then(|| std::path::Path::new("flatpak-spawn"));
+    start_flatpak(id, "flatpak", bridge)
+}
+
+/// `launch_flatpak` with the `flatpak` program to run, so tests can stand in.
+fn start_flatpak(
+    id: &PackageId,
+    program: &str,
+    bridge: Option<&std::path::Path>,
+) -> Result<(), EngineError> {
+    let mut command = flatpak_launch_command(id)?;
+    command.program = program.into();
     desktop_exec::spawn(&command, bridge).map_err(|error| EngineError::InvalidResponse {
         backend: "flatpak".into(),
         reason: format!("couldn't start it: {error}"),
@@ -7022,6 +7032,52 @@ mod tests {
         let mut apt = id(Scope::System, "org.example.App");
         apt.backend = "apt".into();
         assert!(arguments(&apt).is_err());
+        // Refused before anything starts.
+        assert!(launch_flatpak(&apt).is_err());
+        // It starts detached, with those arguments, and says when it can't.
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let program = base.join("flatpak");
+        let record = base.join("arguments");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{0}.tmp' '{0}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        start_flatpak(
+            &id(Scope::System, "org.example.App"),
+            program.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !record.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            "run\n--system\n--arch=x86_64\norg.example.App\n"
+        );
+        let missing = base.join("missing");
+        let error = start_flatpak(
+            &id(Scope::System, "org.example.App"),
+            missing.to_str().unwrap(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("couldn't start it"), "{error}");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     fn completion(code: i32, stdout: &str) -> Completion {
