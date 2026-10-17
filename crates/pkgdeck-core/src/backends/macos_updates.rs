@@ -198,7 +198,7 @@ impl<T: Transport> MacUpdates<T> {
         let restart = package.summary.contains("restart");
         let command = if restart { "--download" } else { "--install" };
         progress(Progress::Message(format!(
-            "{} {}",
+            "{} {}…",
             if restart { "Downloading" } else { "Installing" },
             package.display_name
         )));

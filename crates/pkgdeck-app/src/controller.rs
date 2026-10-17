@@ -574,7 +574,7 @@ impl ProgressState {
         let current = self.current.as_ref();
         encoded(json!({
             "activity_id": self.activity_id,
-            "label": self.label,
+            "label": running_label(&self.label),
             "done": self.done,
             "total": self.total,
             "transferred": self.transferred,
@@ -848,7 +848,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             if cancel.requested() {
                 Ok(Payload::Batch(status, outcomes))
             } else {
-                send(Reply::Progress("Checking for updates".into()));
+                send(Reply::Progress("Checking for updates…".into()));
                 let mut report = engine.installed(cancel);
                 if cancel.requested() {
                     Ok(Payload::Batch(status, outcomes))
@@ -1050,10 +1050,10 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     send(Reply::Progress(match progress {
                         Progress::Message(message) => message.clone(),
                         Progress::Transfer { completed, total } => match total {
-                            Some(total) => format!("Transferred {completed} of {total}"),
-                            None => format!("Transferred {completed}"),
+                            Some(total) => format!("Transferring {completed} of {total}…"),
+                            None => format!("Transferring {completed}…"),
                         },
-                        Progress::Package(name) => format!("Updating {name}"),
+                        Progress::Package(name) => format!("Updating {name}…"),
                     }));
                 }
                 if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
@@ -3445,6 +3445,32 @@ fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
         .collect()
 }
 /// One line for progress and results, such as "Install htop (APT)".
+/// A change's title as it runs: "Update Beta App" reads "Updating Beta
+/// App…" on its progress card.
+fn running_label(title: &str) -> String {
+    if title.is_empty() {
+        return String::new();
+    }
+    let (verb, rest) = title.split_once(' ').unwrap_or((title, ""));
+    let running = match verb {
+        "Install" => "Installing",
+        "Remove" => "Removing",
+        "Update" => "Updating",
+        "Refresh" => "Refreshing",
+        "Clean" => "Cleaning",
+        "Add" => "Adding",
+        "Enable" => "Enabling",
+        "Disable" => "Disabling",
+        "Change" => "Changing",
+        "Open" => "Opening",
+        _ => return format!("{title}…"),
+    };
+    if rest.is_empty() {
+        format!("{running}…")
+    } else {
+        format!("{running} {rest}…")
+    }
+}
 fn operation_title(operation: &Operation) -> String {
     operation_title_named(operation, &Names::new())
 }
@@ -6002,7 +6028,7 @@ impl ffi::PackageController {
             failed_sources.dedup();
             if !failed_sources.is_empty() && !writing {
                 self.as_mut()
-                    .set_status("Retrying failed source checks before updating.".into());
+                    .set_status("Retrying failed source checks before updating…".into());
                 self.start(Job::RetryFailedUpdates(failed_sources));
                 return;
             }
@@ -6254,7 +6280,7 @@ impl ffi::PackageController {
             }
             self.as_mut().set_asked(vec![]);
             self.as_mut()
-                .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
+                .set_status("Cancelling once the package manager finishes safely…".into());
         }
         self.sync_needs_poll();
     }
@@ -7783,6 +7809,29 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_running_change_reads_as_what_it_is_doing() {
+        for (title, running) in [
+            ("Install Demo (Flatpak)", "Installing Demo (Flatpak)…"),
+            ("Remove Demo (APT)", "Removing Demo (APT)…"),
+            ("Update Beta App", "Updating Beta App…"),
+            ("Refresh APT package lists", "Refreshing APT package lists…"),
+            ("Clean Cargo downloads", "Cleaning Cargo downloads…"),
+            ("Add Example repository", "Adding Example repository…"),
+            ("Enable Example repository", "Enabling Example repository…"),
+            (
+                "Disable Example repository",
+                "Disabling Example repository…",
+            ),
+            ("Change Example priority", "Changing Example priority…"),
+            ("Open software sources", "Opening software sources…"),
+            ("Update", "Updating…"),
+            ("Working", "Working…"),
+            ("", ""),
+        ] {
+            assert_eq!(running_label(title), running, "{title}");
+        }
+    }
     /// What `$pattern` binds in `$value`; any other value fails the test.
     macro_rules! expect {
         ($value:expr, $pattern:pat => $bound:expr) => {
@@ -7826,7 +7875,7 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
         assert_eq!(snapshot["done"], 1);
         assert_eq!(snapshot["transfer_total"], Value::Null);
-        assert_eq!(snapshot["label"], "Refresh Flatpak package lists");
+        assert_eq!(snapshot["label"], "Refreshing Flatpak package lists…");
         let repository = RepositoryAction {
             backend: "flatpak".into(),
             name: "synthetic".into(),
@@ -12590,7 +12639,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Waiting for the package manager to finish"));
+            .contains("Cancelling once the package manager finishes safely"));
         sender
             .send(Reply::Done(Ok(Payload::Repositories(
                 repositories::Report::default(),
@@ -14158,9 +14207,9 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "Transferred 5 of 10",
-                "Transferred 7",
-                "Updating synthetic-firmware"
+                "Transferring 5 of 10…",
+                "Transferring 7…",
+                "Updating synthetic-firmware…"
             ]
         );
         assert!(matches!(
@@ -16174,7 +16223,7 @@ mod tests {
         );
         let mut state = ProgressState::new(&job, Some(7), &names);
         let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
-        assert_eq!(snapshot["label"], "Update First App (APT)");
+        assert_eq!(snapshot["label"], "Updating First App (APT)…");
         assert_eq!(snapshot["targets"][0], target_row(&first));
         assert_eq!(snapshot["targets"][1]["name"], "second");
         assert_eq!(snapshot["sources"], json!(["flatpak"]));
@@ -16277,7 +16326,7 @@ mod tests {
         assert!(!state.observe("==> Upgrading unlisted"));
         assert!(state.observe("==> Upgrading beta"));
         let now = snapshot(&state);
-        assert_eq!(now["label"], "Update Beta App");
+        assert_eq!(now["label"], "Updating Beta App…");
         assert_eq!(now["current"], target_row(&beta.id));
         assert_eq!(now["done"], 0);
         assert!(state.observe("==> Upgrading gamma"));
@@ -16449,7 +16498,7 @@ mod tests {
         });
         controller.as_mut().poll();
         let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
-        assert_eq!(progress["label"], "Update Beta App");
+        assert_eq!(progress["label"], "Updating Beta App…");
         assert_eq!(progress["current"], target_row(&package.id));
         drop(release);
         controller.as_mut().rust_mut().progress_state = None;
@@ -19972,7 +20021,7 @@ mod tests {
         controller.as_mut().propose("upgrade-all".into(), -1);
         assert_eq!(
             controller.status().to_string(),
-            "Retrying failed source checks before updating."
+            "Retrying failed source checks before updating…"
         );
         assert!(matches!(
             &controller.rust().worker,
@@ -20289,7 +20338,7 @@ mod tests {
         controller.as_mut().poll();
         let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
         assert_eq!(progress["activity_id"], 42);
-        assert_eq!(progress["label"], "Refresh APT package lists");
+        assert_eq!(progress["label"], "Refreshing APT package lists…");
         assert_eq!(progress["transferred"], 50);
         assert_eq!(progress["transfer_total"], 100);
 

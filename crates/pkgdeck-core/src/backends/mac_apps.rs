@@ -521,7 +521,7 @@ impl Remover<'_> {
                 rustix::fs::access(parent, rustix::fs::Access::WRITE_OK).is_ok()
             });
         let result = if owned {
-            progress(Progress::Message(format!("Moving {name} to the Trash")));
+            progress(Progress::Message(format!("Moving {name} to the Trash…")));
             self.transport.macos_tool(
                 Path::new("/usr/bin/trash"),
                 &["-s".into(), path.into()],
@@ -1015,7 +1015,7 @@ impl MacApps {
             }
         };
         progress(Progress::Message(format!(
-            "Uninstalling {name} with Homebrew ({token})"
+            "Uninstalling {name} with Homebrew ({token})…"
         )));
         let result = self.transport.brew(
             &[
@@ -2524,7 +2524,7 @@ mod tests {
             .0
             .join("home/.Trash/Editor.app/Contents/Info.plist")
             .is_file());
-        assert_eq!(messages, ["Moving Fixture App to the Trash"]);
+        assert_eq!(messages, ["Moving Fixture App to the Trash…"]);
         assert_eq!(
             mover.calls(),
             [
@@ -2671,7 +2671,7 @@ mod tests {
         assert!(!owned.exists());
         assert_eq!(
             messages,
-            ["Uninstalling Fixture App with Homebrew (tap/tools/owned)"]
+            ["Uninstalling Fixture App with Homebrew (tap/tools/owned)…"]
         );
         assert_eq!(
             mover.calls().last().unwrap(),

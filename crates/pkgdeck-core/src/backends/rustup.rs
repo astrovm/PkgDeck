@@ -311,7 +311,7 @@ impl<T: Transport> Backend for Rustup<T> {
             return Err(EngineError::Cancelled);
         }
         progress(Progress::Message(format!(
-            "Running rustup {}",
+            "Running rustup {}…",
             args.join(" ")
         )));
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();

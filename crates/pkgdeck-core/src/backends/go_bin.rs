@@ -458,7 +458,7 @@ impl<T: Transport> GoBinaries<T> {
             return Err(EngineError::Cancelled);
         }
         let target = format!("{path}@latest");
-        progress(Progress::Message(format!("Running go install {target}")));
+        progress(Progress::Message(format!("Running go install {target}…")));
         let args: Vec<OsString> = vec!["install".into(), "--".into(), target.into()];
         let completion = self.transport.dev_tool(ID, &args, cancel, true)?;
         let deferred = completion.cancellation_deferred;
@@ -701,7 +701,7 @@ impl<T: Transport> Backend for GoBinaries<T> {
                     return Err(EngineError::Cancelled);
                 }
                 let file = dir.join(&id.name);
-                progress(Progress::Message(format!("Removing {}", file.display())));
+                progress(Progress::Message(format!("Removing {}…", file.display())));
                 std::fs::remove_file(&file)
                     .map_err(|error| ExecutionError::Io(format!("{}: {error}", file.display())))?;
                 false

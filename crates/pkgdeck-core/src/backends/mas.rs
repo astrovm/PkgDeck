@@ -203,7 +203,7 @@ impl<T: Transport> MacAppStore<T> {
         }
         let names: Vec<&str> = pending.iter().map(|app| app.name.as_str()).collect();
         progress(Progress::Message(format!(
-            "Updating {} from the App Store",
+            "Updating {} from the App Store…",
             names.join(", ")
         )));
         let adam_ids: Vec<String> = pending.iter().map(|app| app.adam_id.to_string()).collect();
@@ -858,7 +858,7 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "Updating Alpha from the App Store",
+                "Updating Alpha from the App Store…",
                 "==> Installed Alpha (2.0)\n"
             ]
         );

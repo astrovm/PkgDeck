@@ -18,6 +18,7 @@
           <li>A Flatpak link for an app installed for all users offers Update or Reinstall instead of Install</li>
           <li>A Flatpak link shows the version it installs instead of its branch</li>
           <li>App descriptions keep their paragraphs and show list items one per line</li>
+          <li>Every section and running change words what it's doing the same way</li>
         </ul>
       </description>
     </release>

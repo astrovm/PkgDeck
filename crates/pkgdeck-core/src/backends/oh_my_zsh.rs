@@ -353,7 +353,7 @@ impl<T: Transport> Backend for OhMyZsh<T> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        progress(Progress::Message(format!("Updating {}", checkout.name)));
+        progress(Progress::Message(format!("Updating {}…", checkout.name)));
         let args: Vec<OsString> = ["-C".as_ref(), checkout.path.as_os_str()]
             .into_iter()
             .map(OsString::from)

@@ -403,7 +403,7 @@ impl<T: Transport> Backend for Conda<T> {
                 return Err(EngineError::Cancelled);
             }
             progress(Progress::Message(format!(
-                "Removing {} {before} from the {} environment",
+                "Removing {} {before} from the {} environment…",
                 id.name, environment.name
             )));
         } else {
@@ -418,7 +418,7 @@ impl<T: Transport> Backend for Conda<T> {
                 return Err(EngineError::Cancelled);
             }
             progress(Progress::Message(format!(
-                "Updating {} {before} → {target} in the {} environment",
+                "Updating {} {before} → {target} in the {} environment…",
                 id.name, environment.name
             )));
         }
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(
             messages,
             vec![Progress::Message(
-                "Updating ripgrep 14.1.0 → 15.2.0 in the tools environment".into()
+                "Updating ripgrep 14.1.0 → 15.2.0 in the tools environment…".into()
             )]
         );
         // The update ran, but the environment can't be read back.
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(
             messages,
             vec![Progress::Message(
-                "Removing ripgrep 14.1.0 from the tools environment".into()
+                "Removing ripgrep 14.1.0 from the tools environment…".into()
             )]
         );
         let calls = fake.calls.lock().unwrap().clone();
