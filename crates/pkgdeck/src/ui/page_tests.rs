@@ -254,6 +254,32 @@ fn package_headers_show_actions_for_opened_files_and_both_flatpak_scopes() {
 }
 
 #[test]
+fn an_installed_flatpak_app_opened_from_a_link_can_launch() {
+    for launchable in [false, true] {
+        let mut row = row("package");
+        row.source = "flatpak".into();
+        row.installed = Some(String::new());
+        let details = Details {
+            package: Some(row.clone()),
+            launchable,
+            ..Details::default()
+        };
+        let harness = draw_details(
+            app(&row, Page::Search),
+            row,
+            details,
+            700.0,
+            false,
+            true,
+            false,
+        );
+        // Installed with nothing left to do: Launch, or no button at all.
+        assert_eq!(harness.query_by_label("Launch").is_some(), launchable);
+        assert!(harness.query_by_label("Install").is_none());
+    }
+}
+
+#[test]
 fn package_actions_close_and_wait_for_review_or_a_retained_list() {
     let row = row("package");
     for narrow in [false, true] {

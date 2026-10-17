@@ -3848,7 +3848,17 @@ fn opened_page(details: &PackageDetails, action: &str) -> Value {
         "screenshots": info.as_ref().map(|i| i.screenshots.clone()).unwrap_or_default(),
         "location": location,
         "action": action,
+        "launchable": package.installed_version.is_some() && launchable_flatpak(package),
     })
+}
+/// A Flatpak app an opened file or link names, not a runtime: it can start
+/// once it's installed.
+fn launchable_flatpak(package: &Package) -> bool {
+    package.id.backend == "flatpak"
+        && !package
+            .summary
+            .lines()
+            .any(|line| line.starts_with("Runtime: "))
 }
 /// The list rows for `packages`, in order, with the apps each one shares.
 fn package_rows(packages: &[Package]) -> Vec<Value> {
@@ -4081,13 +4091,25 @@ impl ffi::PackageController {
         })
     }
     pub fn launch_opened(self: Pin<&mut Self>) -> QString {
-        let Some(id) = self.opened_appimage() else {
-            return "Nothing to start.".into();
+        let started = if let Some(id) = self.opened_appimage() {
+            self.appimages().launch(&id)
+        } else {
+            match self.opened_flatpak() {
+                Some(id) => pkgdeck_core::backends::launch_flatpak(&id),
+                None => return "Nothing to start.".into(),
+            }
         };
-        match self.appimages().launch(&id) {
+        match started {
             Ok(()) => QString::default(),
             Err(error) => plain_error(&error, None, false).as_str().into(),
         }
+    }
+    /// The Flatpak app the open page shows, once its page says it's installed.
+    fn opened_flatpak(&self) -> Option<PackageId> {
+        let package = self.rust().opened_package.as_ref()?;
+        let page: Value = serde_json::from_str(&self.opened().to_string()).ok()?;
+        (launchable_flatpak(package) && page["launchable"] == json!(true))
+            .then(|| package.id.clone())
     }
     pub fn launch_app(self: Pin<&mut Self>, index: i32) -> QString {
         let Some(package) = self.installed_appimage(index) else {
@@ -4137,7 +4159,14 @@ impl ffi::PackageController {
         // The page was written from this same package just before.
         let mut data: Value = serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
         data["action"] = json!("");
-        data["package"]["installed"] = data["package"]["candidate"].clone();
+        // A reference names no version, but the app is installed all the same.
+        let version = data["package"]["candidate"].clone();
+        data["package"]["installed"] = if version.is_null() {
+            json!("")
+        } else {
+            version
+        };
+        data["launchable"] = json!(launchable_flatpak(&package));
         self.as_mut().set_opened(encoded(data));
     }
     pub fn close_opened(mut self: Pin<&mut Self>) {
@@ -4177,6 +4206,25 @@ impl ffi::PackageController {
                 return;
             };
             package.id.scope = scope.clone();
+            // The open page installs where the review now says, so it must
+            // know the install it waits for when that finishes.
+            if let Some(opened) = rust.opened_package.as_mut().filter(|p| p.id == previous) {
+                opened.id.scope = scope.clone();
+            }
+        }
+        if self
+            .rust()
+            .opened_package
+            .as_ref()
+            .is_some_and(|p| p.id.scope == scope)
+        {
+            let mut data: Value =
+                serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
+            if data["package"].is_object() {
+                data["package"]["scope"] = json!(scope);
+                data["package"]["scope_label"] = json!(scope_label(&scope));
+                self.as_mut().set_opened(encoded(data));
+            }
         }
         let mut selected = previous;
         selected.scope = scope;
@@ -8658,6 +8706,76 @@ mod tests {
             assert_eq!(page["action"], action, "{backend} {installed:?}");
             assert_eq!(page["package"]["installed"], json!(installed), "{backend}");
         }
+    }
+    #[test]
+    fn an_opened_flatpak_installed_for_the_system_shows_installed_and_launch() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let source = "https://example.invalid/Demo.flatpakref";
+        let reference = |kind: &str| {
+            let mut package = synthetic_package("org.example.Demo", "Demo");
+            package.id.backend = "flatpak".into();
+            package.id.scope = Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            };
+            package.id.reference = Some(format!("flatpakref:{}:{source}", "ab".repeat(32)));
+            package.installed_version = None;
+            // A reference names no version.
+            package.candidate_version = None;
+            package.summary =
+                format!("Reference: {source}\n{kind}: org.example.Demo/x86_64/stable");
+            package
+        };
+        let package = reference("Application");
+        controller
+            .as_mut()
+            .apply(Ok(opened_payload(package.clone())));
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["launchable"], false);
+        assert_eq!(
+            controller.as_mut().launch_opened().to_string(),
+            "Nothing to start."
+        );
+        // The review installs it for the whole system instead.
+        controller.as_mut().install_opened();
+        controller.as_mut().set_open_flatpak_scope(true);
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["package"]["scope_label"], "System");
+        assert_eq!(page["action"], "Install");
+        let Some(Job::Write(Operation::Install(installed), _)) = controller.rust().pending.clone()
+        else {
+            panic!("no install waits for review");
+        };
+        assert_eq!(installed.scope, Scope::System);
+        controller.as_mut().mark_opened_installed(
+            &Job::Write(Operation::Install(installed.clone()), None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "", "{page}");
+        assert_eq!(page["package"]["installed"], "");
+        assert_eq!(page["launchable"], true);
+        assert_eq!(controller.opened_flatpak(), Some(installed));
+        // A runtime is installed too, but nothing starts it.
+        let runtime = reference("Runtime");
+        controller
+            .as_mut()
+            .apply(Ok(opened_payload(runtime.clone())));
+        controller.as_mut().mark_opened_installed(
+            &Job::Write(Operation::Install(runtime.id.clone()), None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "");
+        assert_eq!(page["launchable"], false);
+        assert_eq!(controller.opened_flatpak(), None);
+        // An app opened when it's already installed can start right away.
+        let mut installed = package;
+        installed.installed_version = Some("1.0".into());
+        controller.as_mut().apply(Ok(opened_payload(installed)));
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "Reinstall");
+        assert_eq!(page["launchable"], true);
     }
     #[test]
     fn opened_files_show_a_page_until_back_and_installed_after_their_install() {

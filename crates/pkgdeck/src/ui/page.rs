@@ -287,9 +287,10 @@ fn app_page(
         appimage && app.launch_settings.error.is_none() && !app.app_file.path.is_empty()
             || opened
                 && details.as_ref().is_some_and(|d| {
-                    d.package
-                        .as_ref()
-                        .is_some_and(|p| p.source == "appimage" && p.is_installed())
+                    d.launchable
+                        || d.package
+                            .as_ref()
+                            .is_some_and(|p| p.source == "appimage" && p.is_installed())
                 });
     let can_act = app.can_act() && app.retained.is_none() && !app.review_on_page;
     let inner = rect.shrink2(vec2(20.0, 18.0));

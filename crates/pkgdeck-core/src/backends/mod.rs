@@ -57,6 +57,43 @@ use std::{
 };
 pub use system_image::SystemImage;
 
+/// Start an installed Flatpak app, detached, as its menu entry would.
+pub fn launch_flatpak(id: &PackageId) -> Result<(), EngineError> {
+    let command = flatpak_launch_command(id)?;
+    let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
+        .then(|| std::path::Path::new("flatpak-spawn"));
+    desktop_exec::spawn(&command, bridge).map_err(|error| EngineError::InvalidResponse {
+        backend: "flatpak".into(),
+        reason: format!("couldn't start it: {error}"),
+    })
+}
+
+/// `flatpak run` for the installation `id` is in.
+fn flatpak_launch_command(id: &PackageId) -> Result<desktop_exec::Command, EngineError> {
+    let invalid = |reason: &str| EngineError::InvalidResponse {
+        backend: "flatpak".into(),
+        reason: reason.into(),
+    };
+    let installation = match id.scope {
+        Scope::System => "--system",
+        Scope::User { .. } => "--user",
+        Scope::Environment { .. } => return Err(invalid("only system and user apps can start")),
+    };
+    if id.backend != "flatpak" || id.name.is_empty() || id.name.starts_with('-') {
+        return Err(invalid("not a Flatpak app"));
+    }
+    let mut arguments = vec!["run".to_owned(), installation.to_owned()];
+    if !id.architecture.is_empty() {
+        arguments.push(format!("--arch={}", id.architecture));
+    }
+    arguments.push(id.name.clone());
+    Ok(desktop_exec::Command {
+        environment: Vec::new(),
+        program: "flatpak".into(),
+        arguments,
+    })
+}
+
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
     Capability::Details,
@@ -6935,6 +6972,57 @@ mod tests {
         path::Path,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn flatpak_apps_start_from_the_installation_they_are_in() {
+        let id = |scope: Scope, name: &str| PackageId {
+            backend: "flatpak".into(),
+            name: name.into(),
+            architecture: "x86_64".into(),
+            scope,
+            remote: None,
+            reference: Some("flatpakref:ab:https://example.org/App.flatpakref".into()),
+        };
+        let arguments =
+            |id: &PackageId| flatpak_launch_command(id).map(|c| (c.program, c.arguments));
+        assert_eq!(
+            arguments(&id(Scope::System, "org.example.App")).unwrap(),
+            (
+                "flatpak".into(),
+                vec![
+                    "run".into(),
+                    "--system".into(),
+                    "--arch=x86_64".into(),
+                    "org.example.App".into()
+                ]
+            )
+        );
+        assert_eq!(
+            arguments(&id(Scope::User { uid: 1000 }, "org.example.App"))
+                .unwrap()
+                .1[1],
+            "--user"
+        );
+        let mut no_arch = id(Scope::System, "org.example.App");
+        no_arch.architecture.clear();
+        assert_eq!(
+            arguments(&no_arch).unwrap().1,
+            ["run", "--system", "org.example.App"]
+        );
+        // An option is never taken for the app, and other managers never run.
+        assert!(arguments(&id(Scope::System, "--command=sh")).is_err());
+        assert!(arguments(&id(Scope::System, "")).is_err());
+        assert!(arguments(&id(
+            Scope::Environment {
+                path: "/opt/env".into()
+            },
+            "org.example.App"
+        ))
+        .is_err());
+        let mut apt = id(Scope::System, "org.example.App");
+        apt.backend = "apt".into();
+        assert!(arguments(&apt).is_err());
+    }
 
     fn completion(code: i32, stdout: &str) -> Completion {
         Completion {
