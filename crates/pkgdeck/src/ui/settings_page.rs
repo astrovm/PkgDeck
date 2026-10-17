@@ -876,6 +876,125 @@ pub(super) fn login_row(app: &mut App, ui: &mut Ui) {
     });
 }
 
+/// What a background check does with the updates it finds.
+fn found_updates_row(app: &mut App, ui: &mut Ui) {
+    use crate::settings::FoundUpdates;
+    let hint = if app.settings.background_mode {
+        "After each check"
+    } else {
+        NEEDS_BACKGROUND
+    };
+    let labels = FoundUpdates::ALL.map(FoundUpdates::name);
+    let widths = label_widths(ui, &labels, ui.available_width());
+    let size = vec2(widths.iter().sum(), 34.0);
+    setting_row(ui, "When updates are found", hint, size, |ui| {
+        let current = position(&FoundUpdates::ALL, app.settings.found_updates());
+        if let Some(choice) =
+            segmented_sized(ui, Id::unique("found-updates"), &labels, current, &widths)
+        {
+            app.settings.set_found_updates(FoundUpdates::ALL[choice]);
+            let auto = app.settings.auto_update;
+            app.c().set_auto_update(auto);
+        }
+    });
+}
+
+/// When the menu bar or tray icon shows. Without it, PkgDeck opens from
+/// the app menu or a notification.
+fn tray_row(app: &mut App, ui: &mut Ui) {
+    use crate::settings::TrayIcon;
+    const CHOICES: [TrayIcon; 3] = [TrayIcon::Always, TrayIcon::Updates, TrayIcon::Never];
+    let never = format!("Open PkgDeck from your apps. Quit with {}", keys("Ctrl+Q"));
+    let hint = match app.settings.tray_icon {
+        _ if !app.settings.background_mode => NEEDS_BACKGROUND,
+        TrayIcon::Never => &never,
+        _ => "",
+    };
+    let label = if cfg!(target_os = "macos") {
+        "Menu bar icon"
+    } else {
+        "Tray icon"
+    };
+    let labels = ["Always", "With updates", "Never"];
+    let widths = label_widths(ui, &labels, ui.available_width());
+    let size = vec2(widths.iter().sum(), 34.0);
+    setting_row(ui, label, hint, size, |ui| {
+        let current = position(&CHOICES, app.settings.tray_icon);
+        if let Some(choice) =
+            segmented_sized(ui, Id::unique("tray-icon"), &labels, current, &widths)
+        {
+            app.settings.tray_icon = CHOICES[choice];
+            app.sync_tray();
+        }
+    });
+}
+
+/// The sources automatic updates can install from: found, turned on, and
+/// able to update without you. By name.
+fn automatic_sources(
+    catalog: &[model::Source],
+    enabled: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    use pkgdeck_core::unattended::{unattended, Unattended};
+    let mut sources: Vec<String> = catalog
+        .iter()
+        .filter(|entry| entry.available && enabled.contains(&entry.source))
+        .filter(|entry| entry.capabilities.iter().any(|c| c == "upgrade"))
+        .filter(|entry| !pkgdeck_core::backends::inventory_only(&entry.source))
+        .filter(|entry| unattended(&entry.source) != Unattended::Never)
+        .map(|entry| entry.source.clone())
+        .collect();
+    sources.sort_by_key(|source| model::source_name(source).to_lowercase());
+    sources
+}
+
+/// A switch for each source automatic updates can install from. System
+/// managers need the password skipped first.
+fn install_from(app: &mut App, ui: &mut Ui) {
+    use pkgdeck_core::unattended::{unattended, Unattended};
+    let palette = Palette::current(ui.ctx());
+    let sources = automatic_sources(&app.catalog, &app.enabled_sources());
+    if sources.is_empty() {
+        return;
+    }
+    ui.label(
+        egui::RichText::new("Install from")
+            .font(theme::font(14.5))
+            .color(palette.ink),
+    );
+    let approved = !app.settings.system_approval.is_empty();
+    for source in &sources {
+        let can = approved || unattended(source) != Unattended::Approved;
+        ui.horizontal(|ui| {
+            ui.set_min_height(SWITCH.y + 6.0);
+            let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            theme::paint_source_icon(ui.painter(), icon, source, palette.accent);
+            let name = model::source_name(source);
+            ui.label(
+                egui::RichText::new(name)
+                    .font(theme::font(14.5))
+                    .color(palette.ink),
+            );
+            if !can {
+                ui.label(
+                    egui::RichText::new("Needs Skip the password")
+                        .font(theme::font(12.5))
+                        .color(palette.muted),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut on = can && app.settings.installs_automatically(source);
+                if switch(ui, &mut on, can, name).changed() {
+                    app.settings.set_installs_automatically(source, on);
+                    let manual = app.settings.manual_sources.clone();
+                    app.c().set_manual_sources(manual);
+                }
+            });
+        });
+    }
+    ui.add_space(8.0);
+}
+
 /// Turns background checks on or off. Off also stops starting at login;
 /// false when that couldn't be undone.
 fn set_background(app: &mut App, on: bool) -> bool {
@@ -915,6 +1034,9 @@ fn checks(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
+        if app.platform.tray_available() {
+            tray_row(app, ui);
+        }
         let interval = model::nearest_interval(app.settings.check_interval);
         setting_row(
             ui,
@@ -955,21 +1077,28 @@ fn checks(app: &mut App, ui: &mut Ui) {
 fn automatic_updates(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Automatic updates", |ui| {
-        auto_update_row(app, ui);
-        setting_row(
-            ui,
-            "Allow removals",
-            "Like an old kernel replaced by a new one",
-            SWITCH,
-            |ui| {
-                let mut on = app.settings.allow_removals;
-                if switch(ui, &mut on, true, "Allow removals").changed() {
-                    app.settings.allow_removals = on;
-                    app.c().set_allow_removals(on);
-                }
-            },
-        );
-        password_row(app, ui, true);
+        found_updates_row(app, ui);
+        let approved = !app.settings.system_approval.is_empty();
+        if app.settings.auto_update {
+            install_from(app, ui);
+            setting_row(
+                ui,
+                "Allow removals",
+                "Like an old kernel replaced by a new one",
+                SWITCH,
+                |ui| {
+                    let mut on = app.settings.allow_removals;
+                    if switch(ui, &mut on, true, "Allow removals").changed() {
+                        app.settings.allow_removals = on;
+                        app.c().set_allow_removals(on);
+                    }
+                },
+            );
+        }
+        // Still there to turn off once automatic updates are.
+        if app.settings.auto_update || approved {
+            password_row(app, ui, true);
+        }
         if let Some(waiting) = app
             .background
             .waiting_text()

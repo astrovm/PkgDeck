@@ -291,6 +291,36 @@ impl TextSize {
     }
 }
 
+/// When the menu bar or tray icon shows, while background checks are on.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayIcon {
+    #[default]
+    Always,
+    /// Only while updates are waiting.
+    Updates,
+    /// Never. PkgDeck opens from the app menu or a notification.
+    Never,
+}
+
+/// What a background check does with the updates it finds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FoundUpdates {
+    Notify,
+    Install,
+    Nothing,
+}
+impl FoundUpdates {
+    pub const ALL: [Self; 3] = [Self::Notify, Self::Install, Self::Nothing];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Notify => "Notify me",
+            Self::Install => "Install them",
+            Self::Nothing => "Do nothing",
+        }
+    }
+}
+
 /// A choice this version doesn't know, from a newer one, reads as the
 /// default rather than losing every other setting.
 fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -357,8 +387,15 @@ pub struct Settings {
     /// Keep checking for updates from the menu bar or tray once the window
     /// closes.
     pub background_mode: bool,
+    #[serde(deserialize_with = "or_default")]
+    pub tray_icon: TrayIcon,
     pub check_interval: i32,
     pub auto_update: bool,
+    /// Say when a check finds updates. Automatic updates say what they
+    /// installed either way.
+    pub notify_updates: bool,
+    /// The sources automatic updates leave for you.
+    pub manual_sources: Vec<String>,
     pub allow_removals: bool,
     /// Clean caches and build files once a day, from the background.
     pub auto_clean: bool,
@@ -406,8 +443,11 @@ impl Default for Settings {
             sort_column: String::new(),
             sort_ascending: true,
             background_mode: true,
+            tray_icon: TrayIcon::Always,
             check_interval: 360,
             auto_update: false,
+            notify_updates: true,
+            manual_sources: vec![],
             allow_removals: true,
             auto_clean: false,
             auto_clean_worktrees: false,
@@ -448,6 +488,32 @@ impl Settings {
 
     pub fn set_window_bar_tint(&mut self, style: Style, on: bool) {
         self.window_bar_tints.insert(style, on);
+    }
+
+    pub fn found_updates(&self) -> FoundUpdates {
+        match (self.auto_update, self.notify_updates) {
+            (true, _) => FoundUpdates::Install,
+            (false, true) => FoundUpdates::Notify,
+            (false, false) => FoundUpdates::Nothing,
+        }
+    }
+
+    pub fn set_found_updates(&mut self, choice: FoundUpdates) {
+        self.auto_update = choice == FoundUpdates::Install;
+        self.notify_updates = choice != FoundUpdates::Nothing;
+    }
+
+    /// Whether automatic updates install from `source`.
+    pub fn installs_automatically(&self, source: &str) -> bool {
+        self.auto_update && !self.manual_sources.iter().any(|s| s == source)
+    }
+
+    pub fn set_installs_automatically(&mut self, source: &str, on: bool) {
+        self.manual_sources.retain(|s| s != source);
+        if !on {
+            self.manual_sources.push(source.to_owned());
+            self.manual_sources.sort();
+        }
     }
 }
 
@@ -1083,5 +1149,58 @@ mod tests {
             autostart: true,
             ..settings
         });
+    }
+
+    #[test]
+    fn what_checks_do_with_updates_reads_back_from_the_switches() {
+        let mut settings = Settings::default();
+        // Before the choice, notifying was all a check did, or installing.
+        assert_eq!(settings.found_updates(), FoundUpdates::Notify);
+        settings.auto_update = true;
+        assert_eq!(settings.found_updates(), FoundUpdates::Install);
+        for choice in FoundUpdates::ALL {
+            settings.set_found_updates(choice);
+            assert_eq!(settings.found_updates(), choice);
+        }
+        assert!(!settings.auto_update && !settings.notify_updates);
+        assert_eq!(
+            FoundUpdates::ALL.map(FoundUpdates::name),
+            ["Notify me", "Install them", "Do nothing"]
+        );
+    }
+
+    #[test]
+    fn sources_left_for_you_are_kept_once_each() {
+        let mut settings = Settings::default();
+        // Nothing installs while automatic updates are off.
+        assert!(!settings.installs_automatically("flatpak"));
+        settings.set_found_updates(FoundUpdates::Install);
+        assert!(settings.installs_automatically("flatpak"));
+        settings.set_installs_automatically("flatpak", false);
+        settings.set_installs_automatically("apt", false);
+        settings.set_installs_automatically("apt", false);
+        assert_eq!(settings.manual_sources, ["apt", "flatpak"]);
+        assert!(!settings.installs_automatically("apt"));
+        assert!(settings.installs_automatically("snap"));
+        settings.set_installs_automatically("apt", true);
+        assert_eq!(settings.manual_sources, ["flatpak"]);
+    }
+
+    #[test]
+    fn the_tray_choice_reads_back_and_an_unknown_one_shows_the_icon() {
+        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap().tray_icon;
+        assert_eq!(read("{}"), TrayIcon::Always);
+        assert_eq!(read(r#"{"trayIcon":"updates"}"#), TrayIcon::Updates);
+        assert_eq!(read(r#"{"trayIcon":"never"}"#), TrayIcon::Never);
+        assert_eq!(read(r#"{"trayIcon":"sometimes"}"#), TrayIcon::Always);
+        let settings = Settings {
+            tray_icon: TrayIcon::Never,
+            manual_sources: vec!["apt".into()],
+            notify_updates: false,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains(r#""trayIcon":"never""#), "{text}");
+        assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), settings);
     }
 }

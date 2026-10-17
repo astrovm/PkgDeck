@@ -790,7 +790,9 @@ pub struct BackgroundState {
     pub available: u64,
     pub failures: Vec<Failure>,
     pub notify: bool,
-    /// What automatic updates wait for, "battery" or "build".
+    /// How many updates an automatic run leaves for you, when one runs.
+    pub manual: Option<u64>,
+    /// What automatic updates wait for, "battery", "metered" or "build".
     pub waiting: Option<String>,
     /// When automatic cleaning last ran, and what it did.
     pub cleaned_at: Option<u64>,
@@ -834,6 +836,7 @@ impl BackgroundState {
     pub fn waiting_text(&self) -> Option<&'static str> {
         match self.waiting.as_deref()? {
             "battery" => Some("Updates wait for the charger"),
+            "metered" => Some("Updates wait for an unmetered connection"),
             "build" => Some("Updates wait for builds to finish"),
             _ => None,
         }

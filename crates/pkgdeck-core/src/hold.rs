@@ -1,5 +1,6 @@
 //! When automatic updates wait: on battery power, where they would drain
-//! the battery, and while something is being built, where they could swap a
+//! the battery, on a metered connection, where they would use up a data
+//! plan, and while something is being built, where they could swap a
 //! compiler or tool out from under the build.
 use crate::{
     host::Host,
@@ -12,6 +13,8 @@ use std::{ffi::OsString, path::Path, time::Duration};
 pub enum Hold {
     /// The computer runs on its battery.
     Battery,
+    /// The network connection is metered, like a phone's hotspot.
+    Metered,
     /// A compiler or build tool is running.
     Build,
 }
@@ -20,6 +23,7 @@ impl Hold {
     pub fn key(self) -> &'static str {
         match self {
             Self::Battery => "battery",
+            Self::Metered => "metered",
             Self::Build => "build",
         }
     }
@@ -27,15 +31,19 @@ impl Hold {
 
 /// Why automatic updates should wait right now, if they should.
 pub fn current(host: &Host) -> Option<Hold> {
-    first(on_battery(host), || building(host))
+    first([
+        (Hold::Battery, &|| on_battery(host)),
+        (Hold::Metered, &|| metered(host)),
+        (Hold::Build, &|| building(host)),
+    ])
 }
 
-/// The battery comes first, as the cheaper check.
-fn first(battery: bool, building: impl FnOnce() -> bool) -> Option<Hold> {
-    if battery {
-        return Some(Hold::Battery);
-    }
-    building().then_some(Hold::Build)
+/// The first reason that applies, cheapest checks first.
+fn first(checks: [(Hold, &dyn Fn() -> bool); 3]) -> Option<Hold> {
+    checks
+        .into_iter()
+        .find(|(_, applies)| applies())
+        .map(|(hold, _)| hold)
 }
 
 #[cfg(target_os = "macos")]
@@ -54,6 +62,44 @@ fn on_battery(_: &Host) -> bool {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn on_battery(_: &Host) -> bool {
     false
+}
+
+/// Whether NetworkManager says the connection is metered, or guesses it
+/// is. The host's busctl asks it, since the Flatpak sandbox can't reach the
+/// system bus.
+#[cfg(target_os = "linux")]
+fn metered(host: &Host) -> bool {
+    host.resolve("busctl")
+        .ok()
+        .flatten()
+        .is_some_and(|busctl| busctl_metered(host, &busctl))
+}
+#[cfg(not(target_os = "linux"))]
+fn metered(_: &Host) -> bool {
+    false
+}
+#[cfg(any(target_os = "linux", test))]
+fn busctl_metered(host: &Host, busctl: &Path) -> bool {
+    read(
+        host,
+        busctl,
+        &[
+            "--system",
+            "get-property",
+            "org.freedesktop.NetworkManager",
+            "/org/freedesktop/NetworkManager",
+            "org.freedesktop.NetworkManager",
+            "Metered",
+        ],
+    )
+    .is_some_and(|reply| metered_reply(&reply))
+}
+
+/// NetworkManager's metered values: 1 is yes and 3 a guess of yes. 0 is
+/// unknown, 2 no and 4 a guess of no.
+#[cfg(any(target_os = "linux", test))]
+fn metered_reply(reply: &str) -> bool {
+    matches!(reply.trim(), "u 1" | "u 3")
 }
 
 /// Whether `pmset -g batt` says the Mac runs on its battery.
@@ -211,9 +257,35 @@ mod tests {
 
     #[test]
     fn the_battery_is_the_first_reason_to_wait() {
-        assert_eq!(first(true, || unreachable!()), Some(Hold::Battery));
-        assert_eq!(first(false, || true), Some(Hold::Build));
-        assert_eq!(first(false, || false), None);
+        let checks = |battery: bool, metered: bool, build: bool| {
+            first([
+                (Hold::Battery, &move || battery),
+                (Hold::Metered, &move || metered),
+                (Hold::Build, &move || build),
+            ])
+        };
+        assert_eq!(checks(true, true, true), Some(Hold::Battery));
+        assert_eq!(checks(false, true, true), Some(Hold::Metered));
+        assert_eq!(checks(false, false, true), Some(Hold::Build));
+        assert_eq!(checks(false, false, false), None);
+        // A later check doesn't run once an earlier one applies.
+        assert_eq!(
+            first([
+                (Hold::Battery, &|| true),
+                (Hold::Metered, &|| unreachable!()),
+                (Hold::Build, &|| unreachable!()),
+            ]),
+            Some(Hold::Battery)
+        );
+    }
+
+    #[test]
+    fn a_metered_or_likely_metered_connection_holds_updates() {
+        assert!(metered_reply("u 1\n"));
+        assert!(metered_reply("u 3\n"));
+        for reply in ["u 0\n", "u 2\n", "u 4\n", "", "garbage"] {
+            assert!(!metered_reply(reply), "{reply}");
+        }
     }
 
     #[test]
@@ -266,13 +338,15 @@ mod tests {
         // Whatever this machine is doing, asking never fails.
         let _ = current(&Host::current());
         assert_eq!(Hold::Battery.key(), "battery");
+        assert_eq!(Hold::Metered.key(), "metered");
         assert_eq!(Hold::Build.key(), "build");
-        // Without ps, nothing counts as a build.
+        // Without ps or busctl, nothing counts as a build or metered.
         let bare = Host::new(
             Runtime::Native,
             BTreeMap::from([("PATH".into(), "/nonexistent/pkgdeck".into())]),
         );
         assert!(!building(&bare));
+        assert!(!metered(&bare));
         assert_eq!(read(&bare, Path::new("/nonexistent/pkgdeck/ps"), &[]), None);
     }
 
@@ -302,6 +376,16 @@ mod tests {
         // A tool that fails says nothing, whatever it printed.
         assert!(!pmset_battery(&host, &broken));
         assert_eq!(read(&host, &broken, &[]), None);
+        // busctl gets asked for NetworkManager's property.
+        let hotspot = tool(
+            &dir,
+            "hotspot",
+            "[ \"$*\" = '--system get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager Metered' ] && echo 'u 3'",
+        );
+        let home = tool(&dir, "home", "echo 'u 4'");
+        assert!(busctl_metered(&host, &hotspot));
+        assert!(!busctl_metered(&host, &home));
+        assert!(!busctl_metered(&host, &broken));
         let build = tool(&dir, "build", "echo /sbin/launchd; echo cargo build");
         let idle = tool(&dir, "idle", "echo /sbin/launchd");
         assert!(listed_builds(&host, &build));

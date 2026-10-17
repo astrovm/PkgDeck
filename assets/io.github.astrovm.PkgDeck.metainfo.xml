@@ -19,6 +19,9 @@
           <li>A Flatpak link shows the version it installs instead of its branch</li>
           <li>App descriptions keep their paragraphs and show list items one per line</li>
           <li>Every section and running change words what it's doing the same way</li>
+          <li>The tray icon can show always, only with updates, or never</li>
+          <li>Checks can notify, install updates, or do nothing with them</li>
+          <li>Automatic updates install only from the sources you pick, and wait on metered connections</li>
         </ul>
       </description>
     </release>
