@@ -17,6 +17,7 @@
           <li>A Flatpak link shows the app's icon, description and screenshots when its repository is set up</li>
           <li>A Flatpak link for an app installed for all users offers Update or Reinstall instead of Install</li>
           <li>A Flatpak link shows the version it installs instead of its branch</li>
+          <li>App descriptions keep their paragraphs and show list items one per line</li>
         </ul>
       </description>
     </release>
