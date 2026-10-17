@@ -109,6 +109,38 @@ pub(super) struct Command {
     pub arguments: Vec<String>,
 }
 
+/// Start `command` detached; through `bridge` (`flatpak-spawn`) when it
+/// has to leave a Flatpak sandbox.
+pub(super) fn spawn(command: &Command, bridge: Option<&std::path::Path>) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut process = if let Some(bridge) = bridge {
+        let mut process = std::process::Command::new(bridge);
+        process.arg("--host");
+        for (name, value) in &command.environment {
+            process.arg(format!("--env={name}={value}"));
+        }
+        process.arg(&command.program);
+        process
+    } else {
+        let mut process = std::process::Command::new(&command.program);
+        process.envs(
+            command
+                .environment
+                .iter()
+                .map(|(name, value)| (name, value)),
+        );
+        process
+    };
+    process
+        .args(command.launch_arguments())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(drop)
+}
+
 impl Command {
     pub fn parse(exec: &str) -> Option<Self> {
         let mut words = split(&unescape(exec))?.into_iter().peekable();

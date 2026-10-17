@@ -338,6 +338,8 @@ pub struct Details {
     pub more: bool,
     pub location: String,
     pub action: String,
+    /// An opened Flatpak app that's installed, so it can start.
+    pub launchable: bool,
     pub cleanup: Option<Cleanup>,
     pub failure: Option<Value>,
     pub hint: String,

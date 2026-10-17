@@ -75,7 +75,8 @@ What the page shows:
   password.
 - Flatpak reference: the app, its repository, whether a signing key is
   included, and any extra repository it needs. Choose User or System here.
-  Flatpak may still download extra runtimes during install.
+  Flatpak may still download extra runtimes during install. Once the app is
+  installed, the page has **Launch**. Runtimes don't.
 - RPM, Arch, and Snap files: checked by their own package manager.
 - Repository files: checked again right before they are added. `.ymp` files
   open the openSUSE installer.

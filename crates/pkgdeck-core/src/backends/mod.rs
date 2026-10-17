@@ -57,6 +57,53 @@ use std::{
 };
 pub use system_image::SystemImage;
 
+/// Start an installed Flatpak app, detached, as its menu entry would.
+pub fn launch_flatpak(id: &PackageId) -> Result<(), EngineError> {
+    let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
+        .then(|| std::path::Path::new("flatpak-spawn"));
+    start_flatpak(id, "flatpak", bridge)
+}
+
+/// `launch_flatpak` with the `flatpak` program to run, so tests can stand in.
+fn start_flatpak(
+    id: &PackageId,
+    program: &str,
+    bridge: Option<&std::path::Path>,
+) -> Result<(), EngineError> {
+    let mut command = flatpak_launch_command(id)?;
+    command.program = program.into();
+    desktop_exec::spawn(&command, bridge).map_err(|error| EngineError::InvalidResponse {
+        backend: "flatpak".into(),
+        reason: format!("couldn't start it: {error}"),
+    })
+}
+
+/// `flatpak run` for the installation `id` is in.
+fn flatpak_launch_command(id: &PackageId) -> Result<desktop_exec::Command, EngineError> {
+    let invalid = |reason: &str| EngineError::InvalidResponse {
+        backend: "flatpak".into(),
+        reason: reason.into(),
+    };
+    let installation = match id.scope {
+        Scope::System => "--system",
+        Scope::User { .. } => "--user",
+        Scope::Environment { .. } => return Err(invalid("only system and user apps can start")),
+    };
+    if id.backend != "flatpak" || id.name.is_empty() || id.name.starts_with('-') {
+        return Err(invalid("not a Flatpak app"));
+    }
+    let mut arguments = vec!["run".to_owned(), installation.to_owned()];
+    if !id.architecture.is_empty() {
+        arguments.push(format!("--arch={}", id.architecture));
+    }
+    arguments.push(id.name.clone());
+    Ok(desktop_exec::Command {
+        environment: Vec::new(),
+        program: "flatpak".into(),
+        arguments,
+    })
+}
+
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
     Capability::Details,
@@ -6935,6 +6982,103 @@ mod tests {
         path::Path,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn flatpak_apps_start_from_the_installation_they_are_in() {
+        let id = |scope: Scope, name: &str| PackageId {
+            backend: "flatpak".into(),
+            name: name.into(),
+            architecture: "x86_64".into(),
+            scope,
+            remote: None,
+            reference: Some("flatpakref:ab:https://example.org/App.flatpakref".into()),
+        };
+        let arguments =
+            |id: &PackageId| flatpak_launch_command(id).map(|c| (c.program, c.arguments));
+        assert_eq!(
+            arguments(&id(Scope::System, "org.example.App")).unwrap(),
+            (
+                "flatpak".into(),
+                vec![
+                    "run".into(),
+                    "--system".into(),
+                    "--arch=x86_64".into(),
+                    "org.example.App".into()
+                ]
+            )
+        );
+        assert_eq!(
+            arguments(&id(Scope::User { uid: 1000 }, "org.example.App"))
+                .unwrap()
+                .1[1],
+            "--user"
+        );
+        let mut no_arch = id(Scope::System, "org.example.App");
+        no_arch.architecture.clear();
+        assert_eq!(
+            arguments(&no_arch).unwrap().1,
+            ["run", "--system", "org.example.App"]
+        );
+        // An option is never taken for the app, and other managers never run.
+        assert!(arguments(&id(Scope::System, "--command=sh")).is_err());
+        assert!(arguments(&id(Scope::System, "")).is_err());
+        assert!(arguments(&id(
+            Scope::Environment {
+                path: "/opt/env".into()
+            },
+            "org.example.App"
+        ))
+        .is_err());
+        let mut apt = id(Scope::System, "org.example.App");
+        apt.backend = "apt".into();
+        assert!(arguments(&apt).is_err());
+        // Refused before anything starts.
+        assert!(launch_flatpak(&apt).is_err());
+        // It starts detached, with those arguments, and says when it can't.
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let program = base.join("flatpak");
+        let record = base.join("arguments");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{0}.tmp' '{0}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        start_flatpak(
+            &id(Scope::System, "org.example.App"),
+            program.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !record.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            "run\n--system\n--arch=x86_64\norg.example.App\n"
+        );
+        let missing = base.join("missing");
+        let error = start_flatpak(
+            &id(Scope::System, "org.example.App"),
+            missing.to_str().unwrap(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("couldn't start it"), "{error}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     fn completion(code: i32, stdout: &str) -> Completion {
         Completion {

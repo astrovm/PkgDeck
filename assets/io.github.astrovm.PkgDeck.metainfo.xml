@@ -12,9 +12,11 @@
   <releases>
     <release version="0.11.7" date="2026-10-17">
       <description>
-        <p>The AppImage works on more Linux systems.</p>
+        <p>The AppImage works on more Linux systems, and Flatpak apps opened from a link can start.</p>
         <ul>
           <li>The AppImage and Snap start on Ubuntu 24.04, Debian 13 and other systems with glibc 2.39 or newer</li>
+          <li>A Flatpak link's page shows the app as installed after installing it for the whole system</li>
+          <li>Installed Flatpak apps opened from a link or file have Launch</li>
         </ul>
       </description>
     </release>

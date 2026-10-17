@@ -1107,38 +1107,8 @@ impl AppImage {
         }
         let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
             .then(|| Path::new("flatpak-spawn"));
-        Self::spawn(&command, bridge).map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
-    }
-    /// Start `command` detached; through `bridge` (`flatpak-spawn`) when it
-    /// has to leave a Flatpak sandbox.
-    fn spawn(command: &desktop_exec::Command, bridge: Option<&Path>) -> std::io::Result<()> {
-        use std::os::unix::process::CommandExt;
-        let mut process = if let Some(bridge) = bridge {
-            let mut process = std::process::Command::new(bridge);
-            process.arg("--host");
-            for (name, value) in &command.environment {
-                process.arg(format!("--env={name}={value}"));
-            }
-            process.arg(&command.program);
-            process
-        } else {
-            let mut process = std::process::Command::new(&command.program);
-            process.envs(
-                command
-                    .environment
-                    .iter()
-                    .map(|(name, value)| (name, value)),
-            );
-            process
-        };
-        process
-            .args(command.launch_arguments())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .spawn()
-            .map(drop)
+        desktop_exec::spawn(&command, bridge)
+            .map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
     }
     /// Saved GitHub projects, by managed file name.
     fn sources_file(&self) -> PathBuf {
@@ -2905,7 +2875,7 @@ esac
         // another test is starting ("Text file busy"); try again.
         let spawn = |command: &desktop_exec::Command, bridge: Option<&Path>| {
             (0..200)
-                .map(|_| AppImage::spawn(command, bridge))
+                .map(|_| desktop_exec::spawn(command, bridge))
                 .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
                 .find(|result| {
                     result.as_ref().err().map(std::io::Error::kind)
@@ -2942,7 +2912,7 @@ esac
             wait(),
             format!("|--host --env=GREETING=hi {} --flag\n", program.display())
         );
-        assert!(AppImage::spawn(&command, Some(&base.join("missing"))).is_err());
+        assert!(desktop_exec::spawn(&command, Some(&base.join("missing"))).is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
