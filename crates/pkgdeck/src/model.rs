@@ -340,6 +340,9 @@ pub struct Details {
     pub action: String,
     /// An opened Flatpak app that's installed, so it can start.
     pub launchable: bool,
+    /// An opened AppImage file that isn't installed, which can start where
+    /// it is.
+    pub runnable: bool,
     pub cleanup: Option<Cleanup>,
     pub failure: Option<Value>,
     pub hint: String,

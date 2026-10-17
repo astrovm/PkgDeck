@@ -280,6 +280,37 @@ fn an_installed_flatpak_app_opened_from_a_link_can_launch() {
 }
 
 #[test]
+fn an_appimage_file_opened_without_installing_can_still_launch() {
+    for runnable in [false, true] {
+        let mut row = row("package");
+        row.source = "appimage".into();
+        row.installed = None;
+        let details = Details {
+            runnable,
+            ..fixture_details(&row)
+        };
+        let mut harness = draw_details(
+            app(&row, Page::Search),
+            row,
+            details,
+            700.0,
+            false,
+            true,
+            false,
+        );
+        // Install stays the main button; Launch only starts the file.
+        assert!(harness.query_by_label("Install").is_some());
+        assert_eq!(harness.query_by_label("Launch").is_some(), runnable);
+        if runnable {
+            harness.get_by_label("Launch").click();
+            harness.run_steps(2);
+            // Nothing is open in this controller, and the page says so.
+            assert_eq!(harness.state().1.launch_error, "Nothing to start.");
+        }
+    }
+}
+
+#[test]
 fn package_actions_close_and_wait_for_review_or_a_retained_list() {
     let row = row("package");
     for narrow in [false, true] {

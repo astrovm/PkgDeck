@@ -16,6 +16,7 @@
         <ul>
           <li>Apps installed from a .flatpak bundle or a local build are left out of update checks</li>
           <li>A source that fails more than once shows once, with every reason</li>
+          <li>An opened AppImage file can launch without installing it</li>
         </ul>
       </description>
     </release>
