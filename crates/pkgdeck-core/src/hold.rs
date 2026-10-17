@@ -29,11 +29,27 @@ impl Hold {
     }
 }
 
-/// Why automatic updates should wait right now, if they should.
-pub fn current(host: &Host) -> Option<Hold> {
+/// Which reasons count. Builds always do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Waits {
+    pub battery: bool,
+    pub metered: bool,
+}
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            battery: true,
+            metered: true,
+        }
+    }
+}
+
+/// Why automatic updates should wait right now, if they should, of the
+/// reasons `waits` counts.
+pub fn current(host: &Host, waits: Waits) -> Option<Hold> {
     first([
-        (Hold::Battery, &|| on_battery(host)),
-        (Hold::Metered, &|| metered(host)),
+        (Hold::Battery, &|| waits.battery && on_battery(host)),
+        (Hold::Metered, &|| waits.metered && metered(host)),
         (Hold::Build, &|| building(host)),
     ])
 }
@@ -336,7 +352,7 @@ mod tests {
     #[test]
     fn the_running_system_answers_without_failing() {
         // Whatever this machine is doing, asking never fails.
-        let _ = current(&Host::current());
+        let _ = current(&Host::current(), Waits::default());
         assert_eq!(Hold::Battery.key(), "battery");
         assert_eq!(Hold::Metered.key(), "metered");
         assert_eq!(Hold::Build.key(), "build");
@@ -412,11 +428,16 @@ mod tests {
             .spawn()
             .unwrap();
         let host = Host::current();
-        let held = (building(&host), current(&host));
+        let nothing_else = Waits {
+            battery: false,
+            metered: false,
+        };
+        let held = (building(&host), current(&host, nothing_else));
         child.kill().unwrap();
         child.wait().unwrap();
         fs::remove_dir_all(&dir).unwrap();
         assert!(held.0);
-        assert!(held.1.is_some());
+        // Builds count whatever else is turned off.
+        assert_eq!(held.1, Some(Hold::Build));
     }
 }

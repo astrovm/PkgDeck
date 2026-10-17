@@ -10,6 +10,16 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.11.6" date="2026-10-17">
+      <description>
+        <p>Choose what automatic updates wait for.</p>
+        <ul>
+          <li>Automatic updates and cleaning can run on battery</li>
+          <li>Automatic updates can run on a metered connection</li>
+          <li>Automatic cleaning no longer waits for a metered connection</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.11.5" date="2026-10-16">
       <description>
         <p>Better pages for opened Flatpak links.</p>

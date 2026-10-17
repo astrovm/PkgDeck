@@ -268,7 +268,8 @@ Turn on **Clean automatically** in **Settings** → **Clean**. It needs
   other system cleanups wait for you.
 - Worktrees have their own switch, **Clean finished worktrees**.
 - Like automatic updates, it waits for the charger, for builds, and for other
-  changes to finish.
+  changes to finish. It runs on a metered connection, since it downloads
+  nothing. Turn off **Wait for the charger** to clean on battery too.
 - A notification says how much space it freed.
 
 ## Sources
@@ -537,10 +538,12 @@ others) need **Skip the password** first. **Update automatically** in
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
   failed.
-- It waits while the computer runs on battery, on a metered connection
-  (Linux, when NetworkManager says or guesses so, like a phone's hotspot),
-  and while something is being built: Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake,
-  Xcode, Gradle, Maven, Bazel, `go build` or `go test`, `dotnet build`.
+- It waits while the computer runs on battery (**Wait for the charger**),
+  on a metered connection (**Wait on metered connections**, Linux only, when
+  NetworkManager says or guesses so, like a phone's hotspot), and while
+  something is being built. Both switches start on. Builds always count:
+  Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake, Xcode, Gradle,
+  Maven, Bazel, `go build` or `go test`, `dotnet build`.
   The check still tells you about the updates, and Settings shows what
   they wait for. Within 5 minutes of plugging in, leaving the metered
   connection or the build ending, PkgDeck checks again and installs them.
@@ -700,7 +703,8 @@ and **About**.
 - **Checks**: **Background checks**, **Tray icon**, **Check every** and
   **Start at login**, then when PkgDeck last checked and what it found.
 - **Automatic updates**: **When updates are found**, then with **Install
-  them**, **Install from**, **Allow removals** and **Skip the password**.
+  them**, **Install from**, **Allow removals**, **Wait for the charger**,
+  **Wait on metered connections** (Linux) and **Skip the password**.
   See [Update notifications](#update-notifications).
 - **Notifications**: why notifications can't show, when they can't, and
   **Test notification**.

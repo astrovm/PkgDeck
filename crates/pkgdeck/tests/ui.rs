@@ -1625,6 +1625,15 @@ fn clean_settings_use_the_clean_page_list_and_say_what_they_need() {
     assert!(harness
         .query_by_label("Once a day. Cleans what's checked on Clean")
         .is_some());
+    // Waiting for the charger shows once something cleans on its own.
+    assert!(harness.query_by_label("Wait for the charger").is_none());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Clean automatically");
+    assert!(harness
+        .query_by_label("Automatic updates wait too")
+        .is_some());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Wait for the charger");
+    assert!(!harness.state().1.settings.wait_for_charger);
+    click_in_view(&mut harness, Some(Role::CheckBox), "Clean automatically");
     // Without background checks, each switch says why it is off, and one
     // button turns them back on.
     harness.state_mut().1.settings.background_mode = false;
@@ -2112,6 +2121,19 @@ fn settings_pick_the_tray_icon_and_what_checks_do_with_updates() {
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.manual_sources, ["homebrew"]);
     assert_eq!(harness.state().1.ctl.manual_sources(), ["homebrew"]);
+    // Both waits start on, and turn off here.
+    let waits = [
+        "Wait for the charger",
+        #[cfg(target_os = "linux")]
+        "Wait on metered connections",
+    ];
+    for label in waits {
+        click_in_view(&mut harness, Some(Role::CheckBox), label);
+    }
+    let settings = &harness.state().1.settings;
+    assert!(!settings.wait_for_charger);
+    assert_eq!(settings.wait_for_unmetered, !cfg!(target_os = "linux"));
+    assert!(!harness.state().1.ctl.waits().battery);
     // With the password skipped, APT can install on its own too.
     harness.state_mut().1.settings.system_approval = "key".into();
     harness.run_steps(3);

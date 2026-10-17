@@ -373,11 +373,21 @@ impl App {
         self.c().set_auto_update(auto);
         let manual = self.settings.manual_sources.clone();
         self.c().set_manual_sources(manual);
+        self.apply_waits();
         self.c().set_allow_removals(removals);
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
         self.c().set_auto_clean_worktrees(worktrees);
         self.sync_cleanup_preferences();
+    }
+
+    /// What automatic updates and cleaning wait for, besides builds.
+    pub fn apply_waits(&mut self) {
+        let (battery, metered) = (
+            self.settings.wait_for_charger,
+            self.settings.wait_for_unmetered,
+        );
+        self.c().set_waits(battery, metered);
     }
 
     pub fn save_settings(&mut self) {
