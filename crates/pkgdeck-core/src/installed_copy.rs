@@ -45,14 +45,9 @@ pub fn compare(left: &str, right: &str) -> Ordering {
 
 /// The installed version of `id`'s package, `Some("")` when it is installed
 /// at no known version, and `None` when it isn't installed or the manager
-/// can't say.
-pub fn version(id: &PackageId, cancel: &Cancellation) -> Option<String> {
-    version_with_host(id, cancel, &Host::current())
-}
-
-/// Like [`version`], but a Flatpak installed only in the other installation
-/// counts too: `id` moves there, so the page's button acts on that copy
-/// instead of adding a second one.
+/// can't say. A Flatpak installed only in the other installation counts
+/// too: `id` moves there, so the page's button acts on that copy instead of
+/// adding a second one.
 pub fn locate(id: &mut PackageId, cancel: &Cancellation) -> Option<String> {
     locate_with_host(id, cancel, &Host::current())
 }
@@ -75,6 +70,7 @@ fn locate_with_host(id: &mut PackageId, cancel: &Cancellation, host: &Host) -> O
     Some(version)
 }
 
+/// The installed version of `id`'s package in its own installation.
 fn version_with_host(id: &PackageId, cancel: &Cancellation, host: &Host) -> Option<String> {
     let name = id.name.as_str();
     if name.is_empty() || name.starts_with('-') {

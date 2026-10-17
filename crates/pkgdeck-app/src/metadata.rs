@@ -1395,6 +1395,11 @@ Description: '&invalid;'
             )),
             "Mods made easy.\n\n• Finds Steam installs\n• 30 mods\n\n1. Pick\n2. Play\n\nLoose text"
         );
+        // A translated phrase inside an English paragraph is left out too.
+        assert_eq!(
+            description("<p>Hello <span xml:lang=\"de\">Hallo</span>world</p>"),
+            "Hello world"
+        );
         assert!(description("<broken>").is_empty());
     }
     #[test]
