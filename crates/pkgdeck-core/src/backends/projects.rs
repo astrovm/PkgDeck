@@ -915,7 +915,7 @@ impl Backend for Projects {
                 .into_iter()
                 .find(|project| project.root == root)
                 .ok_or(EngineError::NotFound)?;
-            progress(Progress::Message(format!("Cleaning {}", plan.title)));
+            progress(Progress::Message(format!("Cleaning {}…", plan.title)));
             // Real folders only: a link stays, wherever it leads.
             let folders = project.folders.iter().filter(|folder| {
                 fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir())
@@ -930,7 +930,7 @@ impl Backend for Projects {
             // `cleanup_plan` found the task, so it is one or the other.
             let repository = Path::new(id.key.strip_prefix("worktrees:").unwrap_or_default());
             let worktrees = self.worktrees(repository, self.cutoff(), cancel);
-            progress(Progress::Message(format!("Cleaning {}", plan.title)));
+            progress(Progress::Message(format!("Cleaning {}…", plan.title)));
             if worktrees.iter().any(|worktree| worktree.missing) {
                 self.git(repository, &["worktree", "prune"], cancel)
                     .ok_or_else(|| failed(repository, "git worktree prune failed".into()))?;

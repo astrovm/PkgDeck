@@ -260,7 +260,7 @@ impl Backend for DevCaches {
             .find(|cache| id.backend == "dev-caches" && cache.key == id.key)
             .ok_or(EngineError::NotFound)?;
         not_while_building(&self.host)?;
-        progress(Progress::Message(format!("Emptying the {}", cache.title)));
+        progress(Progress::Message(format!("Emptying the {}…", cache.title)));
         for folder in &cache.folders {
             if cancel.requested() {
                 return Err(EngineError::Cancelled);
@@ -349,7 +349,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             said,
-            [Progress::Message("Emptying the Cargo downloads".into())]
+            [Progress::Message("Emptying the Cargo downloads…".into())]
         );
         assert!(cargo.join("registry").is_dir() && !cargo.join("git").exists());
         assert_eq!(fs::read_dir(cargo.join("registry")).unwrap().count(), 0);

@@ -847,7 +847,12 @@ fn body(
         details.location.clone()
     };
     if !file.is_empty() {
-        facts.push(("File", file));
+        let label = if file.starts_with("https://") {
+            "Link"
+        } else {
+            "File"
+        };
+        facts.push((label, file));
     }
     if appimage {
         if let Some(bytes) = app.app_file.bytes {

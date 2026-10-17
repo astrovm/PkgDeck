@@ -1556,7 +1556,7 @@ impl Engine {
         events(Event::Started(operations[0].clone()));
         events(Event::Progress {
             operation: operations[0].clone(),
-            progress: Progress::Message("Authorizing system changes for this batch.".into()),
+            progress: Progress::Message("Authorizing system changes for this batch…".into()),
         });
         let guard =
             match crate::batch::begin(&host, authorization, self.batch_mode, operations, cancel) {
@@ -1857,7 +1857,7 @@ mod apt_upgrade_tests {
                 .lock()
                 .unwrap()
                 .push(format!("refresh before {operation:?}"));
-            progress(Progress::Message("Refreshing package lists.".into()));
+            progress(Progress::Message("Refreshing package lists…".into()));
             self.refresh.clone()
         }
         fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {

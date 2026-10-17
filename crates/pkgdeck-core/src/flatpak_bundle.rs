@@ -182,7 +182,23 @@ fn release_version(gzipped: &[u8]) -> Option<String> {
         .take(MAX_APPDATA_XML)
         .read_to_string(&mut xml)
         .ok()?;
-    let mut rest = xml.as_str();
+    first_release(&xml)
+}
+
+/// The newest release of the component `id` in a catalog of many, such as
+/// a Flatpak remote's AppStream data.
+pub(crate) fn component_release(xml: &str, id: &str) -> Option<String> {
+    let (plain, desktop) = (format!("<id>{id}</id>"), format!("<id>{id}.desktop</id>"));
+    xml.split("<component")
+        .skip(1)
+        .map(|component| component.split("</component>").next().unwrap_or_default())
+        .find(|component| component.contains(&plain) || component.contains(&desktop))
+        .and_then(first_release)
+}
+
+/// The version of the first `<release>` in AppStream XML.
+fn first_release(xml: &str) -> Option<String> {
+    let mut rest = xml;
     let tag = loop {
         let at = rest.find("<release")?;
         rest = &rest[at + "<release".len()..];
@@ -392,6 +408,20 @@ pub(crate) mod tests {
             assert_eq!(release_version(&gzip(xml)).as_deref(), expected, "{xml}");
         }
         assert_eq!(release_version(b"not gzip"), None);
+        // In a remote's catalog, only the named app's own releases count.
+        let catalog = r#"<components version="0.8"><component><id>org.example.Other</id><releases><release version="9"/></releases></component>
+            <component><id>org.example.App.desktop</id><releases><release version="2.0"/><release version="1.0"/></releases></component>
+            <component><id>org.example.Plain</id><releases><release version="3"/></releases></component>
+            <component><id>org.example.Bare</id></component><component><id>org.example.Next</id><releases><release version="4"/></releases></component></components>"#;
+        for (id, expected) in [
+            ("org.example.App", Some("2.0")),
+            ("org.example.Plain", Some("3")),
+            ("org.example.Bare", None),
+            ("org.example", None),
+            ("org.example.Missing", None),
+        ] {
+            assert_eq!(component_release(catalog, id).as_deref(), expected, "{id}");
+        }
     }
 
     #[test]

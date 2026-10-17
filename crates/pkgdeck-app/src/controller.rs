@@ -574,7 +574,7 @@ impl ProgressState {
         let current = self.current.as_ref();
         encoded(json!({
             "activity_id": self.activity_id,
-            "label": self.label,
+            "label": running_label(&self.label),
             "done": self.done,
             "total": self.total,
             "transferred": self.transferred,
@@ -630,7 +630,8 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
     if let Payload::OpenPackage(details) = &mut payload {
         let package = &mut details.package;
         if package.id.backend != "appimage" && package.installed_version.is_none() {
-            package.installed_version = pkgdeck_core::installed_copy::version(&package.id, cancel);
+            package.installed_version =
+                pkgdeck_core::installed_copy::locate(&mut package.id, cancel);
         }
     }
     Ok(payload)
@@ -847,7 +848,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             if cancel.requested() {
                 Ok(Payload::Batch(status, outcomes))
             } else {
-                send(Reply::Progress("Checking for updates".into()));
+                send(Reply::Progress("Checking for updates…".into()));
                 let mut report = engine.installed(cancel);
                 if cancel.requested() {
                     Ok(Payload::Batch(status, outcomes))
@@ -1049,10 +1050,10 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     send(Reply::Progress(match progress {
                         Progress::Message(message) => message.clone(),
                         Progress::Transfer { completed, total } => match total {
-                            Some(total) => format!("Transferred {completed} of {total}"),
-                            None => format!("Transferred {completed}"),
+                            Some(total) => format!("Transferring {completed} of {total}…"),
+                            None => format!("Transferring {completed}…"),
                         },
-                        Progress::Package(name) => format!("Updating {name}"),
+                        Progress::Package(name) => format!("Updating {name}…"),
                     }));
                 }
                 if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
@@ -3444,6 +3445,32 @@ fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
         .collect()
 }
 /// One line for progress and results, such as "Install htop (APT)".
+/// A change's title as it runs: "Update Beta App" reads "Updating Beta
+/// App…" on its progress card.
+fn running_label(title: &str) -> String {
+    if title.is_empty() {
+        return String::new();
+    }
+    let (verb, rest) = title.split_once(' ').unwrap_or((title, ""));
+    let running = match verb {
+        "Install" => "Installing",
+        "Remove" => "Removing",
+        "Update" => "Updating",
+        "Refresh" => "Refreshing",
+        "Clean" => "Cleaning",
+        "Add" => "Adding",
+        "Enable" => "Enabling",
+        "Disable" => "Disabling",
+        "Change" => "Changing",
+        "Open" => "Opening",
+        _ => return format!("{title}…"),
+    };
+    if rest.is_empty() {
+        format!("{running}…")
+    } else {
+        format!("{running} {rest}…")
+    }
+}
 fn operation_title(operation: &Operation) -> String {
     operation_title_named(operation, &Names::new())
 }
@@ -3777,19 +3804,30 @@ fn confirmation_preview(
 fn opened_page(details: &PackageDetails, action: &str) -> Value {
     let package = &details.package;
     let info = crate::metadata::cached_info(package);
-    let summary = package.summary.lines().next().unwrap_or_default();
+    // A reference with no comment starts with where it came from, which
+    // the page already shows.
+    let summary = package
+        .summary
+        .lines()
+        .next()
+        .filter(|line| !line.starts_with("Reference: "))
+        .unwrap_or_default();
     let description = info
         .as_ref()
         .map(|info| info.description.clone())
         .filter(|description| !description.is_empty())
         .unwrap_or_else(|| details.description.clone());
     let location = match package.id.reference.as_deref() {
-        Some(reference) if reference.starts_with("local-deb:") => reference
-            .splitn(3, ':')
-            .nth(2)
-            .unwrap_or_default()
-            .to_owned(),
-        Some(reference) if reference.starts_with("flatpakref:") => package.id.name.clone(),
+        // After its hash, the file or link it came from.
+        Some(reference)
+            if reference.starts_with("local-deb:") || reference.starts_with("flatpakref:") =>
+        {
+            reference
+                .splitn(3, ':')
+                .nth(2)
+                .unwrap_or_default()
+                .to_owned()
+        }
         _ => package.id.name.clone(),
     };
     let mut row = package_row(package, &[], None);
@@ -5228,7 +5266,14 @@ impl ffi::PackageController {
                 return;
             }
             if let Job::OpenInput(input) = &job {
-                send(Reply::Done(inspect_open_input(input, &token)));
+                let mut result = inspect_open_input(input, &token);
+                // The catalog names an opened app and gives its icon,
+                // description and screenshots, as on a search result's page.
+                if let Ok(Payload::OpenPackage(details)) = &mut result {
+                    crate::metadata::enrich(&mut details.package, natives.metadata);
+                    crate::metadata::details(&mut details.package, &token, natives.metadata);
+                }
+                send(Reply::Done(result));
                 return;
             }
             // A warm search always has the engine its scope describes.
@@ -5983,7 +6028,7 @@ impl ffi::PackageController {
             failed_sources.dedup();
             if !failed_sources.is_empty() && !writing {
                 self.as_mut()
-                    .set_status("Retrying failed source checks before updating.".into());
+                    .set_status("Retrying failed source checks before updating…".into());
                 self.start(Job::RetryFailedUpdates(failed_sources));
                 return;
             }
@@ -6235,7 +6280,7 @@ impl ffi::PackageController {
             }
             self.as_mut().set_asked(vec![]);
             self.as_mut()
-                .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
+                .set_status("Cancelling once the package manager finishes safely…".into());
         }
         self.sync_needs_poll();
     }
@@ -7764,6 +7809,29 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_running_change_reads_as_what_it_is_doing() {
+        for (title, running) in [
+            ("Install Demo (Flatpak)", "Installing Demo (Flatpak)…"),
+            ("Remove Demo (APT)", "Removing Demo (APT)…"),
+            ("Update Beta App", "Updating Beta App…"),
+            ("Refresh APT package lists", "Refreshing APT package lists…"),
+            ("Clean Cargo downloads", "Cleaning Cargo downloads…"),
+            ("Add Example repository", "Adding Example repository…"),
+            ("Enable Example repository", "Enabling Example repository…"),
+            (
+                "Disable Example repository",
+                "Disabling Example repository…",
+            ),
+            ("Change Example priority", "Changing Example priority…"),
+            ("Open software sources", "Opening software sources…"),
+            ("Update", "Updating…"),
+            ("Working", "Working…"),
+            ("", ""),
+        ] {
+            assert_eq!(running_label(title), running, "{title}");
+        }
+    }
     /// What `$pattern` binds in `$value`; any other value fails the test.
     macro_rules! expect {
         ($value:expr, $pattern:pat => $bound:expr) => {
@@ -7807,7 +7875,7 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
         assert_eq!(snapshot["done"], 1);
         assert_eq!(snapshot["transfer_total"], Value::Null);
-        assert_eq!(snapshot["label"], "Refresh Flatpak package lists");
+        assert_eq!(snapshot["label"], "Refreshing Flatpak package lists…");
         let repository = RepositoryAction {
             backend: "flatpak".into(),
             name: "synthetic".into(),
@@ -8624,22 +8692,29 @@ mod tests {
             &Ok(Payload::Written(OperationOutcome::default())),
         );
         assert!(controller.opened().is_empty());
-        // Links and references show where they came from.
+        // References show the link they came from, not the app's ID, and
+        // their comment, if any, as the summary.
+        let source = "https://example.invalid/demo.flatpakref";
         let mut link = package.clone();
-        link.id.name = "https://example.invalid/demo.flatpakref".into();
-        link.id.reference = Some("flatpakref:app/org.example.Demo/x86_64/stable".into());
-        assert_eq!(
+        link.id.name = "org.example.Demo".into();
+        link.id.reference = Some(format!("flatpakref:{}:{source}", "ab".repeat(32)));
+        let page = |link: &Package| {
             opened_page(
                 &PackageDetails {
                     description: String::new(),
                     homepage: None,
                     dependencies: vec![],
-                    package: link
+                    package: link.clone(),
                 },
-                "Install"
-            )["location"],
-            "https://example.invalid/demo.flatpakref"
-        );
+                "Install",
+            )
+        };
+        link.summary = format!("Does demo things\nReference: {source}\nSigning key: included");
+        let opened = page(&link);
+        assert_eq!(opened["location"], source);
+        assert_eq!(opened["package"]["summary"], "Does demo things");
+        link.summary = format!("Reference: {source}\nSigning key: included");
+        assert_eq!(page(&link)["package"]["summary"], "");
     }
     #[test]
     fn appimage_install_previews_show_icon_and_description() {
@@ -12564,7 +12639,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Waiting for the package manager to finish"));
+            .contains("Cancelling once the package manager finishes safely"));
         sender
             .send(Reply::Done(Ok(Payload::Repositories(
                 repositories::Report::default(),
@@ -14132,9 +14207,9 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "Transferred 5 of 10",
-                "Transferred 7",
-                "Updating synthetic-firmware"
+                "Transferring 5 of 10…",
+                "Transferring 7…",
+                "Updating synthetic-firmware…"
             ]
         );
         assert!(matches!(
@@ -16148,7 +16223,7 @@ mod tests {
         );
         let mut state = ProgressState::new(&job, Some(7), &names);
         let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
-        assert_eq!(snapshot["label"], "Update First App (APT)");
+        assert_eq!(snapshot["label"], "Updating First App (APT)…");
         assert_eq!(snapshot["targets"][0], target_row(&first));
         assert_eq!(snapshot["targets"][1]["name"], "second");
         assert_eq!(snapshot["sources"], json!(["flatpak"]));
@@ -16251,7 +16326,7 @@ mod tests {
         assert!(!state.observe("==> Upgrading unlisted"));
         assert!(state.observe("==> Upgrading beta"));
         let now = snapshot(&state);
-        assert_eq!(now["label"], "Update Beta App");
+        assert_eq!(now["label"], "Updating Beta App…");
         assert_eq!(now["current"], target_row(&beta.id));
         assert_eq!(now["done"], 0);
         assert!(state.observe("==> Upgrading gamma"));
@@ -16423,7 +16498,7 @@ mod tests {
         });
         controller.as_mut().poll();
         let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
-        assert_eq!(progress["label"], "Update Beta App");
+        assert_eq!(progress["label"], "Updating Beta App…");
         assert_eq!(progress["current"], target_row(&package.id));
         drop(release);
         controller.as_mut().rust_mut().progress_state = None;
@@ -19946,7 +20021,7 @@ mod tests {
         controller.as_mut().propose("upgrade-all".into(), -1);
         assert_eq!(
             controller.status().to_string(),
-            "Retrying failed source checks before updating."
+            "Retrying failed source checks before updating…"
         );
         assert!(matches!(
             &controller.rust().worker,
@@ -20263,7 +20338,7 @@ mod tests {
         controller.as_mut().poll();
         let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
         assert_eq!(progress["activity_id"], 42);
-        assert_eq!(progress["label"], "Refresh APT package lists");
+        assert_eq!(progress["label"], "Refreshing APT package lists…");
         assert_eq!(progress["transferred"], 50);
         assert_eq!(progress["transfer_total"], 100);
 

@@ -62,15 +62,8 @@ fn draw(
     draw_with_fallback(app, row, width, narrow, opened, false)
 }
 
-fn draw_with_fallback(
-    mut app: App,
-    row: Row,
-    width: f32,
-    narrow: bool,
-    opened: bool,
-    allow_missing_glyphs: bool,
-) -> Harness<'static, (bool, App)> {
-    let details = Details {
+fn fixture_details(row: &Row) -> Details {
+    Details {
         package: Some(row.clone()),
         description: "Fixture description".into(),
         action: if row.is_installed() {
@@ -80,7 +73,38 @@ fn draw_with_fallback(
         }
         .into(),
         ..Details::default()
-    };
+    }
+}
+
+fn draw_with_fallback(
+    app: App,
+    row: Row,
+    width: f32,
+    narrow: bool,
+    opened: bool,
+    allow_missing_glyphs: bool,
+) -> Harness<'static, (bool, App)> {
+    let details = fixture_details(&row);
+    draw_details(
+        app,
+        row,
+        details,
+        width,
+        narrow,
+        opened,
+        allow_missing_glyphs,
+    )
+}
+
+fn draw_details(
+    mut app: App,
+    row: Row,
+    details: Details,
+    width: f32,
+    narrow: bool,
+    opened: bool,
+    allow_missing_glyphs: bool,
+) -> Harness<'static, (bool, App)> {
     if opened {
         app.opened = Some(details.clone());
     }
@@ -115,6 +139,31 @@ fn draw_with_fallback(
     );
     harness.run_steps(4);
     harness
+}
+
+#[test]
+fn an_opened_link_is_labeled_a_link_and_a_file_a_file() {
+    for (location, label) in [
+        ("https://example.invalid/app.flatpakref", "Link"),
+        ("/home/user/Downloads/app.flatpakref", "File"),
+    ] {
+        let row = row("package");
+        let details = Details {
+            location: location.into(),
+            ..fixture_details(&row)
+        };
+        let harness = draw_details(
+            app(&row, Page::Search),
+            row,
+            details,
+            700.0,
+            false,
+            true,
+            false,
+        );
+        assert!(harness.query_by_label(label).is_some(), "{location}");
+        assert!(harness.query_by_label(location).is_some(), "{location}");
+    }
 }
 
 fn enabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {

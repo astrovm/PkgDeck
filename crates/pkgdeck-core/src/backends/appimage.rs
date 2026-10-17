@@ -1730,7 +1730,7 @@ impl Backend for AppImage {
         match operation {
             Operation::Install(id) => {
                 progress(Progress::Message(
-                    "Importing AppImage without running it.".into(),
+                    "Importing the AppImage without running it…".into(),
                 ));
                 self.import(id, cancel)?;
             }
@@ -1740,7 +1740,7 @@ impl Backend for AppImage {
                     && Self::managed_name(&id.name) =>
             {
                 progress(Progress::Message(
-                    "Removing the AppImage and its desktop entry.".into(),
+                    "Removing the AppImage and its desktop entry…".into(),
                 ));
                 fs::remove_file(self.root.join(&id.name))
                     .map_err(|e| Self::invalid(e.to_string()))?;
@@ -1760,7 +1760,7 @@ impl Backend for AppImage {
                     .find(|(package, _)| package.id == *id)
                     .ok_or(EngineError::NotFound)?;
                 progress(Progress::Message(format!(
-                    "Removing external AppImage {} and its desktop entry.",
+                    "Removing external AppImage {} and its desktop entry…",
                     package.display_name
                 )));
                 // Other entries for the same file (Gear Lever leaves several),
@@ -1775,7 +1775,7 @@ impl Backend for AppImage {
             }
             Operation::Upgrade(id) if id.backend == "appimage" => {
                 progress(Progress::Message(
-                    "Updating AppImage with its built-in updater.".into(),
+                    "Updating the AppImage with its built-in updater…".into(),
                 ));
                 self.update(id, cancel)?;
             }

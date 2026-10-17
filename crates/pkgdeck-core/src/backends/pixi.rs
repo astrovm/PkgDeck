@@ -585,7 +585,7 @@ impl<T: Transport> Backend for Pixi<T> {
         }
         let before = self.environment(id, cancel)?;
         progress(Progress::Message(format!(
-            "{verb} {} with pixi global",
+            "{verb} {} with pixi global…",
             id.name
         )));
         let completion = self.transport.dev_tool(ID, &args, cancel, true)?;
@@ -869,7 +869,7 @@ ruff = { version = "*" }
         assert_eq!(
             messages,
             vec![
-                Progress::Message("Installing ripgrep with pixi global".into()),
+                Progress::Message("Installing ripgrep with pixi global…".into()),
                 Progress::Message("Installed ripgrep".into()),
             ]
         );

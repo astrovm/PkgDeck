@@ -261,7 +261,7 @@ impl<T: Transport> Backend for Nix<T> {
                 }
                 let flake = format!("nixpkgs#{}", id.name);
                 progress(Progress::Message(format!(
-                    "Adding {flake} to your Nix profile"
+                    "Adding {flake} to your Nix profile…"
                 )));
                 // `add` replaced `install` in Nix 2.25; older Nix only has install.
                 match self.write(&["profile", "add", &flake], cancel) {
@@ -278,7 +278,7 @@ impl<T: Transport> Backend for Nix<T> {
                     return Err(EngineError::NotFound);
                 }
                 progress(Progress::Message(format!(
-                    "Removing {} from your Nix profile",
+                    "Removing {} from your Nix profile…",
                     id.name
                 )));
                 self.write(&["profile", "remove", &id.name], cancel)?
@@ -289,7 +289,7 @@ impl<T: Transport> Backend for Nix<T> {
                     return Err(invalid(ID, format!("{} was installed from a store path, so there is nothing to upgrade from", id.name)));
                 }
                 progress(Progress::Message(format!(
-                    "Upgrading {} from its flake",
+                    "Updating {} from its flake…",
                     id.name
                 )));
                 self.write(&["profile", "upgrade", &id.name], cancel)?

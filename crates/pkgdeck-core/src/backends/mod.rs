@@ -1689,7 +1689,7 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                 let missing = || invalid("flatpak", "missing bundle");
                 let staged = crate::artifact::stage(id, cancel)?.ok_or_else(missing)?;
                 progress(Progress::Message(format!(
-                    "Installing Flatpak bundle {}.",
+                    "Installing Flatpak bundle {}…",
                     id.name
                 )));
                 // A bundle replaces an installed copy, newer or not, so its
@@ -1720,7 +1720,7 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                     (false, "--user")
                 };
                 progress(Progress::Message(format!(
-                    "Installing Flatpak reference for {}.",
+                    "Installing Flatpak reference for {}…",
                     id.name
                 )));
                 let temporary = std::env::temp_dir().join(format!(
@@ -1804,7 +1804,7 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
         };
         let (system, scope) = self.target(id)?;
         progress(Progress::Message(format!(
-            "Running Flatpak {verb} for {}.",
+            "Running Flatpak {verb} for {}…",
             id.name
         )));
         let reference = id.reference.as_deref().unwrap_or(&id.name);
@@ -2495,7 +2495,7 @@ impl<T: Transport> Backend for Apt<T> {
             return Ok(());
         }
         self.looked_up.clear();
-        progress(Progress::Message("Refreshing package lists.".into()));
+        progress(Progress::Message("Refreshing package lists…".into()));
         self.transport.apt_write(AptAction::Refresh, cancel)?;
         Ok(())
     }
@@ -2572,7 +2572,7 @@ impl<T: Transport> Backend for Apt<T> {
                 .collect::<Result<Vec<_>, EngineError>>()?;
             AptAction::group_arguments(&actions)?;
             progress(Progress::Message(format!(
-                "Updating {} APT packages in one transaction.",
+                "Updating {} APT packages in one transaction…",
                 actions.len()
             )));
             let result = self.transport.apt_write_group(&actions, cancel)?;
@@ -4415,7 +4415,7 @@ impl<T: Transport> Backend for SystemManager<T> {
                 }
             };
             progress(Progress::Message(format!(
-                "Installing local {} package.",
+                "Installing local {} package…",
                 self.kind.id()
             )));
             let result = self.call(args, cancel, true)?;
@@ -4430,7 +4430,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             (self.kind, operation),
             (ManagerKind::Snap, Operation::Refresh { .. })
         ) {
-            progress(Progress::Message("Reading the Snap package list.".into()));
+            progress(Progress::Message("Reading the Snap package list…".into()));
             bytes(
                 "snap",
                 self.call_with(
@@ -6213,7 +6213,7 @@ impl<T: Transport> DevTool<T> {
         // the reported candidate reflects. Composer re-requires the package
         // for the same reason; pip reinstalls with `--upgrade`.
         let name = self.target(target)?;
-        progress(Progress::Message(format!("Upgrading {name}.")));
+        progress(Progress::Message(format!("Updating {name}…")));
         let home = self
             .home
             .clone()
@@ -6266,7 +6266,7 @@ impl<T: Transport> DevTool<T> {
         // installed tool in place as the single per-backend transaction.
         if self.kind == DevKind::Npm {
             progress(Progress::Message(format!(
-                "Updating {} packages.",
+                "Updating {} packages…",
                 self.kind.id()
             )));
             let result = self.call(&["update", "--global"], cancel, true)?;
@@ -6275,7 +6275,7 @@ impl<T: Transport> DevTool<T> {
             });
         }
         if self.kind == DevKind::Pipx {
-            progress(Progress::Message("Upgrading pipx packages.".into()));
+            progress(Progress::Message("Updating pipx packages…".into()));
             let result = self.call(&["upgrade-all"], cancel, true)?;
             return Ok(OperationOutcome {
                 cancellation_deferred: result.cancellation_deferred,
@@ -6287,7 +6287,7 @@ impl<T: Transport> DevTool<T> {
             for package in self.inventory(Updates::None, cancel)? {
                 let name = &package.package.id.name;
                 progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Upgrading {name} to latest.")));
+                progress(Progress::Message(format!("Updating {name} to latest…")));
                 let latest = format!("{name}@latest");
                 self.call(&["tool", "install", "--force", &latest], cancel, true)?;
             }
@@ -6309,7 +6309,7 @@ impl<T: Transport> DevTool<T> {
             if names.is_empty() {
                 return Ok(OperationOutcome::default());
             }
-            progress(Progress::Message("Upgrading global mise tools.".into()));
+            progress(Progress::Message("Updating global mise tools…".into()));
             let mut args = vec!["upgrade"];
             args.extend(names.iter().map(String::as_str));
             let result = self.call(&args, cancel, true)?;
@@ -6323,7 +6323,7 @@ impl<T: Transport> DevTool<T> {
             for package in self.inventory(Updates::None, cancel)? {
                 let name = &package.package.id.name;
                 progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Upgrading {name}.")));
+                progress(Progress::Message(format!("Updating {name}…")));
                 self.call(
                     &[
                         "global",
@@ -6339,7 +6339,7 @@ impl<T: Transport> DevTool<T> {
             return Ok(OperationOutcome::default());
         }
         if self.kind == DevKind::Gem {
-            progress(Progress::Message("Updating RubyGems.".into()));
+            progress(Progress::Message("Updating RubyGems…".into()));
             let result = self.call(&["update", "--user-install", "--no-document"], cancel, true)?;
             return Ok(OperationOutcome {
                 cancellation_deferred: result.cancellation_deferred,
@@ -6349,7 +6349,7 @@ impl<T: Transport> DevTool<T> {
             let name = &package.package.id.name;
             if self.kind == DevKind::Cargo {
                 progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Reinstalling {name}.")));
+                progress(Progress::Message(format!("Reinstalling {name}…")));
                 self.call(&["install", "--force", name], cancel, true)?;
             } else if self.kind == DevKind::Pip {
                 let home = self
@@ -6357,11 +6357,11 @@ impl<T: Transport> DevTool<T> {
                     .clone()
                     .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
                 progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Upgrading {name}.")));
+                progress(Progress::Message(format!("Updating {name}…")));
                 self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
             } else {
                 progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Upgrading {name} to latest.")));
+                progress(Progress::Message(format!("Updating {name} to latest…")));
                 let latest = format!("{name}@latest");
                 self.call(&["add", "--global", &latest], cancel, true)?;
             }
@@ -7709,7 +7709,7 @@ mod tests {
         assert!(
             matches!(
                 messages.as_slice(),
-                [Progress::Message(text)] if text == "Reading the Snap package list."
+                [Progress::Message(text)] if text == "Reading the Snap package list…"
             ),
             "{messages:?}"
         );

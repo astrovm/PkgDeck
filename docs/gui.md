@@ -305,7 +305,7 @@ installs, upgrades or removes anything.
 
 The button stays in the same place for empty and populated lists. During a check
 it becomes one **Cancel** button with a spinner. Existing rows stay visible. The
-header shows the last check time or **Some sources couldn’t be checked** when
+header shows the last check time or **Some sources couldn't be checked** when
 a source fails. Refresh failures remain visible even if its old package list
 can still be read.
 

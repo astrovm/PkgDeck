@@ -1802,13 +1802,21 @@ fn refresh_header_reports_fresh_partial_and_running_checks_and_preserves_batch_p
         serde_json::from_value(json!([{"source":"apt","kind":"failed"}])).unwrap();
     h.run_steps(2);
     assert!(h
-        .query_by_label_contains("Some sources couldn’t be checked")
+        .query_by_label_contains("Some sources couldn't be checked")
         .is_some());
     h.state_mut().1.report.failures.clear();
     h.state_mut().1.busy = true;
     h.state_mut().1.writing = true;
-    h.state_mut().1.progress.label = "Updating".into();
+    h.state_mut().1.progress.label = "Updating…".into();
     h.run_steps(2);
+    // While updates install, the count stays: nothing is being checked.
+    assert!(h.query_by_label_contains("Checking for updates").is_none());
+    assert!(h
+        .query_by_label_contains(&format!(
+            "{count} {}",
+            if count == 1 { "update" } else { "updates" }
+        ))
+        .is_some());
     // Ordinary writes retain their progress card and its Cancel control.
     assert_eq!(
         h.query_all_by_role_and_label(Role::Button, "Cancel")
@@ -1832,7 +1840,15 @@ fn refresh_header_reports_fresh_partial_and_running_checks_and_preserves_batch_p
     h.state_mut().1.busy = true;
     h.state_mut().1.checking_updates = true;
     h.run_steps(2);
-    assert!(h.query_by_label("Checking for updates").is_some());
+    assert!(h.query_by_label("Checking for updates…").is_some());
+    // Loading the list is a check too, said the same way.
+    h.state_mut().1.writing = false;
+    h.state_mut().1.checking_updates = false;
+    h.run_steps(2);
+    assert!(h.query_by_label("Checking for updates…").is_some());
+    h.state_mut().1.writing = true;
+    h.state_mut().1.checking_updates = true;
+    h.run_steps(2);
     assert_eq!(
         h.query_all_by_role_and_label(Role::Button, "Cancel")
             .count(),

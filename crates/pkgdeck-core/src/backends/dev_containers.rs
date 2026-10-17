@@ -569,7 +569,7 @@ impl<T: Transport> DevContainers<T> {
         match self.kind {
             Kind::Distrobox => {
                 progress(Progress::Message(format!(
-                    "Upgrading the packages in {name} with distrobox upgrade"
+                    "Updating the packages in {name} with distrobox upgrade…"
                 )));
                 let completion = self.tool(&["upgrade", name], cancel, true)?;
                 deferred |= completion.cancellation_deferred;
@@ -577,7 +577,7 @@ impl<T: Transport> DevContainers<T> {
             }
             Kind::Toolbox => {
                 progress(Progress::Message(format!(
-                    "Looking for the package manager in {name}"
+                    "Looking for the package manager in {name}…"
                 )));
                 // This starts the container if it was stopped, as entering
                 // it would.
@@ -606,7 +606,7 @@ impl<T: Transport> DevContainers<T> {
                 }
                 for step in steps {
                     progress(Progress::Message(format!(
-                        "Running {} in {name}",
+                        "Running {} in {name}…",
                         step[2..].join(" ")
                     )));
                     let completion = match self.toolbox_run(name, &step, cancel, true) {
@@ -648,7 +648,7 @@ impl<T: Transport> DevContainers<T> {
     ) -> Result<OperationOutcome, EngineError> {
         let name = found.name.as_str();
         progress(Progress::Message(format!(
-            "Removing the container {name} and everything installed in it with {} rm",
+            "Removing the container {name} and everything installed in it with {} rm…",
             self.id_str()
         )));
         let completion = self.tool(&["rm", "--force", name], cancel, true)?;
@@ -1675,7 +1675,7 @@ nothexnothex | bad | Up | x\n";
             assert_eq!(
                 messages,
                 [Progress::Message(format!(
-                    "Removing the container {name} and everything installed in it with {} rm",
+                    "Removing the container {name} and everything installed in it with {} rm…",
                     kind.id()
                 ))]
             );

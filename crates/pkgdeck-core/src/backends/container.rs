@@ -594,7 +594,7 @@ impl<T: Transport> Container<T> {
             });
         }
         progress(Progress::Message(format!(
-            "Removing {what} from {}",
+            "Removing {what} from {}…",
             self.kind.label()
         )));
         let mut args = args.to_vec();
@@ -929,7 +929,7 @@ impl<T: Transport> Backend for Container<T> {
             }
             self.cleanup_images = None;
             progress(Progress::Message(format!(
-                "Removing dangling {} images",
+                "Removing dangling {} images…",
                 self.kind.label()
             )));
             let mut args = vec!["image", "rm"];
@@ -2000,7 +2000,7 @@ mod tests {
         ));
         assert_eq!(
             messages,
-            [Progress::Message("Removing dangling Podman images".into())]
+            [Progress::Message("Removing dangling Podman images…".into())]
         );
         // A failing engine never yields an empty cleanup plan.
         assert_eq!(

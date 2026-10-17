@@ -118,12 +118,7 @@ fn heading_text(app: &App) -> String {
     let count = app.items.len();
     // While writing, the card says what runs; the count stays.
     if app.busy && !app.writing {
-        return match app.page {
-            Page::Search => "Searching",
-            _ if count > 0 => "Refreshing",
-            _ => "Loading",
-        }
-        .into();
+        return format!("{}…", busy_word(app));
     }
     if app.page == Page::Search {
         if let Some(matches) = app.report.matches.filter(|m| *m > count as u64) {
@@ -142,13 +137,29 @@ fn heading_text(app: &App) -> String {
     }
 }
 
+/// What a section is doing while it loads, without the ellipsis that ends
+/// the line.
+fn busy_word(app: &App) -> &'static str {
+    match app.page {
+        Page::Search => "Searching",
+        Page::Updates => "Checking for updates",
+        _ if !app.items.is_empty() => "Refreshing",
+        _ => "Loading",
+    }
+}
+
+/// "APT", "APT and Snap", or a count past two, as in "{n} sources".
+fn sources_text(names: &[String], many: &str) -> String {
+    match names {
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        _ => format!("{} {many}", names.len()),
+    }
+}
+
 /// "Waiting for APT", "Waiting for APT and Snap", or a count past two.
 fn waiting_text(names: &[String]) -> String {
-    match names {
-        [one] => format!("Waiting for {one}"),
-        [one, two] => format!("Waiting for {one} and {two}"),
-        _ => format!("Waiting for {} sources", names.len()),
-    }
+    format!("Waiting for {}…", sources_text(names, "sources"))
 }
 
 /// Whether the page has a list to talk about: its count, status and
@@ -162,34 +173,32 @@ pub fn list_shown(app: &App) -> bool {
 /// The line under the page title: how many, or what the page is doing,
 /// and which sources it still waits for (named on hover past two).
 pub fn subtitle(app: &App) -> (String, Option<String>) {
-    if app.page == Page::Updates && app.opened.is_none() {
-        let line = if app.checking_updates {
-            "Checking for updates".into()
-        } else if !app.busy {
-            match app.read_failures().is_empty() {
-                false => "Some sources couldn’t be checked".into(),
-                true => app
-                    .report
-                    .checked_at
-                    .map(|at| {
-                        format!(
-                            "Last {}",
-                            model::checked_ago(at, model::now()).to_lowercase()
-                        )
-                    })
-                    .unwrap_or_default(),
-            }
-        } else {
-            heading_text(app)
+    if app.page == Page::Updates && app.opened.is_none() && !app.checking_updates && !app.busy {
+        let line = match app.read_failures().is_empty() {
+            false => "Some sources couldn't be checked".into(),
+            true => app
+                .report
+                .checked_at
+                .map(|at| {
+                    format!(
+                        "Last {}",
+                        model::checked_ago(at, model::now()).to_lowercase()
+                    )
+                })
+                .unwrap_or_default(),
         };
-        let line = if !app.busy && !app.items.is_empty() && !line.is_empty() {
+        let line = if !app.items.is_empty() && !line.is_empty() {
             format!("{} · {line}", heading_text(app))
         } else {
             line
         };
         return (line, None);
     }
-    if !list_shown(app) {
+    // A check runs with or without rows, and says so either way. While
+    // updates install, the card says what runs and the count stays.
+    let checking =
+        app.page == Page::Updates && app.opened.is_none() && (app.checking_updates || !app.writing);
+    if !checking && !list_shown(app) {
         return (String::new(), None);
     }
     let mut names = Vec::new();
@@ -204,19 +213,30 @@ pub fn subtitle(app: &App) -> (String, Option<String>) {
             .map(|id| model::source_name(id).to_owned())
             .collect();
     }
-    let line = status_line(heading_text(app), app.page == Page::Search, &names);
+    let heading = if checking {
+        format!("{}…", busy_word(app))
+    } else {
+        heading_text(app)
+    };
+    let named = matches!(app.page, Page::Search | Page::Updates);
+    let line = status_line(heading, named, &names);
     let hover = (names.len() > 2).then(|| names.join("\n"));
     (line, hover)
 }
 
 /// While waiting on sources, "Waiting for" already says the list is
 /// loading, so it takes the place of "Refreshing" or "Loading".
-/// "Searching" stays, since the search has its own job to name.
-fn status_line(heading: String, searching: bool, names: &[String]) -> String {
+/// "Searching" and "Checking for updates" stay, since they name their own
+/// job; the line ends in one ellipsis.
+fn status_line(heading: String, named: bool, names: &[String]) -> String {
     if names.is_empty() {
         heading
-    } else if searching {
-        format!("{heading} · {}", waiting_text(names))
+    } else if named {
+        format!(
+            "{} · {}",
+            heading.strip_suffix('…').unwrap_or(&heading),
+            waiting_text(names)
+        )
     } else {
         waiting_text(names)
     }
@@ -1079,15 +1099,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         };
         let icon = if running { "cancel" } else { action.icon() };
         let tip = if running {
-            let status = app.ctl.status().to_string();
-            format!(
-                "Cancel {}",
-                if status.is_empty() {
-                    "the change".into()
-                } else {
-                    status
-                }
-            )
+            cancel_tip(&app.progress.label)
         } else {
             match action {
                 model::Action::Clean => format!("Run cleanup {title}"),
@@ -1344,6 +1356,17 @@ fn failed_summary(ui: &Ui, painter: &egui::Painter, place: Rect, reason: &str, i
         .on_hover_text(reason);
 }
 
+/// "Cancel updating Beta App" for a change whose card reads "Updating Beta
+/// App…".
+fn cancel_tip(label: &str) -> String {
+    let label = label.strip_suffix('…').unwrap_or(label);
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => format!("Cancel {}{}", first.to_lowercase(), chars.as_str()),
+        None => "Cancel the change".into(),
+    }
+}
+
 fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     let palette = Palette::current(ui.ctx());
     let failures = app.read_failures();
@@ -1355,9 +1378,8 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
     let good_news;
     let message: String = {
         let up_to_date = |names: &[String]| match names {
-            [one] => format!("{one} is up to date"),
-            [a, b] => format!("{a} and {b} are up to date"),
-            many => format!("{} other sources are up to date", many.len()),
+            [_] => format!("{} is up to date", sources_text(names, "")),
+            _ => format!("{} are up to date", sources_text(names, "other sources")),
         };
         let answered: Vec<String> = app
             .report
@@ -1367,7 +1389,7 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .collect();
         if app.writing && app.page == Page::Search {
             good_news = false;
-            "Search will resume shortly.".into()
+            "Search will resume shortly".into()
         } else if !failures.is_empty()
             && (answered.is_empty()
                 || phase == "failed"
@@ -1379,7 +1401,10 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             good_news = true;
             match app.page {
                 Page::Updates => up_to_date(&answered),
-                _ => format!("Nothing to clean in {}", answered.join(", ")),
+                _ => format!(
+                    "Nothing to clean in {}",
+                    sources_text(&answered, "other sources")
+                ),
             }
         } else if phase == "cancelled" {
             good_news = false;
@@ -1391,21 +1416,21 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             .into()
         } else if phase == "unsupported" {
             good_news = false;
-            "None of your sources work here.".into()
+            "None of your sources work here".into()
         } else if installed_filters {
             good_news = false;
-            "No packages match these filters.".into()
+            "No packages match these filters".into()
         } else if filtered && !app.rows.is_empty() {
             good_news = false;
-            "No results from selected sources.".into()
+            "No results from selected sources".into()
         } else {
             good_news = matches!(app.page, Page::Updates | Page::Clean);
             match app.page {
                 Page::Updates => "You're up to date",
                 Page::Clean => "Nothing to clean",
-                Page::Installed => "No installed packages.",
-                Page::Search => "No matching packages.",
-                Page::Settings => "No results to show.",
+                Page::Installed => "No installed packages",
+                Page::Search => "No matching packages",
+                Page::Settings => "No results to show",
             }
             .into()
         }
@@ -1549,7 +1574,9 @@ fn empty_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_mark, source_badge_shown, status_line, waiting_text};
+    use super::{
+        batch_mark, cancel_tip, source_badge_shown, sources_text, status_line, waiting_text,
+    };
     use crate::model::{identity_of_row_value, Progress, RowState};
     use std::collections::HashSet;
 
@@ -1623,33 +1650,54 @@ mod tests {
     #[test]
     fn waiting_names_one_or_two_sources_and_counts_more() {
         let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-        assert_eq!(waiting_text(&names(&["APT"])), "Waiting for APT");
+        assert_eq!(waiting_text(&names(&["APT"])), "Waiting for APT…");
         assert_eq!(
             waiting_text(&names(&["APT", "Snap"])),
-            "Waiting for APT and Snap"
+            "Waiting for APT and Snap…"
         );
         assert_eq!(
             waiting_text(&names(&["APT", "Snap", "npm"])),
-            "Waiting for 3 sources"
+            "Waiting for 3 sources…"
+        );
+        // Finished lists join the same way.
+        assert_eq!(
+            sources_text(&names(&["APT", "Snap"]), "other sources"),
+            "APT and Snap"
+        );
+        assert_eq!(
+            sources_text(&names(&["APT", "Snap", "npm"]), "other sources"),
+            "3 other sources"
         );
     }
 
     #[test]
-    fn waiting_line_replaces_the_busy_word_but_not_searching() {
+    fn waiting_line_replaces_the_busy_word_but_not_a_named_job() {
         let apt = vec!["APT".to_owned()];
         assert_eq!(
-            status_line("Refreshing".into(), false, &apt),
-            "Waiting for APT"
+            status_line("Refreshing…".into(), false, &apt),
+            "Waiting for APT…"
         );
         assert_eq!(
-            status_line("Loading".into(), false, &apt),
-            "Waiting for APT"
+            status_line("Loading…".into(), false, &apt),
+            "Waiting for APT…"
+        );
+        // One ellipsis, at the end.
+        assert_eq!(
+            status_line("Searching…".into(), true, &apt),
+            "Searching · Waiting for APT…"
         );
         assert_eq!(
-            status_line("Searching".into(), true, &apt),
-            "Searching · Waiting for APT"
+            status_line("Checking for updates…".into(), true, &apt),
+            "Checking for updates · Waiting for APT…"
         );
-        assert_eq!(status_line("Refreshing".into(), false, &[]), "Refreshing");
+        assert_eq!(status_line("Refreshing…".into(), false, &[]), "Refreshing…");
+    }
+
+    #[test]
+    fn cancelling_a_row_names_the_change_running() {
+        assert_eq!(cancel_tip("Updating Beta App…"), "Cancel updating Beta App");
+        assert_eq!(cancel_tip("Working"), "Cancel working");
+        assert_eq!(cancel_tip(""), "Cancel the change");
     }
 }
 

@@ -281,7 +281,7 @@ fn provider_url(package: &Package) -> Option<String> {
 }
 fn description(value: &str) -> String {
     roxmltree::Document::parse(&format!("<description>{value}</description>"))
-        .map(|doc| plain(doc.root_element()))
+        .map(|doc| paragraphs(doc.root_element()))
         .unwrap_or_else(|_| {
             if value.contains('<') {
                 String::new()
@@ -392,14 +392,62 @@ fn image_url(value: &str, base: Option<&str>) -> Option<String> {
 fn stem(value: &str) -> &str {
     value.strip_suffix(".desktop").unwrap_or(value)
 }
+/// Whether `node` and everything around it is English or untagged.
+fn english(node: roxmltree::Node<'_, '_>) -> bool {
+    !node.ancestors().any(|ancestor| {
+        ancestor
+            .attribute(("http://www.w3.org/XML/1998/namespace", "lang"))
+            .is_some_and(|lang| lang != "en")
+    })
+}
+/// An AppStream description as text: paragraphs a blank line apart, and
+/// list items one per line, bulleted or numbered.
+fn paragraphs(node: roxmltree::Node<'_, '_>) -> String {
+    let mut blocks = vec![];
+    let mut loose = String::new();
+    let end_loose = |loose: &mut String, blocks: &mut Vec<String>| {
+        let text = loose.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() {
+            blocks.push(text);
+        }
+        loose.clear();
+    };
+    for child in node.children().filter(|child| english(*child)) {
+        if child.has_tag_name("ul") || child.has_tag_name("ol") {
+            end_loose(&mut loose, &mut blocks);
+            let items: Vec<_> = child
+                .children()
+                .filter(|item| item.has_tag_name("li") && english(*item))
+                .map(plain)
+                .filter(|item| !item.is_empty())
+                .enumerate()
+                .map(|(at, item)| {
+                    if child.has_tag_name("ol") {
+                        format!("{}. {item}", at + 1)
+                    } else {
+                        format!("• {item}")
+                    }
+                })
+                .collect();
+            if !items.is_empty() {
+                blocks.push(items.join("\n"));
+            }
+        } else if child.has_tag_name("p") {
+            end_loose(&mut loose, &mut blocks);
+            loose = plain(child);
+            end_loose(&mut loose, &mut blocks);
+        } else {
+            loose.push(' ');
+            loose.push_str(&plain(child));
+        }
+    }
+    end_loose(&mut loose, &mut blocks);
+    blocks.join("\n\n")
+}
 fn plain(node: roxmltree::Node<'_, '_>) -> String {
     let mut text = String::new();
     for node in node.descendants() {
-        if node.ancestors().any(|ancestor| {
-            ancestor
-                .attribute(("http://www.w3.org/XML/1998/namespace", "lang"))
-                .is_some_and(|lang| lang != "en")
-        }) {
+        if !english(node) {
             continue;
         }
         if node.is_text() {
@@ -587,7 +635,7 @@ impl Catalog {
                 AppInfo {
                     name: child(component, "name").map(plain).unwrap_or_default(),
                     description: child(component, "description")
-                        .map(plain)
+                        .map(paragraphs)
                         .unwrap_or_default(),
                     homepage: component
                         .children()
@@ -668,7 +716,7 @@ impl Catalog {
                         "<description>{}</description>",
                         localized(&value["Description"])
                     ))
-                    .map(|d| plain(d.root_element()))
+                    .map(|d| paragraphs(d.root_element()))
                     .unwrap_or_default(),
                     homepage: value["Url"]["homepage"].as_str().and_then(web_url),
                     publisher: Some(localized(&value["DeveloperName"]))
@@ -1011,7 +1059,7 @@ Icon: {{stock: '{}', cached: [{{name: missing.png}}]}}
             assert_eq!(p.display_name, "Example Player");
             assert_eq!(p.id, identity);
             let info = catalog.find(&p).unwrap();
-            assert_eq!(info.description, "A friendly player. Second paragraph.");
+            assert_eq!(info.description, "A friendly player.\n\nSecond paragraph.");
             assert_eq!(
                 info.homepage.as_deref(),
                 Some("https://example.invalid/player")
@@ -1336,6 +1384,22 @@ Description: '&invalid;'
             assert!(provider_url(&p).is_none());
         }
         assert_eq!(description("Rock & roll"), "Rock & roll");
+        // Paragraphs stay apart and list items get a line each; other
+        // languages, empty items and empty lists are left out.
+        assert_eq!(
+            description(concat!(
+                "<p>Mods  made\n easy.</p><p xml:lang=\"de\">Einfach.</p>",
+                "<ul><li>Finds <em>Steam</em> installs</li><li xml:lang=\"es\">Encuentra</li><li> </li><li>30 mods</li></ul>",
+                "<ul><li/></ul><ol><li>Pick</li><li>Play</li></ol>",
+                "Loose <b>text</b><p></p>"
+            )),
+            "Mods made easy.\n\n• Finds Steam installs\n• 30 mods\n\n1. Pick\n2. Play\n\nLoose text"
+        );
+        // A translated phrase inside an English paragraph is left out too.
+        assert_eq!(
+            description("<p>Hello <span xml:lang=\"de\">Hallo</span>world</p>"),
+            "Hello world"
+        );
         assert!(description("<broken>").is_empty());
     }
     #[test]

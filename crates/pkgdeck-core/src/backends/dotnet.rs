@@ -456,7 +456,7 @@ impl<T: Transport> DotnetTools<T> {
             _ => ("Removing", "uninstall"),
         };
         progress(Progress::Message(format!(
-            "{label} {} with dotnet tool",
+            "{label} {} with dotnet tool…",
             id.name
         )));
         let args: Vec<OsString> = ["tool", command, "--global", "--", &id.name]
