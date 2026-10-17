@@ -117,8 +117,10 @@ Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 Opening this page and the background check run `brew update` once
 before they read Homebrew. Formulae and casks share that fetch, so a newly
 published cask (including PkgDeck itself) can show up. They also ask each
-Flatpak remote for new versions again. The Installed page does not fetch: it
-uses what Homebrew and Flatpak already know. The first Updates load can take longer while Homebrew fetches;
+Flatpak remote for new versions again. Apps installed from a `.flatpak` bundle
+or a local build have no remote to ask, so they're left out instead of failing
+the check. The Installed page does not fetch: it uses what Homebrew and Flatpak
+already know. The first Updates load can take longer while Homebrew fetches;
 other sources still appear as they answer.
 
 ![Updates for an APT package and three npm tools, all checked](screenshots/updates.png)

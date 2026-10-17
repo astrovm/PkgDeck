@@ -1904,7 +1904,24 @@ impl App {
             self.report.failures.clone()
         };
         failures.retain(|f| f.kind != "cancelled" && sources.contains(&f.source));
-        failures
+        // One entry per source: a source can fail more than once (one
+        // Flatpak remote after another), and each reason is kept.
+        let mut merged: Vec<Failure> = Vec::new();
+        for failure in failures {
+            let Some(entry) = merged.iter_mut().find(|m| m.source == failure.source) else {
+                merged.push(failure);
+                continue;
+            };
+            match (&mut entry.detail, failure.detail.filter(|d| !d.is_empty())) {
+                (Some(known), Some(detail)) if !known.lines().any(|line| line == detail) => {
+                    known.push('\n');
+                    known.push_str(&detail);
+                }
+                (known @ None, detail) => *known = detail,
+                _ => {}
+            }
+        }
+        merged
     }
 
     pub fn failure_reason(&self, source: &str) -> String {

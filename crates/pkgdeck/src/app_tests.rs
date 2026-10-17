@@ -1002,6 +1002,45 @@ fn failures_come_from_the_report_or_failure_rows() {
 }
 
 #[test]
+fn a_source_that_failed_more_than_once_is_one_entry_with_each_reason() {
+    let mut app = app();
+    app.page = Page::Updates;
+    let failure =
+        |detail: Option<&str>| json!({"source": "apt", "kind": "failed", "detail": detail});
+    app.c().set_report_state(
+        json!({"phase": "partial", "failures": [
+            failure(Some("one remote is off")),
+            failure(None),
+            failure(Some("another can't be reached")),
+            failure(Some("one remote is off")),
+            {"source": "snap", "kind": "failed", "detail": "snap is broken"},
+        ]})
+        .to_string()
+        .into(),
+    );
+    app.react();
+    let failures = app.read_failures();
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert_eq!(failures[0].source, "apt");
+    assert_eq!(
+        failures[0].detail.as_deref(),
+        Some("one remote is off\nanother can't be reached")
+    );
+    assert_eq!(failures[1].detail.as_deref(), Some("snap is broken"));
+    // A first failure with no reason takes the next one's.
+    app.c().set_report_state(
+        json!({"phase": "partial", "failures": [failure(None), failure(Some("late reason"))]})
+            .to_string()
+            .into(),
+    );
+    app.react();
+    assert_eq!(
+        app.read_failures()[0].detail.as_deref(),
+        Some("late reason")
+    );
+}
+
+#[test]
 fn ticks_run_what_is_due() {
     let mut app = app();
     // Tray events arrive through the tick. Tests start platforms in

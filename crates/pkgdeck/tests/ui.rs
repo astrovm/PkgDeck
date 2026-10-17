@@ -1671,6 +1671,57 @@ fn switch_disabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
 }
 
 #[test]
+fn a_source_that_failed_twice_shows_once_with_both_reasons() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.c().set_rows("[]".into());
+    app.react();
+    app.report.phase = "partial".into();
+    app.report.failures = serde_json::from_value(json!([
+        {"source": "apt", "kind": "failed", "detail": "First remote is off"},
+        {"source": "apt", "kind": "failed", "detail": "Second remote is gone"}
+    ]))
+    .unwrap();
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    // One source, named, not "2 sources": the title the list paints.
+    let failures = harness.state().1.read_failures();
+    assert_eq!(
+        pkgdeck::model::failure_title(&failures),
+        "Couldn't check APT"
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Details")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label("Retry").count(), 1);
+    assert!(harness
+        .query_by_label("First remote is off\nSecond remote is gone")
+        .is_some());
+    harness
+        .get_by_role_and_label(Role::Button, "Copy diagnostics")
+        .click();
+    harness.step();
+    let copied: Vec<_> = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        copied[0]
+            .contains("apt (failed): First remote is off\napt (failed): Second remote is gone\n"),
+        "{}",
+        copied[0]
+    );
+}
+
+#[test]
 fn refresh_a_failed_list_uses_the_header_check_and_offers_details() {
     let mut app = with_sources(app());
     app.page = Page::Updates;

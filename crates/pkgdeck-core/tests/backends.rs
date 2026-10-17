@@ -892,6 +892,63 @@ fn flatpak_updates_survive_an_unreachable_remote() {
     assert!(all.installed(&cancel).is_err());
 }
 
+#[test]
+fn flatpak_updates_leave_out_remotes_of_bundles_and_local_builds() {
+    let cancel = Cancellation::default();
+    let arch = std::env::consts::ARCH;
+    // Flatpak disables a bundle's remote, and never lists a local build's.
+    let remotes = "flathub\tuser\n\
+                   artcraft-origin\tuser,disabled,no-enumerate,no-gpg-verify\n\
+                   devel-origin\tuser,no-enumerate,no-gpg-verify\n";
+    let fixture = |installed: String| FlatpakFixture {
+        installed: Some(installed),
+        unreachable: vec!["artcraft-origin", "devel-origin"],
+        remotes: Some(remotes),
+        ..FlatpakFixture::default()
+    };
+    let mixed = format!(
+        "io.example.One\t{arch}\tstable\t1.0\tOne\tflathub\n\
+         io.example.Bundle\t{arch}\tstable\t1.0\tBundle\tartcraft-origin\n\
+         io.example.Devel\t{arch}\tstable\t1.0\tDevel\tdevel-origin\n"
+    );
+    let fixture_mixed = fixture(mixed);
+    let mut backend = Flatpak::new(fixture_mixed.clone());
+    let packages = backend.installed(&cancel).unwrap();
+    assert!(packages
+        .iter()
+        .any(|p| p.id.name == "io.example.One" && p.update == UpdateAvailability::Available));
+    // Nothing failed: those apps just have nowhere to get updates from.
+    assert!(
+        backend.query_errors().is_empty(),
+        "{:?}",
+        backend.query_errors()
+    );
+    // Their remotes are never asked on their own.
+    let calls = fixture_mixed.calls.lock().unwrap();
+    assert!(!calls
+        .iter()
+        .any(|(args, _, _)| args.iter().any(|arg| arg.ends_with("-origin"))));
+    drop(calls);
+    // Only bundles and local builds: no updates, and no failure.
+    let mut local = Flatpak::new(fixture(format!(
+        "io.example.Bundle\t{arch}\tstable\t1.0\tBundle\tartcraft-origin\n"
+    )));
+    let packages = local.installed(&cancel).unwrap();
+    assert!(packages
+        .iter()
+        .all(|p| p.update != UpdateAvailability::Available));
+    assert!(local.query_errors().is_empty());
+    // A real remote that fails still counts.
+    let mut broken = Flatpak::new(FlatpakFixture {
+        unreachable: vec!["artcraft-origin", "astrovm"],
+        ..fixture(format!(
+            "io.example.Bundle\t{arch}\tstable\t1.0\tBundle\tartcraft-origin\n\
+             io.example.Two\t{arch}\tstable\t1.0\tTwo\tastrovm\n"
+        ))
+    });
+    assert!(broken.installed(&cancel).is_err());
+}
+
 type FlatpakCall = (Vec<String>, bool, bool);
 
 #[derive(Clone, Default)]
@@ -907,6 +964,8 @@ struct FlatpakFixture {
     uncached: bool,
     /// Refreshing AppStream data fails, such as offline.
     appstream_fails: bool,
+    /// What `flatpak remotes` prints: name and options.
+    remotes: Option<&'static str>,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -998,6 +1057,9 @@ impl Transport for FlatpakFixture {
                 self.user_updates.clone()
             }
             .unwrap_or_else(|| output("")));
+        }
+        if args.contains(&"remotes".into()) {
+            return Ok(output(self.remotes.unwrap_or_default()));
         }
         if args.contains(&"list".into()) {
             if let Some(installed) = &self.installed {
