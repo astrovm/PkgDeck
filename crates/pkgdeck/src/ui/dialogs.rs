@@ -701,6 +701,15 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
 
 // ---------------------------------------------------------------------------
 
+/// Why a source failed: every reason it gave, one per line.
+fn reason(app: &App, failure: &model::Failure) -> String {
+    failure
+        .detail
+        .clone()
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or_else(|| app.failure_reason(&failure.source))
+}
+
 fn source_checks(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.checks_open;
     let failures = app.read_failures();
@@ -745,8 +754,7 @@ fn source_checks(app: &mut App, ctx: &egui::Context) {
                     });
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(app.failure_reason(&failure.source))
-                                .color(palette.muted),
+                            egui::RichText::new(reason(app, failure)).color(palette.muted),
                         )
                         .wrap(),
                     );
@@ -760,12 +768,9 @@ fn source_checks(app: &mut App, ctx: &egui::Context) {
             {
                 let mut text = format!("View: {}\nState: {}\n", app.page.name(), app.report.phase);
                 for failure in &failures {
-                    text.push_str(&format!(
-                        "{} ({}): {}\n",
-                        failure.source,
-                        failure.kind,
-                        app.failure_reason(&failure.source)
-                    ));
+                    for line in reason(app, failure).lines() {
+                        text.push_str(&format!("{} ({}): {line}\n", failure.source, failure.kind));
+                    }
                 }
                 ui.ctx().copy_text(text);
             }

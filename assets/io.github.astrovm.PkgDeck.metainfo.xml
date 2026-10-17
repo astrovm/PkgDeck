@@ -10,6 +10,15 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.11.8" date="2026-10-17">
+      <description>
+        <p>Flatpak update checks no longer fail on apps from bundles or local builds.</p>
+        <ul>
+          <li>Apps installed from a .flatpak bundle or a local build are left out of update checks</li>
+          <li>A source that fails more than once shows once, with every reason</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.11.7" date="2026-10-17">
       <description>
         <p>The AppImage works on more Linux systems, and Flatpak apps opened from a link can start.</p>

@@ -1260,6 +1260,35 @@ impl<T: Transport + Sync> Flatpak<T> {
         }
         Ok(result)
     }
+    /// Remotes Flatpak made for one bundle or local build: disabled, or
+    /// never listed. An unreadable list leaves none out.
+    fn local_remotes(
+        &self,
+        prefix: &str,
+        cancel: &Cancellation,
+        system: bool,
+    ) -> std::collections::BTreeSet<String> {
+        let args = [
+            prefix,
+            "remotes",
+            "--show-disabled",
+            "--columns=name,options",
+        ];
+        let Ok(output) = self.call(&args, cancel, false, system) else {
+            return Default::default();
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(_, options)| {
+                options
+                    .split(',')
+                    .any(|option| matches!(option.trim(), "disabled" | "no-enumerate"))
+            })
+            .map(|(name, _)| name.trim().to_owned())
+            .filter(|name| flatpak_id(name))
+            .collect()
+    }
     fn list(
         &self,
         cancel: &Cancellation,
@@ -1375,14 +1404,33 @@ impl<T: Transport + Sync> Flatpak<T> {
                 Some(_) => ask(false),
             }
         };
-        let remotes: std::collections::BTreeSet<_> =
-            origins.iter().filter(|origin| !origin.is_empty()).collect();
+        let mut remotes: std::collections::BTreeSet<_> = origins
+            .iter()
+            .filter(|origin| !origin.is_empty())
+            .map(String::as_str)
+            .collect();
         let mut texts = Vec::new();
-        match remote_updates(None) {
+        let first = remote_updates(None);
+        // A bundle or a local build installs from a remote of its own that
+        // Flatpak disables or never lists. Nothing can be asked there, and
+        // flatpak refuses to list any remote while one is.
+        let local = if first.is_err() && !cancel.requested() {
+            self.local_remotes(prefix, cancel, system)
+        } else {
+            Default::default()
+        };
+        let installed_from = remotes.len();
+        remotes.retain(|remote| !local.contains(*remote));
+        match first {
             Ok(text) => texts.push(text),
+            // Nothing left to ask: what's installed came from bundles or
+            // local builds only.
+            Err(_) if remotes.is_empty() && installed_from > 0 && !cancel.requested() => {}
             // One unreachable remote makes flatpak refuse to list any. Ask
             // each remote on its own so the others still show their updates.
-            Err(first) if !cancel.requested() && remotes.len() > 1 => {
+            Err(first)
+                if !cancel.requested() && (remotes.len() > 1 || remotes.len() < installed_from) =>
+            {
                 let remote_updates = &remote_updates;
                 let answers: Vec<_> = std::thread::scope(|scope| {
                     let workers: Vec<_> = remotes
