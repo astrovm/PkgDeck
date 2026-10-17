@@ -396,6 +396,10 @@ pub struct Settings {
     pub notify_updates: bool,
     /// The sources automatic updates leave for you.
     pub manual_sources: Vec<String>,
+    /// Automatic updates and cleaning wait while on battery.
+    pub wait_for_charger: bool,
+    /// Automatic updates wait on a metered connection.
+    pub wait_for_unmetered: bool,
     pub allow_removals: bool,
     /// Clean caches and build files once a day, from the background.
     pub auto_clean: bool,
@@ -448,6 +452,8 @@ impl Default for Settings {
             auto_update: false,
             notify_updates: true,
             manual_sources: vec![],
+            wait_for_charger: true,
+            wait_for_unmetered: true,
             allow_removals: true,
             auto_clean: false,
             auto_clean_worktrees: false,

@@ -4,7 +4,7 @@ use crate::qt::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
-use pkgdeck_core::hold::Hold;
+use pkgdeck_core::hold::{Hold, Waits};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{
@@ -1239,10 +1239,10 @@ struct Natives {
     /// Load the local app catalog in the background when sections load.
     warm_catalog: bool,
     /// Why automatic updates should wait right now, if they should.
-    hold: fn(&pkgdeck_core::host::Host) -> Option<Hold>,
+    hold: fn(&pkgdeck_core::host::Host, Waits) -> Option<Hold>,
 }
-/// Never on battery and never building.
-fn never_hold(_: &pkgdeck_core::host::Host) -> Option<Hold> {
+/// Never on battery, metered or building.
+fn never_hold(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
     None
 }
 /// Builds an engine for some sources, as `native_engine` does.
@@ -1576,6 +1576,8 @@ pub struct Controller {
     auto_update: bool,
     /// The sources automatic updates leave for you.
     manual_sources: Vec<String>,
+    /// What automatic updates and cleaning wait for, besides builds.
+    waits: Waits,
     /// Why the updates the last background check found wait, if they do.
     auto_held: Option<Hold>,
     /// Let Update all remove packages when APT's plan does.
@@ -1720,6 +1722,7 @@ impl Default for Controller {
             approval_worker: None,
             auto_update: false,
             manual_sources: vec![],
+            waits: Waits::default(),
             auto_held: None,
             allow_removals: true,
             auto_clean: false,
@@ -4277,11 +4280,19 @@ impl ffi::PackageController {
     pub fn manual_sources(&self) -> &[String] {
         &self.rust().manual_sources
     }
+    /// Whether automatic updates wait for the charger and for a connection
+    /// that isn't metered. Cleaning waits for the charger too.
+    pub fn set_waits(mut self: Pin<&mut Self>, battery: bool, metered: bool) {
+        self.as_mut().rust_mut().waits = Waits { battery, metered };
+    }
+    pub fn waits(&self) -> Waits {
+        self.rust().waits
+    }
     /// Why automatic updates wait now, if they still do. A new reason
     /// replaces the old one in the background state.
     fn still_held(mut self: Pin<&mut Self>) -> Option<Hold> {
         let natives = self.rust().natives;
-        let hold = (natives.hold)(&(natives.host)());
+        let hold = (natives.hold)(&(natives.host)(), self.rust().waits);
         if hold.is_some() && hold != self.rust().auto_held {
             self.as_mut().rust_mut().auto_held = hold;
             let mut state: Value =
@@ -4364,8 +4375,13 @@ impl ffi::PackageController {
         {
             return;
         }
+        // Cleaning downloads nothing, so a metered connection doesn't count.
         let natives = rust.natives;
-        if (natives.hold)(&(natives.host)()).is_some() {
+        let waits = Waits {
+            metered: false,
+            ..rust.waits
+        };
+        if (natives.hold)(&(natives.host)(), waits).is_some() {
             return;
         }
         let job = Job::AutoClean {
@@ -4499,7 +4515,7 @@ impl ffi::PackageController {
         // On battery, a metered connection or during a build, wait:
         // check_updates tries again once that's over.
         let natives = self.rust().natives;
-        let hold = (natives.hold)(&(natives.host)());
+        let hold = (natives.hold)(&(natives.host)(), self.rust().waits);
         if hold.is_some() {
             self.as_mut().rust_mut().auto_held = hold;
             return None;
@@ -14154,11 +14170,58 @@ mod tests {
         assert_eq!(state["notify"], false);
         assert_eq!(state["manual"], 0);
     }
-    fn on_battery(_: &pkgdeck_core::host::Host) -> Option<Hold> {
-        Some(Hold::Battery)
+    /// Fakes that count only what `waits` asks for, like the real check.
+    fn on_battery(_: &pkgdeck_core::host::Host, waits: Waits) -> Option<Hold> {
+        waits.battery.then_some(Hold::Battery)
     }
-    fn building(_: &pkgdeck_core::host::Host) -> Option<Hold> {
+    fn on_metered(_: &pkgdeck_core::host::Host, waits: Waits) -> Option<Hold> {
+        waits.metered.then_some(Hold::Metered)
+    }
+    fn building(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
         Some(Hold::Build)
+    }
+    #[test]
+    fn turned_off_waits_let_updates_run_and_cleaning_ignores_metered() {
+        let mut wget = synthetic_package("wget", "wget");
+        wget.id.backend = "homebrew".into();
+        wget.update = UpdateAvailability::Available;
+        wget.candidate_version = Some("2".into());
+        let report = PackageReport {
+            packages: vec![wget],
+            failures: vec![],
+            successful_sources: vec!["homebrew".into()],
+        };
+        for (hold, battery, metered, runs) in [
+            (on_battery as fn(&_, _) -> _, true, true, false),
+            (on_battery, false, true, true),
+            (on_metered, true, true, false),
+            (on_metered, true, false, true),
+        ] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().prefetch.clear();
+            controller.as_mut().set_auto_update(true);
+            controller.as_mut().set_waits(battery, metered);
+            assert_eq!(controller.waits(), Waits { battery, metered });
+            controller.as_mut().rust_mut().natives.hold = hold;
+            let left = controller.as_mut().schedule_auto_update(&report);
+            assert_eq!(left.is_some(), runs, "{battery} {metered}");
+        }
+        // Cleaning runs on a metered connection, and waits for the charger.
+        let cleans = |hold: fn(&pkgdeck_core::host::Host, Waits) -> Option<Hold>, battery| {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().natives.hold = hold;
+            controller.as_mut().set_waits(battery, true);
+            controller
+                .as_mut()
+                .set_auto_clean(true, epoch_seconds() - 25 * 60 * 60);
+            controller.as_mut().schedule_auto_clean();
+            controller.rust().validated_confirmed.is_some()
+        };
+        assert!(cleans(on_metered, true));
+        assert!(!cleans(on_battery, true));
+        assert!(cleans(on_battery, false));
     }
     #[test]
     fn automatic_updates_wait_for_power_and_builds_then_check_again() {

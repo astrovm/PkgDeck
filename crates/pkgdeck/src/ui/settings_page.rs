@@ -995,6 +995,38 @@ fn install_from(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
 }
 
+/// Whether automatic updates and cleaning wait while on battery.
+fn charger_row(app: &mut App, ui: &mut Ui, hint: &str) {
+    setting_row(ui, "Wait for the charger", hint, SWITCH, |ui| {
+        let mut on = app.settings.wait_for_charger;
+        if switch(ui, &mut on, true, "Wait for the charger").changed() {
+            app.settings.wait_for_charger = on;
+            app.apply_waits();
+        }
+    });
+}
+
+/// Whether automatic updates wait on a metered connection. Only Linux can
+/// tell, from NetworkManager.
+fn metered_row(app: &mut App, ui: &mut Ui) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    setting_row(
+        ui,
+        "Wait on metered connections",
+        "Like a phone's hotspot",
+        SWITCH,
+        |ui| {
+            let mut on = app.settings.wait_for_unmetered;
+            if switch(ui, &mut on, true, "Wait on metered connections").changed() {
+                app.settings.wait_for_unmetered = on;
+                app.apply_waits();
+            }
+        },
+    );
+}
+
 /// Turns background checks on or off. Off also stops starting at login;
 /// false when that couldn't be undone.
 fn set_background(app: &mut App, on: bool) -> bool {
@@ -1094,6 +1126,8 @@ fn automatic_updates(app: &mut App, ui: &mut Ui) {
                     }
                 },
             );
+            charger_row(app, ui, "Cleaning waits too");
+            metered_row(app, ui);
         }
         // Still there to turn off once automatic updates are.
         if app.settings.auto_update || approved {
@@ -1306,6 +1340,9 @@ fn clean(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
+        if app.settings.auto_clean || app.settings.auto_clean_worktrees {
+            charger_row(app, ui, "Automatic updates wait too");
+        }
         ui.horizontal(|ui| {
             if !background
                 && Button::new(Look::Soft(Tone::Accent), "Turn on Background checks")

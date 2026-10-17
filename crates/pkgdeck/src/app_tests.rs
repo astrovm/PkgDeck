@@ -1638,7 +1638,18 @@ fn settings_tell_the_controller_which_sources_to_leave_for_you() {
     app.settings
         .set_found_updates(crate::settings::FoundUpdates::Install);
     app.settings.set_installs_automatically("apt", false);
+    // Waiting for the charger and a free connection starts on.
     app.apply_settings();
     assert!(app.c().auto_update());
     assert_eq!(app.ctl.manual_sources(), ["apt"]);
+    assert_eq!(
+        app.ctl.waits(),
+        pkgdeck_core::hold::Waits {
+            battery: true,
+            metered: true
+        }
+    );
+    app.settings.wait_for_charger = false;
+    app.apply_settings();
+    assert!(!app.ctl.waits().battery && app.ctl.waits().metered);
 }
