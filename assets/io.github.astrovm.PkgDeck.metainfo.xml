@@ -10,6 +10,14 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.11.7" date="2026-10-17">
+      <description>
+        <p>The AppImage works on more Linux systems.</p>
+        <ul>
+          <li>The AppImage and Snap start on Ubuntu 24.04, Debian 13 and other systems with glibc 2.39 or newer</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.11.6" date="2026-10-17">
       <description>
         <p>Choose what automatic updates wait for.</p>

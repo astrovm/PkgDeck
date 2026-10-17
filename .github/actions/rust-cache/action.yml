@@ -10,6 +10,9 @@ inputs:
   save:
     description: Save successful builds; consumers of another job's cache restore only.
     default: 'true'
+  os:
+    description: Linux runner image, since outputs link against its glibc.
+    default: ubuntu-26.04
 # Only main saves. Pull requests may restore main's caches but not each other's,
 # so per-PR saves were never reused by other PRs and evicted main's entries.
 # Main restores only outputs built from the same lockfile and toolchain: an
@@ -28,9 +31,9 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ~/.cargo/bin/cargo-llvm-cov
-        key: rust-v4-${{ runner.os == 'Linux' && 'ubuntu-26.04' || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
+        key: rust-v4-${{ runner.os == 'Linux' && inputs.os || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
         restore-keys: |
-          rust-v4-${{ runner.os == 'Linux' && 'ubuntu-26.04' || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-
+          rust-v4-${{ runner.os == 'Linux' && inputs.os || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-
     - name: Restore Rust cache
       if: inputs.save != 'true' || github.ref != 'refs/heads/main'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -41,7 +44,7 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ~/.cargo/bin/cargo-llvm-cov
-        key: rust-v4-${{ runner.os == 'Linux' && 'ubuntu-26.04' || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
+        key: rust-v4-${{ runner.os == 'Linux' && inputs.os || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
         restore-keys: |
-          rust-v4-${{ runner.os == 'Linux' && 'ubuntu-26.04' || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-
-          rust-v4-${{ runner.os == 'Linux' && 'ubuntu-26.04' || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-
+          rust-v4-${{ runner.os == 'Linux' && inputs.os || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-
+          rust-v4-${{ runner.os == 'Linux' && inputs.os || runner.os }}-${{ inputs.arch }}-${{ inputs.scope }}-

@@ -136,6 +136,10 @@ GitHub Releases also have AppImage and Snap packages:
   updater looks for an old file name. From v0.1.2 on, updates work
   automatically.
 - The Snap is only published on GitHub, not the Snap Store.
+- The AppImage and Snap are built on Ubuntu 24.04, so they need glibc 2.39
+  or newer, like Ubuntu 24.04 or Debian 13. CI checks every bundled program
+  and library for that and runs the AppImage on Ubuntu 24.04, Debian 13 and
+  Ubuntu 26.04.
 
 To build the packages, use the same environment as CI:
 

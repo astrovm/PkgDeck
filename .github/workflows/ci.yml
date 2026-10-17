@@ -718,13 +718,15 @@ jobs:
     if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     # Usually under 12 minutes; a slow Ubuntu mirror has stretched it past 30.
     timeout-minutes: 45
+    # The AppImage and Snap use the system's glibc, so they're built on the
+    # oldest Ubuntu they support. A newer runner makes them need its glibc.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-26.04
+          - runner: ubuntu-24.04
             arch: x86_64
-          - runner: ubuntu-26.04-arm
+          - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -735,6 +737,7 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           scope: release
+          os: ubuntu-24.04
       - name: Set up desktop dependencies
         uses: ./.github/actions/setup-desktop
         with:
@@ -750,6 +753,8 @@ jobs:
         run: |
           source scripts/dev-env.sh
           scripts/bundle.sh
+          # Ubuntu 24.04 has glibc 2.39.
+          scripts/ci/check-glibc.sh build/AppDir 2.39
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
           test -x build/AppDir/usr/libexec/pkgdeck-host-runner
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
@@ -811,6 +816,26 @@ jobs:
           listed=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list) || { echo "$listed"; exit 1; }
           imported=$(jq -er '.data.packages[0].id.name' <<< "$listed") || { echo "$listed"; exit 1; }
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage remove "$imported" | jq -e '.exit_code == 0'
+      - name: Test AppImage on other systems
+        if: needs.reviewed.outputs.tested != 'true'
+        run: |
+          images=(build/artifacts/PkgDeck-v*-${{ matrix.arch }}.AppImage)
+          # Debian 13 has a newer glibc and APT 3, and Ubuntu 26.04 is the newest
+          # release. Containers have no FUSE, so the AppImage extracts itself.
+          for system in ubuntu:24.04 debian:13 ubuntu:26.04; do
+            echo "Testing on $system"
+            docker run --rm -e APPIMAGE_EXTRACT_AND_RUN=1 -v "$PWD/${images[0]}:/PkgDeck.AppImage:ro" "$system" sh -euc '
+              cd /tmp
+              /PkgDeck.AppImage --appimage-extract >/dev/null
+              for file in squashfs-root/usr/bin/* squashfs-root/usr/libexec/*; do
+                links=$(LD_LIBRARY_PATH=squashfs-root/usr/lib ldd "$file")
+                case $links in *"not found"*) echo "$file: $links" >&2; exit 1 ;; esac
+              done
+              /PkgDeck.AppImage --cli --version >&2
+              /PkgDeck.AppImage --cli doctor >&2
+              /PkgDeck.AppImage --cli --json --from apt --arch "$(dpkg --print-architecture)" info bash
+            ' | jq -e '.exit_code == 0 and .data.package.id.name == "bash" and .data.package.installed_version != null'
+          done
       - name: Build and test Snap
         if: needs.reviewed.outputs.tested != 'true'
         run: |
