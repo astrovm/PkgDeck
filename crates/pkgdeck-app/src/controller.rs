@@ -1473,6 +1473,9 @@ pub struct Controller {
     appimage_data: Option<PathBuf>,
     /// The package `opened` shows.
     opened_package: Option<Package>,
+    /// Flatpak links install for the whole system unless the app is
+    /// already installed: the last choice in their review.
+    flatpak_links_for_system: bool,
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
@@ -1625,6 +1628,7 @@ impl Default for Controller {
             opened: QString::default(),
             appimage_data: None,
             opened_package: None,
+            flatpak_links_for_system: false,
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
@@ -4328,6 +4332,14 @@ impl ffi::PackageController {
     }
     /// Whether automatic updates wait for the charger and for a connection
     /// that isn't metered. Cleaning waits for the charger too.
+    /// Where Flatpak links install by default: for the whole system, or for
+    /// this user.
+    pub fn set_flatpak_links_for_system(mut self: Pin<&mut Self>, system: bool) {
+        self.as_mut().rust_mut().flatpak_links_for_system = system;
+    }
+    pub fn flatpak_links_for_system(&self) -> bool {
+        self.rust().flatpak_links_for_system
+    }
     pub fn set_waits(mut self: Pin<&mut Self>, battery: bool, metered: bool) {
         self.as_mut().rust_mut().waits = Waits { battery, metered };
     }
@@ -6417,7 +6429,14 @@ impl ffi::PackageController {
             }
             // An opened file or link gets its own app page; Install there
             // previews the change.
-            Ok(Payload::OpenPackage(details)) => {
+            Ok(Payload::OpenPackage(mut details)) => {
+                let reference = details.package.id.reference.as_deref();
+                if self.rust().flatpak_links_for_system
+                    && details.package.installed_version.is_none()
+                    && reference.is_some_and(|value| value.starts_with("flatpakref:"))
+                {
+                    details.package.id.scope = Scope::System;
+                }
                 let package = details.package.clone();
                 {
                     let rust = self.as_mut().rust_mut();
@@ -8704,6 +8723,56 @@ mod tests {
             assert_eq!(page["action"], action, "{backend} {installed:?}");
             assert_eq!(page["package"]["installed"], json!(installed), "{backend}");
         }
+    }
+    #[test]
+    fn flatpak_links_start_where_the_last_one_was_installed() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let user = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        let mut link = synthetic_package("org.example.Demo", "Demo");
+        link.id.backend = "flatpak".into();
+        link.id.scope = user.clone();
+        link.id.reference = Some(format!(
+            "flatpakref:{}:https://example.invalid/Demo.flatpakref",
+            "ab".repeat(32)
+        ));
+        link.installed_version = None;
+        let scope_of = |controller: &mut Pin<&mut ffi::PackageController>, package: &Package| {
+            controller
+                .as_mut()
+                .apply(Ok(opened_payload(package.clone())));
+            let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+            assert_eq!(
+                controller.rust().opened_package.as_ref().unwrap().id.scope,
+                serde_json::from_value(page["package"]["scope"].clone()).unwrap()
+            );
+            page["package"]["scope_label"].as_str().unwrap().to_owned()
+        };
+        assert!(!controller.flatpak_links_for_system());
+        assert!(scope_of(&mut controller, &link).starts_with("User"));
+        controller.as_mut().set_flatpak_links_for_system(true);
+        assert_eq!(scope_of(&mut controller, &link), "System");
+        // The review starts there too.
+        controller.as_mut().install_opened();
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["flatpak_ref_scope"], "system");
+        controller.as_mut().confirm(false);
+        // An app that's already installed stays where it is.
+        let mut installed = link.clone();
+        installed.installed_version = Some("1.0".into());
+        assert!(scope_of(&mut controller, &installed).starts_with("User"));
+        // Other files keep their own scope.
+        let mut bundle = link.clone();
+        bundle.id.reference = Some(format!(
+            "artifact:flatpak:{}::/tmp/Demo.flatpak",
+            "ab".repeat(32)
+        ));
+        assert!(scope_of(&mut controller, &bundle).starts_with("User"));
+        controller.as_mut().set_flatpak_links_for_system(false);
+        assert!(scope_of(&mut controller, &link).starts_with("User"));
     }
     #[test]
     fn an_opened_flatpak_installed_for_the_system_shows_installed_and_launch() {
