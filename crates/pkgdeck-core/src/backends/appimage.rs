@@ -2058,9 +2058,13 @@ mod tests {
         assert!(backend
             .run_command(&base.join("missing.AppImage"), uid)
             .is_err());
-        // A header alone isn't a program: starting it fails and says so.
-        let error = backend.run_file(&file).unwrap_err().to_string();
-        assert!(error.contains("couldn't start it"), "{error}");
+        // A header alone isn't a program: Linux refuses to start it, and
+        // the error says so. macOS hands it to a child that fails later.
+        #[cfg(target_os = "linux")]
+        {
+            let error = backend.run_file(&file).unwrap_err().to_string();
+            assert!(error.contains("couldn't start it"), "{error}");
+        }
         fs::remove_dir_all(base).unwrap();
     }
 
