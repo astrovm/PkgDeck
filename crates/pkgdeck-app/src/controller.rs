@@ -3853,7 +3853,15 @@ fn opened_page(details: &PackageDetails, action: &str) -> Value {
         "location": location,
         "action": action,
         "launchable": package.installed_version.is_some() && launchable_flatpak(package),
+        "runnable": runnable_file(package).is_some(),
     })
+}
+/// An AppImage file that isn't installed yet, which can still start from
+/// where it is.
+fn runnable_file(package: &Package) -> Option<&std::path::Path> {
+    let path = std::path::Path::new(&package.id.name);
+    (package.id.backend == "appimage" && package.installed_version.is_none() && path.is_absolute())
+        .then_some(path)
 }
 /// A Flatpak app an opened file or link names, not a runtime: it can start
 /// once it's installed.
@@ -4095,7 +4103,16 @@ impl ffi::PackageController {
         })
     }
     pub fn launch_opened(self: Pin<&mut Self>) -> QString {
-        let started = if let Some(id) = self.opened_appimage() {
+        let page: Value = serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
+        let file = self
+            .rust()
+            .opened_package
+            .as_ref()
+            .filter(|_| page["runnable"] == json!(true))
+            .and_then(runnable_file);
+        let started = if let Some(path) = file {
+            self.appimages().run_file(path)
+        } else if let Some(id) = self.opened_appimage() {
             self.appimages().launch(&id)
         } else {
             match self.opened_flatpak() {
@@ -4171,6 +4188,8 @@ impl ffi::PackageController {
             version
         };
         data["launchable"] = json!(launchable_flatpak(&package));
+        // The installed copy starts instead.
+        data["runnable"] = json!(false);
         self.as_mut().set_opened(encoded(data));
     }
     pub fn close_opened(mut self: Pin<&mut Self>) {
@@ -8860,6 +8879,56 @@ mod tests {
         let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
         assert_eq!(page["action"], "Reinstall");
         assert_eq!(page["launchable"], true);
+    }
+    #[test]
+    fn opened_appimages_start_from_their_file_until_installed() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-run-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A header alone looks like an AppImage, but nothing can run it.
+        let mut header = vec![0_u8; 64];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[4..7].copy_from_slice(&[2, 1, 1]);
+        header[8..11].copy_from_slice(b"AI\x02");
+        header[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        header[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        header[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        let file = dir.join("Demo.AppImage");
+        std::fs::write(&file, &header).unwrap();
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().appimage_data = Some(dir.join("data"));
+        let mut package = synthetic_package(&file.to_string_lossy(), "Demo");
+        package.id.backend = "appimage".into();
+        package.id.reference = Some("ab".repeat(32));
+        package.installed_version = None;
+        controller
+            .as_mut()
+            .apply(Ok(opened_payload(package.clone())));
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["runnable"], true);
+        assert_eq!(page["launchable"], false);
+        let error = controller.as_mut().launch_opened().to_string();
+        assert!(error.contains("couldn't start it"), "{error}");
+        // Once installed, the installed copy starts instead.
+        controller.as_mut().mark_opened_installed(
+            &Job::Write(Operation::Install(package.id.clone()), None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["runnable"], false);
+        let error = controller.as_mut().launch_opened().to_string();
+        assert!(!error.contains("couldn't start it"), "{error}");
+        // Neither an installed copy nor a name that isn't a path runs as a file.
+        let mut installed = package.clone();
+        installed.installed_version = Some("1.0".into());
+        let mut named = package;
+        named.id.name = "Demo.AppImage".into();
+        for other in [installed, named] {
+            controller.as_mut().apply(Ok(opened_payload(other)));
+            let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+            assert_eq!(page["runnable"], false);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn opened_files_show_a_page_until_back_and_installed_after_their_install() {

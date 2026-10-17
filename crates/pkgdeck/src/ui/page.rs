@@ -292,6 +292,8 @@ fn app_page(
                             .as_ref()
                             .is_some_and(|p| p.source == "appimage" && p.is_installed())
                 });
+    // Not installed, but it can start from its file all the same.
+    let runnable = opened && !launchable && details.as_ref().is_some_and(|d| d.runnable);
     let can_act = app.can_act() && app.retained.is_none() && !app.review_on_page;
     let inner = rect.shrink2(vec2(20.0, 18.0));
     ui.scope_builder(
@@ -308,7 +310,7 @@ fn app_page(
                 .filter(|i| i.variants.len() > 1)
                 .map(|i| i.variants.clone());
             let mut buttons = Vec::new();
-            if launchable {
+            if launchable || runnable {
                 buttons.push(PageButton::Launch);
             }
             // Outside Updates the main action is Remove; an update waiting there
@@ -334,16 +336,16 @@ fn app_page(
             }
             let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
                 PageButton::Launch => {
-                    let look = if update_waits {
+                    let look = if update_waits || runnable {
                         Look::Secondary
                     } else {
                         Look::Primary
                     };
-                    if Button::new(look, "Launch")
-                        .icon("launch")
-                        .show(ui)
-                        .clicked()
-                    {
+                    let mut button = Button::new(look, "Launch").icon("launch");
+                    if runnable {
+                        button = button.tooltip("Start it without installing");
+                    }
+                    if button.show(ui).clicked() {
                         let error = if opened {
                             app.c().launch_opened().to_string()
                         } else {

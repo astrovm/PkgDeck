@@ -69,7 +69,9 @@ What the page shows:
   the file. PkgDeck never runs the file to inspect it. Your original file is
   kept, unless that AppImage is already installed some other way (for
   example by Gear Lever): then the page offers **Manage** instead, which
-  moves it into PkgDeck's folder.
+  moves it into PkgDeck's folder. **Launch** next to **Install** starts the
+  file where it is, without installing it. A file of yours that isn't
+  allowed to run yet is allowed first, as a file manager does.
 - Debian package (`.deb`): its full description, homepage and dependencies.
   **Install** checks the changes APT would make before it asks for your
   password.

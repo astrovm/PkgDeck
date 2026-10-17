@@ -184,6 +184,43 @@ impl AppImage {
             path: self.root.clone(),
         }
     }
+    /// Start an AppImage file where it is, without installing it, as a
+    /// file manager does.
+    pub fn run_file(&self, path: &Path) -> Result<(), EngineError> {
+        let command = self.run_command(path, rustix::process::getuid().as_raw())?;
+        let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
+            .then(|| Path::new("flatpak-spawn"));
+        desktop_exec::spawn(&command, bridge)
+            .map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
+    }
+    /// How `path` starts. A file `uid` owns that can't run yet is allowed
+    /// to, as a file manager's "allow executing" does.
+    fn run_command(&self, path: &Path, uid: u32) -> Result<desktop_exec::Command, EngineError> {
+        if !path.is_absolute() {
+            return Err(Self::invalid("expected an absolute path"));
+        }
+        Self::type2(path)?;
+        let metadata = fs::metadata(path).map_err(|e| Self::invalid(e.to_string()))?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o100 == 0 {
+            if metadata.uid() != uid {
+                return Err(Self::invalid("it isn't allowed to run, and it isn't yours"));
+            }
+            let allowed = fs::Permissions::from_mode(mode | 0o100);
+            fs::set_permissions(path, allowed).map_err(|e| Self::invalid(e.to_string()))?;
+        }
+        let mut command = desktop_exec::Command {
+            environment: Vec::new(),
+            program: path.to_string_lossy().into_owned(),
+            arguments: Vec::new(),
+        };
+        if Self::needs_fuse2(path) && !self.has_fuse2() {
+            command
+                .environment
+                .push(("APPIMAGE_EXTRACT_AND_RUN".into(), "1".into()));
+        }
+        Ok(command)
+    }
     fn invalid(reason: impl Into<String>) -> EngineError {
         EngineError::InvalidResponse {
             backend: "appimage".into(),
@@ -1978,6 +2015,52 @@ mod tests {
         assert_eq!(file.path, root.join(&managed.name));
         assert_eq!(file.bytes, fs::metadata(&original).unwrap().len());
         assert!(file.modified > 0);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn appimage_files_run_where_they_are_without_installing() {
+        let base = test_base("run-file");
+        let uid = rustix::process::getuid().as_raw();
+        let mut backend = AppImage::new(base.join("root"), base.join("applications"), uid);
+        let file = base.join("Demo.AppImage");
+        type2(&file);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        backend.fuse2 = Some(true);
+        let command = backend.run_command(&file, uid).unwrap();
+        assert_eq!(command.program, file.display().to_string());
+        assert!(command.arguments.is_empty() && command.environment.is_empty());
+        // Allowed to run, as a file manager does, and nothing more.
+        assert_eq!(mode(&file), 0o744);
+        assert!(!base.join("root").exists());
+        // An older runtime starts unpacked without FUSE 2.
+        let mut bytes = fs::read(&file).unwrap();
+        bytes.extend_from_slice(b"libfuse.so.2");
+        fs::write(&file, bytes).unwrap();
+        backend.fuse2 = Some(false);
+        assert_eq!(
+            backend.run_command(&file, uid).unwrap().environment,
+            [("APPIMAGE_EXTRACT_AND_RUN".to_owned(), "1".to_owned())]
+        );
+        // Someone else's file is left as it is.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = backend.run_command(&file, uid + 1).unwrap_err().to_string();
+        assert!(error.contains("isn't yours"), "{error}");
+        assert_eq!(mode(&file), 0o644);
+        // Only an AppImage, by its full path.
+        assert!(backend
+            .run_command(Path::new("Demo.AppImage"), uid)
+            .is_err());
+        let notes = base.join("notes.txt");
+        fs::write(&notes, "not an AppImage").unwrap();
+        assert!(backend.run_command(&notes, uid).is_err());
+        assert!(backend
+            .run_command(&base.join("missing.AppImage"), uid)
+            .is_err());
+        // A header alone isn't a program: starting it fails and says so.
+        let error = backend.run_file(&file).unwrap_err().to_string();
+        assert!(error.contains("couldn't start it"), "{error}");
         fs::remove_dir_all(base).unwrap();
     }
 
