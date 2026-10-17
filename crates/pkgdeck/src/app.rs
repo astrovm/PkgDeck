@@ -371,6 +371,8 @@ impl App {
         let (clean, cleaned_at) = (self.settings.auto_clean, self.settings.auto_cleaned_at);
         self.c().set_check_interval(interval);
         self.c().set_auto_update(auto);
+        let manual = self.settings.manual_sources.clone();
+        self.c().set_manual_sources(manual);
         self.c().set_allow_removals(removals);
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
@@ -803,11 +805,15 @@ impl App {
             String::new()
         });
         if self.background.notify && self.can_notify() {
+            // Updates an automatic run leaves for you, or all of them.
+            let count = self.background.manual.unwrap_or(count);
             let body = match count {
                 1 => "1 update available".to_owned(),
                 count => format!("{count} updates available"),
             };
-            self.platform.notify("PkgDeck updates", &body);
+            if self.settings.notify_updates {
+                self.platform.notify("PkgDeck updates", &body);
+            }
             self.c().acknowledge_notification();
         }
     }
@@ -1832,7 +1838,13 @@ impl App {
 
     /// The tray icon follows background checks.
     pub fn sync_tray(&mut self) {
-        let visible = self.settings.background_mode;
+        use crate::settings::TrayIcon;
+        let visible = self.settings.background_mode
+            && match self.settings.tray_icon {
+                TrayIcon::Always => true,
+                TrayIcon::Updates => self.background.available > 0,
+                TrayIcon::Never => false,
+            };
         self.sync_icon();
         self.platform.set_tray(visible);
     }

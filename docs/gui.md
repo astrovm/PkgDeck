@@ -488,14 +488,18 @@ once; change them later in Settings.
 - The first check runs about 30 seconds after launch, then at most once per
   **Check every** interval: 15 minutes to a week, 6 hours by default. The
   Updates page refreshes in the background no more often than that either.
-- Checks wait while you're offline, on a metered connection, or while another
-  package operation is running.
+- Checks wait while another package operation is running.
 - **Start at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
   default.
 - While background checks are on, PkgDeck shows a tray icon (a menu bar
   icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
+- **Tray icon** (**Menu bar icon** on macOS) picks when it shows:
+  **Always**, **With updates** (only while updates are waiting), or
+  **Never**. Without it, checks and notifications keep working. Open
+  PkgDeck from your apps or a notification, and quit with Ctrl+Q (Cmd+Q
+  on macOS).
 - On Linux, clicking the tray icon also shows or hides the window.
 - Clicking a notification opens Updates.
 - Closing the window really closes it. PkgDeck keeps checking from the
@@ -516,20 +520,30 @@ notification.
 
 ### Automatic updates
 
-Turn on **Update automatically** in **Settings** → **Updates**. When a background check
-finds updates, PkgDeck installs them and sends one notification.
+In **Settings** → **Updates**, **When updates are found** picks what a
+background check does:
 
-It's off by default.
+1. **Notify me**: one notification for each new batch. The default.
+2. **Install them**: PkgDeck installs them and sends one notification.
+3. **Do nothing**: no notification. The count still shows on the Updates
+   page and the badge.
+
+With **Install them**, **Install from** has a switch for each source that
+can update on its own. Turn one off to install its updates yourself: they
+still get a notification. System managers (APT, DNF, Flatpak, Snap and
+others) need **Skip the password** first. **Update automatically** in
+**Set up PkgDeck** picks **Install them**.
 
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
   failed.
-- It waits while the computer runs on battery, and while something is
-  being built: Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake,
+- It waits while the computer runs on battery, on a metered connection
+  (Linux, when NetworkManager says or guesses so, like a phone's hotspot),
+  and while something is being built: Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake,
   Xcode, Gradle, Maven, Bazel, `go build` or `go test`, `dotnet build`.
   The check still tells you about the updates, and Settings shows what
-  they wait for. Within 5 minutes of plugging in or the build ending,
-  PkgDeck checks again and installs them.
+  they wait for. Within 5 minutes of plugging in, leaving the metered
+  connection or the build ending, PkgDeck checks again and installs them.
 - Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and other
   developer tools) update right away.
 - Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox
@@ -683,10 +697,11 @@ and **About**.
 
 ### Updates
 
-- **Checks**: **Background checks**, **Check every** and **Start at login**,
-  then when PkgDeck last checked and what it found.
-- **Automatic updates**: **Update automatically**, **Allow removals** and
-  **Skip the password**. See [Update notifications](#update-notifications).
+- **Checks**: **Background checks**, **Tray icon**, **Check every** and
+  **Start at login**, then when PkgDeck last checked and what it found.
+- **Automatic updates**: **When updates are found**, then with **Install
+  them**, **Install from**, **Allow removals** and **Skip the password**.
+  See [Update notifications](#update-notifications).
 - **Notifications**: why notifications can't show, when they can't, and
   **Test notification**.
 

@@ -1583,3 +1583,62 @@ fn refresh_checks_block_changes_and_other_work_keeps_its_existing_rules() {
         assert!(app.confirmation.is_none());
     }
 }
+
+#[test]
+fn checks_tell_about_what_automatic_updates_leave_or_say_nothing() {
+    let mut app = app();
+    // An automatic run installs 3 and leaves 2 for you.
+    app.c().set_background_state(
+        json!({"available": 5, "notify": true, "manual": 2})
+            .to_string()
+            .into(),
+    );
+    app.react();
+    assert_eq!(
+        app.platform.recorded(),
+        [(
+            "PkgDeck updates".to_owned(),
+            "2 updates available".to_owned()
+        )]
+    );
+    // Do nothing: the badge still counts, and nothing pops up.
+    app.settings
+        .set_found_updates(crate::settings::FoundUpdates::Nothing);
+    app.c()
+        .set_background_state(json!({"available": 3, "notify": true}).to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 3);
+    assert_eq!(app.platform.recorded().len(), 1);
+}
+
+// The menu bar icon needs a running NSApplication, which tests don't have.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_tray_icon_shows_always_with_updates_or_never() {
+    use crate::settings::TrayIcon;
+    let mut app = app();
+    let shown = |app: &mut App, tray: TrayIcon, available: u64| {
+        app.settings.tray_icon = tray;
+        app.background.available = available;
+        app.sync_tray();
+        !app.platform.tray_titles().is_empty()
+    };
+    assert!(shown(&mut app, TrayIcon::Always, 0));
+    assert!(!shown(&mut app, TrayIcon::Updates, 0));
+    assert!(shown(&mut app, TrayIcon::Updates, 2));
+    assert!(!shown(&mut app, TrayIcon::Never, 2));
+    // Without background checks there is no icon at all.
+    app.settings.background_mode = false;
+    assert!(!shown(&mut app, TrayIcon::Always, 2));
+}
+
+#[test]
+fn settings_tell_the_controller_which_sources_to_leave_for_you() {
+    let mut app = app();
+    app.settings
+        .set_found_updates(crate::settings::FoundUpdates::Install);
+    app.settings.set_installs_automatically("apt", false);
+    app.apply_settings();
+    assert!(app.c().auto_update());
+    assert_eq!(app.ctl.manual_sources(), ["apt"]);
+}

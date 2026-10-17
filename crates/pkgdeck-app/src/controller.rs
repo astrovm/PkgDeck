@@ -1574,6 +1574,8 @@ pub struct Controller {
     approval_worker: Option<ApprovalWorker>,
     /// Install updates that background checks find.
     auto_update: bool,
+    /// The sources automatic updates leave for you.
+    manual_sources: Vec<String>,
     /// Why the updates the last background check found wait, if they do.
     auto_held: Option<Hold>,
     /// Let Update all remove packages when APT's plan does.
@@ -1717,6 +1719,7 @@ impl Default for Controller {
             catalog_worker: None,
             approval_worker: None,
             auto_update: false,
+            manual_sources: vec![],
             auto_held: None,
             allow_removals: true,
             auto_clean: false,
@@ -4267,6 +4270,13 @@ impl ffi::PackageController {
     pub fn auto_update(&self) -> bool {
         self.rust().auto_update
     }
+    /// Leave these sources' updates for you, even with automatic updates.
+    pub fn set_manual_sources(mut self: Pin<&mut Self>, sources: Vec<String>) {
+        self.as_mut().rust_mut().manual_sources = sources;
+    }
+    pub fn manual_sources(&self) -> &[String] {
+        &self.rust().manual_sources
+    }
     /// Why automatic updates wait now, if they still do. A new reason
     /// replaces the old one in the background state.
     fn still_held(mut self: Pin<&mut Self>) -> Option<Hold> {
@@ -4436,8 +4446,9 @@ impl ffi::PackageController {
     }
     /// After a background check: queue the updates it found as one
     /// automatic run, when that is on and nothing else is waiting. Returns
-    /// whether a run was queued.
-    fn schedule_auto_update(mut self: Pin<&mut Self>, report: &PackageReport) -> bool {
+    /// how many updates the queued run leaves for you, or nothing when no
+    /// run was queued.
+    fn schedule_auto_update(mut self: Pin<&mut Self>, report: &PackageReport) -> Option<u64> {
         use pkgdeck_core::unattended::{unattended, Unattended};
         self.as_mut().rust_mut().auto_held = None;
         let rust = self.rust();
@@ -4448,7 +4459,7 @@ impl ffi::PackageController {
             || rust.validated_confirmed.is_some()
             || !rust.confirmed_queue.is_empty()
         {
-            return false;
+            return None;
         }
         let approved = rust.approval_current();
         // A source whose check failed may have more to update than it said.
@@ -4457,6 +4468,7 @@ impl ffi::PackageController {
             .iter()
             .filter(|p| !report.failures.iter().any(|f| f.backend == p.id.backend))
             .filter(|p| !pkgdeck_core::backends::inventory_only(&p.id.backend))
+            .filter(|p| !rust.manual_sources.contains(&p.id.backend))
             .filter(|p| match unattended(&p.id.backend) {
                 Unattended::User => true,
                 Unattended::Approved => approved,
@@ -4482,16 +4494,22 @@ impl ffi::PackageController {
             &self.rust().failed_updates,
         );
         if operations.is_empty() {
-            return false;
+            return None;
         }
-        // On battery or during a build, wait: check_updates tries again
-        // once that's over.
+        // On battery, a metered connection or during a build, wait:
+        // check_updates tries again once that's over.
         let natives = self.rust().natives;
         let hold = (natives.hold)(&(natives.host)());
         if hold.is_some() {
             self.as_mut().rust_mut().auto_held = hold;
-            return false;
+            return None;
         }
+        let left = report
+            .packages
+            .iter()
+            .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+            .filter(|p| !operations.iter().any(|o| o.backend() == p.id.backend))
+            .count() as u64;
         let versions = packages
             .iter()
             .filter(|p| p.id.backend == "homebrew-cask")
@@ -4511,7 +4529,7 @@ impl ffi::PackageController {
             cleanup_preview: vec![],
         });
         self.sync_needs_poll();
-        true
+        Some(left)
     }
     pub fn set_check_interval(mut self: Pin<&mut Self>, minutes: i32) {
         let seconds = u64::try_from(minutes).unwrap_or(0).saturating_mul(60);
@@ -4819,12 +4837,14 @@ impl ffi::PackageController {
             .map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error)}))
             .collect();
         // An automatic update tells what it did when it finishes, instead
-        // of announcing updates it is about to install.
-        let automatic = self.as_mut().schedule_auto_update(&report);
+        // of announcing updates it is about to install. The ones it leaves
+        // for you are announced still.
+        let left = self.as_mut().schedule_auto_update(&report);
+        let automatic = left.is_some();
         if !automatic {
             self.as_mut().schedule_auto_clean();
         }
-        if automatic {
+        if left == Some(0) {
             self.as_mut()
                 .rust_mut()
                 .background_schedule
@@ -4834,7 +4854,7 @@ impl ffi::PackageController {
         self.as_mut()
             .set_notification_history(saved.as_str().into());
         let waiting = self.rust().auto_held.map(Hold::key);
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && !automatic, "waiting": waiting})));
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && left != Some(0), "manual": left, "waiting": waiting})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -14035,7 +14055,12 @@ mod tests {
             controller.as_mut().finish_background_check(report.clone());
             let state: Value =
                 serde_json::from_str(&controller.background_state().to_string()).unwrap();
-            assert_eq!(state["notify"], !automatic);
+            // What automatic updates leave for you is announced either way.
+            assert_eq!(state["notify"], true);
+            assert_eq!(
+                state["manual"],
+                if automatic { json!(3) } else { Value::Null }
+            );
             let queued = controller
                 .rust()
                 .validated_confirmed
@@ -14062,6 +14087,72 @@ mod tests {
         controller.as_mut().rust_mut().pending = Some(Job::Load("Search".into(), String::new()));
         controller.as_mut().finish_background_check(report);
         assert!(controller.rust().validated_confirmed.is_none());
+    }
+    #[test]
+    fn automatic_updates_leave_the_sources_you_picked_for_you() {
+        let available = |backend: &str, name: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = backend.into();
+            package.update = UpdateAvailability::Available;
+            package.candidate_version = Some("2".into());
+            package
+        };
+        let report = |packages: Vec<Package>| PackageReport {
+            packages,
+            failures: vec![],
+            successful_sources: vec!["homebrew".into(), "cargo".into()],
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().set_auto_update(true);
+        controller.as_mut().set_manual_sources(vec!["cargo".into()]);
+        let both = report(vec![
+            available("homebrew", "wget"),
+            available("cargo", "ripgrep"),
+            available("cargo", "bat"),
+        ]);
+        assert_eq!(controller.as_mut().schedule_auto_update(&both), Some(2));
+        let queued = controller
+            .rust()
+            .validated_confirmed
+            .as_ref()
+            .map(|entry| entry.job.operations());
+        assert_eq!(
+            queued,
+            Some(vec![Operation::UpgradeAll {
+                backend: "homebrew".into()
+            }])
+        );
+        // Only sources left for you: nothing runs, and the check tells.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().set_auto_update(true);
+        controller
+            .as_mut()
+            .set_manual_sources(vec!["homebrew".into()]);
+        controller
+            .as_mut()
+            .finish_background_check(report(vec![available("homebrew", "wget")]));
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert!(controller.rust().validated_confirmed.is_none());
+        assert_eq!(state["notify"], true);
+        assert_eq!(state["manual"], Value::Null);
+        // Everything installs on its own: the run tells when it's done.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().set_auto_update(true);
+        controller
+            .as_mut()
+            .finish_background_check(report(vec![available("homebrew", "wget")]));
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert!(controller.rust().validated_confirmed.is_some());
+        assert_eq!(state["notify"], false);
+        assert_eq!(state["manual"], 0);
     }
     fn on_battery(_: &pkgdeck_core::host::Host) -> Option<Hold> {
         Some(Hold::Battery)
@@ -19859,7 +19950,7 @@ mod tests {
             failures: vec![],
             successful_sources: vec!["fwupd".into()],
         };
-        assert!(!controller.as_mut().schedule_auto_update(&report));
+        assert_eq!(controller.as_mut().schedule_auto_update(&report), None);
         assert!(controller.rust().validated_confirmed.is_none());
     }
     #[test]

@@ -412,9 +412,10 @@ fn a_confirmation_asks_and_cancel_turns_it_down() {
 fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
     settings_tab(&mut harness, SettingsTab::Updates);
-    let before = harness.state().1.settings.auto_update;
-    click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
-    assert_ne!(harness.state().1.settings.auto_update, before);
+    assert!(!harness.state().1.settings.auto_update);
+    click_in_view(&mut harness, Some(Role::RadioButton), "Install them");
+    assert!(harness.state().1.settings.auto_update);
+    assert!(harness.state().1.ctl.auto_update());
     settings_tab(&mut harness, SettingsTab::Appearance);
     click_in_view(&mut harness, None, "Light");
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
@@ -910,6 +911,7 @@ fn one_button_refreshes_the_sources_and_checks_for_updates() {
 fn settings_say_what_automatic_updates_wait_for() {
     for (waiting, text) in [
         ("battery", "Updates wait for the charger"),
+        ("metered", "Updates wait for an unmetered connection"),
         ("build", "Updates wait for builds to finish"),
     ] {
         let mut app = app();
@@ -928,7 +930,7 @@ fn settings_say_what_automatic_updates_wait_for() {
         harness.run_steps(4);
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
-        click_in_view(&mut harness, Some(Role::CheckBox), "Update automatically");
+        click_in_view(&mut harness, Some(Role::RadioButton), "Notify me");
         assert!(harness.query_by_label(text).is_none(), "{text}");
     }
     // A reason this version doesn't know shows nothing.
@@ -2037,4 +2039,94 @@ fn the_activity_drawer_dims_the_page_inside_the_windows_rounded_corners() {
         .expect("the page dims behind the drawer");
     // GNOME 51's bottom corners are round; the scrim stops inside them.
     assert!(scrim.sw > 0 && scrim.se > 0, "{scrim:?}");
+}
+
+#[test]
+fn settings_pick_the_tray_icon_and_what_checks_do_with_updates() {
+    use pkgdeck::settings::{FoundUpdates, TrayIcon};
+    let mut app = app();
+    let source = |id: &str, name: &str| {
+        json!({"source": id, "name": name, "summary": "Available", "available": true,
+               "availability_kind": "available", "capabilities": ["installed", "upgrade"]})
+    };
+    // Firmware never updates on its own, so it gets no switch.
+    app.c().set_source_catalog(
+        json!([
+            source("apt", "APT"),
+            source("homebrew", "Homebrew"),
+            source("fwupd", "Firmware")
+        ])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    app.page = Page::Settings;
+    app.ui.settings_tab = SettingsTab::Updates;
+    app.invalidate();
+    let mut harness = harness_at(app, egui::vec2(1200.0, 2400.0));
+    harness.run_steps(3);
+    let never = if cfg!(target_os = "macos") {
+        "Open PkgDeck from your apps. Quit with ⌘Q"
+    } else {
+        "Open PkgDeck from your apps. Quit with Ctrl+Q"
+    };
+    assert!(harness.query_by_label(never).is_none());
+    harness
+        .get_by_role_and_label(Role::RadioButton, "Never")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.tray_icon, TrayIcon::Never);
+    assert!(harness.query_by_label(never).is_some());
+    harness
+        .get_by_role_and_label(Role::RadioButton, "With updates")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.tray_icon, TrayIcon::Updates);
+    // Notifying is the start; the sources show once updates install.
+    assert!(harness.query_by_label("Install from").is_none());
+    harness
+        .get_by_role_and_label(Role::RadioButton, "Do nothing")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().1.settings.found_updates(),
+        FoundUpdates::Nothing
+    );
+    harness
+        .get_by_role_and_label(Role::RadioButton, "Install them")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().1.settings.found_updates(),
+        FoundUpdates::Install
+    );
+    assert!(harness.query_by_label("Install from").is_some());
+    // APT needs the password skipped; Homebrew runs as you.
+    assert!(!switch_enabled(&harness, "APT"));
+    assert!(harness.query_by_label("Needs Skip the password").is_some());
+    assert!(switch_enabled(&harness, "Homebrew"));
+    assert!(harness.query_by_label("Firmware").is_none());
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Homebrew")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.manual_sources, ["homebrew"]);
+    assert_eq!(harness.state().1.ctl.manual_sources(), ["homebrew"]);
+    // With the password skipped, APT can install on its own too.
+    harness.state_mut().1.settings.system_approval = "key".into();
+    harness.run_steps(3);
+    assert!(switch_enabled(&harness, "APT"));
+    assert!(harness.query_by_label("Needs Skip the password").is_none());
+    // Without background checks, the choices say what they need.
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Background checks")
+        .click();
+    harness.run_steps(3);
+    // The tray icon and the choice of what checks do, among others.
+    assert!(
+        harness
+            .query_all_by_label("Needs Background checks")
+            .count()
+            >= 2
+    );
 }
