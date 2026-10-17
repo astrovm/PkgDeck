@@ -1,9 +1,9 @@
 cask "pkgdeck" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.11.4"
-  sha256 arm:   "d50371b226ee9e371532f02ea47a07d66db69fd8ea3722f744ddd1012dce5dd0",
-         intel: "b505048d93d3672e5a3b2c6a9cc0e934391b9c79612b897f1716aabb95889b18"
+  version "0.11.5"
+  sha256 arm:   "175af9cc7449cdd9bddbcc9367967991194e9798c7debec20968e892c50df99c",
+         intel: "d4eea9e5401b15fbe13916f163db623d04b9b7c5fe068d93b8052cd2574a0750"
 
   url "https://github.com/astrovm/PkgDeck/releases/download/v#{version}/PkgDeck-v#{version}-macos-#{arch}.zip"
   name "PkgDeck"
