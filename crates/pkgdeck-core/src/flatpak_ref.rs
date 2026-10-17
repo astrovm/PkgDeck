@@ -6,7 +6,13 @@ use crate::{
     process::{Cancellation, Limits},
 };
 use sha2::{Digest, Sha256};
-use std::{ffi::OsString, fs, io::Read, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const MAX_BYTES: usize = 64 * 1024;
 fn invalid(reason: impl ToString) -> EngineError {
@@ -107,6 +113,10 @@ fn reference_bytes(
     }
 }
 fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
+    parse(source, bytes).map(|(package, _)| package)
+}
+/// The package a reference installs, and the repository URL it names.
+fn parse(source: &str, bytes: &[u8]) -> Result<(Package, String), EngineError> {
     let hash = hex::encode(Sha256::digest(bytes));
     let text = std::str::from_utf8(bytes).map_err(invalid)?;
     let mut section = "";
@@ -138,6 +148,7 @@ fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
         return Err(invalid("invalid runtime repository URL"));
     }
     let title = fields.get("Title").copied().unwrap_or(name);
+    let comment = fields.get("Comment").copied().unwrap_or_default();
     let runtime = match fields.get("IsRuntime").copied().unwrap_or("false") {
         "true" => true,
         "false" => false,
@@ -155,8 +166,8 @@ fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
     let scope = Scope::User {
         uid: rustix::process::getuid().as_raw(),
     };
-    let summary = format!("Reference: {source}\n{}: {name}/{arch}/{branch}\nRepository to add if needed: {url}\nSuggested remote: {remote_name}\nSigning key: {}\nRuntime repository to add if needed: {}\nAdditional runtimes may be installed.", if runtime { "Runtime" } else { "Application" }, if signing_key { "included" } else { "not included" }, if runtime_repo.is_empty() { "none" } else { runtime_repo });
-    Ok(Package {
+    let summary = format!("{comment}{}Reference: {source}\n{}: {name}/{arch}/{branch}\nRepository to add if needed: {url}\nSuggested remote: {remote_name}\nSigning key: {}\nRuntime repository to add if needed: {}\nAdditional runtimes may be installed.", if comment.is_empty() { "" } else { "\n" }, if runtime { "Runtime" } else { "Application" }, if signing_key { "included" } else { "not included" }, if runtime_repo.is_empty() { "none" } else { runtime_repo });
+    let package = Package {
         id: PackageId {
             backend: "flatpak".into(),
             name: name.into(),
@@ -168,16 +179,79 @@ fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
         display_name: title.into(),
         summary,
         installed_version: None,
-        candidate_version: Some(branch.into()),
+        // The branch isn't a version; a configured remote may know one.
+        candidate_version: None,
         update: UpdateAvailability::Unknown,
         icon: None,
         component_ids: vec![name.into()],
         homepages: vec![],
         adopt_with: None,
-    })
+    };
+    Ok((package, url.into()))
 }
 pub fn inspect(source: &str, cancel: &Cancellation) -> Result<Package, EngineError> {
-    inspect_bytes(source, &reference_bytes(source, cancel, &Host::current())?)
+    let host = Host::current();
+    let (mut package, url) = parse(source, &reference_bytes(source, cancel, &host)?)?;
+    let home = host.var("HOME").map(PathBuf::from);
+    package.candidate_version = remote_version(&installations(home.as_deref()), &url, &package.id);
+    Ok(package)
+}
+/// The user's Flatpak installation, then the system's.
+fn installations(home: Option<&Path>) -> Vec<PathBuf> {
+    home.filter(|home| home.is_absolute())
+        .map(|home| home.join(".local/share/flatpak"))
+        .into_iter()
+        .chain([PathBuf::from("/var/lib/flatpak")])
+        .collect()
+}
+/// The newest release of `id`'s app in a remote already set up with the
+/// reference's repository `url`, from that remote's AppStream data: what
+/// installing the reference gets now.
+fn remote_version(installations: &[PathBuf], url: &str, id: &PackageId) -> Option<String> {
+    let url = url.trim_end_matches('/');
+    installations.iter().find_map(|installation| {
+        let config = read_text(&installation.join("repo/config"), MAX_BYTES * 16)?;
+        let mut remote = "";
+        config.lines().map(str::trim).find_map(|line| {
+            if let Some(name) = line
+                .strip_prefix("[remote \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                remote = name;
+                return None;
+            }
+            let value = line.strip_prefix("url=")?;
+            if remote.is_empty() || !identifier(remote) || value.trim_end_matches('/') != url {
+                return None;
+            }
+            let active = installation
+                .join("appstream")
+                .join(remote)
+                .join(&id.architecture)
+                .join("active");
+            let xml = read_text(&active.join("appstream.xml"), CATALOG_BYTES).or_else(|| {
+                let file = fs::File::open(active.join("appstream.xml.gz")).ok()?;
+                let mut xml = String::new();
+                flate2::read::GzDecoder::new(file)
+                    .take(CATALOG_BYTES as u64)
+                    .read_to_string(&mut xml)
+                    .ok()?;
+                Some(xml)
+            })?;
+            crate::flatpak_bundle::component_release(&xml, &id.name)
+        })
+    })
+}
+/// The most of a remote's AppStream data read to find one app's version.
+const CATALOG_BYTES: usize = 64 * 1024 * 1024;
+fn read_text(path: &Path, limit: usize) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(limit as u64)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
 }
 pub fn verified_source(
     id: &PackageId,
@@ -251,7 +325,8 @@ mod tests {
         assert_eq!(bytes, reference);
         let package = inspect_bytes(url, &bytes).unwrap();
         assert_eq!(package.id.name, "org.example.Remote");
-        assert_eq!(package.candidate_version.as_deref(), Some("master"));
+        // A branch isn't a version.
+        assert_eq!(package.candidate_version, None);
         let args = fs::read_to_string(&calls).unwrap();
         assert!(args.contains("--max-redirs\n0\n"));
         assert!(args.contains("--proto\n=https\n"));
@@ -350,5 +425,106 @@ mod tests {
         assert!(runtime.summary.contains("Runtime:"));
         assert!(runtime.summary.contains("Signing key: included"));
         assert!(runtime.summary.contains("Suggested remote: example"));
+        assert!(runtime.summary.starts_with("Reference: "));
+        let described = inspect_bytes(
+            source,
+            b"[Flatpak Ref]\nName=org.example.App\nUrl=https://example.invalid/repo\nComment=Does example things\n",
+        )
+        .unwrap();
+        assert_eq!(
+            described.summary.lines().take(2).collect::<Vec<_>>(),
+            ["Does example things", "Reference: /tmp/example.flatpakref"]
+        );
+    }
+
+    #[test]
+    fn a_configured_remote_names_the_version_a_reference_installs() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-flatpakref-remote-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (user, system) = (base.join("user"), base.join("system"));
+        let app = |name: &str| PackageId {
+            backend: "flatpak".into(),
+            name: name.into(),
+            architecture: "x86_64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        let catalog = |installation: &Path, remote: &str, version: &str, gzipped: bool| {
+            let active = installation
+                .join("appstream")
+                .join(remote)
+                .join("x86_64/active");
+            fs::create_dir_all(&active).unwrap();
+            let xml = format!("<components><component><id>org.example.App</id><releases><release version=\"{version}\"/></releases></component></components>");
+            if gzipped {
+                let mut gzip = flate2::write::GzEncoder::new(
+                    fs::File::create(active.join("appstream.xml.gz")).unwrap(),
+                    flate2::Compression::default(),
+                );
+                std::io::Write::write_all(&mut gzip, xml.as_bytes()).unwrap();
+                gzip.finish().unwrap();
+            } else {
+                fs::write(active.join("appstream.xml"), xml).unwrap();
+            }
+        };
+        for installation in [&user, &system] {
+            fs::create_dir_all(installation.join("repo")).unwrap();
+        }
+        // The user's remote is another repository; the system's matches,
+        // with or without the trailing slash, and its catalog is gzipped.
+        fs::write(
+            user.join("repo/config"),
+            "[core]\nurl=https://example.invalid/repo\n[remote \"other\"]\nurl=https://other.invalid/repo\n[remote \"../bad\"]\nurl=https://example.invalid/repo/\n",
+        )
+        .unwrap();
+        catalog(&user, "other", "9", false);
+        fs::write(
+            system.join("repo/config"),
+            "[remote \"example\"]\ngpg-verify=true\nurl=https://example.invalid/repo/\n",
+        )
+        .unwrap();
+        catalog(&system, "example", "1.2.2", true);
+        let both = [user.clone(), system.clone()];
+        let url = "https://example.invalid/repo";
+        assert_eq!(
+            remote_version(&both, url, &app("org.example.App")).as_deref(),
+            Some("1.2.2")
+        );
+        assert_eq!(remote_version(&both, url, &app("org.example.Other")), None);
+        assert_eq!(
+            remote_version(
+                &both,
+                "https://unknown.invalid/repo",
+                &app("org.example.App")
+            ),
+            None
+        );
+        // A plain catalog is read first; a remote with none says nothing.
+        catalog(&system, "example", "1.3", false);
+        assert_eq!(
+            remote_version(&both, url, &app("org.example.App")).as_deref(),
+            Some("1.3")
+        );
+        fs::remove_dir_all(system.join("appstream")).unwrap();
+        assert_eq!(remote_version(&both, url, &app("org.example.App")), None);
+        assert_eq!(
+            remote_version(&[base.join("none")], url, &app("org.example.App")),
+            None
+        );
+        assert_eq!(
+            installations(Some(Path::new("/home/user"))),
+            [
+                PathBuf::from("/home/user/.local/share/flatpak"),
+                PathBuf::from("/var/lib/flatpak")
+            ]
+        );
+        assert_eq!(
+            installations(Some(Path::new("relative"))),
+            [PathBuf::from("/var/lib/flatpak")]
+        );
+        assert_eq!(installations(None), [PathBuf::from("/var/lib/flatpak")]);
+        fs::remove_dir_all(base).unwrap();
     }
 }

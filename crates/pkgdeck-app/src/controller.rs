@@ -630,7 +630,8 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
     if let Payload::OpenPackage(details) = &mut payload {
         let package = &mut details.package;
         if package.id.backend != "appimage" && package.installed_version.is_none() {
-            package.installed_version = pkgdeck_core::installed_copy::version(&package.id, cancel);
+            package.installed_version =
+                pkgdeck_core::installed_copy::locate(&mut package.id, cancel);
         }
     }
     Ok(payload)
@@ -3777,19 +3778,30 @@ fn confirmation_preview(
 fn opened_page(details: &PackageDetails, action: &str) -> Value {
     let package = &details.package;
     let info = crate::metadata::cached_info(package);
-    let summary = package.summary.lines().next().unwrap_or_default();
+    // A reference with no comment starts with where it came from, which
+    // the page already shows.
+    let summary = package
+        .summary
+        .lines()
+        .next()
+        .filter(|line| !line.starts_with("Reference: "))
+        .unwrap_or_default();
     let description = info
         .as_ref()
         .map(|info| info.description.clone())
         .filter(|description| !description.is_empty())
         .unwrap_or_else(|| details.description.clone());
     let location = match package.id.reference.as_deref() {
-        Some(reference) if reference.starts_with("local-deb:") => reference
-            .splitn(3, ':')
-            .nth(2)
-            .unwrap_or_default()
-            .to_owned(),
-        Some(reference) if reference.starts_with("flatpakref:") => package.id.name.clone(),
+        // After its hash, the file or link it came from.
+        Some(reference)
+            if reference.starts_with("local-deb:") || reference.starts_with("flatpakref:") =>
+        {
+            reference
+                .splitn(3, ':')
+                .nth(2)
+                .unwrap_or_default()
+                .to_owned()
+        }
         _ => package.id.name.clone(),
     };
     let mut row = package_row(package, &[], None);
@@ -5228,7 +5240,14 @@ impl ffi::PackageController {
                 return;
             }
             if let Job::OpenInput(input) = &job {
-                send(Reply::Done(inspect_open_input(input, &token)));
+                let mut result = inspect_open_input(input, &token);
+                // The catalog names an opened app and gives its icon,
+                // description and screenshots, as on a search result's page.
+                if let Ok(Payload::OpenPackage(details)) = &mut result {
+                    crate::metadata::enrich(&mut details.package, natives.metadata);
+                    crate::metadata::details(&mut details.package, &token, natives.metadata);
+                }
+                send(Reply::Done(result));
                 return;
             }
             // A warm search always has the engine its scope describes.
@@ -8624,22 +8643,29 @@ mod tests {
             &Ok(Payload::Written(OperationOutcome::default())),
         );
         assert!(controller.opened().is_empty());
-        // Links and references show where they came from.
+        // References show the link they came from, not the app's ID, and
+        // their comment, if any, as the summary.
+        let source = "https://example.invalid/demo.flatpakref";
         let mut link = package.clone();
-        link.id.name = "https://example.invalid/demo.flatpakref".into();
-        link.id.reference = Some("flatpakref:app/org.example.Demo/x86_64/stable".into());
-        assert_eq!(
+        link.id.name = "org.example.Demo".into();
+        link.id.reference = Some(format!("flatpakref:{}:{source}", "ab".repeat(32)));
+        let page = |link: &Package| {
             opened_page(
                 &PackageDetails {
                     description: String::new(),
                     homepage: None,
                     dependencies: vec![],
-                    package: link
+                    package: link.clone(),
                 },
-                "Install"
-            )["location"],
-            "https://example.invalid/demo.flatpakref"
-        );
+                "Install",
+            )
+        };
+        link.summary = format!("Does demo things\nReference: {source}\nSigning key: included");
+        let opened = page(&link);
+        assert_eq!(opened["location"], source);
+        assert_eq!(opened["package"]["summary"], "Does demo things");
+        link.summary = format!("Reference: {source}\nSigning key: included");
+        assert_eq!(page(&link)["package"]["summary"], "");
     }
     #[test]
     fn appimage_install_previews_show_icon_and_description() {

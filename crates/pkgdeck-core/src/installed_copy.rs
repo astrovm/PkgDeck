@@ -50,6 +50,31 @@ pub fn version(id: &PackageId, cancel: &Cancellation) -> Option<String> {
     version_with_host(id, cancel, &Host::current())
 }
 
+/// Like [`version`], but a Flatpak installed only in the other installation
+/// counts too: `id` moves there, so the page's button acts on that copy
+/// instead of adding a second one.
+pub fn locate(id: &mut PackageId, cancel: &Cancellation) -> Option<String> {
+    locate_with_host(id, cancel, &Host::current())
+}
+
+fn locate_with_host(id: &mut PackageId, cancel: &Cancellation, host: &Host) -> Option<String> {
+    if let Some(version) = version_with_host(id, cancel, host) {
+        return Some(version);
+    }
+    let other = match (id.backend.as_str(), &id.scope) {
+        ("flatpak", Scope::System) => Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        },
+        ("flatpak", Scope::User { .. }) => Scope::System,
+        _ => return None,
+    };
+    let mut moved = id.clone();
+    moved.scope = other;
+    let version = version_with_host(&moved, cancel, host)?;
+    *id = moved;
+    Some(version)
+}
+
 fn version_with_host(id: &PackageId, cancel: &Cancellation, host: &Host) -> Option<String> {
     let name = id.name.as_str();
     if name.is_empty() || name.starts_with('-') {
@@ -318,6 +343,52 @@ mod tests {
                 version_with_host(&id(backend, name, scope), &cancel, &host),
                 None
             );
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_flatpak_installed_only_in_the_other_installation_is_found_there() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-locate-{}", std::process::id()));
+        let cancel = Cancellation::default();
+        let user = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        // This flatpak only has a system copy of `tool`.
+        let host = host(&base, "flatpak", "", 0);
+        fs::write(
+            base.join("flatpak"),
+            "#!/bin/sh\n[ \"$1\" = --system ] && printf 'tool\\t1.2.2\\n'\nexit 0\n",
+        )
+        .unwrap();
+        for (from, expected) in [
+            (user.clone(), Scope::System),
+            (Scope::System, Scope::System),
+        ] {
+            let mut found = id("flatpak", "tool", from);
+            assert_eq!(
+                locate_with_host(&mut found, &cancel, &host).as_deref(),
+                Some("1.2.2")
+            );
+            assert_eq!(found.scope, expected);
+        }
+        // Nothing moves when neither has it, or for other managers.
+        for (backend, name, scope) in [
+            ("flatpak", "other", user.clone()),
+            ("flatpak", "other", Scope::System),
+            ("apt", "tool", Scope::System),
+            (
+                "flatpak",
+                "tool",
+                Scope::Environment {
+                    path: "/env".into(),
+                },
+            ),
+        ] {
+            let mut missing = id(backend, name, scope);
+            let before = missing.clone();
+            assert_eq!(locate_with_host(&mut missing, &cancel, &host), None);
+            assert_eq!(missing, before);
         }
         fs::remove_dir_all(&base).unwrap();
     }

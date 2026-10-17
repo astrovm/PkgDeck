@@ -10,6 +10,16 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.11.5" date="2026-10-16">
+      <description>
+        <p>Better pages for opened Flatpak links.</p>
+        <ul>
+          <li>A Flatpak link shows the app's icon, description and screenshots when its repository is set up</li>
+          <li>A Flatpak link for an app installed for all users offers Update or Reinstall instead of Install</li>
+          <li>A Flatpak link shows the version it installs instead of its branch</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.11.4" date="2026-10-16">
       <description>
         <p>Fixes for opened files, Homebrew Casks and KDE.</p>
