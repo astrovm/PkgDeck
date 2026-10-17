@@ -2065,7 +2065,11 @@ fn settings_pick_the_tray_icon_and_what_checks_do_with_updates() {
     app.invalidate();
     let mut harness = harness_at(app, egui::vec2(1200.0, 2400.0));
     harness.run_steps(3);
-    let never = "Open PkgDeck from your apps. Quit with Ctrl+Q";
+    let never = if cfg!(target_os = "macos") {
+        "Open PkgDeck from your apps. Quit with ⌘Q"
+    } else {
+        "Open PkgDeck from your apps. Quit with Ctrl+Q"
+    };
     assert!(harness.query_by_label(never).is_none());
     harness
         .get_by_role_and_label(Role::RadioButton, "Never")

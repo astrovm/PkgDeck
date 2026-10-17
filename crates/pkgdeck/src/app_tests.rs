@@ -1611,6 +1611,8 @@ fn checks_tell_about_what_automatic_updates_leave_or_say_nothing() {
     assert_eq!(app.platform.recorded().len(), 1);
 }
 
+// The menu bar icon needs a running NSApplication, which tests don't have.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_tray_icon_shows_always_with_updates_or_never() {
     use crate::settings::TrayIcon;
