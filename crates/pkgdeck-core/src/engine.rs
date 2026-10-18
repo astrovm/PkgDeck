@@ -333,6 +333,16 @@ pub trait Backend: Send {
     ) -> Result<OperationOutcome, EngineError> {
         Err(self.unsupported(operation.capability()))
     }
+    /// Updates that have to join `operations`, a run of this manager's
+    /// updates: installed packages that need the exact version one of them
+    /// replaces. Most managers update those on their own.
+    fn lockstep(
+        &mut self,
+        _operations: &[Operation],
+        _cancel: &Cancellation,
+    ) -> Result<Vec<Operation>, EngineError> {
+        Ok(vec![])
+    }
     /// A manager may combine exact same-verb selections in one native write.
     fn execute_group(
         &mut self,
@@ -1298,10 +1308,15 @@ impl Engine {
         if let Some(result) = self.refresh_without_password(operation, cancel, events) {
             return result;
         }
-        // Several commands as root share one approval, like a batch.
-        if crate::batch::protected_commands(operation).is_ok_and(|commands| commands.len() > 1) {
+        // Several commands as root share one approval, like a batch, and an
+        // update that others have to join runs with them.
+        let one = std::slice::from_ref(operation);
+        if crate::batch::protected_commands(operation).is_ok_and(|commands| commands.len() > 1)
+            || (matches!(operation, Operation::Upgrade(_))
+                && self.with_lockstep(one, cancel).len() > 1)
+        {
             return self
-                .execute_batch(std::slice::from_ref(operation), cancel, events)
+                .execute_batch(one, cancel, events)
                 .pop()
                 .unwrap_or(Err(EngineError::Cancelled));
         }
@@ -1473,9 +1488,66 @@ impl Engine {
         Ok(())
     }
 
+    /// `operations` with the updates that have to join them (see
+    /// [`Backend::lockstep`]), each right after the run of updates it
+    /// joins, so they update in one transaction.
+    pub fn with_lockstep(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+    ) -> Vec<Operation> {
+        let mut all = Vec::with_capacity(operations.len());
+        let mut index = 0;
+        while index < operations.len() {
+            let end = crate::batch::group_end(operations, index);
+            all.extend_from_slice(&operations[index..end]);
+            if matches!(operations[index], Operation::Upgrade(_)) {
+                // Without them the update fails as it would have.
+                let joining = self
+                    .ready(operations[index].backend(), Capability::Upgrade, cancel)
+                    .and_then(|backend| backend.lockstep(&operations[index..end], cancel))
+                    .unwrap_or_default();
+                for operation in joining {
+                    if !operations.contains(&operation) && !all.contains(&operation) {
+                        all.push(operation);
+                    }
+                }
+            }
+            index = end;
+        }
+        all
+    }
+
     /// Ordered, best-effort batch. Successful writes are not rolled back after another failure.
     /// Every input receives its own result and terminal event, including cancelled items.
+    /// Updates that have to join them run too, in the same transaction,
+    /// with no result or events of their own.
     pub fn execute_batch(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        let all = self.with_lockstep(operations, cancel);
+        if all.len() == operations.len() {
+            return self.execute_listed(operations, cancel, events);
+        }
+        let joined = |operation: &Operation| !operations.contains(operation);
+        let results = self.execute_listed(&all, cancel, &mut |event| match &event {
+            Event::Started(operation)
+            | Event::Progress { operation, .. }
+            | Event::Finished { operation, .. }
+                if joined(operation) => {}
+            _ => events(event),
+        });
+        all.iter()
+            .zip(results)
+            .filter(|(operation, _)| !joined(operation))
+            .map(|(_, result)| result)
+            .collect()
+    }
+
+    fn execute_listed(
         &mut self,
         operations: &[Operation],
         cancel: &Cancellation,
@@ -1592,20 +1664,8 @@ impl Engine {
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
-            let mut end = index + 1;
-            if operation.backend() == "apt"
-                && matches!(
-                    operation,
-                    Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
-                )
-            {
-                while end < operations.len()
-                    && operations[end].backend() == "apt"
-                    && std::mem::discriminant(&operations[end]) == std::mem::discriminant(operation)
-                {
-                    end += 1;
-                }
-            }
+            let backend = operation.backend();
+            let end = crate::batch::group_end(operations, index);
             crate::batch::set_operation(index);
             if end - index > 1 {
                 for (offset, member) in operations[index..end].iter().enumerate() {
@@ -1613,16 +1673,16 @@ impl Engine {
                         events(Event::Started(member.clone()));
                     }
                 }
-                let prepared =
-                    self.ready("apt", operation.capability(), cancel)
-                        .and_then(|backend| {
-                            backend.prepare(operation, cancel, &mut |progress| {
-                                events(Event::Progress {
-                                    operation: operation.clone(),
-                                    progress,
-                                })
+                let prepared = self
+                    .ready(backend, operation.capability(), cancel)
+                    .and_then(|manager| {
+                        manager.prepare(operation, cancel, &mut |progress| {
+                            events(Event::Progress {
+                                operation: operation.clone(),
+                                progress,
                             })
-                        });
+                        })
+                    });
                 let rechecked = operations[index..end]
                     .iter()
                     .map(|member| {
@@ -1634,9 +1694,9 @@ impl Engine {
                 let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
                     Err(error)
                 } else {
-                    self.ready("apt", operation.capability(), cancel)
-                        .and_then(|backend| {
-                            backend
+                    self.ready(backend, operation.capability(), cancel)
+                        .and_then(|manager| {
+                            manager
                                 .execute_group(&operations[index..end], cancel, &mut |progress| {
                                     events(Event::Progress {
                                         operation: operation.clone(),
@@ -1645,13 +1705,13 @@ impl Engine {
                                 })
                                 .unwrap_or_else(|| {
                                     Err(EngineError::InvalidResponse {
-                                        backend: "apt".into(),
-                                        reason: "grouped APT operation unavailable".into(),
+                                        backend: backend.into(),
+                                        reason: "grouped operation unavailable".into(),
                                     })
                                 })
                         })
                 };
-                crate::cache::invalidate("apt");
+                crate::cache::invalidate(backend);
                 for member in &operations[index..end] {
                     let result = match &grouped {
                         Ok(outcomes) => Ok(outcomes[0].clone()),

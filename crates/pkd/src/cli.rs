@@ -958,6 +958,8 @@ fn dispatch_command(
             return (data, code);
         }
     };
+    // Updates that have to join the chosen ones, so the review lists them.
+    let operations = engine.with_lockstep(&operations, cancel);
     // A change its source can't make, such as removing firmware, and any
     // change but removal on an inventory-only source, is refused before
     // confirmation, progress events, and activity history rather than by

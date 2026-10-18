@@ -947,6 +947,155 @@ fn manager(kind: &str, script: Script) -> SystemManager<Script> {
 }
 
 #[test]
+fn pacman_updates_every_selected_package_in_one_transaction() {
+    let script = Script::new(|_| ok(""));
+    let mut pacman = manager("pacman", script.clone());
+    let updates = ["systemd", "systemd-libs"]
+        .map(|name| Operation::Upgrade(system_id("pacman", name, "x86_64")));
+    let mut messages = vec![];
+    let outcomes = pacman
+        .execute_group(&updates, &Cancellation::default(), &mut |item| {
+            messages.push(item)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        matches!(&messages[..], [Progress::Message(text)] if text == "Updating systemd and systemd-libs in one transaction…")
+    );
+    // The same command the batch runner was asked to approve.
+    let planned = &pkgdeck_core::batch::batch_commands(&updates).unwrap()[0][0];
+    assert_eq!(planned.program, "/usr/bin/pacman");
+    assert_eq!(
+        script.calls(),
+        [format!("w:pacman {}", planned.args.join(" "))]
+    );
+    // A failed transaction fails the whole run.
+    let failing = Script::new(|_| failed(1));
+    native_failure(
+        manager("pacman", failing)
+            .execute_group(&updates, &Cancellation::default(), &mut |_| {})
+            .unwrap(),
+        1,
+    );
+    // One package, other changes, or other managers aren't grouped here.
+    let script = Script::new(|_| ok(""));
+    let mut pacman = manager("pacman", script.clone());
+    assert!(pacman
+        .execute_group(&updates[..1], &Cancellation::default(), &mut |_| {})
+        .is_none());
+    let mixed = [
+        updates[0].clone(),
+        Operation::Install(system_id("pacman", "jq", "x86_64")),
+    ];
+    invalid_response(
+        pacman
+            .execute_group(&mixed, &Cancellation::default(), &mut |_| {})
+            .unwrap(),
+        "mixed pacman batch",
+    );
+    let dnf = ["one", "two"].map(|name| Operation::Upgrade(system_id("dnf", name, "x86_64")));
+    assert!(manager("dnf", script.clone())
+        .execute_group(&dnf, &Cancellation::default(), &mut |_| {})
+        .is_none());
+    assert!(script.calls().is_empty());
+}
+
+/// pacman's updates and what each updatable package depends on, as
+/// systemd 262.1 found them.
+fn pacman_lockstep_script() -> Script {
+    Script::new(|call| {
+        if call == "pacman -Qu" {
+            return ok("curl 8.22.0-1 -> 8.23.0-1\n\
+systemd 262-1 -> 262.1-1\n\
+systemd-libs 262-1 -> 262.1-1\n\
+systemd-sysvcompat 262-1 -> 262.1-1\n\
+zlib 1:1.3.2-3 -> 1:1.3.2-4 [ignored]\n");
+        }
+        if call.starts_with("pacman -Qi -- ") {
+            return ok("Name            : curl\n\
+Architecture    : x86_64\n\
+Depends On      : ca-certificates  zlib\n\
+\n\
+Name            : systemd\n\
+Architecture    : x86_64\n\
+Depends On      : systemd-libs=262  acl  bash\n\
+\n\
+Name            : systemd-sysvcompat\n\
+Architecture    : x86_64\n\
+Depends On      : systemd=262\n\
+\n\
+Name            : systemd-libs\n\
+Architecture    : x86_64\n\
+Depends On      : glibc  libcap\n");
+        }
+        exit(1, "")
+    })
+}
+
+#[test]
+fn pacman_updates_bring_along_what_needs_the_version_they_replace() {
+    let cancel = Cancellation::default();
+    let update = |name: &str| Operation::Upgrade(system_id("pacman", name, "x86_64"));
+    let script = pacman_lockstep_script();
+    let mut pacman = manager("pacman", script.clone());
+    // systemd pins systemd-libs, and systemd-sysvcompat pins systemd.
+    assert_eq!(
+        pacman.lockstep(&[update("systemd-libs")], &cancel).unwrap(),
+        [update("systemd"), update("systemd-sysvcompat")]
+    );
+    // Only the other updates are read.
+    assert_eq!(
+        script.calls(),
+        [
+            "pacman -Qu",
+            "pacman -Qi -- curl systemd systemd-sysvcompat"
+        ]
+    );
+    assert_eq!(
+        pacman.lockstep(&[update("systemd")], &cancel).unwrap(),
+        [update("systemd-sysvcompat")]
+    );
+    // Installs bring nothing; neither does what nothing pins, or a batch
+    // that has them all.
+    let jq = Operation::Install(system_id("pacman", "jq", "x86_64"));
+    assert!(pacman.lockstep(&[jq], &cancel).unwrap().is_empty());
+    assert!(pacman
+        .lockstep(&[update("curl")], &cancel)
+        .unwrap()
+        .is_empty());
+    assert!(pacman
+        .lockstep(&[update("systemd-sysvcompat")], &cancel)
+        .unwrap()
+        .is_empty());
+    let all = ["curl", "systemd", "systemd-libs", "systemd-sysvcompat"].map(update);
+    let script = pacman_lockstep_script();
+    let mut pacman = manager("pacman", script.clone());
+    assert!(pacman.lockstep(&all, &cancel).unwrap().is_empty());
+    assert_eq!(script.calls(), ["pacman -Qu"]);
+    // A listing that fails is an error, so nothing joins.
+    let mut broken = manager(
+        "pacman",
+        Script::new(|call| {
+            if call == "pacman -Qu" {
+                ok("systemd 262-1 -> 262.1-1\nsystemd-sysvcompat 262-1 -> 262.1-1\n")
+            } else {
+                failed(1)
+            }
+        }),
+    );
+    native_failure(broken.lockstep(&[update("systemd")], &cancel), 1);
+    // Other managers update what they need themselves.
+    let script = pacman_lockstep_script();
+    let dnf = Operation::Upgrade(system_id("dnf", "systemd", "x86_64"));
+    assert!(manager("dnf", script.clone())
+        .lockstep(&[dnf], &cancel)
+        .unwrap()
+        .is_empty());
+    assert!(script.calls().is_empty());
+}
+
+#[test]
 fn apk_xbps_and_macports_writes_use_fixed_noninteractive_commands() {
     let all = |backend: &str| {
         let id = system_id(backend, "tool", std::env::consts::ARCH);
