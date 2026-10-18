@@ -10,6 +10,19 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.0" date="2026-10-18">
+      <description>
+        <p>Updates from different sources run at the same time, and pacman updates work on Arch again.</p>
+        <ul>
+          <li>APT, Flatpak, Snap and other sources update side by side, with one password per batch</li>
+          <li>The progress card names every update that is running</li>
+          <li>Selected pacman updates run in one transaction, with the packages that need their exact version</li>
+          <li>The window opens at the size you left it, maximized if it was</li>
+          <li>Screen readers read out the progress card</li>
+          <li>zypper and DNF no longer show as failed when their first check after a change is slow</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.11.8" date="2026-10-17">
       <description>
         <p>Flatpak update checks no longer fail on apps from bundles or local builds.</p>
