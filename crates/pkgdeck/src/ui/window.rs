@@ -42,6 +42,17 @@ pub struct Window<'a> {
     /// The accent the window's icon was last drawn in.
     #[cfg(not(target_os = "macos"))]
     icon: Option<egui::Color32>,
+    /// The window's size, kept in the settings once it closes: saving
+    /// each frame of a resize would rewrite them all the way.
+    size: Size,
+}
+
+/// The window's size in logical pixels, and whether it's maximized.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Size {
+    width: f32,
+    height: f32,
+    maximized: bool,
 }
 
 impl<'a> Window<'a> {
@@ -54,6 +65,11 @@ impl<'a> Window<'a> {
         let smoke_test = app.launch.smoke_test.then_some(0);
         crate::platform::probe_blur(ctx);
         crate::backdrop::allow_wallpaper(wallpaper_cache());
+        let size = Size {
+            width: app.settings.window_width,
+            height: app.settings.window_height,
+            maximized: app.settings.window_maximized,
+        };
         Self {
             app,
             smoke_test,
@@ -63,6 +79,7 @@ impl<'a> Window<'a> {
             filled: None,
             #[cfg(not(target_os = "macos"))]
             icon: None,
+            size,
         }
     }
 
@@ -77,7 +94,7 @@ impl<'a> Window<'a> {
         }
         self.app.dragging = ctx.dragged_id().is_some();
         let zoom = ctx.zoom_factor();
-        ctx.input(|i| remember_size(i.viewport(), zoom, &mut self.app.settings));
+        ctx.input(|i| remember_size(i.viewport(), zoom, &mut self.size));
         let wait = self.app.tick(Instant::now());
         ui::show(self.app, ui);
         if self.shown {
@@ -114,22 +131,18 @@ impl<'a> Window<'a> {
     }
 }
 
-/// Keeps the window's size and whether it's maximized, so the next one
+/// Follows the window's size and whether it's maximized, so the next one
 /// opens the same. Maximized or full screen, it keeps the size it goes
 /// back to; minimized, it keeps everything. `zoom` turns points back into
 /// the logical pixels the window was opened in.
-fn remember_size(
-    viewport: &egui::ViewportInfo,
-    zoom: f32,
-    settings: &mut crate::settings::Settings,
-) {
+fn remember_size(viewport: &egui::ViewportInfo, zoom: f32, size: &mut Size) {
     if viewport.minimized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false) {
         return;
     }
-    settings.window_maximized = viewport.maximized.unwrap_or(false);
-    if let Some(rect) = viewport.inner_rect.filter(|_| !settings.window_maximized) {
-        settings.window_width = (rect.width() * zoom).round();
-        settings.window_height = (rect.height() * zoom).round();
+    size.maximized = viewport.maximized.unwrap_or(false);
+    if let Some(rect) = viewport.inner_rect.filter(|_| !size.maximized) {
+        size.width = (rect.width() * zoom).round();
+        size.height = (rect.height() * zoom).round();
     }
 }
 
@@ -226,6 +239,10 @@ fn fill_window(frame: &eframe::Frame, fill: Option<[u8; 3]>) -> bool {
 
 impl Drop for Window<'_> {
     fn drop(&mut self) {
+        let settings = &mut self.app.settings;
+        settings.window_width = self.size.width;
+        settings.window_height = self.size.height;
+        settings.window_maximized = self.size.maximized;
         self.app.window_visible = false;
         self.app.c().set_window_open(false);
         if let Ok(mut guard) = CONTEXT.lock() {
@@ -289,7 +306,16 @@ mod tests {
 
     #[test]
     fn the_window_keeps_the_size_it_goes_back_to() {
-        let mut settings = crate::settings::Settings::default();
+        let mut size = Size {
+            width: 0.0,
+            height: 0.0,
+            maximized: false,
+        };
+        let sized = |width, height, maximized| Size {
+            width,
+            height,
+            maximized,
+        };
         let mut viewport = egui::ViewportInfo {
             inner_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(10.0, 20.0),
@@ -298,51 +324,32 @@ mod tests {
             ..Default::default()
         };
         // Points under a larger text size are bigger than pixels.
-        remember_size(&viewport, 1.25, &mut settings);
-        assert_eq!(
-            (settings.window_width, settings.window_height),
-            (801.0, 600.0)
-        );
-        assert!(!settings.window_maximized);
+        remember_size(&viewport, 1.25, &mut size);
+        assert_eq!(size, sized(801.0, 600.0, false));
         let mut big = viewport.clone();
         big.inner_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(1920.0, 1080.0),
         ));
         big.maximized = Some(true);
-        remember_size(&big, 1.0, &mut settings);
-        assert!(settings.window_maximized);
-        assert_eq!(
-            (settings.window_width, settings.window_height),
-            (801.0, 600.0)
-        );
+        remember_size(&big, 1.0, &mut size);
+        assert_eq!(size, sized(801.0, 600.0, true));
         // Full screen and minimized windows change nothing.
         for (fullscreen, minimized) in [(true, false), (false, true)] {
             let mut odd = big.clone();
             odd.maximized = Some(false);
             odd.fullscreen = Some(fullscreen);
             odd.minimized = Some(minimized);
-            remember_size(&odd, 1.0, &mut settings);
-            assert!(settings.window_maximized);
-            assert_eq!(
-                (settings.window_width, settings.window_height),
-                (801.0, 600.0)
-            );
+            remember_size(&odd, 1.0, &mut size);
+            assert_eq!(size, sized(801.0, 600.0, true));
         }
         viewport.maximized = Some(false);
-        remember_size(&viewport, 1.0, &mut settings);
-        assert!(!settings.window_maximized);
-        assert_eq!(
-            (settings.window_width, settings.window_height),
-            (640.0, 480.0)
-        );
+        remember_size(&viewport, 1.0, &mut size);
+        assert_eq!(size, sized(640.0, 480.0, false));
         // Before the window reports a size, the last one stays.
         viewport.inner_rect = None;
-        remember_size(&viewport, 1.0, &mut settings);
-        assert_eq!(
-            (settings.window_width, settings.window_height),
-            (640.0, 480.0)
-        );
+        remember_size(&viewport, 1.0, &mut size);
+        assert_eq!(size, sized(640.0, 480.0, false));
     }
 
     #[test]

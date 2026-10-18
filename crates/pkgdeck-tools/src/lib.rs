@@ -455,7 +455,7 @@ impl Desktop {
             sleep(Duration::from_millis(50));
         }
     }
-    pub fn close(mut self) {
+    pub fn close(&mut self) {
         self.xdo(&["key", "--clearmodifiers", "ctrl+q"]);
         until(
             || {
@@ -563,6 +563,18 @@ pub fn gui_lifecycle(args: &[String]) {
     gui.xdo(&["key", "--clearmodifiers", "ctrl+r"]);
     sleep(Duration::from_millis(300));
     gui.key("Escape");
+    gui.close();
+    // The next window opens at the size this one was left at.
+    let saved: Value =
+        serde_json::from_slice(&fs::read(gui.dir.0.join("pkgdeck/window.json")).unwrap()).unwrap();
+    assert_eq!(
+        (&saved["windowWidth"], &saved["windowHeight"]),
+        (&json!(1100.0), &json!(760.0)),
+        "{saved}"
+    );
+    gui.launch(&call);
+    let geometry = gui.xdo(&["getwindowgeometry", &gui.window]);
+    assert!(geometry.contains("Geometry: 1100x760"), "{geometry}");
     gui.close();
     for mode in ["success", "fail", "slow", "query-fails"] {
         let dir = fixture(true);
