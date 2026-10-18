@@ -2103,10 +2103,10 @@ while :; do sleep 1 </dev/null >/dev/null 2>&1; done"#,
         let alive = || rustix::process::test_kill_process(runner).is_ok();
         assert!(alive());
         drop(scope);
+        // One still running is stopped before the test fails.
+        let kill = || rustix::process::kill_process(runner, rustix::process::Signal::KILL);
         let lingering = alive();
-        if lingering {
-            let _ = rustix::process::kill_process(runner, rustix::process::Signal::KILL);
-        }
+        let _ = lingering.then(kill);
         assert!(!lingering);
     }
 
