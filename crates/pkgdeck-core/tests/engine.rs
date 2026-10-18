@@ -2022,3 +2022,28 @@ fn different_managers_change_at_once_and_each_one_in_order() {
         assert!(engine.supports(backend, Capability::Refresh), "{backend}");
     }
 }
+
+#[test]
+fn a_reviewed_cleanup_runs_in_its_own_lane_once() {
+    let mut engine = Engine::default();
+    engine.register(Cleaner).unwrap();
+    engine
+        .register(Synthetic::new("flatpak", Fault::None))
+        .unwrap();
+    let cancel = Cancellation::default();
+    let reviewed = engine.cleanup(&cancel).items.remove(0);
+    let operations = [
+        Operation::Refresh {
+            backend: "flatpak".into(),
+        },
+        Operation::Clean(reviewed.id.clone()),
+    ];
+    engine.remember_cleanup_plan(reviewed);
+    let outcomes = engine.execute_batch(&operations, &cancel, &mut |_| {});
+    assert!(outcomes.iter().all(Result::is_ok));
+    // Its lane used the confirmation up.
+    assert!(matches!(
+        engine.execute_batch(&operations, &cancel, &mut |_| {})[..],
+        [Ok(_), Err(EngineError::InvalidResponse { .. })]
+    ));
+}

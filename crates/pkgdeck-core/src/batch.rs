@@ -615,17 +615,26 @@ impl Drop for Session {
     fn drop(&mut self) {
         // The elevated runner may not accept signals from the frontend.
         // EOF must let it leave its request loop before we wait for it.
-        self.input.get_mut().map(Option::take).ok();
-        if let Ok(child) = self.child.get_mut() {
-            // Also close a runner that sent a malformed Ready frame. A batch
-            // error must never leave an elevated child waiting for more input.
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
+        // A step that panicked while holding one changes nothing here.
+        use std::sync::PoisonError;
+        self.input
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        // Also close a runner that sent a malformed Ready frame. A batch
+        // error must never leave an elevated child waiting for more input.
+        let child = self.child.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
         }
+        let _ = child.wait();
         // Its output closed with it.
-        if let Some(reader) = self.reader.get_mut().ok().and_then(Option::take) {
+        if let Some(reader) = self
+            .reader
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
             let _ = reader.join();
         }
     }
@@ -682,9 +691,10 @@ impl Session {
             if replies.closed {
                 return Err(closed());
             }
-            if replies.waiting.insert(index, sender).is_some() {
+            if replies.waiting.contains_key(&index) {
                 return Err(invalid("protected command already running"));
             }
+            replies.waiting.insert(index, sender);
         }
         let result = (|| {
             send(
@@ -1988,6 +1998,81 @@ done"#;
         );
         drop(scope);
         assert!(share().is_none());
+    }
+
+    #[test]
+    fn a_step_runs_once_at_a_time_and_not_after_the_runner_closed() {
+        // The runner answers once it has both steps' requests, then leaves.
+        let script = r#"IFS= read -r start
+printf '%s\n' '{"type":"ready","protocol":3}'
+IFS= read -r first
+IFS= read -r second
+for step in 0 1; do
+  printf '{"type":"completed","operation":%s,"completion":{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}\n' $step
+done"#;
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(script);
+        let operations = [
+            Operation::Install(id("apt", "synthetic")),
+            Operation::Upgrade(PackageId {
+                remote: Some("flathub".into()),
+                ..id("flatpak", "org.example.Test")
+            }),
+        ];
+        let approved = batch_commands(&operations).unwrap();
+        let cancel = Cancellation::default();
+        let scope = begin_session(child, &operations, approved.clone(), &cancel)
+            .unwrap()
+            .unwrap();
+        let session = share().unwrap().0;
+        let args = |step: usize| {
+            approved[step][0]
+                .args
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        };
+        let program = |step: usize| PathBuf::from(&approved[step][0].program);
+        let wait_for = |done: &dyn Fn(&Replies) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done(&session.replies.lock().unwrap()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        std::thread::scope(|threads| {
+            let first = threads.spawn(|| {
+                let _entered = SharedSession(session.clone()).enter();
+                set_operation(0);
+                run_in_scope(&program(0), &args(0), &cancel).unwrap()
+            });
+            wait_for(&|replies| replies.waiting.contains_key(&0));
+            // The same step again, while it runs.
+            set_operation(0);
+            assert!(matches!(
+                run_in_scope(&program(0), &args(0), &cancel),
+                Some(Err(ExecutionError::Invalid(reason))) if reason.contains("already running")
+            ));
+            set_operation(1);
+            assert!(run_in_scope(&program(1), &args(1), &cancel)
+                .unwrap()
+                .is_ok());
+            assert!(first.join().unwrap().is_ok());
+        });
+        wait_for(&|replies| replies.closed);
+        set_operation(1);
+        assert!(matches!(
+            run_in_scope(&program(1), &args(1), &cancel),
+            Some(Err(ExecutionError::Invalid(_)))
+        ));
+        // A step it still had to run finds it gone.
+        let flatpak = &approved[1][0];
+        *session.next.lock().unwrap() = vec![0, 0];
+        set_operation(1);
+        assert!(matches!(
+            run_in_scope(Path::new(&flatpak.program), &args(1), &cancel),
+            Some(Err(ExecutionError::Io(reason))) if reason.contains("closed unexpectedly")
+        ));
+        drop(scope);
     }
 
     #[test]

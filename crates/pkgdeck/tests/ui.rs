@@ -1230,6 +1230,26 @@ fn rows_work_while_they_animate_in() {
 }
 
 #[test]
+fn the_progress_card_reads_out_every_running_step() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.busy = true;
+    app.writing = true;
+    app.progress = serde_json::from_value(json!({
+        "activity_id": 7, "label": "Updating GNOME 46 and 1 more", "done": 0, "total": 3,
+        "running": [{"source": "apt"}, {"source": "snap"}],
+    }))
+    .unwrap();
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_label("Updating GNOME 46 and 1 more")
+        .is_some());
+    assert!(harness.query_by_label("2 of 3").is_some());
+}
+
+#[test]
 fn a_running_change_shows_its_words_only_while_it_is_the_live_one() {
     let mut app = app();
     app.activity = serde_json::from_value(json!([{
