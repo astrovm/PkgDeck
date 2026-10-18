@@ -194,6 +194,10 @@ also builds the image and dependencies.
 - Your home folder, Cargo credentials, package databases, and daemon sockets
   are never mounted.
 - GUI tests use off-screen rendering or a private Xvfb display.
+- A local run gets half of Podman's CPUs and memory, so the rest of your
+  computer stays usable. Set `PKGDECK_CONTAINER_CPUS` or
+  `PKGDECK_CONTAINER_MEMORY` (bytes, or a size like `8g`) to change it, or `0`
+  for no limit. CI runs have no limit.
 
 The install/remove test container only mounts the checkout and the built
 binaries, read-only. Root inside the container can create test users and

@@ -26,6 +26,22 @@ if ! podman image exists "$image"; then
     fi
 fi
 if [[ "${1:-}" == --build-only ]]; then printf '%s\n' "$image"; exit 0; fi
+# A local run leaves half the machine free: by default it gets half of the
+# engine's CPUs and memory. CI runners are disposable, so they get all of it.
+# PKGDECK_CONTAINER_CPUS and PKGDECK_CONTAINER_MEMORY (bytes, or 4g) change
+# the limits; 0 lifts one.
+limits=()
+if [[ -z ${CI:-} ]]; then
+    host=$(podman info --format '{{.Host.CPUs}} {{.Host.MemTotal}}')
+    host_cpus=${host% *}
+    host_memory=${host#* }
+    default_cpus=$((host_cpus > 1 ? host_cpus / 2 : 1))
+    default_memory=$((host_memory / 2))
+fi
+cpus=${PKGDECK_CONTAINER_CPUS:-${default_cpus:-0}}
+memory=${PKGDECK_CONTAINER_MEMORY:-${default_memory:-0}}
+[[ $cpus == 0 ]] || limits+=("--cpus=$cpus")
+[[ $memory == 0 ]] || limits+=("--memory=$memory")
 run_container() {
     local status
     run_directory=$(mktemp -d "${TMPDIR:-/tmp}/pkgdeck-container-XXXXXX")
@@ -38,7 +54,8 @@ run_container() {
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    podman run --rm --cidfile "$run_directory/cid" --label io.pkgdeck.verification=true "$@" <&0 &
+    podman run --rm --cidfile "$run_directory/cid" --label io.pkgdeck.verification=true \
+        ${limits[@]+"${limits[@]}"} "$@" <&0 &
     if wait "$!"; then status=0; else status=$?; fi
     exit "$status"
 }
