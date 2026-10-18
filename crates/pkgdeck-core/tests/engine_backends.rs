@@ -1056,7 +1056,10 @@ fn pacman_updates_bring_along_what_needs_the_version_they_replace() {
         pacman.lockstep(&[update("systemd")], &cancel).unwrap(),
         [update("systemd-sysvcompat")]
     );
-    // What nothing pins, or a batch that has them all, brings nothing.
+    // Installs bring nothing; neither does what nothing pins, or a batch
+    // that has them all.
+    let jq = Operation::Install(system_id("pacman", "jq", "x86_64"));
+    assert!(pacman.lockstep(&[jq], &cancel).unwrap().is_empty());
     assert!(pacman
         .lockstep(&[update("curl")], &cancel)
         .unwrap()

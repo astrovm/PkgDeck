@@ -4598,7 +4598,12 @@ impl<T: Transport> Backend for SystemManager<T> {
         let mut joined = vec![];
         loop {
             let before = joined.len();
-            for (name, architecture, pins) in &installed {
+            for PacmanPins {
+                name,
+                architecture,
+                pins,
+            } in &installed
+            {
                 let breaks = pins.iter().any(|(dependency, version)| {
                     chosen.contains(dependency)
                         && updates
@@ -4664,9 +4669,17 @@ impl<T: Transport> Backend for SystemManager<T> {
     }
 }
 
-/// Each package in `pacman -Qi`'s answer, with its architecture and the
-/// exact versions it depends on (`systemd=262`).
-fn pacman_pins(text: &str) -> Vec<(String, String, Vec<(String, String)>)> {
+/// A package in `pacman -Qi`'s answer.
+#[derive(Debug, PartialEq)]
+struct PacmanPins {
+    name: String,
+    architecture: String,
+    /// The exact versions it depends on (`systemd=262`), by name.
+    pins: Vec<(String, String)>,
+}
+
+/// Each package in `pacman -Qi`'s answer.
+fn pacman_pins(text: &str) -> Vec<PacmanPins> {
     let mut packages = vec![];
     let mut fields: Vec<(String, String)> = vec![];
     let mut finish = |fields: &mut Vec<(String, String)>| {
@@ -4686,7 +4699,11 @@ fn pacman_pins(text: &str) -> Vec<(String, String, Vec<(String, String)>)> {
                 .map(|(name, version)| (name.to_owned(), version.to_owned()))
                 .collect();
             let architecture = field("Architecture").unwrap_or_default().to_owned();
-            packages.push((name.to_owned(), architecture, pins));
+            packages.push(PacmanPins {
+                name: name.to_owned(),
+                architecture,
+                pins,
+            });
         }
         fields.clear();
     };
@@ -7213,15 +7230,19 @@ Version         : 1-1\n";
         assert_eq!(
             pacman_pins(text),
             [
-                (
-                    "systemd".to_owned(),
-                    "x86_64".to_owned(),
-                    vec![
-                        ("systemd-libs".to_owned(), "262".to_owned()),
-                        ("zlib".to_owned(), "1:1.3.2-3".to_owned()),
+                PacmanPins {
+                    name: "systemd".into(),
+                    architecture: "x86_64".into(),
+                    pins: vec![
+                        ("systemd-libs".into(), "262".into()),
+                        ("zlib".into(), "1:1.3.2-3".into()),
                     ]
-                ),
-                ("tool".to_owned(), "any".to_owned(), vec![]),
+                },
+                PacmanPins {
+                    name: "tool".into(),
+                    architecture: "any".into(),
+                    pins: vec![],
+                },
             ]
         );
         assert!(pacman_pins("").is_empty());

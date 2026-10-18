@@ -284,37 +284,17 @@ fn runner_commands(
     Ok(commands)
 }
 
-fn apt_group_action(operation: &Operation) -> Result<Option<AptAction>, ExecutionError> {
-    match operation {
-        Operation::Install(id) if id.backend == "apt" => {
-            Ok(Some(AptAction::Install(apt_target(id)?)))
-        }
-        Operation::Remove(id) if id.backend == "apt" => {
-            Ok(Some(AptAction::Remove(apt_target(id)?)))
-        }
-        Operation::Upgrade(id) if id.backend == "apt" => {
-            Ok(Some(AptAction::Upgrade(apt_target(id)?)))
-        }
-        _ => Ok(None),
-    }
-}
-
 /// Where the run of changes from `index` that one native transaction
 /// makes together ends: APT installs, removals or updates, and pacman
 /// updates, one verb at a time. Updating pacman packages one by one is a
 /// partial upgrade, which fails when packages move in lockstep, like
 /// systemd and systemd-libs.
 pub fn group_end(operations: &[Operation], index: usize) -> usize {
-    let joins = |operation: &Operation| match operation {
-        Operation::Install(id) | Operation::Remove(id) => id.backend == "apt",
-        Operation::Upgrade(id) => matches!(id.backend.as_str(), "apt" | "pacman"),
-        _ => false,
-    };
     let first = &operations[index];
     let mut end = index + 1;
-    if joins(first) {
+    if joining(first).is_some() {
         while end < operations.len()
-            && joins(&operations[end])
+            && joining(&operations[end]).is_some()
             && operations[end].backend() == first.backend()
             && std::mem::discriminant(&operations[end]) == std::mem::discriminant(first)
         {
@@ -324,21 +304,32 @@ pub fn group_end(operations: &[Operation], index: usize) -> usize {
     end
 }
 
+/// The package a change that can join a transaction is for.
+fn joining(operation: &Operation) -> Option<&PackageId> {
+    match operation {
+        Operation::Install(id) | Operation::Remove(id) if id.backend == "apt" => Some(id),
+        Operation::Upgrade(id) if matches!(id.backend.as_str(), "apt" | "pacman") => Some(id),
+        _ => None,
+    }
+}
+
 /// The commands for a run [`group_end`] found, all for its first change.
 fn group_commands(group: &[Operation]) -> Result<Vec<ProtectedCommand>, ExecutionError> {
+    let ids = group.iter().filter_map(joining);
     if group[0].backend() == "pacman" {
         let mut command = manager_command("pacman", "upgrade", None)?;
-        for operation in group {
-            let Operation::Upgrade(id) = operation else {
-                return Err(invalid("mixed pacman batch"));
-            };
+        for id in ids {
             command.args.push(system_id(id, "pacman")?.into());
         }
         return Ok(vec![command]);
     }
-    let actions = group
-        .iter()
-        .map(|operation| apt_group_action(operation)?.ok_or_else(|| invalid("mixed APT batch")))
+    let action = match group[0] {
+        Operation::Install(_) => AptAction::Install,
+        Operation::Remove(_) => AptAction::Remove,
+        _ => AptAction::Upgrade,
+    };
+    let actions = ids
+        .map(|id| apt_target(id).map(action))
         .collect::<Result<Vec<_>, _>>()?;
     let args = AptAction::group_arguments(&actions)?
         .into_iter()
