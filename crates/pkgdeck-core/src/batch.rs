@@ -1,6 +1,8 @@
 //! One narrowly scoped authorization process for a confirmed native batch.
 //! The elevated process derives its own command list from typed operations;
 //! the frontend may only request each listed command once and in order.
+//! Managers that don't share a lock run side by side, each in its own
+//! [`lane`], and in order within it.
 use crate::{
     host::{AptAction, Authorization, Host, Runtime},
     package::{Operation, PackageId, Scope},
@@ -20,7 +22,8 @@ use std::{
 use crate::spawn::{Child, Io, Launch};
 
 // 2: the runner forwards each line of a command's output as it runs.
-const PROTOCOL: u8 = 2;
+// 3: commands in different lanes run at once; replies name their operation.
+const PROTOCOL: u8 = 3;
 const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
@@ -441,14 +444,77 @@ enum Response {
     },
     /// A line the running command printed, sent before it completes.
     Output {
+        operation: usize,
         line: String,
     },
     Completed {
+        operation: usize,
         completion: WireCompletion,
     },
+    /// The request for `operation` was refused, or its command couldn't
+    /// run. The runner takes no more requests after this.
     Rejected {
+        operation: usize,
         reason: String,
     },
+}
+/// A reply for one operation, as the step waiting for it gets it.
+enum Reply {
+    Output(String),
+    Completed(WireCompletion),
+    Rejected(String),
+}
+impl Response {
+    /// The operation a reply is for, and the reply; `None` for Ready.
+    fn reply(self) -> Option<(usize, Reply)> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::Output { operation, line } => Some((operation, Reply::Output(line))),
+            Self::Completed {
+                operation,
+                completion,
+            } => Some((operation, Reply::Completed(completion))),
+            Self::Rejected { operation, reason } => Some((operation, Reply::Rejected(reason))),
+        }
+    }
+}
+
+/// Which package managers can't run at the same time: those that share a
+/// lock share a lane, and a lane runs one change at a time, in order.
+/// Managers this doesn't name share one lane, as every change did before.
+pub fn lane(operation: &Operation) -> &'static str {
+    match operation.backend() {
+        "apt" => "apt",
+        "flatpak" => "flatpak",
+        "snap" => "snap",
+        // AUR helpers build, then install through pacman.
+        "pacman" | "aur" => "pacman",
+        "dnf" => "dnf",
+        "zypper" => "zypper",
+        "apk" => "apk",
+        "xbps" => "xbps",
+        // One Homebrew lock covers formulae and casks.
+        "homebrew" | "homebrew-cask" => "homebrew",
+        "nix" => "nix",
+        _ => "",
+    }
+}
+
+/// The runs [`group_end`] finds in `operations`, as `start..end` ranges,
+/// split by [`lane`] in the order each lane first appears.
+pub fn lanes(operations: &[Operation]) -> Vec<Vec<std::ops::Range<usize>>> {
+    let mut lanes: Vec<(&str, Vec<std::ops::Range<usize>>)> = vec![];
+    let mut index = 0;
+    while index < operations.len() {
+        let end = group_end(operations, index);
+        let (key, run) = (lane(&operations[index]), index..end);
+        match lanes.iter_mut().find(|(lane, _)| *lane == key) {
+            Some((_, runs)) => runs.push(run),
+            None => lanes.push((key, vec![run])),
+        }
+        index = end;
+    }
+    lanes.into_iter().map(|(_, runs)| runs).collect()
 }
 #[derive(Serialize, Deserialize)]
 struct WireCompletion {
@@ -516,15 +582,27 @@ fn line(pipe: &mut impl Read) -> Result<Vec<u8>, ExecutionError> {
 }
 
 pub struct ScopeGuard;
-struct Session {
-    child: Child,
-    input: Option<PipeWriter>,
-    output: PipeReader,
-    commands: Vec<Vec<ProtectedCommand>>,
-    current: usize,
-    next: Vec<usize>,
+/// The runner's replies, handed to the step waiting for each operation.
+#[derive(Default)]
+struct Replies {
+    waiting: std::collections::BTreeMap<usize, std::sync::mpsc::Sender<Reply>>,
+    /// The runner stopped answering; nothing more will come.
+    closed: bool,
 }
-thread_local! { static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) }; }
+type SharedReplies = std::sync::Arc<std::sync::Mutex<Replies>>;
+struct Session {
+    child: std::sync::Mutex<Child>,
+    input: std::sync::Mutex<Option<PipeWriter>>,
+    replies: SharedReplies,
+    reader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    commands: Vec<Vec<ProtectedCommand>>,
+    next: std::sync::Mutex<Vec<usize>>,
+}
+thread_local! {
+    static SESSION: RefCell<Option<std::sync::Arc<Session>>> = const { RefCell::new(None) };
+    /// The operation this thread is running, see [`set_operation`].
+    static CURRENT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
@@ -537,13 +615,143 @@ impl Drop for Session {
     fn drop(&mut self) {
         // The elevated runner may not accept signals from the frontend.
         // EOF must let it leave its request loop before we wait for it.
-        self.input.take();
+        // A step that panicked while holding one changes nothing here.
+        use std::sync::PoisonError;
+        self.input
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         // Also close a runner that sent a malformed Ready frame. A batch
         // error must never leave an elevated child waiting for more input.
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
+        let child = self.child.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
         }
-        let _ = self.child.wait();
+        let _ = child.wait();
+        // Its output closed with it.
+        if let Some(reader) = self
+            .reader
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = reader.join();
+        }
+    }
+}
+/// Reads the runner's replies until it closes, handing each to the step
+/// waiting for its operation.
+fn read_replies(mut output: PipeReader, replies: SharedReplies) {
+    let mut unexpected = false;
+    while let Ok(bytes) = line(&mut output) {
+        let Some((operation, reply)) = serde_json::from_slice::<Response>(&bytes)
+            .ok()
+            .and_then(Response::reply)
+        else {
+            unexpected = true;
+            break;
+        };
+        let replies = replies.lock().expect("runner replies");
+        if let Some(waiting) = replies.waiting.get(&operation) {
+            let _ = waiting.send(reply);
+        }
+    }
+    let mut replies = replies.lock().expect("runner replies");
+    replies.closed = true;
+    // Dropping every sender wakes whoever still waits.
+    for waiting in std::mem::take(&mut replies.waiting).into_values() {
+        if unexpected {
+            let _ = waiting.send(Reply::Rejected("unexpected authorization response".into()));
+        }
+    }
+}
+impl Session {
+    /// Runs the next approved command of `index`, which must be the one
+    /// asked for, and waits for it.
+    fn run(
+        &self,
+        index: usize,
+        actual: &ProtectedCommand,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let next = self.next.lock().expect("runner state").get(index).copied();
+        let expected = next.and_then(|next| self.commands.get(index)?.get(next));
+        let (Some(next), Some(expected)) = (next, expected) else {
+            return Err(invalid("protected command outside approved batch"));
+        };
+        if expected != actual {
+            return Err(invalid("protected command differs from approved batch"));
+        }
+        if cancel.requested() {
+            return Err(ExecutionError::Cancelled);
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut replies = self.replies.lock().expect("runner replies");
+            if replies.closed {
+                return Err(closed());
+            }
+            if replies.waiting.contains_key(&index) {
+                return Err(invalid("protected command already running"));
+            }
+            replies.waiting.insert(index, sender);
+        }
+        let result = (|| {
+            send(
+                self.input
+                    .lock()
+                    .expect("runner input")
+                    .as_mut()
+                    .ok_or_else(closed)?,
+                &Request::Run {
+                    operation: index,
+                    command: next,
+                },
+            )?;
+            loop {
+                match receiver.recv().map_err(|_| closed())? {
+                    Reply::Output(line) => cancel.observe(&line),
+                    Reply::Completed(completion) => {
+                        self.next.lock().expect("runner state")[index] += 1;
+                        let mut result: Completion = completion.into();
+                        result.cancellation_deferred = cancel.requested();
+                        return Ok(result);
+                    }
+                    Reply::Rejected(reason) => return Err(invalid(&reason)),
+                }
+            }
+        })();
+        self.replies
+            .lock()
+            .expect("runner replies")
+            .waiting
+            .remove(&index);
+        result
+    }
+}
+fn closed() -> ExecutionError {
+    ExecutionError::Io("authorization runner closed unexpectedly".into())
+}
+/// The batch's session, for other threads to run their part of it in.
+#[derive(Clone)]
+pub struct SharedSession(std::sync::Arc<Session>);
+/// While held, this thread runs its commands through the shared session.
+pub struct Entered;
+impl Drop for Entered {
+    fn drop(&mut self) {
+        SESSION.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
+}
+/// The session this thread runs in, if any.
+pub fn share() -> Option<SharedSession> {
+    SESSION.with(|cell| cell.borrow().clone().map(SharedSession))
+}
+impl SharedSession {
+    pub fn enter(&self) -> Entered {
+        SESSION.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&self.0)));
+        Entered
     }
 }
 fn flatpak_app_path(info: &str) -> Option<PathBuf> {
@@ -759,18 +967,18 @@ fn begin_session_within(
     ) {
         return Err(authorization_start_error(child, error));
     }
-    let mut session = Session {
-        child,
-        input: Some(input),
-        output,
-        next: vec![0; commands.len()],
+    let mut output = output;
+    let session = Session {
+        child: std::sync::Mutex::new(child),
+        input: std::sync::Mutex::new(Some(input)),
+        replies: SharedReplies::default(),
+        reader: std::sync::Mutex::new(None),
+        next: std::sync::Mutex::new(vec![0; commands.len()]),
         commands,
-        current: 0,
     };
     let start = Instant::now();
-    let flags =
-        rustix::fs::fcntl_getfl(&session.output).map_err(|e| ExecutionError::Io(e.to_string()))?;
-    rustix::fs::fcntl_setfl(&session.output, flags | rustix::fs::OFlags::NONBLOCK)
+    let flags = rustix::fs::fcntl_getfl(&output).map_err(|e| ExecutionError::Io(e.to_string()))?;
+    rustix::fs::fcntl_setfl(&output, flags | rustix::fs::OFlags::NONBLOCK)
         .map_err(|e| ExecutionError::Io(e.to_string()))?;
     let mut frame = Vec::new();
     let ready = loop {
@@ -780,7 +988,7 @@ fn begin_session_within(
         if start.elapsed() > timeout {
             return Err(ExecutionError::AuthorizationDenied);
         }
-        if let Some(status) = session.child.try_wait()? {
+        if let Some(status) = session.child.lock().expect("runner").try_wait()? {
             return Err(match status.code() {
                 Some(126) => ExecutionError::AuthorizationCancelled,
                 _ => ExecutionError::AuthorizationDenied,
@@ -789,12 +997,12 @@ fn begin_session_within(
         // The ready frame is short and written before any native command.
         // stdout is nonblocking so cancellation can dismiss a pending prompt.
         let mut chunk = [0; 8192];
-        let count = match session.output.read(&mut chunk) {
+        let count = match output.read(&mut chunk) {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 // Wake as soon as a partial ready frame has more bytes, while
                 // bounding the wait so cancellation and child exit stay responsive.
                 let mut fds = [rustix::event::PollFd::new(
-                    &session.output,
+                    &output,
                     rustix::event::PollFlags::IN,
                 )];
                 let timeout = rustix::event::Timespec {
@@ -819,15 +1027,17 @@ fn begin_session_within(
                 .map_err(|e| ExecutionError::Io(e.to_string()))?;
         }
     };
-    let flags =
-        rustix::fs::fcntl_getfl(&session.output).map_err(|e| ExecutionError::Io(e.to_string()))?;
-    rustix::fs::fcntl_setfl(&session.output, flags & !rustix::fs::OFlags::NONBLOCK)
+    let flags = rustix::fs::fcntl_getfl(&output).map_err(|e| ExecutionError::Io(e.to_string()))?;
+    rustix::fs::fcntl_setfl(&output, flags & !rustix::fs::OFlags::NONBLOCK)
         .map_err(|e| ExecutionError::Io(e.to_string()))?;
     if !matches!(ready, Response::Ready { protocol: PROTOCOL }) {
         return Err(ExecutionError::AuthorizationDenied);
     }
+    let replies = std::sync::Arc::clone(&session.replies);
+    *session.reader.lock().expect("runner reader") =
+        Some(std::thread::spawn(move || read_replies(output, replies)));
     SESSION.with(|cell| {
-        *cell.borrow_mut() = Some(session);
+        *cell.borrow_mut() = Some(std::sync::Arc::new(session));
         Ok(Some(ScopeGuard))
     })
 }
@@ -857,76 +1067,24 @@ fn authorization_start_error(mut child: Child, error: ExecutionError) -> Executi
     }
 }
 
+/// The operation this thread's next protected commands belong to.
 pub fn set_operation(index: usize) {
-    SESSION.with(|cell| {
-        if let Some(session) = cell.borrow_mut().as_mut() {
-            session.current = index;
-        }
-    });
+    CURRENT.with(|current| current.set(index));
 }
 pub fn run_in_scope(
     executable: &Path,
     args: &[OsString],
     cancel: &Cancellation,
 ) -> Option<Result<Completion, ExecutionError>> {
-    SESSION.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let session = borrow.as_mut()?;
-        let index = session.current;
-        let Some(next) = session.next.get(index).copied() else {
-            return Some(Err(invalid("protected command outside approved batch")));
-        };
-        let Some(expected) = session
-            .commands
-            .get(index)
-            .and_then(|commands| commands.get(next))
-        else {
-            return Some(Err(invalid("protected command outside approved batch")));
-        };
-        let actual = ProtectedCommand {
-            program: executable.to_string_lossy().into_owned(),
-            args: args
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect(),
-        };
-        if expected != &actual {
-            return Some(Err(invalid(
-                "protected command differs from approved batch",
-            )));
-        }
-        if cancel.requested() {
-            return Some(Err(ExecutionError::Cancelled));
-        }
-        let result = (|| {
-            send(
-                session.input.as_mut().expect("active runner input"),
-                &Request::Run {
-                    operation: index,
-                    command: next,
-                },
-            )?;
-            let response = loop {
-                let response: Response = serde_json::from_slice(&line(&mut session.output)?)
-                    .map_err(|e| ExecutionError::Io(e.to_string()))?;
-                match response {
-                    Response::Output { line } => cancel.observe(&line),
-                    other => break other,
-                }
-            };
-            match response {
-                Response::Completed { completion } => {
-                    session.next[index] += 1;
-                    let mut result: Completion = completion.into();
-                    result.cancellation_deferred = cancel.requested();
-                    Ok(result)
-                }
-                Response::Rejected { reason } => Err(invalid(&reason)),
-                _ => Err(invalid("unexpected authorization response")),
-            }
-        })();
-        Some(result)
-    })
+    let session = SESSION.with(|cell| cell.borrow().clone())?;
+    let actual = ProtectedCommand {
+        program: executable.to_string_lossy().into_owned(),
+        args: args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect(),
+    };
+    Some(session.run(CURRENT.with(std::cell::Cell::get), &actual, cancel))
 }
 
 /// Entry point for the elevated binary. No executable path or argument list
@@ -936,14 +1094,14 @@ pub fn serve(mode: BatchMode) -> Result<(), ExecutionError> {
         rustix::process::geteuid().is_root(),
         mode,
         &mut std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
+        &mut std::io::stdout(),
     )
 }
 fn serve_as(
     root: bool,
     mode: BatchMode,
     input: &mut impl Read,
-    output: &mut impl Write,
+    output: &mut (impl Write + Send),
 ) -> Result<(), ExecutionError> {
     if !root {
         return Err(invalid("host runner requires root"));
@@ -972,20 +1130,51 @@ fn run_protected(
     )
 }
 /// Runs one approved command, handing each line it prints to the second
-/// argument.
+/// argument. Commands in different lanes run at once.
 trait RunProtected:
-    FnMut(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError>
+    Fn(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError> + Sync
 {
 }
-impl<F: FnMut(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError>>
-    RunProtected for F
+impl<
+        F: Fn(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError> + Sync,
+    > RunProtected for F
 {
+}
+/// What the runner has let start, so each command runs once, in order in
+/// its lane, and one at a time there.
+struct Approved {
+    next: Vec<usize>,
+    /// The last operation each lane started, while it's running.
+    lanes: std::collections::BTreeMap<&'static str, (usize, bool)>,
+    /// Why a command couldn't run; no more start after one.
+    failed: Option<ExecutionError>,
+}
+impl Approved {
+    fn start(
+        &mut self,
+        commands: &[Vec<ProtectedCommand>],
+        key: &'static str,
+        operation: usize,
+        command: usize,
+    ) -> bool {
+        let lane = self.lanes.get(key).copied();
+        let ok = self.failed.is_none()
+            && operation < commands.len()
+            && command == self.next[operation]
+            && command < commands[operation].len()
+            && lane.is_none_or(|(last, running)| !running && last <= operation);
+        if ok {
+            self.next[operation] += 1;
+            self.lanes.insert(key, (operation, true));
+        }
+        ok
+    }
 }
 fn serve_protocol(
     mode: BatchMode,
     mut input: &mut impl Read,
-    mut output: &mut impl Write,
-    mut run: impl RunProtected,
+    output: &mut (impl Write + Send),
+    run: impl RunProtected,
 ) -> Result<(), ExecutionError> {
     let start: Request =
         serde_json::from_slice(&line(&mut input)?).map_err(|e| invalid(&e.to_string()))?;
@@ -1000,49 +1189,72 @@ fn serve_protocol(
     if !commands.iter().any(|entry| !entry.is_empty()) {
         return Err(invalid("empty protected plan"));
     }
-    send(&mut output, &Response::Ready { protocol: PROTOCOL })?;
-    let mut next = vec![0; commands.len()];
-    let mut last_operation = 0;
-    while let Ok(bytes) = line(&mut input) {
-        let request: Request =
-            serde_json::from_slice(&bytes).map_err(|e| invalid(&e.to_string()))?;
-        let Request::Run { operation, command } = request else {
-            return Err(invalid("runner already initialized"));
-        };
-        if operation < last_operation
-            || operation >= commands.len()
-            || command != next[operation]
-            || command >= commands[operation].len()
-        {
-            send(
-                &mut output,
-                &Response::Rejected {
+    send(output, &Response::Ready { protocol: PROTOCOL })?;
+    let output = std::sync::Mutex::new(output);
+    let reply = |response: &Response| send(&mut **output.lock().expect("runner output"), response);
+    let state = std::sync::Mutex::new(Approved {
+        next: vec![0; commands.len()],
+        lanes: Default::default(),
+        failed: None,
+    });
+    let (operations, commands, run, reply, approved) =
+        (&operations, &commands, &run, &reply, &state);
+    std::thread::scope(|scope| {
+        while let Ok(bytes) = line(&mut input) {
+            let request: Request =
+                serde_json::from_slice(&bytes).map_err(|e| invalid(&e.to_string()))?;
+            let Request::Run { operation, command } = request else {
+                return Err(invalid("runner already initialized"));
+            };
+            let key = operations.get(operation).map_or("", lane);
+            if !approved
+                .lock()
+                .expect("runner state")
+                .start(commands, key, operation, command)
+            {
+                reply(&Response::Rejected {
+                    operation,
                     reason: "command outside approved batch".into(),
-                },
-            )?;
-            return Err(invalid("command outside approved batch"));
+                })?;
+                return Err(invalid("command outside approved batch"));
+            }
+            scope.spawn(move || {
+                let expected = &commands[operation][command];
+                let completion = run(expected, &mut |line| {
+                    // The frontend follows progress from these; a lost line
+                    // is not worth failing the command over.
+                    let _ = reply(&Response::Output {
+                        operation,
+                        line: line.to_owned(),
+                    });
+                });
+                let mut state = approved.lock().expect("runner state");
+                state.lanes.insert(key, (operation, false));
+                let sent = match completion {
+                    Ok(completion) => reply(&Response::Completed {
+                        operation,
+                        completion: completion.into(),
+                    }),
+                    Err(error) => {
+                        let sent = reply(&Response::Rejected {
+                            operation,
+                            reason: error.to_string(),
+                        });
+                        state.failed.get_or_insert(error);
+                        sent
+                    }
+                };
+                if let Err(error) = sent {
+                    state.failed.get_or_insert(error);
+                }
+            });
         }
-        last_operation = operation;
-        next[operation] += 1;
-        let expected = &commands[operation][command];
-        let completion = run(expected, &mut |line| {
-            // The frontend follows progress from these; a lost line is not
-            // worth failing the command over.
-            let _ = send(
-                &mut output,
-                &Response::Output {
-                    line: line.to_owned(),
-                },
-            );
-        })?;
-        send(
-            &mut output,
-            &Response::Completed {
-                completion: completion.into(),
-            },
-        )?;
+        Ok(())
+    })?;
+    match state.into_inner().expect("runner state").failed {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1079,13 +1291,16 @@ mod tests {
     }
     /// Runs nothing; records every command the runner was asked to run.
     #[derive(Default)]
-    struct Recorder(Vec<ProtectedCommand>);
+    struct Recorder(std::sync::Mutex<Vec<ProtectedCommand>>);
     impl Recorder {
-        fn run(&mut self) -> impl RunProtected + '_ {
+        fn run(&self) -> impl RunProtected + '_ {
             |command, _| {
-                self.0.push(command.clone());
+                self.0.lock().unwrap().push(command.clone());
                 Ok(completion())
             }
+        }
+        fn calls(&self) -> Vec<ProtectedCommand> {
+            self.0.lock().unwrap().clone()
         }
     }
 
@@ -1114,35 +1329,50 @@ mod tests {
                 command: 0,
             },
         ];
-        let mut seen = Vec::new();
+        let seen = std::sync::Mutex::new(Vec::new());
         let mut output = Vec::new();
         serve_protocol(
             BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
             &mut output,
             |command, on_line| {
-                seen.push(command.clone());
+                seen.lock().unwrap().push(command.clone());
                 on_line(&format!("Running {}", command.program));
                 Ok(completion())
             },
         )
         .unwrap();
-        assert_eq!(seen.len(), 3);
-        assert_eq!(seen[0].program, "/usr/bin/apt-get");
-        assert_eq!(seen[1].program, "/usr/bin/snap");
-        assert_eq!(seen[2].program, "/usr/bin/flatpak");
+        // Three lanes, so in any order.
+        let mut seen: Vec<_> = seen
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|command| command.program)
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            ["/usr/bin/apt-get", "/usr/bin/flatpak", "/usr/bin/snap"]
+        );
         let replies = output
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<Response>(line).unwrap())
             .collect::<Vec<_>>();
-        // Ready, then each command's output line before its completion.
+        // Ready, then each command's output line before its completion,
+        // both naming its operation.
         assert_eq!(replies.len(), 7);
         assert!(matches!(replies[0], Response::Ready { protocol: PROTOCOL }));
-        assert!(
-            matches!(&replies[1], Response::Output { line } if line == "Running /usr/bin/apt-get")
-        );
-        assert!(matches!(replies[2], Response::Completed { .. }));
+        for (operation, program) in [(0, "apt-get"), (1, "snap"), (2, "flatpak")] {
+            let output = replies.iter().position(|reply| {
+                matches!(reply, Response::Output { operation: at, line }
+                    if *at == operation && *line == format!("Running /usr/bin/{program}"))
+            });
+            let completed = replies.iter().position(|reply| {
+                matches!(reply, Response::Completed { operation: at, .. } if *at == operation)
+            });
+            assert!(output.unwrap() < completed.unwrap());
+        }
     }
 
     #[test]
@@ -1223,7 +1453,7 @@ mod tests {
                 command: 0,
             },
         ];
-        let mut recorder = Recorder(vec![]);
+        let recorder = Recorder::default();
         serve_protocol(
             BatchMode::UpgradeOnly { removals: false },
             &mut Cursor::new(input(&requests)),
@@ -1231,7 +1461,7 @@ mod tests {
             recorder.run(),
         )
         .unwrap();
-        assert_eq!(recorder.0, [runner[1][0].clone()]);
+        assert_eq!(recorder.calls(), [runner[1][0].clone()]);
 
         // With removals allowed, APT runs the reviewed command as is.
         let removing =
@@ -1240,7 +1470,7 @@ mod tests {
 
         // An install never starts, even before the first command.
         let mut output = Vec::new();
-        let mut recorder = Recorder(vec![]);
+        let recorder = Recorder::default();
         assert!(serve_protocol(
             BatchMode::UpgradeOnly { removals: false },
             &mut Cursor::new(input(&[Request::Start {
@@ -1251,7 +1481,7 @@ mod tests {
             recorder.run(),
         )
         .is_err());
-        assert!(output.is_empty() && recorder.0.is_empty());
+        assert!(output.is_empty() && recorder.calls().is_empty());
     }
 
     #[test]
@@ -1330,18 +1560,18 @@ mod tests {
                 command: 0,
             },
         ];
-        let mut calls = 0;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
         serve_protocol(
             BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
             &mut Vec::new(),
             |_, _| {
-                calls += 1;
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(completion())
             },
         )
         .unwrap();
-        assert_eq!(calls, 1);
+        assert_eq!(calls.into_inner(), 1);
     }
 
     #[test]
@@ -1363,7 +1593,7 @@ mod tests {
                 command: 0,
             },
         ];
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         let result = serve_protocol(
             BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
@@ -1371,14 +1601,14 @@ mod tests {
             recorder.run(),
         );
         assert!(matches!(result, Err(ExecutionError::Invalid(_))));
-        assert_eq!(recorder.0.len(), 1);
+        assert_eq!(recorder.calls().len(), 1);
     }
 
     #[test]
     fn invalid_plan_is_rejected_before_ready_or_write() {
         let operations = vec![Operation::Install(id("apt", "--purge"))];
         let mut output = Vec::new();
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         let result = serve_protocol(
             BatchMode::Reviewed,
             &mut Cursor::new(input(&[Request::Start {
@@ -1390,7 +1620,7 @@ mod tests {
         );
         assert!(matches!(result, Err(ExecutionError::Invalid(_))));
         assert!(output.is_empty());
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
     }
 
     #[test]
@@ -1575,8 +1805,8 @@ mod tests {
 
     #[test]
     fn authorization_protocol_rejects_empty_restarts_and_out_of_plan_indices() {
-        let mut recorder = Recorder::default();
-        let mut run = recorder.run();
+        let recorder = Recorder::default();
+        let run = recorder.run();
         for request in [
             Request::Start {
                 protocol: PROTOCOL,
@@ -1600,7 +1830,7 @@ mod tests {
                 BatchMode::Reviewed,
                 &mut Cursor::new(input(&[request])),
                 &mut output,
-                &mut run
+                &run
             )
             .is_err());
             assert!(output.is_empty());
@@ -1635,12 +1865,12 @@ mod tests {
                 BatchMode::Reviewed,
                 &mut Cursor::new(input(&requests)),
                 &mut output,
-                &mut run
+                &run
             )
             .is_err());
         }
         drop(run);
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
     }
 
     #[test]
@@ -1648,10 +1878,10 @@ mod tests {
         // The child implements just the framed protocol. No native package
         // tool is started; this exercises the frontend side of the boundary.
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":2}'
+printf '%s\n' '{"type":"ready","protocol":3}'
 while IFS= read -r request; do
-  printf '%s\n' '{"type":"output","line":"Unpacking synthetic:amd64 (2) over (1) ..."}'
-  printf '%s\n' '{"type":"completed","completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
+  printf '%s\n' '{"type":"output","operation":0,"line":"Unpacking synthetic:amd64 (2) over (1) ..."}'
+  printf '%s\n' '{"type":"completed","operation":0,"completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
 done"#;
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(script);
@@ -1705,10 +1935,151 @@ done"#;
     }
 
     #[test]
+    fn threads_run_their_steps_through_one_session_at_once() {
+        // The runner answers only once both steps asked, the later one first.
+        let script = r#"IFS= read -r start
+printf '%s\n' '{"type":"ready","protocol":3}'
+IFS= read -r first
+IFS= read -r second
+for request in "$second" "$first"; do
+  case $request in *'"operation":0'*) step=0 ;; *) step=1 ;; esac
+  printf '{"type":"output","operation":%s,"line":"step %s"}\n' $step $step
+  printf '{"type":"completed","operation":%s,"completion":{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}\n' $step
+done"#;
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(script);
+        let operations = [
+            Operation::Install(id("apt", "synthetic")),
+            Operation::Upgrade(PackageId {
+                remote: Some("flathub".into()),
+                ..id("flatpak", "org.example.Test")
+            }),
+        ];
+        let approved = batch_commands(&operations).unwrap();
+        let cancel = Cancellation::default();
+        let scope = begin_session(child, &operations, approved.clone(), &cancel)
+            .unwrap()
+            .unwrap();
+        let shared = share().unwrap();
+        let seen = std::thread::scope(|threads| {
+            let steps = (0..2)
+                .map(|step| {
+                    let (shared, command, cancel) = (&shared, &approved[step][0], &cancel);
+                    threads.spawn(move || {
+                        let _entered = shared.enter();
+                        set_operation(step);
+                        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                        let seen = lines.clone();
+                        let observed =
+                            cancel.with_output(std::sync::Arc::new(move |line: &str| {
+                                seen.lock().unwrap().push(line.to_owned());
+                            }));
+                        let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
+                        let code = run_in_scope(Path::new(&command.program), &args, &observed)
+                            .unwrap()
+                            .unwrap()
+                            .code;
+                        let lines = lines.lock().unwrap().clone();
+                        (code, lines)
+                    })
+                })
+                .collect::<Vec<_>>();
+            steps
+                .into_iter()
+                .map(|step| step.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            seen,
+            [
+                (Some(0), vec!["step 0".to_owned()]),
+                (Some(0), vec!["step 1".to_owned()])
+            ]
+        );
+        drop(scope);
+        assert!(share().is_none());
+    }
+
+    #[test]
+    fn a_step_runs_once_at_a_time_and_not_after_the_runner_closed() {
+        // The runner answers once it has both steps' requests, then leaves.
+        let script = r#"IFS= read -r start
+printf '%s\n' '{"type":"ready","protocol":3}'
+IFS= read -r first
+IFS= read -r second
+for step in 0 1; do
+  printf '{"type":"completed","operation":%s,"completion":{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}\n' $step
+done"#;
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(script);
+        let operations = [
+            Operation::Install(id("apt", "synthetic")),
+            Operation::Upgrade(PackageId {
+                remote: Some("flathub".into()),
+                ..id("flatpak", "org.example.Test")
+            }),
+        ];
+        let approved = batch_commands(&operations).unwrap();
+        let cancel = Cancellation::default();
+        let scope = begin_session(child, &operations, approved.clone(), &cancel)
+            .unwrap()
+            .unwrap();
+        let session = share().unwrap().0;
+        let args = |step: usize| {
+            approved[step][0]
+                .args
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        };
+        let program = |step: usize| PathBuf::from(&approved[step][0].program);
+        let wait_for = |done: &dyn Fn(&Replies) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done(&session.replies.lock().unwrap()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        std::thread::scope(|threads| {
+            let first = threads.spawn(|| {
+                let _entered = SharedSession(session.clone()).enter();
+                set_operation(0);
+                run_in_scope(&program(0), &args(0), &cancel).unwrap()
+            });
+            wait_for(&|replies| replies.waiting.contains_key(&0));
+            // The same step again, while it runs.
+            set_operation(0);
+            assert!(matches!(
+                run_in_scope(&program(0), &args(0), &cancel),
+                Some(Err(ExecutionError::Invalid(reason))) if reason.contains("already running")
+            ));
+            set_operation(1);
+            assert!(run_in_scope(&program(1), &args(1), &cancel)
+                .unwrap()
+                .is_ok());
+            assert!(first.join().unwrap().is_ok());
+        });
+        wait_for(&|replies| replies.closed);
+        set_operation(1);
+        assert!(matches!(
+            run_in_scope(&program(1), &args(1), &cancel),
+            Some(Err(ExecutionError::Invalid(_)))
+        ));
+        // A step it still had to run finds it gone.
+        let flatpak = &approved[1][0];
+        *session.next.lock().unwrap() = vec![0, 0];
+        set_operation(1);
+        assert!(matches!(
+            run_in_scope(Path::new(&flatpak.program), &args(1), &cancel),
+            Some(Err(ExecutionError::Io(reason))) if reason.contains("closed unexpectedly")
+        ));
+        drop(scope);
+    }
+
+    #[test]
     fn scoped_session_can_cancel_a_pending_authorization() {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(
-            "IFS= read -r start; sleep 2; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'",
+            "IFS= read -r start; sleep 2; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'",
         );
         let operations = [Operation::Refresh {
             backend: "apt".into(),
@@ -1825,7 +2196,7 @@ done"#;
             Err(ExecutionError::Invalid(_))
         ));
         let mut output = Vec::new();
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         assert!(matches!(
             serve_protocol(
                 BatchMode::Reviewed,
@@ -1835,7 +2206,7 @@ done"#;
             ),
             Err(ExecutionError::Invalid(_))
         ));
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
     }
 
     #[test]
@@ -1846,8 +2217,8 @@ done"#;
         let commands = batch_commands(&operations).unwrap();
         for script in [
             // A runner speaking another protocol version is refused.
-            "IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'; sleep 1",
-            "IFS= read -r start; printf '%s\\n' '{\"type\":\"rejected\",\"reason\":\"no\"}'; sleep 1",
+            "IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; sleep 1",
+            "IFS= read -r start; printf '%s\\n' '{\"type\":\"rejected\",\"operation\":0,\"reason\":\"no\"}'; sleep 1",
             "exit 126",
         ] {
             let mut child = Command::new("/bin/sh");
@@ -1914,9 +2285,9 @@ done"#;
     #[test]
     fn scoped_session_preserves_native_rejection_and_cancel_before_dispatch() {
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":2}'
+printf '%s\n' '{"type":"ready","protocol":3}'
 while IFS= read -r request; do
-  printf '%s\n' '{"type":"rejected","reason":"synthetic rejection"}'
+  printf '%s\n' '{"type":"rejected","operation":0,"reason":"synthetic rejection"}'
 done"#;
         let operations = [Operation::Refresh {
             backend: "apt".into(),
@@ -2047,9 +2418,9 @@ done"#;
     fn scoped_grouped_apt_write_runs_the_confirmed_targets_once() {
         use std::collections::BTreeMap;
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":2}'
+printf '%s\n' '{"type":"ready","protocol":3}'
 while IFS= read -r request; do
-  printf '%s\n' '{"type":"completed","completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
+  printf '%s\n' '{"type":"completed","operation":0,"completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
 done"#;
         let operations = [
             Operation::Install(id("apt", "one")),
@@ -2098,10 +2469,10 @@ done"#;
         let log = std::env::temp_dir().join(format!("pkgdeck-apt-session-{}", std::process::id()));
         let script = format!(
             r#"IFS= read -r start
-printf '%s\n' '{{"type":"ready","protocol":2}}'
+printf '%s\n' '{{"type":"ready","protocol":3}}'
 while IFS= read -r request; do
   printf '%s\n' "$request" >>'{}'
-  printf '%s\n' '{{"type":"completed","completion":{{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}}}'
+  printf '%s\n' '{{"type":"completed","operation":0,"completion":{{"code":0,"signal":null,"stdout":[],"stderr":[],"truncated":false,"cancellation_deferred":false}}}}'
 done"#,
             log.display()
         );
@@ -2227,6 +2598,221 @@ done"#,
     }
 
     #[test]
+    fn managers_that_share_a_lock_share_a_lane() {
+        let operations = [
+            Operation::Upgrade(id("apt", "one")),
+            Operation::Upgrade(id("apt", "two")),
+            Operation::UpgradeAll {
+                backend: "flatpak".into(),
+            },
+            Operation::Upgrade(id("homebrew", "jq")),
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            Operation::Upgrade(id("homebrew-cask", "firefox")),
+            Operation::Upgrade(id("rustup", "stable")),
+            Operation::Upgrade(id("aur", "yay")),
+            Operation::Upgrade(id("pip", "black")),
+            Operation::Upgrade(id("pacman", "zlib")),
+            Operation::Refresh {
+                backend: "flatpak".into(),
+            },
+        ];
+        assert_eq!(
+            lanes(&operations),
+            [
+                vec![0..2, 4..5],
+                vec![2..3, 10..11],
+                vec![3..4, 5..6],
+                // Every manager without a lane of its own shares one.
+                vec![6..7, 8..9],
+                vec![7..8, 9..10],
+            ]
+        );
+        for backend in ["snap", "dnf", "zypper", "apk", "xbps", "nix"] {
+            let refresh = Operation::Refresh {
+                backend: backend.into(),
+            };
+            assert_eq!(lane(&refresh), backend);
+        }
+        assert!(lanes(&[]).is_empty());
+    }
+
+    /// Output that tells `sender` once the runner refuses something. The
+    /// runner holds its state while it writes that, so whatever it reads next
+    /// sees the refusal.
+    struct Watched(Vec<u8>, std::sync::mpsc::Sender<()>);
+    impl Write for Watched {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            if bytes.windows(8).any(|word| word == b"rejected") {
+                let _ = self.1.send(());
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    /// Input that hands out `later` only once `ready` says so.
+    struct Paced(
+        Cursor<Vec<u8>>,
+        std::sync::mpsc::Receiver<()>,
+        Option<Vec<u8>>,
+    );
+    impl Read for Paced {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.0.read(buf)?;
+            match self.2.take() {
+                Some(later) if count == 0 => {
+                    let _ = self.1.recv_timeout(Duration::from_secs(10));
+                    self.0 = Cursor::new(later);
+                    self.0.read(buf)
+                }
+                later => {
+                    self.2 = later;
+                    Ok(count)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_runner_runs_lanes_at_once_and_each_lane_in_order() {
+        let operations = vec![
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            Operation::Refresh {
+                backend: "dnf".into(),
+            },
+            Operation::Install(id("apt", "jq")),
+        ];
+        let run = |operation: usize| Request::Run {
+            operation,
+            command: 0,
+        };
+        let start = || Request::Start {
+            protocol: PROTOCOL,
+            operations: operations.clone(),
+        };
+        // apt and dnf meet: each finishes only once both started.
+        let (started, ready) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+        let met = std::sync::Mutex::new(vec![]);
+        serve_protocol(
+            BatchMode::Reviewed,
+            &mut Cursor::new(input(&[start(), run(0), run(1)])),
+            &mut Vec::new(),
+            |_, _| {
+                let mut count = started.lock().unwrap();
+                *count += 1;
+                ready.notify_all();
+                let (count, wait) = ready
+                    .wait_timeout_while(count, Duration::from_secs(10), |count| *count < 2)
+                    .unwrap();
+                drop(count);
+                met.lock().unwrap().push(!wait.timed_out());
+                Ok(completion())
+            },
+        )
+        .unwrap();
+        assert_eq!(*met.lock().unwrap(), [true, true]);
+        // A lane runs one at a time: apt's second change can't start while
+        // its first runs, which only ends once the second was refused.
+        let (sender, refused) = std::sync::mpsc::channel();
+        let refused = std::sync::Mutex::new(refused);
+        let mut output = Watched(vec![], sender);
+        let recorder = Recorder::default();
+        let result = serve_protocol(
+            BatchMode::Reviewed,
+            &mut Cursor::new(input(&[start(), run(0), run(2)])),
+            &mut output,
+            |command, _| {
+                recorder.0.lock().unwrap().push(command.clone());
+                let _ = refused
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+                Ok(completion())
+            },
+        );
+        assert!(matches!(result, Err(ExecutionError::Invalid(_))));
+        assert_eq!(recorder.calls().len(), 1);
+        let output = String::from_utf8(output.0).unwrap();
+        assert!(
+            output.contains(
+                r#"{"type":"rejected","operation":2,"reason":"command outside approved batch"}"#
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(r#"{"type":"completed","operation":0,"#),
+            "{output}"
+        );
+        // ... and in order: once apt's second change ran, its first can't.
+        let recorder = Recorder::default();
+        let result = serve_protocol(
+            BatchMode::Reviewed,
+            &mut Cursor::new(input(&[start(), run(2), run(0)])),
+            &mut Vec::new(),
+            recorder.run(),
+        );
+        assert!(matches!(result, Err(ExecutionError::Invalid(_))));
+        assert_eq!(recorder.calls().len(), 1);
+    }
+
+    #[test]
+    fn after_a_command_fails_to_run_the_runner_starts_no_more() {
+        let first = input(&[
+            Request::Start {
+                protocol: PROTOCOL,
+                operations: vec![
+                    Operation::Refresh {
+                        backend: "apt".into(),
+                    },
+                    Operation::Refresh {
+                        backend: "dnf".into(),
+                    },
+                ],
+            },
+            Request::Run {
+                operation: 0,
+                command: 0,
+            },
+        ]);
+        // dnf's request comes in only once apt's failure was sent.
+        let later = input(&[Request::Run {
+            operation: 1,
+            command: 0,
+        }]);
+        let (sender, failed) = std::sync::mpsc::channel();
+        let mut output = Watched(vec![], sender);
+        let recorder = Recorder::default();
+        let result = serve_protocol(
+            BatchMode::Reviewed,
+            &mut Paced(Cursor::new(first), failed, Some(later)),
+            &mut output,
+            |command, _| {
+                recorder.0.lock().unwrap().push(command.clone());
+                Err(ExecutionError::Io("no such program".into()))
+            },
+        );
+        assert!(matches!(result, Err(ExecutionError::Invalid(_))));
+        assert_eq!(recorder.calls().len(), 1);
+        let output = String::from_utf8(output.0).unwrap();
+        assert!(
+            output.contains(r#"{"type":"rejected","operation":0,"reason":"no such program"}"#),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                r#"{"type":"rejected","operation":1,"reason":"command outside approved batch"}"#
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn flatpak_refs_validate_short_form_and_reject_malformed_scope() {
         let mut app = id("flatpak", "org.example.Test");
         app.architecture = "x86_64".into();
@@ -2279,7 +2865,7 @@ done"#,
         let mut malformed = input(&[start]);
         malformed.extend_from_slice(b"not-json\n");
         let mut output = Vec::new();
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         assert!(matches!(
             serve_protocol(
                 BatchMode::Reviewed,
@@ -2289,7 +2875,7 @@ done"#,
             ),
             Err(ExecutionError::Invalid(_))
         ));
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
         assert!(matches!(
             serde_json::from_slice::<Response>(output.split(|b| *b == b'\n').next().unwrap())
                 .unwrap(),
@@ -2318,7 +2904,19 @@ done"#,
             ),
             Err(ExecutionError::AuthorizationDenied)
         ));
-        assert_eq!(output.iter().filter(|b| **b == b'\n').count(), 1);
+        // The frontend hears why, for that operation.
+        let replies: Vec<Response> = output
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert!(matches!(
+            &replies[..],
+            [
+                Response::Ready { .. },
+                Response::Rejected { operation: 0, .. }
+            ]
+        ));
     }
 
     #[test]
@@ -2343,7 +2941,7 @@ done"#,
         ));
 
         let mut child = Command::new("/bin/sh");
-        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; IFS= read -r request; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'");
+        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'; IFS= read -r request; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'");
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands.clone(), &cancel)
             .unwrap()
@@ -2365,7 +2963,7 @@ done"#,
         }];
         let commands = batch_commands(&operations).unwrap();
         let mut child = Command::new("/bin/sh");
-        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; IFS= read -r request");
+        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'; IFS= read -r request");
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands, &cancel)
             .unwrap()
@@ -2416,7 +3014,7 @@ done"#,
                 backend: "apt".into(),
             }],
         };
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         let mut full: &mut [u8] = &mut [];
         let result = serve_protocol(
             BatchMode::Reviewed,
@@ -2425,7 +3023,7 @@ done"#,
             recorder.run(),
         );
         assert!(matches!(result, Err(ExecutionError::Io(_))));
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
     }
 
     /// Room for exactly the Ready frame; every later reply fails to write.
@@ -2444,7 +3042,7 @@ done"#,
             }],
         };
         // The rejection of an out-of-plan request cannot be delivered.
-        let mut recorder = Recorder::default();
+        let recorder = Recorder::default();
         let mut buffer = ready_only();
         let result = serve_protocol(
             BatchMode::Reviewed,
@@ -2459,7 +3057,7 @@ done"#,
             recorder.run(),
         );
         assert!(matches!(result, Err(ExecutionError::Io(_))));
-        assert!(recorder.0.is_empty());
+        assert!(recorder.calls().is_empty());
         // Nor can a finished command's completion, after it ran once.
         let mut buffer = ready_only();
         let result = serve_protocol(
@@ -2475,7 +3073,7 @@ done"#,
             recorder.run(),
         );
         assert!(matches!(result, Err(ExecutionError::Io(_))));
-        assert_eq!(recorder.0.len(), 1);
+        assert_eq!(recorder.calls().len(), 1);
     }
 
     #[test]
@@ -2580,7 +3178,7 @@ done"#,
         let commands = batch_commands(&operations).unwrap();
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(
-            "IFS= read -r start; exec 0<&-; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; sleep 5",
+            "IFS= read -r start; exec 0<&-; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'; sleep 5",
         );
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands.clone(), &cancel)

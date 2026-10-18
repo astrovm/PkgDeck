@@ -904,7 +904,12 @@ pub fn progress_card(app: &mut App, ui: &mut Ui, salt: &str) {
                 palette.ink,
                 label_width,
             );
-            let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 20.0), Sense::hover());
+            let (rect, response) =
+                ui.allocate_exact_size(vec2(galley.size().x, 20.0), Sense::hover());
+            // Painted, so screen readers get the words in full here.
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Label, true, &progress.label)
+            });
             ui.painter().galley(
                 pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
                 galley,

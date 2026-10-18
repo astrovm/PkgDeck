@@ -360,22 +360,37 @@ struct ProgressState {
     label: String,
     done: usize,
     total: usize,
-    transferred: u64,
-    transfer_total: Option<u64>,
     operations: Vec<Operation>,
-    /// The operation running now; before the first one starts, the job's
-    /// only operation, if it has just one.
+    /// The operation that started last; before the first one starts, the
+    /// job's only operation, if it has just one.
     current: Option<Operation>,
+    /// The steps running now, in the order they started. Steps of
+    /// different sources can run at once.
+    running: Vec<Step>,
     /// Rows a whole-source step is expected to update, by source, from
     /// the Updates list (see `with_rows`).
     rows: BTreeMap<String, Vec<PackageId>>,
-    /// The package a whole-source step reported it is working on now.
-    item: Option<PackageId>,
     /// Packages already done, successfully or not.
     finished: Vec<PackageId>,
     /// Packages whose change succeeded, in the order they finished.
     succeeded: Vec<PackageId>,
     names: Names,
+}
+/// A running step of a change.
+struct Step {
+    operation: Operation,
+    label: String,
+    /// The package a whole-source step reported it is working on now.
+    item: Option<PackageId>,
+    transferred: u64,
+    transfer_total: Option<u64>,
+}
+impl Step {
+    /// How far its transfer is, from 0 to 1, when it has one.
+    fn fraction(&self) -> Option<f64> {
+        self.transfer_total
+            .map(|total| (self.transferred as f64 / total as f64).min(1.0))
+    }
 }
 impl ProgressState {
     /// Counts each package a whole-source step updates as a step of its
@@ -419,26 +434,61 @@ impl ProgressState {
         }) else {
             return false;
         };
-        if let Some(previous) = self.item.take().filter(|previous| *previous != id) {
-            self.finish(previous, false);
-        }
-        self.label = format!(
+        let label = format!(
             "Update {}",
             self.names
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| id.name.clone())
         );
-        self.item = Some(id);
+        let step = self.step(&Operation::UpgradeAll {
+            backend: backend.into(),
+        });
+        step.label.clone_from(&label);
+        let previous = step.item.replace(id.clone());
+        if let Some(previous) = previous.filter(|previous| *previous != id) {
+            self.finish(previous, false);
+        }
+        self.label = label;
         true
     }
-    /// Follows a line of output from the running whole-source step.
-    fn observe(&mut self, line: &str) -> bool {
-        let Some(Operation::UpgradeAll { backend }) = self.current.clone() else {
-            return false;
+    /// The running step of `operation`, which started now if it wasn't
+    /// running yet.
+    fn step(&mut self, operation: &Operation) -> &mut Step {
+        let index = match self
+            .running
+            .iter()
+            .position(|step| step.operation == *operation)
+        {
+            Some(index) => index,
+            None => {
+                self.running.push(Step {
+                    operation: operation.clone(),
+                    label: operation_title_named(operation, &self.names),
+                    item: None,
+                    transferred: 0,
+                    transfer_total: None,
+                });
+                self.running.len() - 1
+            }
         };
-        pkgdeck_core::backends::output_package(&backend, line)
-            .is_some_and(|name| self.move_to(&backend, &name))
+        &mut self.running[index]
+    }
+    /// Follows a line of output from a running whole-source step. Steps
+    /// running at once share their output, so each source checks the line.
+    fn observe(&mut self, line: &str) -> bool {
+        let sources: Vec<String> = self
+            .running
+            .iter()
+            .filter_map(|step| match &step.operation {
+                Operation::UpgradeAll { backend } => Some(backend.clone()),
+                _ => None,
+            })
+            .collect();
+        sources.iter().any(|backend| {
+            pkgdeck_core::backends::output_package(backend, line)
+                .is_some_and(|name| self.move_to(backend, &name))
+        })
     }
     /// Marks a package done and counts it once. Success is confirmed only
     /// when the operation finishes, not when its output moves to another row.
@@ -483,12 +533,10 @@ impl ProgressState {
             label,
             done: 0,
             total: operations.len().max(1),
-            transferred: 0,
-            transfer_total: None,
             operations,
             current,
+            running: vec![],
             rows: BTreeMap::new(),
-            item: None,
             finished: vec![],
             succeeded: vec![],
             names: names.clone(),
@@ -497,11 +545,9 @@ impl ProgressState {
     fn apply(&mut self, event: &Event) {
         match event {
             Event::Started(operation) => {
-                self.label = operation_title_named(operation, &self.names);
+                self.running.retain(|step| step.operation != *operation);
+                self.label = self.step(operation).label.clone();
                 self.current = Some(operation.clone());
-                self.item = None;
-                self.transferred = 0;
-                self.transfer_total = None;
             }
             Event::Progress {
                 operation: Operation::UpgradeAll { backend },
@@ -510,11 +556,12 @@ impl ProgressState {
                 self.move_to(backend, name);
             }
             Event::Progress {
+                operation,
                 progress: Progress::Transfer { completed, total },
-                ..
             } => {
-                self.transferred = *completed;
-                self.transfer_total = (*total).filter(|total| *total > 0);
+                let step = self.step(operation);
+                step.transferred = *completed;
+                step.transfer_total = (*total).filter(|total| *total > 0);
             }
             Event::Finished { operation, result } => {
                 let rows = match operation {
@@ -529,9 +576,12 @@ impl ProgressState {
                 for id in rows {
                     self.finish(id, result.is_ok());
                 }
-                self.item = None;
-                self.transferred = 0;
-                self.transfer_total = None;
+                self.running.retain(|step| step.operation != *operation);
+                // What still runs, if anything, is what the card names.
+                if let Some(last) = self.running.last() {
+                    self.label.clone_from(&last.label);
+                    self.current = Some(last.operation.clone());
+                }
             }
             Event::Progress { .. } => {}
         }
@@ -540,15 +590,20 @@ impl ProgressState {
     /// finished steps of a batch plus the running step's transfer. A single
     /// step without a transfer size has no known fraction.
     fn fraction(&self) -> Option<f64> {
-        let step = self
-            .transfer_total
-            .map(|total| (self.transferred as f64 / total as f64).min(1.0));
         if self.done >= self.total {
             Some(1.0)
         } else if self.total > 1 {
-            Some((self.done as f64 + step.unwrap_or(0.0)) / self.total as f64)
+            let steps: f64 = self.running.iter().filter_map(Step::fraction).sum();
+            Some(((self.done as f64 + steps) / self.total as f64).min(1.0))
         } else {
-            step
+            self.running.last().and_then(Step::fraction)
+        }
+    }
+    /// The step the card shows the transfer of: the only one running.
+    fn transfer(&self) -> Option<&Step> {
+        match self.running.as_slice() {
+            [one] => Some(one),
+            _ => None,
         }
     }
     fn snapshot(&self) -> QString {
@@ -572,18 +627,43 @@ impl ProgressState {
             })
             .collect();
         let current = self.current.as_ref();
+        let item = self
+            .running
+            .iter()
+            .find(|step| Some(&step.operation) == current)
+            .and_then(|step| step.item.as_ref());
+        let running: Vec<_> = self
+            .running
+            .iter()
+            .map(|step| {
+                json!({
+                    "current": step.item.as_ref().or_else(|| package_target(&step.operation)).map(target_row),
+                    "source": step.operation.backend(),
+                })
+            })
+            .collect();
+        let label = match self.running.len() {
+            0 | 1 => running_label(&self.label),
+            count => format!(
+                "{} and {} more",
+                running_label(&self.label).trim_end_matches('…'),
+                count - 1
+            ),
+        };
+        let transfer = self.transfer();
         encoded(json!({
             "activity_id": self.activity_id,
-            "label": running_label(&self.label),
+            "label": label,
             "done": self.done,
             "total": self.total,
-            "transferred": self.transferred,
-            "transfer_total": self.transfer_total,
+            "transferred": transfer.map_or(0, |step| step.transferred),
+            "transfer_total": transfer.and_then(|step| step.transfer_total),
             "fraction": self.fraction(),
             "targets": targets,
             "sources": sources,
             "action": current.map_or("", operation_kind),
-            "current": self.item.as_ref().or_else(|| current.and_then(package_target)).map(target_row),
+            "current": item.or_else(|| current.and_then(package_target)).map(target_row),
+            "running": running,
             "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
@@ -16702,6 +16782,84 @@ mod tests {
             result: Ok(OperationOutcome::default()),
         });
         assert_eq!(state.fraction(), Some(1.0));
+    }
+    #[test]
+    fn steps_of_different_sources_run_and_show_at_once() {
+        let mut snap = synthetic_package("gnome-46-2404", "GNOME 46");
+        snap.id.backend = "snap".into();
+        snap.update = UpdateAvailability::Available;
+        let mut apt = synthetic_package("wireplumber", "WirePlumber");
+        apt.update = UpdateAvailability::Available;
+        let (snaps, apt_update) = (
+            Operation::UpgradeAll {
+                backend: "snap".into(),
+            },
+            Operation::Upgrade(apt.id.clone()),
+        );
+        let flatpak = Operation::UpgradeAll {
+            backend: "flatpak".into(),
+        };
+        let job = Job::UpgradeAll(
+            vec![apt_update.clone(), snaps.clone(), flatpak.clone()],
+            None,
+        );
+        let mut state =
+            ProgressState::new(&job, None, &Names::new()).with_rows(&[apt.clone(), snap.clone()]);
+        let snapshot = |state: &ProgressState| -> Value {
+            serde_json::from_str(&state.snapshot().to_string()).unwrap()
+        };
+        let transfer = |operation: &Operation, completed| Event::Progress {
+            operation: operation.clone(),
+            progress: Progress::Transfer {
+                completed,
+                total: Some(100),
+            },
+        };
+        state.apply(&Event::Started(apt_update.clone()));
+        state.apply(&transfer(&apt_update, 50));
+        // One step: the card shows its transfer.
+        assert_eq!(snapshot(&state)["transfer_total"], 100);
+        state.apply(&Event::Started(snaps.clone()));
+        state.apply(&transfer(&snaps, 25));
+        assert!(state.observe("gnome-46-2404 2 from Canonical refreshed"));
+        let now = snapshot(&state);
+        assert_eq!(now["label"], "Updating GNOME 46 and 1 more");
+        assert_eq!(
+            now["running"],
+            json!([
+                {"current": target_row(&apt.id), "source": "apt"},
+                {"current": target_row(&snap.id), "source": "snap"},
+            ])
+        );
+        assert_eq!(now["current"], target_row(&snap.id));
+        // Two steps: no single transfer, but both count toward the bar.
+        assert_eq!(now["transfer_total"], Value::Null);
+        assert!((now["fraction"].as_f64().unwrap() - 0.75 / 3.0).abs() < 1e-9);
+        state.apply(&Event::Finished {
+            operation: snaps,
+            result: Ok(OperationOutcome::default()),
+        });
+        // Back to what still runs.
+        let now = snapshot(&state);
+        assert_eq!(now["label"], "Updating wireplumber (APT)…");
+        assert_eq!(now["current"], target_row(&apt.id));
+        assert_eq!(now["current_source"], "apt");
+        assert_eq!(now["transferred"], 50);
+        assert_eq!(now["finished"], json!([target_row(&snap.id)]));
+        // A step that finishes without having started moves nothing back.
+        state.apply(&Event::Finished {
+            operation: flatpak,
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(snapshot(&state)["current_source"], "apt");
+        state.apply(&Event::Finished {
+            operation: apt_update,
+            result: Ok(OperationOutcome::default()),
+        });
+        let now = snapshot(&state);
+        assert_eq!(now["running"], json!([]));
+        assert_eq!(now["fraction"], 1.0);
+        assert!(!state.observe("gnome-46-2404 2 from Canonical refreshed"));
     }
     #[test]
     fn update_all_counts_and_follows_each_package_of_a_source() {

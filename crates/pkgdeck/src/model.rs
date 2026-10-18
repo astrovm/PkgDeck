@@ -453,8 +453,26 @@ pub struct Progress {
     pub sources: Vec<String>,
     pub action: String,
     pub current: Option<Value>,
+    /// Every step running now: steps of different sources run at once.
+    pub running: Vec<RunningStep>,
     pub finished: Vec<Value>,
     pub current_source: Option<String>,
+}
+/// One step of the change that runs now: its package, or the source it
+/// updates whole.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RunningStep {
+    pub current: Option<Value>,
+    pub source: String,
+}
+impl RunningStep {
+    fn has(&self, identity: &str, source: &str) -> bool {
+        match &self.current {
+            Some(current) => identity_of_row_value(current) == identity,
+            None => self.source == source,
+        }
+    }
 }
 impl Progress {
     /// How far along, 0 to 1, when that's known.
@@ -480,13 +498,15 @@ impl Progress {
                     .round()
                     .min(100.0)
             ),
-            // The one being worked on counts: "2 of 5" beside "Updating ripgrep"
-            // when ripgrep is the second.
+            // The ones being worked on count: "2 of 5" beside "Updating
+            // ripgrep" when ripgrep is the second.
             _ if self.total > 1 => {
-                let running = self.current.is_some() || self.current_source.is_some();
+                let running = (self.running.len() as u64).max(u64::from(
+                    self.current.is_some() || self.current_source.is_some(),
+                ));
                 format!(
                     "{} of {}",
-                    (self.done + u64::from(running)).min(self.total),
+                    (self.done + running).min(self.total),
                     self.total
                 )
             }
@@ -509,7 +529,7 @@ impl Progress {
         let running = match &self.current {
             Some(current) => identity_of_row_value(current) == identity,
             None => self.current_source.as_deref() == Some(source),
-        };
+        } || self.running.iter().any(|step| step.has(identity, source));
         Some(if running {
             RowState::Running
         } else {

@@ -1934,3 +1934,116 @@ fn optional_sources_stay_quiet_when_cancelled_before_detection() {
         ["present"]
     );
 }
+
+/// Changes in flight, the most there ever were, and who started each.
+#[derive(Default)]
+struct Meetings {
+    state: std::sync::Mutex<(usize, usize, Vec<&'static str>)>,
+    ready: std::sync::Condvar,
+}
+struct Meeting(&'static str, Arc<Meetings>);
+impl Backend for Meeting {
+    fn id(&self) -> &str {
+        self.0
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Refresh]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let meetings = &self.1;
+        let mut state = meetings.state.lock().unwrap();
+        state.0 += 1;
+        state.1 = state.1.max(state.0);
+        state.2.push(self.0);
+        meetings.ready.notify_all();
+        // The first three wait for each other, so they surely overlap.
+        let (mut state, _) = meetings
+            .ready
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                state.2.len() < 3
+            })
+            .unwrap();
+        state.0 -= 1;
+        Ok(OperationOutcome::default())
+    }
+}
+
+#[test]
+fn different_managers_change_at_once_and_each_one_in_order() {
+    let meetings = Arc::new(Meetings::default());
+    let mut engine = Engine::default();
+    let backends = ["apt", "homebrew", "flatpak", "homebrew-cask", "snap"];
+    for backend in backends {
+        engine
+            .register(Meeting(backend, Arc::clone(&meetings)))
+            .unwrap();
+    }
+    let operations = backends.map(|backend| Operation::Refresh {
+        backend: backend.into(),
+    });
+    let mut events = vec![];
+    let outcomes = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
+        events.push(event);
+    });
+    assert_eq!(outcomes, vec![Ok(OperationOutcome::default()); 5]);
+    let (_, most, mut started) = std::mem::take(&mut *meetings.state.lock().unwrap());
+    // Three lanes at a time. Homebrew's two share one lock, so they share a
+    // lane and go one after the other, like snap goes once a lane is free.
+    assert_eq!(most, 3);
+    started[..3].sort_unstable();
+    started[3..].sort_unstable();
+    assert_eq!(
+        started,
+        ["apt", "flatpak", "homebrew", "homebrew-cask", "snap"]
+    );
+    // Every change starts, then finishes.
+    for operation in &operations {
+        let at = |finished: bool| {
+            events.iter().position(|event| match event {
+                Event::Started(started) => !finished && started == operation,
+                Event::Finished {
+                    operation: done, ..
+                } => finished && done == operation,
+                _ => false,
+            })
+        };
+        assert!(at(false).unwrap() < at(true).unwrap(), "{operation:?}");
+    }
+    // The managers come back to the engine once their lanes end.
+    for backend in backends {
+        assert!(engine.supports(backend, Capability::Refresh), "{backend}");
+    }
+}
+
+#[test]
+fn a_reviewed_cleanup_runs_in_its_own_lane_once() {
+    let mut engine = Engine::default();
+    engine.register(Cleaner).unwrap();
+    engine
+        .register(Synthetic::new("flatpak", Fault::None))
+        .unwrap();
+    let cancel = Cancellation::default();
+    let reviewed = engine.cleanup(&cancel).items.remove(0);
+    let operations = [
+        Operation::Refresh {
+            backend: "flatpak".into(),
+        },
+        Operation::Clean(reviewed.id.clone()),
+    ];
+    engine.remember_cleanup_plan(reviewed);
+    let outcomes = engine.execute_batch(&operations, &cancel, &mut |_| {});
+    assert!(outcomes.iter().all(Result::is_ok));
+    // Its lane used the confirmation up.
+    assert!(matches!(
+        engine.execute_batch(&operations, &cancel, &mut |_| {})[..],
+        [Ok(_), Err(EngineError::InvalidResponse { .. })]
+    ));
+}
