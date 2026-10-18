@@ -397,6 +397,13 @@ mod tests {
         });
         session.event(message(&operations[0], "Update (1): fixture"));
         assert_eq!(session.notes.borrow().len(), 1);
+        // One change has nothing to count.
+        session.start(&operations[..1], false);
+        session.event(Event::Started(operations[0].clone()));
+        assert_eq!(
+            live.showing().0,
+            Some(presentation::operation_progress(&operations[0]))
+        );
     }
 
     #[test]
