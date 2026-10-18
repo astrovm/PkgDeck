@@ -103,6 +103,12 @@ impl Live {
             .map(|line| crate::presentation::clean(line.trim()))
             .unwrap_or_default();
     }
+    /// The status and its detail, as they show now.
+    #[cfg(test)]
+    pub fn showing(&self) -> (Option<String>, String) {
+        let state = self.state.lock().unwrap();
+        (state.label.clone(), state.detail.clone())
+    }
     /// Remove the spinner line, for example before a prompt.
     pub fn clear(&self) {
         let mut state = self.state.lock().unwrap();

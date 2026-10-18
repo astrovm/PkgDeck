@@ -169,6 +169,11 @@ fn progress_measures_bytes_then_steps_then_fractions() {
         ..steps.clone()
     };
     assert_eq!(by_source.count(), "4 of 4");
+    let at_once = Progress {
+        running: vec![RunningStep::default(), RunningStep::default()],
+        ..running.clone()
+    };
+    assert_eq!(at_once.count(), "3 of 4");
     let fraction = Progress {
         total: 1,
         fraction: Some(1.5),
@@ -223,6 +228,35 @@ fn progress_tells_each_row_how_far_it_is() {
         by_source.for_row(&identity("a"), "flatpak"),
         Some(RowState::Queued)
     );
+    // Steps of different sources run at once.
+    let at_once = Progress {
+        targets: vec![id("a"), id("b"), id("c")],
+        current: Some(id("b")),
+        running: vec![
+            RunningStep {
+                current: Some(id("a")),
+                source: "apt".into(),
+            },
+            RunningStep {
+                current: None,
+                source: "snap".into(),
+            },
+        ],
+        total: 3,
+        ..Progress::default()
+    };
+    for (name, source, state) in [
+        ("a", "apt", RowState::Running),
+        ("b", "apt", RowState::Running),
+        ("c", "apt", RowState::Queued),
+        ("c", "snap", RowState::Running),
+    ] {
+        assert_eq!(
+            at_once.for_row(&identity(name), source),
+            Some(state),
+            "{name}"
+        );
+    }
 }
 
 #[test]

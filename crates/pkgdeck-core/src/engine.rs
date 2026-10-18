@@ -484,6 +484,10 @@ pub enum Event {
     },
 }
 
+/// How many lanes of a batch run at once (see [`crate::batch::lanes`]):
+/// enough to overlap the slow managers, few enough not to swamp a disk.
+const LANES_AT_ONCE: usize = 3;
+
 #[derive(Default)]
 pub struct Engine {
     backends: BTreeMap<String, Box<dyn Backend>>,
@@ -1581,10 +1585,17 @@ impl Engine {
             return vec![];
         }
         if self.batch_authorization.is_none() {
-            return operations
-                .iter()
-                .map(|operation| self.execute_started(operation, cancel, events, false))
+            // Without the batch runner nothing joins: each change runs alone.
+            let singles = crate::batch::lanes(operations)
+                .into_iter()
+                .map(|runs| {
+                    runs.into_iter()
+                        .flatten()
+                        .map(|index| index..index + 1)
+                        .collect()
+                })
                 .collect();
+            return self.run_lanes(operations, singles, cancel, events, false);
         }
         let checked: Vec<_> = operations
             .iter()
@@ -1619,10 +1630,13 @@ impl Engine {
             .iter()
             .any(|commands| !commands.is_empty());
         if !protected {
-            return operations
-                .iter()
-                .map(|operation| self.execute_started(operation, cancel, events, false))
-                .collect();
+            return self.run_lanes(
+                operations,
+                crate::batch::lanes(operations),
+                cancel,
+                events,
+                false,
+            );
         }
         let (host, authorization) = self.batch_authorization.clone().expect("configured above");
         events(Event::Started(operations[0].clone()));
@@ -1660,76 +1674,210 @@ impl Engine {
                 ),
             });
         }
-        let mut results = Vec::with_capacity(operations.len());
-        let mut index = 0;
-        while index < operations.len() {
-            let operation = &operations[index];
-            let backend = operation.backend();
-            let end = crate::batch::group_end(operations, index);
-            crate::batch::set_operation(index);
-            if end - index > 1 {
-                for (offset, member) in operations[index..end].iter().enumerate() {
-                    if index + offset != 0 {
-                        events(Event::Started(member.clone()));
+        let results = self.run_lanes(
+            operations,
+            crate::batch::lanes(operations),
+            cancel,
+            events,
+            true,
+        );
+        drop(guard);
+        results
+    }
+
+    /// Runs `operations` lane by lane (see [`crate::batch::lanes`]), up to
+    /// [`LANES_AT_ONCE`] lanes at a time, each with its own part of this
+    /// engine. `first_started`: the first operation's `Started` went out.
+    fn run_lanes(
+        &mut self,
+        operations: &[Operation],
+        lanes: Vec<Vec<std::ops::Range<usize>>>,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+        first_started: bool,
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        if lanes.len() < 2 {
+            return lanes
+                .into_iter()
+                .flatten()
+                .flat_map(|run| self.run_group(operations, run, cancel, events, first_started))
+                .collect();
+        }
+        let session = crate::batch::share();
+        let queue: std::sync::Mutex<std::collections::VecDeque<_>> = std::sync::Mutex::new(
+            lanes
+                .into_iter()
+                .map(|runs| (self.lane(operations, &runs), runs))
+                .collect(),
+        );
+        let workers = LANES_AT_ONCE.min(queue.lock().expect("lanes").len());
+        let done = std::sync::Mutex::new(Vec::new());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let sender = sender.clone();
+                let (queue, done, session) = (&queue, &done, &session);
+                scope.spawn(move || {
+                    let _entered = session.as_ref().map(crate::batch::SharedSession::enter);
+                    loop {
+                        let Some((mut engine, runs)) = queue.lock().expect("lanes").pop_front()
+                        else {
+                            break;
+                        };
+                        let mut results = vec![];
+                        for run in runs {
+                            let start = run.start;
+                            let outcomes = engine.run_group(
+                                operations,
+                                run,
+                                cancel,
+                                &mut |event| {
+                                    let _ = sender.send(event);
+                                },
+                                first_started,
+                            );
+                            results.extend((start..).zip(outcomes));
+                        }
+                        done.lock().expect("lanes").push((engine, results));
                     }
-                }
-                let prepared = self
-                    .ready(backend, operation.capability(), cancel)
-                    .and_then(|manager| {
-                        manager.prepare(operation, cancel, &mut |progress| {
+                });
+            }
+            // Events reach the caller here, on its own thread.
+            drop(sender);
+            for event in receiver {
+                events(event);
+            }
+        });
+        let mut results: Vec<Option<Result<OperationOutcome, EngineError>>> =
+            (0..operations.len()).map(|_| None).collect();
+        for (engine, outcomes) in done.into_inner().expect("lanes") {
+            self.backends.extend(engine.backends);
+            self.detected.extend(engine.detected);
+            for (index, result) in outcomes {
+                results[index] = Some(result);
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.unwrap_or(Err(EngineError::Cancelled)))
+            .collect()
+    }
+
+    /// An engine for one lane's `runs`: the backends they use, moved out of
+    /// this one, and what was reviewed for them.
+    fn lane(&mut self, operations: &[Operation], runs: &[std::ops::Range<usize>]) -> Engine {
+        let members: Vec<&Operation> = runs
+            .iter()
+            .flat_map(|run| &operations[run.clone()])
+            .collect();
+        let backends = members
+            .iter()
+            .filter_map(|operation| self.backends.remove_entry(operation.backend()))
+            .collect();
+        let cleanup_plans = members
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Clean(id) => self.cleanup_plans.remove_entry(id),
+                _ => None,
+            })
+            .collect();
+        let apt_upgrade_plan = members
+            .iter()
+            .any(|operation| matches!(operation, Operation::UpgradeAll { backend } if backend == "apt"))
+            .then(|| self.apt_upgrade_plan.take())
+            .flatten();
+        let operation_plan = self
+            .operation_plan
+            .take_if(|plan| members.contains(&&plan.operation));
+        Engine {
+            backends,
+            detected: self.detected.clone(),
+            optional: self.optional.clone(),
+            cleanup_plans,
+            apt_upgrade_plan,
+            operation_plan,
+            batch_authorization: self.batch_authorization.clone(),
+            batch_mode: self.batch_mode,
+            unattended: self.unattended,
+        }
+    }
+
+    /// Runs one run [`crate::batch::group_end`] found: a change, or several
+    /// its manager makes in one transaction.
+    fn run_group(
+        &mut self,
+        operations: &[Operation],
+        run: std::ops::Range<usize>,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+        first_started: bool,
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        let (index, end) = (run.start, run.end);
+        let operation = &operations[index];
+        let backend = operation.backend();
+        crate::batch::set_operation(index);
+        let started = |position: usize| first_started && position == 0;
+        if end - index == 1 {
+            return vec![self.execute_started(operation, cancel, events, started(index))];
+        }
+        for (offset, member) in operations[index..end].iter().enumerate() {
+            if !started(index + offset) {
+                events(Event::Started(member.clone()));
+            }
+        }
+        let prepared = self
+            .ready(backend, operation.capability(), cancel)
+            .and_then(|manager| {
+                manager.prepare(operation, cancel, &mut |progress| {
+                    events(Event::Progress {
+                        operation: operation.clone(),
+                        progress,
+                    })
+                })
+            });
+        let rechecked = operations[index..end]
+            .iter()
+            .map(|member| {
+                prepared
+                    .clone()
+                    .and_then(|()| self.preflight(member, cancel))
+            })
+            .collect::<Vec<_>>();
+        let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
+            Err(error)
+        } else {
+            self.ready(backend, operation.capability(), cancel)
+                .and_then(|manager| {
+                    manager
+                        .execute_group(&operations[index..end], cancel, &mut |progress| {
                             events(Event::Progress {
                                 operation: operation.clone(),
                                 progress,
+                            });
+                        })
+                        .unwrap_or_else(|| {
+                            Err(EngineError::InvalidResponse {
+                                backend: backend.into(),
+                                reason: "grouped operation unavailable".into(),
                             })
                         })
-                    });
-                let rechecked = operations[index..end]
-                    .iter()
-                    .map(|member| {
-                        prepared
-                            .clone()
-                            .and_then(|()| self.preflight(member, cancel))
-                    })
-                    .collect::<Vec<_>>();
-                let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
-                    Err(error)
-                } else {
-                    self.ready(backend, operation.capability(), cancel)
-                        .and_then(|manager| {
-                            manager
-                                .execute_group(&operations[index..end], cancel, &mut |progress| {
-                                    events(Event::Progress {
-                                        operation: operation.clone(),
-                                        progress,
-                                    });
-                                })
-                                .unwrap_or_else(|| {
-                                    Err(EngineError::InvalidResponse {
-                                        backend: backend.into(),
-                                        reason: "grouped operation unavailable".into(),
-                                    })
-                                })
-                        })
+                })
+        };
+        crate::cache::invalidate(backend);
+        operations[index..end]
+            .iter()
+            .map(|member| {
+                let result = match &grouped {
+                    Ok(outcomes) => Ok(outcomes[0].clone()),
+                    Err(error) => Err(error.clone()),
                 };
-                crate::cache::invalidate(backend);
-                for member in &operations[index..end] {
-                    let result = match &grouped {
-                        Ok(outcomes) => Ok(outcomes[0].clone()),
-                        Err(error) => Err(error.clone()),
-                    };
-                    events(Event::Finished {
-                        operation: member.clone(),
-                        result: result.clone(),
-                    });
-                    results.push(result);
-                }
-            } else {
-                results.push(self.execute_started(operation, cancel, events, index == 0));
-            }
-            index = end;
-        }
-        drop(guard);
-        results
+                events(Event::Finished {
+                    operation: member.clone(),
+                    result: result.clone(),
+                });
+                result
+            })
+            .collect()
     }
 }
 

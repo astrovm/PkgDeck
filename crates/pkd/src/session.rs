@@ -21,8 +21,13 @@ pub struct Session<'a> {
     notes: RefCell<Vec<(Operation, String)>>,
     reviewed: Cell<bool>,
     executing: Cell<bool>,
+    /// Changes started and finished so far, and of how many.
     position: Cell<usize>,
+    finished: Cell<usize>,
     total: Cell<usize>,
+    /// The changes running now, in the order they started: changes of
+    /// different sources run at once. The status shows the last one.
+    running: RefCell<Vec<Operation>>,
     shown: Cell<bool>,
 }
 
@@ -36,7 +41,9 @@ impl<'a> Session<'a> {
             reviewed: Cell::new(false),
             executing: Cell::new(false),
             position: Cell::new(0),
+            finished: Cell::new(0),
             total: Cell::new(0),
+            running: RefCell::default(),
             shown: Cell::new(false),
         }
     }
@@ -71,45 +78,71 @@ impl<'a> Session<'a> {
             self.review(operations);
         }
         self.position.set(0);
+        self.finished.set(0);
         self.total.set(operations.len());
+        self.running.borrow_mut().clear();
         self.executing.set(true);
+    }
+    /// The status line: the change that started last of those running.
+    fn status(&self) {
+        let Some(operation) = self.running.borrow().last().cloned() else {
+            return;
+        };
+        let counter = if self.total.get() > 1 {
+            format!(" ({}/{})", self.position.get(), self.total.get())
+        } else {
+            String::new()
+        };
+        self.live.status(format!(
+            "{}{counter}",
+            presentation::operation_progress(&operation)
+        ));
+    }
+    /// Details under the status belong to the change it shows.
+    fn detail(&self, operation: &Operation, detail: &str) {
+        let running = self.running.borrow();
+        if running.last().is_none_or(|shown| shown == operation) {
+            self.live.detail(detail);
+        }
     }
     pub fn event(&self, event: Event) {
         match event {
             Event::Started(operation) => {
                 self.position.set(self.position.get() + 1);
-                let counter = if self.total.get() > 1 {
-                    format!(" ({}/{})", self.position.get(), self.total.get())
-                } else {
-                    String::new()
-                };
-                self.live.status(format!(
-                    "{}{counter}",
-                    presentation::operation_progress(&operation)
-                ));
+                self.running.borrow_mut().push(operation);
+                self.status();
             }
             Event::Progress {
                 operation,
                 progress: Progress::Message(message),
             } => {
                 if self.executing.get() {
-                    self.live.detail(&message);
+                    self.detail(&operation, &message);
                 } else {
                     self.notes.borrow_mut().push((operation, message));
                 }
             }
             Event::Progress {
+                operation,
                 progress: Progress::Transfer { completed, total },
-                ..
-            } => self.live.detail(&transfer(completed, total)),
+            } => self.detail(&operation, &transfer(completed, total)),
             Event::Progress {
+                operation,
                 progress: Progress::Package(name),
-                ..
-            } => self.live.detail(&format!("Updating {name}")),
+            } => self.detail(&operation, &format!("Updating {name}")),
             Event::Finished { operation, result } => {
+                self.finished.set(self.finished.get() + 1);
                 // Messages after the last change belong to the next review.
-                if self.position.get() == self.total.get() {
+                if self.finished.get() >= self.total.get() {
                     self.executing.set(false);
+                }
+                let shown = self.running.borrow().last() == Some(&operation);
+                self.running
+                    .borrow_mut()
+                    .retain(|running| *running != operation);
+                // Back to a change that still runs.
+                if shown {
+                    self.status();
                 }
                 if !self.show_results {
                     return;
@@ -323,6 +356,47 @@ mod tests {
         session.start(&operations[1..], true);
         session.event(Event::Started(operations[1].clone()));
         assert_eq!(session.position.get(), 1);
+    }
+
+    #[test]
+    fn changes_running_at_once_show_the_latest_and_end_with_the_last() {
+        let live = Live::forced(false);
+        let session = Session::new(&live);
+        let operations = [apt("fixture"), homebrew()];
+        session.start(&operations, false);
+        session.event(Event::Started(operations[0].clone()));
+        session.event(Event::Started(operations[1].clone()));
+        let status = |operation: &Operation| {
+            Some(format!(
+                "{} (2/2)",
+                presentation::operation_progress(operation)
+            ))
+        };
+        assert_eq!(live.showing().0, status(&operations[1]));
+        // Only the change it shows writes under the status.
+        let message = |operation: &Operation, text: &str| Event::Progress {
+            operation: operation.clone(),
+            progress: Progress::Message(text.into()),
+        };
+        session.event(message(&operations[0], "Unpacking fixture"));
+        assert_eq!(live.showing().1, "");
+        session.event(message(&operations[1], "Pouring tool"));
+        assert_eq!(live.showing().1, "Pouring tool");
+        session.event(Event::Finished {
+            operation: operations[1].clone(),
+            result: Ok(OperationOutcome::default()),
+        });
+        // Back to the one still running, whose messages are still progress.
+        assert_eq!(live.showing(), (status(&operations[0]), String::new()));
+        session.event(message(&operations[0], "Unpacking fixture"));
+        assert_eq!(live.showing().1, "Unpacking fixture");
+        assert!(session.notes.borrow().is_empty());
+        session.event(Event::Finished {
+            operation: operations[0].clone(),
+            result: Ok(OperationOutcome::default()),
+        });
+        session.event(message(&operations[0], "Update (1): fixture"));
+        assert_eq!(session.notes.borrow().len(), 1);
     }
 
     #[test]
