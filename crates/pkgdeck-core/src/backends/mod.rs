@@ -4560,6 +4560,44 @@ impl<T: Transport> Backend for SystemManager<T> {
             cancellation_deferred: result.cancellation_deferred,
         })
     }
+    /// pacman updates every selected package in one transaction, so
+    /// packages that move in lockstep update together.
+    fn execute_group(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+        if !matches!(self.kind, ManagerKind::Pacman) || operations.len() < 2 {
+            return None;
+        }
+        self.looked_up.clear();
+        let grouped = (|| {
+            let fixed = self.kind.write_args(&operations[0]).unwrap_or_default();
+            let mut args: Vec<OsString> = fixed.into_iter().map(OsString::from).collect();
+            for operation in operations {
+                match operation {
+                    Operation::Upgrade(id) if id.backend == "pacman" => {
+                        args.push(self.target(id)?.into());
+                    }
+                    _ => return Err(invalid("pacman", "mixed pacman batch")),
+                }
+            }
+            progress(Progress::Message(format!(
+                "Updating {} pacman packages in one transaction…",
+                operations.len()
+            )));
+            let result = self.call_with("pacman", args, cancel, true)?;
+            bytes("pacman", result.clone())?;
+            Ok(vec![
+                OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred,
+                };
+                operations.len()
+            ])
+        })();
+        Some(grouped)
+    }
 }
 
 /// Capabilities shared by user-scoped development managers. Search covers

@@ -1592,20 +1592,8 @@ impl Engine {
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
-            let mut end = index + 1;
-            if operation.backend() == "apt"
-                && matches!(
-                    operation,
-                    Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
-                )
-            {
-                while end < operations.len()
-                    && operations[end].backend() == "apt"
-                    && std::mem::discriminant(&operations[end]) == std::mem::discriminant(operation)
-                {
-                    end += 1;
-                }
-            }
+            let backend = operation.backend();
+            let end = crate::batch::group_end(operations, index);
             crate::batch::set_operation(index);
             if end - index > 1 {
                 for (offset, member) in operations[index..end].iter().enumerate() {
@@ -1613,16 +1601,16 @@ impl Engine {
                         events(Event::Started(member.clone()));
                     }
                 }
-                let prepared =
-                    self.ready("apt", operation.capability(), cancel)
-                        .and_then(|backend| {
-                            backend.prepare(operation, cancel, &mut |progress| {
-                                events(Event::Progress {
-                                    operation: operation.clone(),
-                                    progress,
-                                })
+                let prepared = self
+                    .ready(backend, operation.capability(), cancel)
+                    .and_then(|manager| {
+                        manager.prepare(operation, cancel, &mut |progress| {
+                            events(Event::Progress {
+                                operation: operation.clone(),
+                                progress,
                             })
-                        });
+                        })
+                    });
                 let rechecked = operations[index..end]
                     .iter()
                     .map(|member| {
@@ -1634,9 +1622,9 @@ impl Engine {
                 let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
                     Err(error)
                 } else {
-                    self.ready("apt", operation.capability(), cancel)
-                        .and_then(|backend| {
-                            backend
+                    self.ready(backend, operation.capability(), cancel)
+                        .and_then(|manager| {
+                            manager
                                 .execute_group(&operations[index..end], cancel, &mut |progress| {
                                     events(Event::Progress {
                                         operation: operation.clone(),
@@ -1645,13 +1633,13 @@ impl Engine {
                                 })
                                 .unwrap_or_else(|| {
                                     Err(EngineError::InvalidResponse {
-                                        backend: "apt".into(),
-                                        reason: "grouped APT operation unavailable".into(),
+                                        backend: backend.into(),
+                                        reason: "grouped operation unavailable".into(),
                                     })
                                 })
                         })
                 };
-                crate::cache::invalidate("apt");
+                crate::cache::invalidate(backend);
                 for member in &operations[index..end] {
                     let result = match &grouped {
                         Ok(outcomes) => Ok(outcomes[0].clone()),

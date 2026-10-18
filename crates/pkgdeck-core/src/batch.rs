@@ -299,6 +299,59 @@ fn apt_group_action(operation: &Operation) -> Result<Option<AptAction>, Executio
     }
 }
 
+/// Where the run of changes from `index` that one native transaction
+/// makes together ends: APT installs, removals or updates, and pacman
+/// updates, one verb at a time. Updating pacman packages one by one is a
+/// partial upgrade, which fails when packages move in lockstep, like
+/// systemd and systemd-libs.
+pub fn group_end(operations: &[Operation], index: usize) -> usize {
+    let joins = |operation: &Operation| match operation {
+        Operation::Install(id) | Operation::Remove(id) => id.backend == "apt",
+        Operation::Upgrade(id) => matches!(id.backend.as_str(), "apt" | "pacman"),
+        _ => false,
+    };
+    let first = &operations[index];
+    let mut end = index + 1;
+    if joins(first) {
+        while end < operations.len()
+            && joins(&operations[end])
+            && operations[end].backend() == first.backend()
+            && std::mem::discriminant(&operations[end]) == std::mem::discriminant(first)
+        {
+            end += 1;
+        }
+    }
+    end
+}
+
+/// The commands for a run [`group_end`] found, all for its first change.
+fn group_commands(group: &[Operation]) -> Result<Vec<ProtectedCommand>, ExecutionError> {
+    if group[0].backend() == "pacman" {
+        let mut command = manager_command("pacman", "upgrade", None)?;
+        for operation in group {
+            let Operation::Upgrade(id) = operation else {
+                return Err(invalid("mixed pacman batch"));
+            };
+            command.args.push(system_id(id, "pacman")?.into());
+        }
+        return Ok(vec![command]);
+    }
+    let actions = group
+        .iter()
+        .map(|operation| apt_group_action(operation)?.ok_or_else(|| invalid("mixed APT batch")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let args = AptAction::group_arguments(&actions)?
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned());
+    let command = ProtectedCommand::new("apt-get", args);
+    // Updates refresh the lists first, as one does on its own.
+    Ok(if matches!(group[0], Operation::Upgrade(_)) {
+        vec![apt_command(AptAction::Refresh)?, command]
+    } else {
+        vec![command]
+    })
+}
+
 pub fn batch_commands(
     operations: &[Operation],
 ) -> Result<Vec<Vec<ProtectedCommand>>, ExecutionError> {
@@ -308,33 +361,9 @@ pub fn batch_commands(
         .collect::<Result<Vec<_>, _>>()?;
     let mut index = 0;
     while index < operations.len() {
-        let Some(first) = apt_group_action(&operations[index])? else {
-            index += 1;
-            continue;
-        };
-        let mut actions = vec![first];
-        let mut end = index + 1;
-        while end < operations.len()
-            && std::mem::discriminant(&operations[end])
-                == std::mem::discriminant(&operations[index])
-        {
-            let Some(action) = apt_group_action(&operations[end])? else {
-                break;
-            };
-            actions.push(action);
-            end += 1;
-        }
-        if actions.len() > 1 {
-            let args = AptAction::group_arguments(&actions)?
-                .into_iter()
-                .map(|arg| arg.to_string_lossy().into_owned());
-            let group = ProtectedCommand::new("apt-get", args);
-            // Updates refresh the lists first, as one does on its own.
-            commands[index] = if matches!(operations[index], Operation::Upgrade(_)) {
-                vec![apt_command(AptAction::Refresh)?, group]
-            } else {
-                vec![group]
-            };
+        let end = group_end(operations, index);
+        if end - index > 1 {
+            commands[index] = group_commands(&operations[index..end])?;
             for entry in &mut commands[index + 1..end] {
                 entry.clear();
             }
@@ -2166,6 +2195,44 @@ done"#,
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn pacman_updates_run_in_one_transaction_and_nothing_else_joins_them() {
+        let operations = [
+            Operation::Upgrade(id("pacman", "systemd")),
+            Operation::Upgrade(id("pacman", "systemd-libs")),
+            Operation::Upgrade(id("pacman", "systemd-sysvcompat")),
+            Operation::Install(id("pacman", "jq")),
+            Operation::Install(id("pacman", "curl")),
+            Operation::Upgrade(id("dnf", "other")),
+            Operation::Upgrade(id("pacman", "zlib")),
+            Operation::Remove(id("pacman", "one")),
+            Operation::Remove(id("pacman", "two")),
+        ];
+        let commands = batch_commands(&operations).unwrap();
+        let mut together = manager_command("pacman", "upgrade", None).unwrap();
+        together
+            .args
+            .extend(["systemd", "systemd-libs", "systemd-sysvcompat"].map(String::from));
+        assert_eq!(commands[0], [together]);
+        assert!(commands[1].is_empty() && commands[2].is_empty());
+        // Installs, removals, other sources and a lone update keep their own.
+        for (index, commands) in commands.iter().enumerate().skip(3) {
+            assert_eq!(*commands, protected_commands(&operations[index]).unwrap());
+        }
+        assert_eq!(
+            (0..operations.len())
+                .map(|index| group_end(&operations, index))
+                .collect::<Vec<_>>(),
+            [3, 3, 3, 4, 5, 6, 7, 8, 9]
+        );
+        // A name that isn't one is refused for the whole run.
+        let bad = [
+            Operation::Upgrade(id("pacman", "systemd")),
+            Operation::Upgrade(id("pacman", "--sysroot=/")),
+        ];
+        assert!(batch_commands(&bad).is_err());
     }
 
     #[test]

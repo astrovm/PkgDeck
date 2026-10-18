@@ -947,6 +947,61 @@ fn manager(kind: &str, script: Script) -> SystemManager<Script> {
 }
 
 #[test]
+fn pacman_updates_every_selected_package_in_one_transaction() {
+    let script = Script::new(|_| ok(""));
+    let mut pacman = manager("pacman", script.clone());
+    let updates = ["systemd", "systemd-libs"]
+        .map(|name| Operation::Upgrade(system_id("pacman", name, "x86_64")));
+    let mut messages = vec![];
+    let outcomes = pacman
+        .execute_group(&updates, &Cancellation::default(), &mut |item| {
+            messages.push(item)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        matches!(&messages[..], [Progress::Message(text)] if text.contains("2 pacman packages"))
+    );
+    // The same command the batch runner was asked to approve.
+    let planned = &pkgdeck_core::batch::batch_commands(&updates).unwrap()[0][0];
+    assert_eq!(planned.program, "/usr/bin/pacman");
+    assert_eq!(
+        script.calls(),
+        [format!("w:pacman {}", planned.args.join(" "))]
+    );
+    // A failed transaction fails the whole run.
+    let failing = Script::new(|_| failed(1));
+    native_failure(
+        manager("pacman", failing)
+            .execute_group(&updates, &Cancellation::default(), &mut |_| {})
+            .unwrap(),
+        1,
+    );
+    // One package, other changes, or other managers aren't grouped here.
+    let script = Script::new(|_| ok(""));
+    let mut pacman = manager("pacman", script.clone());
+    assert!(pacman
+        .execute_group(&updates[..1], &Cancellation::default(), &mut |_| {})
+        .is_none());
+    let mixed = [
+        updates[0].clone(),
+        Operation::Install(system_id("pacman", "jq", "x86_64")),
+    ];
+    invalid_response(
+        pacman
+            .execute_group(&mixed, &Cancellation::default(), &mut |_| {})
+            .unwrap(),
+        "mixed pacman batch",
+    );
+    let dnf = ["one", "two"].map(|name| Operation::Upgrade(system_id("dnf", name, "x86_64")));
+    assert!(manager("dnf", script.clone())
+        .execute_group(&dnf, &Cancellation::default(), &mut |_| {})
+        .is_none());
+    assert!(script.calls().is_empty());
+}
+
+#[test]
 fn apk_xbps_and_macports_writes_use_fixed_noninteractive_commands() {
     let all = |backend: &str| {
         let id = system_id(backend, "tool", std::env::consts::ARCH);

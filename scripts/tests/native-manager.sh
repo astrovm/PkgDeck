@@ -36,9 +36,10 @@ script="
     success sources
     success search jq
     success info jq
-    # Without an architecture, one full upgrade: upgrading packages one at
-    # a time is a partial upgrade, which breaks when packages move in
-    # lockstep (pacman's systemd and systemd-libs).
+    # With an architecture, the packages it picks; pacman updates them in
+    # one transaction, since packages can move in lockstep (systemd and
+    # systemd-libs). Then without one, a full update.
+    success update
     report pkd update
     success install jq
     $query
