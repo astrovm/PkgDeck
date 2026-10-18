@@ -422,6 +422,14 @@ pub struct Settings {
     /// in the column headings; 0 for the default.
     pub name_column: f32,
     pub version_column: f32,
+    /// The window's size the last time it was neither maximized nor full
+    /// screen, in logical pixels; 0 for the default.
+    #[serde(deserialize_with = "or_default")]
+    pub window_width: f32,
+    #[serde(deserialize_with = "or_default")]
+    pub window_height: f32,
+    /// Whether the window was last maximized, so the next one opens so.
+    pub window_maximized: bool,
     pub flatpak_scope_choices: String,
     /// Flatpak links install for the whole system: the last choice in
     /// their review.
@@ -471,6 +479,9 @@ impl Default for Settings {
             details_width: 0.0,
             name_column: 0.0,
             version_column: 0.0,
+            window_width: 0.0,
+            window_height: 0.0,
+            window_maximized: false,
             flatpak_scope_choices: "{}".into(),
             flatpak_links_for_system: false,
             search_hint: String::new(),
@@ -1194,6 +1205,24 @@ mod tests {
         assert!(settings.installs_automatically("snap"));
         settings.set_installs_automatically("apt", true);
         assert_eq!(settings.manual_sources, ["flatpak"]);
+    }
+
+    #[test]
+    fn the_window_size_reads_back_and_a_bad_one_reads_as_the_default() {
+        let saved = Settings {
+            window_width: 1500.0,
+            window_height: 900.0,
+            window_maximized: true,
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&saved).unwrap();
+        assert!(text.contains(r#""windowWidth":1500.0"#));
+        assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), saved);
+        let read: Settings =
+            serde_json::from_str(r#"{"windowWidth":"wide","windowHeight":null,"autoUpdate":true}"#)
+                .unwrap();
+        assert_eq!((read.window_width, read.window_height), (0.0, 0.0));
+        assert!(read.auto_update);
     }
 
     #[test]

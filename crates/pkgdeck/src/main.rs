@@ -93,18 +93,33 @@ fn quiet(launch: &app::Launch) -> bool {
 /// The window's first size: 4:3, as tall as before so it still fits a
 /// 1366×768 screen.
 const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
+/// The smallest the window can be.
+const MIN_SIZE: [f32; 2] = [360.0, 400.0];
+
+/// The size the window last had, or [`DEFAULT_SIZE`] the first time.
+/// eframe keeps it within the largest screen.
+fn last_size(settings: &settings::Settings) -> [f32; 2] {
+    let size = [settings.window_width, settings.window_height];
+    if size.iter().all(|side| side.is_finite() && *side > 0.0) {
+        [size[0].max(MIN_SIZE[0]), size[1].max(MIN_SIZE[1])]
+    } else {
+        DEFAULT_SIZE
+    }
+}
 
 /// `decorated` is whether the system draws the window's frame: the older
 /// styles draw their own, unless the desktop they copy is the one running.
-fn options(decorated: bool) -> eframe::NativeOptions {
+/// The window opens at `size`, maximized if `maximized`.
+fn options(decorated: bool, size: [f32; 2], maximized: bool) -> eframe::NativeOptions {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("PkgDeck")
         .with_decorations(decorated)
         // Glass styles let the desktop show through, blurred.
         .with_transparent(true)
         .with_app_id("io.github.astrovm.PkgDeck")
-        .with_inner_size(DEFAULT_SIZE)
-        .with_min_inner_size([360.0, 400.0])
+        .with_inner_size(size)
+        .with_maximized(maximized)
+        .with_min_inner_size(MIN_SIZE)
         .with_drag_and_drop(true);
     // macOS already has a full-resolution, multi-size icon in the bundle.
     // Supplying a window icon makes eframe replace it in the Dock.
@@ -136,7 +151,7 @@ fn start_macos_background() -> eframe::Result {
         }
         fn ui(&mut self, _: &mut eframe::egui::Ui, _: &mut eframe::Frame) {}
     }
-    let mut options = options(true);
+    let mut options = options(true, DEFAULT_SIZE, false);
     options.viewport = options.viewport.with_visible(false);
     eframe::run_native("PkgDeck", options, Box::new(|_| Ok(Box::new(Startup))))
 }
@@ -279,10 +294,11 @@ fn main() {
             let media = media.clone();
             let result = eframe::run_native(
                 "PkgDeck",
-                options(pkgdeck::ui::system_frame(
-                    app.settings.style,
-                    pkgdeck::ui::desktop(),
-                )),
+                options(
+                    pkgdeck::ui::system_frame(app.settings.style, pkgdeck::ui::desktop()),
+                    last_size(&app.settings),
+                    app.settings.window_maximized,
+                ),
                 Box::new(|cc| {
                     pkgdeck::setup(&cc.egui_ctx, std::path::Path::new("/"), media);
                     Ok(Box::new(Window::new(&cc.egui_ctx, &mut app)))
@@ -358,7 +374,7 @@ mod tests {
 
     #[test]
     fn the_dock_keeps_the_bundled_icon() {
-        let icon = options(true).viewport.icon.unwrap();
+        let icon = options(true, DEFAULT_SIZE, false).viewport.icon.unwrap();
         assert_eq!(
             *icon == eframe::egui::IconData::default(),
             cfg!(target_os = "macos")
@@ -419,8 +435,33 @@ mod tests {
 
     #[test]
     fn the_window_opens_at_4_by_3() {
-        let size = options(true).viewport.inner_size.unwrap();
-        assert_eq!(size, DEFAULT_SIZE.into());
-        assert_eq!(size.x * 3.0, size.y * 4.0);
+        let size = last_size(&settings::Settings::default());
+        assert_eq!(size, DEFAULT_SIZE);
+        assert_eq!(size[0] * 3.0, size[1] * 4.0);
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_it_last_had() {
+        let mut saved = settings::Settings {
+            window_width: 1500.0,
+            window_height: 900.0,
+            window_maximized: true,
+            ..Default::default()
+        };
+        let size = last_size(&saved);
+        assert_eq!(size, [1500.0, 900.0]);
+        let viewport = options(true, size, saved.window_maximized).viewport;
+        assert_eq!(viewport.inner_size, Some(size.into()));
+        assert_eq!(viewport.maximized, Some(true));
+        // Never smaller than the window can be.
+        saved.window_width = 100.0;
+        saved.window_height = 50.0;
+        assert_eq!(last_size(&saved), MIN_SIZE);
+        // Only one side, or nonsense, reads as the default.
+        for (width, height) in [(0.0, 900.0), (1500.0, -1.0), (f32::INFINITY, 900.0)] {
+            saved.window_width = width;
+            saved.window_height = height;
+            assert_eq!(last_size(&saved), DEFAULT_SIZE);
+        }
     }
 }
