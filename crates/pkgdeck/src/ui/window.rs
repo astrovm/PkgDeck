@@ -76,6 +76,8 @@ impl<'a> Window<'a> {
             self.app.window_request = WindowRequest::Show;
         }
         self.app.dragging = ctx.dragged_id().is_some();
+        let zoom = ctx.zoom_factor();
+        ctx.input(|i| remember_size(i.viewport(), zoom, &mut self.app.settings));
         let wait = self.app.tick(Instant::now());
         ui::show(self.app, ui);
         if self.shown {
@@ -109,6 +111,25 @@ impl<'a> Window<'a> {
             ctx.request_repaint();
         }
         ctx.request_repaint_after(wait);
+    }
+}
+
+/// Keeps the window's size and whether it's maximized, so the next one
+/// opens the same. Maximized or full screen, it keeps the size it goes
+/// back to; minimized, it keeps everything. `zoom` turns points back into
+/// the logical pixels the window was opened in.
+fn remember_size(
+    viewport: &egui::ViewportInfo,
+    zoom: f32,
+    settings: &mut crate::settings::Settings,
+) {
+    if viewport.minimized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false) {
+        return;
+    }
+    settings.window_maximized = viewport.maximized.unwrap_or(false);
+    if let Some(rect) = viewport.inner_rect.filter(|_| !settings.window_maximized) {
+        settings.window_width = (rect.width() * zoom).round();
+        settings.window_height = (rect.height() * zoom).round();
     }
 }
 
@@ -265,6 +286,64 @@ impl eframe::App for Window<'_> {
 mod tests {
     use super::*;
     use theme::{Palette, Scheme};
+
+    #[test]
+    fn the_window_keeps_the_size_it_goes_back_to() {
+        let mut settings = crate::settings::Settings::default();
+        let mut viewport = egui::ViewportInfo {
+            inner_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(10.0, 20.0),
+                egui::vec2(640.4, 480.0),
+            )),
+            ..Default::default()
+        };
+        // Points under a larger text size are bigger than pixels.
+        remember_size(&viewport, 1.25, &mut settings);
+        assert_eq!(
+            (settings.window_width, settings.window_height),
+            (801.0, 600.0)
+        );
+        assert!(!settings.window_maximized);
+        let mut big = viewport.clone();
+        big.inner_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1920.0, 1080.0),
+        ));
+        big.maximized = Some(true);
+        remember_size(&big, 1.0, &mut settings);
+        assert!(settings.window_maximized);
+        assert_eq!(
+            (settings.window_width, settings.window_height),
+            (801.0, 600.0)
+        );
+        // Full screen and minimized windows change nothing.
+        for (fullscreen, minimized) in [(true, false), (false, true)] {
+            let mut odd = big.clone();
+            odd.maximized = Some(false);
+            odd.fullscreen = Some(fullscreen);
+            odd.minimized = Some(minimized);
+            remember_size(&odd, 1.0, &mut settings);
+            assert!(settings.window_maximized);
+            assert_eq!(
+                (settings.window_width, settings.window_height),
+                (801.0, 600.0)
+            );
+        }
+        viewport.maximized = Some(false);
+        remember_size(&viewport, 1.0, &mut settings);
+        assert!(!settings.window_maximized);
+        assert_eq!(
+            (settings.window_width, settings.window_height),
+            (640.0, 480.0)
+        );
+        // Before the window reports a size, the last one stays.
+        viewport.inner_rect = None;
+        remember_size(&viewport, 1.0, &mut settings);
+        assert_eq!(
+            (settings.window_width, settings.window_height),
+            (640.0, 480.0)
+        );
+    }
 
     #[test]
     fn only_the_system_frame_is_filled_behind() {
