@@ -28,13 +28,18 @@ script="
     trap 'echo \"real $backend lifecycle FAILED at line \$LINENO: \$BASH_COMMAND\" >&2' ERR
     $adduser
     printf 'pkgdeck-test ALL=(root) NOPASSWD: $writers\\n' >/etc/sudoers.d/pkgdeck
-    run() { sudo -u pkgdeck-test /opt/pkd --json --yes --auth sudo --from $backend --arch \$(uname -m) \"\$@\"; }
+    pkd() { sudo -u pkgdeck-test /opt/pkd --json --yes --auth sudo --from $backend \"\$@\"; }
+    run() { pkd --arch \$(uname -m) \"\$@\"; }
     # Print pkd's report when a step fails; grep -q alone would hide it.
-    success() { local out; out=\$(run \"\$@\") || true; grep -q '\"exit_code\":0' <<<\"\$out\" || { printf '%s\\n' \"\$out\" >&2; return 1; }; }
+    report() { local out; out=\$(\"\$@\") || true; grep -q '\"exit_code\":0' <<<\"\$out\" || { printf '%s\\n' \"\$out\" >&2; return 1; }; }
+    success() { report run \"\$@\"; }
     success sources
     success search jq
     success info jq
-    success update
+    # Without an architecture, one full upgrade: upgrading packages one at
+    # a time is a partial upgrade, which breaks when packages move in
+    # lockstep (pacman's systemd and systemd-libs).
+    report pkd update
     success install jq
     $query
     run list | grep -q '\"name\":\"jq\"'
