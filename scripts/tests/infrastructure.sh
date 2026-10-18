@@ -50,7 +50,7 @@ grep -q synthetic-slow-stage "$work/slow/latest/format.log"
 cat >"$work/bin/podman" <<'EOF'
 #!/bin/bash
 case "$1" in
-    info) echo true ;;
+    info) [[ $* == *CPUs* ]] && echo '8 1000' || echo true ;;
     image) exit 0 ;;
     run) printf '%s\n' "$@" >"$PODMAN_ARGS"; exit "${PODMAN_STATUS:-0}" ;;
     *) exit 2 ;;
@@ -66,6 +66,20 @@ grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
+# A local run gets half the engine's CPUs and memory unless told otherwise.
+for setting in local CI=true PKGDECK_CONTAINER_CPUS=0 'PKGDECK_CONTAINER_CPUS=3 PKGDECK_CONTAINER_MEMORY=4g'; do
+    read -ra overrides <<<"${setting/local/}"
+    expect_code 0 env -u CI PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" \
+        ${overrides[@]+"${overrides[@]}"} scripts/container.sh development --exec true
+    grep -E -- '^--(cpus|memory)=' "$work/args" | tr '\n' ' ' >"$work/limits" || true
+    case $setting in
+        local) expected='--cpus=4 --memory=500 ' ;;
+        CI=true) expected='' ;;
+        PKGDECK_CONTAINER_CPUS=0) expected='--memory=500 ' ;;
+        *) expected='--cpus=3 --memory=4g ' ;;
+    esac
+    [[ $(<"$work/limits") == "$expected" ]] || { echo "$setting: got '$(<"$work/limits")', expected '$expected'"; exit 1; }
+done
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
 echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'

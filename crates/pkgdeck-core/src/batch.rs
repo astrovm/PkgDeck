@@ -2087,7 +2087,7 @@ done"#;
 printf '%s' $$ >'{}'
 IFS= read -r start
 printf '%s\n' '{{"type":"ready","protocol":3}}'
-while :; do sleep 1; done"#,
+while :; do sleep 1 </dev/null >/dev/null 2>&1; done"#,
             pid.display()
         );
         let mut child = Command::new("/bin/sh");
@@ -2097,11 +2097,17 @@ while :; do sleep 1; done"#,
         let scope = begin_session(child, &operations, approved, &Cancellation::default())
             .unwrap()
             .unwrap();
-        let runner = PathBuf::from(format!("/proc/{}", fs::read_to_string(&pid).unwrap()));
-        assert!(runner.exists());
-        drop(scope);
-        assert!(!runner.exists());
+        let runner = fs::read_to_string(&pid).unwrap();
         let _ = fs::remove_file(&pid);
+        let runner = rustix::process::Pid::from_raw(runner.parse().unwrap()).unwrap();
+        let alive = || rustix::process::test_kill_process(runner).is_ok();
+        assert!(alive());
+        drop(scope);
+        let lingering = alive();
+        if lingering {
+            let _ = rustix::process::kill_process(runner, rustix::process::Signal::KILL);
+        }
+        assert!(!lingering);
     }
 
     #[test]
