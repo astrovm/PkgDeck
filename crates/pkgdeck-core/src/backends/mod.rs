@@ -7219,12 +7219,13 @@ mod tests {
 Version         : 262-1\n\
 Architecture    : x86_64\n\
 Depends On      : systemd-libs=262  acl  linux-api-headers>=4.10  bash<6  zlib=1:1.3.2-3\n\
-Optional Deps   : curl: systemd-journal-upload [installed]\n\
-                  polkit=1: not a dependency\n\
+Optional Deps   : curl: systemd-journal-upload [installed]\n                  \
+polkit=1: not a dependency\n\
 \n\
 Name            : tool\n\
 Architecture    : any\n\
-Depends On      : None\n\
+Depends On      : None\n                  \
+tool-libs=2\n\
 \n\
 Version         : 1-1\n";
         assert_eq!(
@@ -7238,10 +7239,11 @@ Version         : 1-1\n";
                         ("zlib".into(), "1:1.3.2-3".into()),
                     ]
                 },
+                // A value that goes on below still counts.
                 PacmanPins {
                     name: "tool".into(),
                     architecture: "any".into(),
-                    pins: vec![],
+                    pins: vec![("tool-libs".into(), "2".into())],
                 },
             ]
         );
