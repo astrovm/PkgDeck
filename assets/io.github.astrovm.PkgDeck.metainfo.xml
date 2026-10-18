@@ -19,6 +19,7 @@
           <li>Selected pacman updates run in one transaction, with the packages that need their exact version</li>
           <li>The window opens at the size you left it, maximized if it was</li>
           <li>Screen readers read out the progress card</li>
+          <li>zypper and DNF no longer show as failed when their first check after a change is slow</li>
         </ul>
       </description>
     </release>

@@ -83,6 +83,22 @@ fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
     Ok(())
 }
 
+/// How long a package manager may take to answer a read.
+fn read_timeout(executable: &str, args: &[OsString]) -> std::time::Duration {
+    // A firmware metadata refresh downloads the whole catalog.
+    let fwupd_refresh = executable == "fwupdmgr" && args.iter().any(|arg| arg == "refresh");
+    if executable == "softwareupdate" || fwupd_refresh {
+        // Their listings ask remote servers and can take minutes.
+        std::time::Duration::from_secs(300)
+    } else if matches!(executable, "snap" | "fwupdmgr" | "zypper" | "dnf") {
+        // zypper and DNF rebuild their package cache on the first read
+        // after a change, which takes seconds on a slow computer.
+        std::time::Duration::from_secs(60)
+    } else {
+        Limits::default().timeout
+    }
+}
+
 /// Points sudo at the password dialog bundled with the macOS app, so a
 /// Homebrew cask that needs administrator access (Docker Desktop removing
 /// its helper tools, for one) can ask for the password without a terminal.
@@ -1432,16 +1448,7 @@ impl Host {
         if write {
             self.privileged(&path, args, authorization, cancel)
         } else {
-            // A firmware metadata refresh downloads the whole catalog.
-            let fwupd_refresh = executable == "fwupdmgr" && args.iter().any(|arg| arg == "refresh");
-            let timeout = if executable == "softwareupdate" || fwupd_refresh {
-                // Their listings ask remote servers and can take minutes.
-                std::time::Duration::from_secs(300)
-            } else if matches!(executable, "snap" | "fwupdmgr") {
-                std::time::Duration::from_secs(60)
-            } else {
-                Limits::default().timeout
-            };
+            let timeout = read_timeout(executable, args);
             let command = self.command(&path, args)?;
             let result = process::run(
                 command,
@@ -2480,6 +2487,21 @@ mod boundary_tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         stopper.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slow_package_manager_reads_get_more_time() {
+        let read = |executable: &str, args: &[&str]| {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            read_timeout(executable, &args).as_secs()
+        };
+        assert_eq!(read("softwareupdate", &["--list"]), 300);
+        assert_eq!(read("fwupdmgr", &["refresh"]), 300);
+        assert_eq!(read("fwupdmgr", &["get-updates"]), 60);
+        for manager in ["snap", "zypper", "dnf"] {
+            assert_eq!(read(manager, &["search"]), 60, "{manager}");
+        }
+        assert_eq!(read("pacman", &["-Q"]), 10);
     }
 
     #[test]
