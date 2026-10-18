@@ -1609,7 +1609,7 @@ fn an_update_brings_along_what_needs_the_version_it_replaces() {
             finished.push(operation);
         }
     });
-    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(outcome.is_ok());
     assert_eq!(finished, [pacman_update("systemd")]);
     assert_eq!(*transactions.lock().unwrap(), [2]);
     // Listed already, it runs once.
