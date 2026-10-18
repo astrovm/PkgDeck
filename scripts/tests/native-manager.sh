@@ -36,6 +36,12 @@ script="
     success sources
     success search jq
     success info jq
+    # pacman alone won't update what needs the exact version an update
+    # replaces (systemd-sysvcompat needs systemd=262), so pkd adds it.
+    if [ $backend = pacman ] && pacman -Qu systemd >/dev/null 2>&1; then
+        success upgrade systemd
+        if pacman -Qu systemd systemd-libs systemd-sysvcompat; then echo 'systemd left behind' >&2; exit 1; fi
+    fi
     # With an architecture, the packages it picks; pacman updates them in
     # one transaction, since packages can move in lockstep (systemd and
     # systemd-libs). Then without one, a full update.

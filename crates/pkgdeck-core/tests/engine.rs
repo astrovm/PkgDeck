@@ -1481,6 +1481,33 @@ impl Backend for PacmanGroup {
         self.0.lock().unwrap().push(operations.len());
         Some(Ok(vec![OperationOutcome::default(); operations.len()]))
     }
+    /// systemd-sysvcompat needs the systemd it was built with.
+    fn lockstep(
+        &mut self,
+        operations: &[Operation],
+        _: &Cancellation,
+    ) -> Result<Vec<Operation>, EngineError> {
+        let has = |name: &str| {
+            operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::Upgrade(id) if id.name == name))
+        };
+        Ok(if has("systemd") && !has("systemd-sysvcompat") {
+            vec![pacman_update("systemd-sysvcompat")]
+        } else {
+            vec![]
+        })
+    }
+}
+fn pacman_update(name: &str) -> Operation {
+    Operation::Upgrade(PackageId {
+        backend: "pacman".into(),
+        name: name.into(),
+        architecture: "x86_64".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    })
 }
 
 #[test]
@@ -1524,6 +1551,72 @@ fn pacman_updates_in_a_batch_run_as_one_transaction() {
     assert_eq!(finished, operations.len());
     // The three together, then the one after another source on its own.
     assert_eq!(*transactions.lock().unwrap(), [3, 1]);
+}
+
+#[test]
+fn an_update_brings_along_what_needs_the_version_it_replaces() {
+    let transactions = std::sync::Arc::default();
+    let mut engine = Engine::default();
+    engine
+        .register(PacmanGroup(std::sync::Arc::clone(&transactions)))
+        .unwrap();
+    engine
+        .register(Synthetic::new("synthetic", Fault::None))
+        .unwrap();
+    engine.enable_batch_authorization(
+        Host::new(Runtime::Native, Default::default()),
+        Authorization::Polkit,
+    );
+    let refresh = Operation::Refresh {
+        backend: "synthetic".into(),
+    };
+    let operations = [pacman_update("systemd"), refresh.clone()];
+    let cancel = Cancellation::default();
+    // A review can list it.
+    assert_eq!(
+        engine.with_lockstep(&operations, &cancel),
+        [
+            pacman_update("systemd"),
+            pacman_update("systemd-sysvcompat"),
+            refresh
+        ]
+    );
+    // Run without that review, it joins the transaction but has no result
+    // or events of its own.
+    let mut events = vec![];
+    let outcomes = engine.execute_batch(&operations, &cancel, &mut |event| events.push(event));
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(*transactions.lock().unwrap(), [2]);
+    let joined = pacman_update("systemd-sysvcompat");
+    assert!(!events.iter().any(|event| match event {
+        Event::Started(operation)
+        | Event::Progress { operation, .. }
+        | Event::Finished { operation, .. } => *operation == joined,
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Finished { .. }))
+            .count(),
+        2
+    );
+    // One update on its own brings it along too.
+    transactions.lock().unwrap().clear();
+    let mut finished = vec![];
+    let outcome = engine.execute(&operations[0], &cancel, &mut |event| {
+        if let Event::Finished { operation, .. } = event {
+            finished.push(operation);
+        }
+    });
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(finished, [pacman_update("systemd")]);
+    assert_eq!(*transactions.lock().unwrap(), [2]);
+    // Listed already, it runs once.
+    transactions.lock().unwrap().clear();
+    let listed = engine.with_lockstep(&operations, &cancel);
+    assert_eq!(engine.execute_batch(&listed, &cancel, &mut |_| {}).len(), 3);
+    assert_eq!(*transactions.lock().unwrap(), [2]);
 }
 
 #[test]

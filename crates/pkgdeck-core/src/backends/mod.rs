@@ -4560,6 +4560,67 @@ impl<T: Transport> Backend for SystemManager<T> {
             cancellation_deferred: result.cancellation_deferred,
         })
     }
+    /// pacman updates what an update needs, but not the installed packages
+    /// that need the exact version it replaces, like systemd-sysvcompat
+    /// needing systemd=262: those join, and then what needs them.
+    fn lockstep(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+    ) -> Result<Vec<Operation>, EngineError> {
+        if !matches!(self.kind, ManagerKind::Pacman) {
+            return Ok(vec![]);
+        }
+        let mut chosen: std::collections::BTreeSet<String> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Upgrade(id) if id.backend == "pacman" => Some(id.name.clone()),
+                _ => None,
+            })
+            .collect();
+        if chosen.is_empty() {
+            return Ok(vec![]);
+        }
+        let updates = self.updates(cancel)?;
+        let mut args: Vec<OsString> = vec!["-Qi".into(), "--".into()];
+        args.extend(
+            updates
+                .keys()
+                .filter(|name| !chosen.contains(*name) && self.valid_name(name))
+                .map(OsString::from),
+        );
+        if args.len() == 2 {
+            return Ok(vec![]);
+        }
+        let text = String::from_utf8_lossy(&bytes("pacman", self.call(args, cancel, false)?)?)
+            .into_owned();
+        let installed = pacman_pins(&text);
+        let mut joined = vec![];
+        loop {
+            let before = joined.len();
+            for (name, architecture, pins) in &installed {
+                let breaks = pins.iter().any(|(dependency, version)| {
+                    chosen.contains(dependency)
+                        && updates
+                            .get(dependency)
+                            .is_some_and(|candidate| !same_pacman_version(candidate, version))
+                });
+                if breaks && updates.contains_key(name) && chosen.insert(name.clone()) {
+                    joined.push(Operation::Upgrade(PackageId {
+                        backend: "pacman".into(),
+                        name: name.clone(),
+                        architecture: architecture.clone(),
+                        scope: Scope::System,
+                        remote: None,
+                        reference: None,
+                    }));
+                }
+            }
+            if joined.len() == before {
+                return Ok(joined);
+            }
+        }
+    }
     /// pacman updates every selected package in one transaction, so
     /// packages that move in lockstep update together.
     fn execute_group(
@@ -4574,19 +4635,22 @@ impl<T: Transport> Backend for SystemManager<T> {
         self.looked_up.clear();
         let grouped = (|| {
             let fixed = self.kind.write_args(&operations[0]).unwrap_or_default();
-            let mut args: Vec<OsString> = fixed.into_iter().map(OsString::from).collect();
+            let mut names = vec![];
             for operation in operations {
                 match operation {
                     Operation::Upgrade(id) if id.backend == "pacman" => {
-                        args.push(self.target(id)?.into());
+                        names.push(self.target(id)?);
                     }
                     _ => return Err(invalid("pacman", "mixed pacman batch")),
                 }
             }
+            // Names the packages that joined the ones chosen, too.
             progress(Progress::Message(format!(
-                "Updating {} pacman packages in one transaction…",
-                operations.len()
+                "Updating {} in one transaction…",
+                and_list(&names)
             )));
+            let mut args: Vec<OsString> = fixed.into_iter().map(OsString::from).collect();
+            args.extend(names.into_iter().map(OsString::from));
             let result = self.call_with("pacman", args, cancel, true)?;
             bytes("pacman", result.clone())?;
             Ok(vec![
@@ -4598,6 +4662,69 @@ impl<T: Transport> Backend for SystemManager<T> {
         })();
         Some(grouped)
     }
+}
+
+/// Each package in `pacman -Qi`'s answer, with its architecture and the
+/// exact versions it depends on (`systemd=262`).
+fn pacman_pins(text: &str) -> Vec<(String, String, Vec<(String, String)>)> {
+    let mut packages = vec![];
+    let mut fields: Vec<(String, String)> = vec![];
+    let mut finish = |fields: &mut Vec<(String, String)>| {
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        if let Some(name) = field("Name") {
+            let pins = field("Depends On")
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|dependency| dependency.split_once('='))
+                // `>=` and `<=` aren't exact.
+                .filter(|(name, _)| !name.ends_with(['<', '>']))
+                .map(|(name, version)| (name.to_owned(), version.to_owned()))
+                .collect();
+            let architecture = field("Architecture").unwrap_or_default().to_owned();
+            packages.push((name.to_owned(), architecture, pins));
+        }
+        fields.clear();
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            finish(&mut fields);
+        } else if line.starts_with(char::is_whitespace) {
+            // A long value goes on below.
+            if let Some((_, value)) = fields.last_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+        } else if let Some((key, value)) = line.split_once(" : ") {
+            fields.push((key.trim().to_owned(), value.trim().to_owned()));
+        }
+    }
+    finish(&mut fields);
+    packages
+}
+
+/// `a`, `a and b`, or `a, b, and c`.
+fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// Whether `candidate`, a full version, is the one `pinned` names. A pin
+/// without a release (`262`) matches every release of that version.
+fn same_pacman_version(candidate: &str, pinned: &str) -> bool {
+    candidate == pinned
+        || (!pinned.contains('-')
+            && candidate
+                .rsplit_once('-')
+                .is_some_and(|(version, _)| version == pinned))
 }
 
 /// Capabilities shared by user-scoped development managers. Search covers
@@ -7068,6 +7195,59 @@ mod tests {
         path::Path,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn pacman_pins_are_the_exact_versions_each_package_depends_on() {
+        let text = "Name            : systemd\n\
+Version         : 262-1\n\
+Architecture    : x86_64\n\
+Depends On      : systemd-libs=262  acl  linux-api-headers>=4.10  bash<6  zlib=1:1.3.2-3\n\
+Optional Deps   : curl: systemd-journal-upload [installed]\n\
+                  polkit=1: not a dependency\n\
+\n\
+Name            : tool\n\
+Architecture    : any\n\
+Depends On      : None\n\
+\n\
+Version         : 1-1\n";
+        assert_eq!(
+            pacman_pins(text),
+            [
+                (
+                    "systemd".to_owned(),
+                    "x86_64".to_owned(),
+                    vec![
+                        ("systemd-libs".to_owned(), "262".to_owned()),
+                        ("zlib".to_owned(), "1:1.3.2-3".to_owned()),
+                    ]
+                ),
+                ("tool".to_owned(), "any".to_owned(), vec![]),
+            ]
+        );
+        assert!(pacman_pins("").is_empty());
+    }
+
+    #[test]
+    fn a_pin_without_a_release_matches_every_release_of_its_version() {
+        assert!(same_pacman_version("262-1", "262"));
+        assert!(same_pacman_version("262-2", "262"));
+        assert!(same_pacman_version("262-1", "262-1"));
+        assert!(same_pacman_version("1:1.3.2-4", "1:1.3.2"));
+        assert!(!same_pacman_version("262.1-1", "262"));
+        assert!(!same_pacman_version("262-2", "262-1"));
+        assert!(!same_pacman_version("2620-1", "262"));
+        assert!(!same_pacman_version("1:1.3.2-4", "1:1.3.2-3"));
+    }
+
+    #[test]
+    fn names_read_as_a_list() {
+        let names =
+            |list: &[&str]| and_list(&list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>());
+        assert_eq!(names(&[]), "");
+        assert_eq!(names(&["a"]), "a");
+        assert_eq!(names(&["a", "b"]), "a and b");
+        assert_eq!(names(&["a", "b", "c"]), "a, b, and c");
+    }
 
     #[test]
     fn flatpak_apps_start_from_the_installation_they_are_in() {
