@@ -160,7 +160,8 @@ Backends that can't do this return `Unsupported`.
 
 Before cleaning, the engine finds the plan again. It runs only if the plan is
 the one reviewed. Container sources also run a list that got shorter, such as
-when an image came into use, and remove only what is still unused.
+when an image came into use, and remove only what is still unused. Homebrew's
+cleanup runs when its files only changed size or some are gone.
 
 ## Tests
 

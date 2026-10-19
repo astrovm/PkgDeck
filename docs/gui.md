@@ -227,8 +227,12 @@ starts checked, except:
   cleaned like the rest from then on.
 - sccache, because it manages its own size limit.
 
-Its button shows the space those tasks free. **Select all** and **Select none**
-work like on Updates.
+Its button shows the space those tasks free. **Select all** leaves out the
+tasks that may hold your work or data until you check them yourself.
+**Select none** works like on Updates.
+
+When some tasks fail, **Activity** shows each reason once, with the tasks it
+stopped. The row shows the reason too, and the whole text when you point at it.
 
 ### Clean settings
 

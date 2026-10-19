@@ -1101,12 +1101,25 @@ impl App {
             self.unchecked.insert(row.identity());
         }
     }
+    /// Whether Select all checks `row`. A cleanup that waits to be checked
+    /// the first time (it may delete data, see `CleanupItem::opt_in`) is
+    /// only ever checked on its own.
+    pub fn select_all_checks(&self, row: &Row) -> bool {
+        (self.page != Page::Clean || row.batch_cleanable())
+            && !(row.kind == "cleanup" && row.cleanup_opt_in && !self.row_checked(row))
+    }
     pub fn set_all_checked(&mut self, checked: bool) {
         let rows: Vec<_> = self
             .items
             .iter()
             .filter_map(|item| self.shown_rows().get(item.raw))
-            .filter(|row| self.page != Page::Clean || row.batch_cleanable())
+            .filter(|row| {
+                if checked {
+                    self.select_all_checks(row)
+                } else {
+                    self.page != Page::Clean || row.batch_cleanable()
+                }
+            })
             .cloned()
             .collect();
         for row in rows {

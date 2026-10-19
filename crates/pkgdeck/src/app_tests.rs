@@ -1460,6 +1460,34 @@ fn a_clean_filter_with_no_usable_source_reads_nothing() {
 }
 
 #[test]
+fn select_all_never_checks_a_task_that_deletes_data() {
+    let mut app = app();
+    app.page = Page::Clean;
+    let rows = json!([
+        {"kind":"cleanup", "name":"one", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache"},
+        {"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "cleanup_opt_in":true},
+        {"kind":"cleanup", "name":"deps", "source":"apt", "cleanup_key":"deps", "cleanup_kind":"orphan_dependencies", "cleanup_opt_in":true}
+    ]);
+    app.c().set_rows(rows.to_string().into());
+    app.react();
+    app.refresh_items();
+    let row = |index: usize| serde_json::from_value::<Row>(rows[index].clone()).unwrap();
+    app.set_all_checked(false);
+    app.set_all_checked(true);
+    assert!(app.row_checked(&row(0)));
+    assert!(!app.row_checked(&row(1)));
+    assert!(!app.select_all_checks(&row(1)));
+    // One checked by hand stays checked, and Select none clears it too.
+    app.set_row_checked(&row(2), true);
+    assert!(app.select_all_checks(&row(2)));
+    app.set_all_checked(true);
+    assert!(app.row_checked(&row(2)));
+    assert!(!app.row_checked(&row(1)));
+    app.set_all_checked(false);
+    assert!((0..3).all(|index| !app.row_checked(&row(index))));
+}
+
+#[test]
 fn clean_selected_reviews_only_the_checked_batch_tasks() {
     let mut app = app();
     app.page = Page::Clean;

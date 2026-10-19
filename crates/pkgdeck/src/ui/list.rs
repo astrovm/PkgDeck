@@ -359,7 +359,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             .items
             .iter()
             .filter_map(|i| rows.get(i.raw))
-            .filter(|row| app.page != Page::Clean || row.batch_cleanable())
+            .filter(|row| app.select_all_checks(row))
             .collect();
         let all_checked =
             !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
@@ -996,7 +996,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         if let Some(reason) = failed.as_deref().filter(|_| width - used > 40.0) {
             let place =
                 Rect::from_min_size(at + vec2(used + gap, 0.0), vec2(width - used - gap, 16.0));
-            failed_summary(ui, &painter, place, reason, id);
+            failed_summary(ui, &painter, place, reason, id, 1);
         } else if !row.summary.is_empty() && width - used > 40.0 {
             let summary = one_line(
                 ui,
@@ -1054,9 +1054,14 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     if let Some(s) = cols.summary {
         if let Some(reason) = &failed {
-            let place =
-                Rect::from_min_size(pos2(s.left(), rect.center().y - 9.0), vec2(s.width(), 18.0));
-            failed_summary(ui, &painter, place, reason, id);
+            // Two lines when the row has room for them.
+            let high = (rect.height() - 8.0).clamp(18.0, 36.0);
+            let rows = if high >= 34.0 { 2 } else { 1 };
+            let place = Rect::from_min_size(
+                pos2(s.left(), rect.center().y - high / 2.0),
+                vec2(s.width(), high),
+            );
+            failed_summary(ui, &painter, place, reason, id, rows);
         } else {
             let galley = one_line(
                 ui,
@@ -1331,22 +1336,28 @@ fn skeleton_rows(ui: &mut Ui, body: Rect, palette: &Palette) {
     }
 }
 
-/// A warning mark and why the last change failed on the row, in `place`.
-/// The whole reason shows on hover.
-fn failed_summary(ui: &Ui, painter: &egui::Painter, place: Rect, reason: &str, id: Id) {
+/// A warning mark and why the last change failed on the row, in `place`,
+/// on up to `rows` lines. The whole reason shows on hover.
+fn failed_summary(
+    ui: &Ui,
+    painter: &egui::Painter,
+    place: Rect,
+    reason: &str,
+    id: Id,
+    rows: usize,
+) {
     let palette = Palette::current(ui.ctx());
     let mark = Rect::from_min_size(
         pos2(place.left(), place.center().y - 7.0),
         Vec2::splat(14.0),
     );
     theme::paint_icon(painter, mark, "warning", palette.warning);
-    let text = one_line(
-        ui,
-        reason,
-        theme::font(12.5),
-        palette.warning,
-        (place.width() - 20.0).max(0.0),
-    );
+    let width = (place.width() - 20.0).max(0.0);
+    let text = if rows > 1 {
+        wrapped(ui, reason, theme::font(12.5), palette.warning, width, rows)
+    } else {
+        one_line(ui, reason, theme::font(12.5), palette.warning, width)
+    };
     painter.galley(
         pos2(place.left() + 20.0, place.center().y - text.size().y / 2.0),
         text,

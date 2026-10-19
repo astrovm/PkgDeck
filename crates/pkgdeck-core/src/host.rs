@@ -424,6 +424,10 @@ impl Host {
             // pnpm refuses global commands when PNPM_HOME is set in the
             // session but missing here; Cargo and Bun read theirs too.
             "PNPM_HOME",
+            // Node version managers, where they keep npm and pnpm.
+            "FNM_DIR",
+            "NVM_DIR",
+            "VOLTA_HOME",
             "CARGO_HOME",
             "RUSTUP_HOME",
             "BUN_INSTALL",
@@ -866,8 +870,9 @@ impl Host {
     }
 
     /// Official installers put Cargo, rustup, Nix, pixi and the conda family outside
-    /// the PATH a desktop app starts with. Only their fixed per-user locations, or the
-    /// executable a `conda init` shell names, are tried.
+    /// the PATH a desktop app starts with, and Node version managers put npm and
+    /// pnpm there only in a shell they set up. Only their fixed per-user locations,
+    /// or the executable a `conda init` shell names, are tried.
     fn user_install(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
         let path = |key: &str| {
             self.var(key)
@@ -916,6 +921,31 @@ impl Host {
                 candidates.extend(path("MAMBA_EXE"));
                 candidates.extend(home.as_ref().map(|home| home.join(".local/bin/micromamba")));
             }
+            // The default Node of fnm, Volta and nvm, in that order.
+            "npm" | "pnpm" => {
+                let data = path("XDG_DATA_HOME")
+                    .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+                let fnm = [
+                    path("FNM_DIR"),
+                    data.map(|data| data.join("fnm")),
+                    home.as_ref().map(|home| home.join(".fnm")),
+                    home.as_ref()
+                        .map(|home| home.join("Library/Application Support/fnm")),
+                ];
+                for dir in fnm.into_iter().flatten() {
+                    candidates.push(dir.join("aliases/default/bin").join(name));
+                }
+                candidates.extend(
+                    path("VOLTA_HOME")
+                        .or_else(|| home.as_ref().map(|home| home.join(".volta")))
+                        .map(|dir| dir.join("bin").join(name)),
+                );
+                let nvm = path("NVM_DIR").or_else(|| home.as_ref().map(|home| home.join(".nvm")));
+                candidates.extend(
+                    nvm.and_then(|nvm| self.nvm_default(&nvm))
+                        .map(|dir| dir.join("bin").join(name)),
+                );
+            }
             _ => {}
         }
         for candidate in candidates {
@@ -926,6 +956,42 @@ impl Host {
             }
         }
         Ok(None)
+    }
+
+    /// Where `name` runs from: the PATH, or else a per-user install a
+    /// desktop app's PATH misses (see [`Self::user_install`]).
+    pub fn find(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
+        match self.resolve(name)? {
+            Some(path) => Ok(Some(path)),
+            None => self.user_install(name),
+        }
+    }
+
+    /// The Node nvm's `default` alias names: an exact version, or the newest
+    /// installed one it starts with (`22`, `22.1`). Other aliases, such as
+    /// `lts/*` or `node`, get the newest installed version.
+    fn nvm_default(&self, nvm: &Path) -> Option<PathBuf> {
+        let versions = nvm.join("versions/node");
+        let alias = fs::read_to_string(self.filesystem_path(&nvm.join("alias/default"))).ok()?;
+        let alias = alias.trim().trim_start_matches('v');
+        let numbers = |name: &str| -> Option<Vec<u64>> {
+            name.strip_prefix('v')?
+                .split('.')
+                .map(|part| part.parse().ok())
+                .collect()
+        };
+        let wanted: Option<Vec<u64>> = alias.split('.').map(|part| part.parse().ok()).collect();
+        fs::read_dir(self.filesystem_path(&versions))
+            .ok()?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter_map(|name| Some((numbers(&name)?, name)))
+            .filter(|(version, _)| {
+                wanted
+                    .as_ref()
+                    .is_none_or(|wanted| version.starts_with(wanted))
+            })
+            .max()
+            .map(|(_, name)| versions.join(name))
     }
 
     /// Development tools always run as the invoking user with a bounded
@@ -940,12 +1006,26 @@ impl Host {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         refuse_root(write)?;
+        let mut host = std::borrow::Cow::Borrowed(self);
         let path = match self.resolve(executable)? {
-            Some(path) => Some(path),
-            None => self.user_install(executable)?,
-        }
-        .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
-        let command = self.command(&path, args)?;
+            Some(path) => path,
+            None => {
+                let path = self
+                    .user_install(executable)?
+                    .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
+                // npm and pnpm start the `node` next to them, through PATH.
+                if let Some(dir) = path.parent() {
+                    let key = OsString::from("PATH");
+                    let dirs = std::iter::once(dir.to_owned())
+                        .chain(std::env::split_paths(&self.env[&key]));
+                    if let Ok(joined) = std::env::join_paths(dirs) {
+                        host.to_mut().env.insert(key, joined);
+                    }
+                }
+                path
+            }
+        };
+        let command = host.command(&path, args)?;
         let result = process::run(
             command,
             Limits {
@@ -2672,6 +2752,87 @@ mod boundary_tests {
                 assert_eq!(host.user_install(name).unwrap(), Some(home.join(relative)));
             }
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn node_version_managers_lend_npm_and_pnpm_with_their_node() {
+        let root = scratch("node-managers");
+        let home = root.join("home");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let found = |vars: &[(&str, &Path)], name: &str| {
+            let mut vars = vars.to_vec();
+            vars.extend([("HOME", home.as_path()), ("PATH", bin.as_path())]);
+            host(Runtime::Native, &vars).user_install(name).unwrap()
+        };
+        // None installed.
+        assert_eq!(found(&[], "npm"), None);
+        // nvm: an exact default, a major version, then any other alias.
+        let nvm = home.join(".nvm");
+        for version in ["v20.11.0", "v22.1.0", "v22.12.0", "v9.0.0"] {
+            executable(
+                &nvm.join("versions/node").join(version).join("bin/npm"),
+                "exit 0",
+            );
+        }
+        fs::create_dir_all(nvm.join("versions/node/not-a-version")).unwrap();
+        let alias = nvm.join("alias/default");
+        fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        for (default, version) in [
+            ("v20.11.0\n", Some("v20.11.0")),
+            ("22", Some("v22.12.0")),
+            ("22.1", Some("v22.1.0")),
+            ("lts/*", Some("v22.12.0")),
+            ("18", None),
+        ] {
+            fs::write(&alias, default).unwrap();
+            assert_eq!(
+                found(&[], "npm"),
+                version.map(|version| nvm.join("versions/node").join(version).join("bin/npm")),
+                "{default}"
+            );
+        }
+        // Volta comes before nvm, and fnm before both.
+        executable(&home.join(".volta/bin/pnpm"), "exit 0");
+        executable(&nvm.join("versions/node/v9.0.0/bin/pnpm"), "exit 0");
+        assert_eq!(found(&[], "pnpm"), Some(home.join(".volta/bin/pnpm")));
+        let fnm = home.join(".local/share/fnm/aliases/default/bin");
+        executable(&fnm.join("pnpm"), "exit 0");
+        assert_eq!(found(&[], "pnpm"), Some(fnm.join("pnpm")));
+        // Moved fnm and Volta homes.
+        let moved = root.join("moved");
+        executable(&moved.join("fnm/aliases/default/bin/npm"), "exit 0");
+        assert_eq!(
+            found(&[("FNM_DIR", &moved.join("fnm"))], "npm"),
+            Some(moved.join("fnm/aliases/default/bin/npm"))
+        );
+        executable(&moved.join("volta/bin/npm"), "exit 0");
+        assert_eq!(
+            found(&[("VOLTA_HOME", &moved.join("volta"))], "npm"),
+            Some(moved.join("volta/bin/npm"))
+        );
+        // npm runs with the node next to it first on PATH.
+        executable(&fnm.join("npm"), "printf %s \"$PATH\"");
+        let host = host(Runtime::Native, &[("HOME", &home), ("PATH", &bin)]);
+        assert_eq!(host.find("npm").unwrap(), Some(fnm.join("npm")));
+        let result = host
+            .dev_tool("npm", "npm", &[], &Cancellation::default(), false)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("{}:{}", fnm.display(), bin.display())
+        );
+        // One on PATH wins, with PATH as it is.
+        executable(&bin.join("npm"), "printf %s \"$PATH\"");
+        assert_eq!(host.find("npm").unwrap(), Some(bin.join("npm")));
+        let result = host
+            .dev_tool("npm", "npm", &[], &Cancellation::default(), false)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            bin.to_str().unwrap()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

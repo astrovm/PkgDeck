@@ -59,6 +59,8 @@ that aren't installed are skipped. Sources that fail are reported, not
 hidden. `pkd sources` lists every source, including unavailable ones and why.
 pnpm 11 and later refuse global installs until `pnpm setup` puts their bin
 folder on your PATH, so until then pnpm shows as unavailable.
+npm and pnpm from fnm, Volta or nvm are found even when PkgDeck starts outside
+the shell that set them up. PkgDeck uses their default Node.
 
 ![pkd sources listing available and unavailable package managers](screenshots/cli-sources.png)
 

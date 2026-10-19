@@ -3066,6 +3066,35 @@ impl<T: Transport> Backend for Homebrew<T> {
     fn id(&self) -> &str {
         "homebrew"
     }
+    /// brew cleanup lists each file with its size, which grows with a
+    /// download, and the total it frees. Neither changes what it removes,
+    /// and a list that only got shorter removes less.
+    fn cleanup_still_reviewed(&self, reviewed: &CleanupItem, current: &CleanupItem) -> bool {
+        fn removes(preview: &str) -> Vec<&str> {
+            preview
+                .lines()
+                .filter(|line| !line.starts_with("==> This operation would free approximately"))
+                .map(|line| match line.strip_prefix("Would remove: ") {
+                    Some(rest) => rest.rsplit_once(" (").map_or(rest, |(path, _)| path),
+                    None => line,
+                })
+                .collect()
+        }
+        if reviewed == current {
+            return true;
+        }
+        let listed = removes(&reviewed.preview);
+        current.id.key == "cleanup"
+            && (
+                &reviewed.id,
+                &reviewed.kind,
+                &reviewed.title,
+                &reviewed.summary,
+            ) == (&current.id, &current.kind, &current.title, &current.summary)
+            && removes(&current.preview)
+                .iter()
+                .all(|line| listed.contains(line))
+    }
     fn has_update_index(&self) -> bool {
         true
     }
