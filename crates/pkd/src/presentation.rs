@@ -1620,7 +1620,7 @@ mod tests {
             ),
             (
                 json!({"Refused": {"backend": "apt", "refusal": "Unknown"}}),
-                "{\"Refused\":{\"backend\":\"apt\",\"refusal\":\"Unknown\"}}",
+                "Refused: backend: apt; refusal: Unknown",
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
