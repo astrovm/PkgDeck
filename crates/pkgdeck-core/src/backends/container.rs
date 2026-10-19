@@ -1787,6 +1787,7 @@ mod tests {
         let current = backend.cleanup(&cancel).unwrap().remove(1);
         assert_ne!(reviewed, current);
         assert!(backend.cleanup_still_reviewed(&reviewed, &current));
+        assert!(backend.cleanup_still_reviewed(&current, &current));
         // A longer list, or a different one, needs a new review.
         assert!(!backend.cleanup_still_reviewed(&current, &reviewed));
         let reworded = CleanupItem {
@@ -1806,6 +1807,12 @@ mod tests {
             ..reviewed.clone()
         };
         assert!(!backend.cleanup_still_reviewed(&other_reviewed, &other));
+        // A preview with no list can't be told apart.
+        let unlisted = CleanupItem {
+            preview: "Removes these images.".into(),
+            ..current.clone()
+        };
+        assert!(!backend.cleanup_still_reviewed(&reviewed, &unlisted));
         backend
             .execute(&Operation::Clean(current.id.clone()), &cancel, &mut ignore)
             .unwrap();
