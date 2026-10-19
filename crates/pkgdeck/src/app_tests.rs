@@ -1466,7 +1466,8 @@ fn select_all_never_checks_a_task_that_deletes_data() {
     let rows = json!([
         {"kind":"cleanup", "name":"one", "source":"dev-caches", "cleanup_key":"one", "cleanup_kind":"package_cache"},
         {"kind":"cleanup", "name":"vol", "source":"docker", "cleanup_key":"vol", "cleanup_kind":"data", "cleanup_opt_in":true},
-        {"kind":"cleanup", "name":"deps", "source":"apt", "cleanup_key":"deps", "cleanup_kind":"orphan_dependencies", "cleanup_opt_in":true}
+        {"kind":"cleanup", "name":"deps", "source":"apt", "cleanup_key":"deps", "cleanup_kind":"orphan_dependencies", "cleanup_opt_in":true},
+        {"kind":"cleanup", "name":"sccache", "source":"dev-caches", "cleanup_key":"sccache", "cleanup_kind":"package_cache"}
     ]);
     app.c().set_rows(rows.to_string().into());
     app.react();
@@ -1477,14 +1478,22 @@ fn select_all_never_checks_a_task_that_deletes_data() {
     assert!(app.row_checked(&row(0)));
     assert!(!app.row_checked(&row(1)));
     assert!(!app.select_all_checks(&row(1)));
+    // sccache starts unchecked too, as it keeps its own size.
+    assert!(!app.row_checked(&row(3)));
+    assert!(!app.select_all_checks(&row(3)));
     // One checked by hand stays checked, and Select none clears it too.
     app.set_row_checked(&row(2), true);
     assert!(app.select_all_checks(&row(2)));
     app.set_all_checked(true);
     assert!(app.row_checked(&row(2)));
     assert!(!app.row_checked(&row(1)));
+    app.set_row_checked(&row(3), true);
+    app.set_all_checked(true);
+    assert!(app.row_checked(&row(3)));
     app.set_all_checked(false);
-    assert!((0..3).all(|index| !app.row_checked(&row(index))));
+    assert!((0..4).all(|index| !app.row_checked(&row(index))));
+    app.set_all_checked(true);
+    assert!(!app.row_checked(&row(3)));
 }
 
 #[test]

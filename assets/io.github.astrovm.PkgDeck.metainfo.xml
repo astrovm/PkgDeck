@@ -17,7 +17,7 @@
           <li>If a task changed since you reviewed it, only that task is skipped and the rest are cleaned</li>
           <li>Podman and Docker cleanups still run when an image, volume or container came into use, and keep what is in use</li>
           <li>Automatic updates skip only the sources that can't run on their own, not the whole batch</li>
-          <li>Select all no longer checks cleanups that delete data, such as unused volumes</li>
+          <li>Select all no longer checks cleanups that start unchecked, such as unused volumes and sccache</li>
           <li>npm and pnpm installed with fnm, Volta or nvm are found again</li>
           <li>Homebrew cleanup still runs when a file it lists changed size</li>
           <li>Errors read more clearly, and Activity shows each reason once</li>

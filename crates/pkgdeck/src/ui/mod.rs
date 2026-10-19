@@ -1297,7 +1297,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     .icon("installed")
                     .icon_only(narrow)
                     .tooltip(if selected + missing < total {
-                        "Tasks that delete data stay unchecked until you check them"
+                        "Tasks that start unchecked stay that way until you check them"
                     } else {
                         "Select all"
                     })

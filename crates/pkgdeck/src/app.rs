@@ -1101,12 +1101,19 @@ impl App {
             self.unchecked.insert(row.identity());
         }
     }
-    /// Whether Select all checks `row`. A cleanup that waits to be checked
-    /// the first time (it may delete data, see `CleanupItem::opt_in`) is
-    /// only ever checked on its own.
+    /// Whether Select all checks `row`. A cleanup that starts unchecked
+    /// (one that may delete data, or sccache, see
+    /// `CleanupPreferences::starts_unchecked`) is only ever checked on its own.
     pub fn select_all_checks(&self, row: &Row) -> bool {
-        (self.page != Page::Clean || row.batch_cleanable())
-            && !(row.kind == "cleanup" && row.cleanup_opt_in && !self.row_checked(row))
+        let waits = row.kind == "cleanup"
+            && pkgdeck_core::package::CleanupPreferences::starts_unchecked(
+                &pkgdeck_core::package::CleanupId {
+                    backend: row.source.clone(),
+                    key: row.cleanup_key.clone(),
+                },
+                row.cleanup_opt_in,
+            );
+        (self.page != Page::Clean || row.batch_cleanable()) && !(waits && !self.row_checked(row))
     }
     pub fn set_all_checked(&mut self, checked: bool) {
         let rows: Vec<_> = self

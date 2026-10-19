@@ -228,7 +228,7 @@ starts checked, except:
 - sccache, because it manages its own size limit.
 
 Its button shows the space those tasks free. **Select all** leaves out the
-tasks that may hold your work or data until you check them yourself.
+tasks that start unchecked until you check them yourself.
 **Select none** works like on Updates.
 
 When some tasks fail, **Activity** shows each reason once, with the tasks it
