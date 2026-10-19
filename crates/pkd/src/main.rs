@@ -63,7 +63,7 @@ fn doctor_with(
         .unwrap_or(0);
     let mut found = 0;
     for (name, executable) in pkgdeck_core::host::BACKENDS {
-        text += &match host.resolve(executable)? {
+        text += &match host.find(executable)? {
             Some(path) => {
                 found += 1;
                 let path = paint("2", &path.display().to_string());

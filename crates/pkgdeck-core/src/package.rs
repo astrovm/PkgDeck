@@ -181,6 +181,11 @@ impl Default for CleanupPreferences {
     }
 }
 impl CleanupPreferences {
+    /// Whether the task starts unchecked the first time it shows up: an
+    /// opt-in one, or one left out by default, such as sccache.
+    pub fn starts_unchecked(id: &CleanupId, opt_in: bool) -> bool {
+        opt_in || Self::default().excluded.contains(id)
+    }
     /// Whether the task is checked. An opt-in one only once it was.
     pub fn includes(&self, id: &CleanupId, opt_in: bool) -> bool {
         if opt_in {

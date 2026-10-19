@@ -1264,6 +1264,13 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 .collect();
             let total = selectable.len();
             let selected = selectable.iter().filter(|checked| **checked).count();
+            // Tasks Select all would check that aren't yet.
+            let missing = app
+                .items
+                .iter()
+                .filter_map(|item| rows.get(item.raw))
+                .filter(|row| app.select_all_checks(row) && !app.row_checked(row))
+                .count();
             let bytes = clean_all_frees(app);
             let action = if selected == total {
                 "Clean all"
@@ -1285,16 +1292,21 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 app.clean_selected();
             }
             let narrow = width < 420.0;
-            if selected < total
+            if missing > 0
                 && Button::new(Look::Secondary, "Select all")
                     .icon("installed")
                     .icon_only(narrow)
+                    .tooltip(if selected + missing < total {
+                        "Tasks that start unchecked stay that way until you check them"
+                    } else {
+                        "Select all"
+                    })
                     .show(ui)
                     .clicked()
             {
                 app.set_all_checked(true);
             }
-            if selected == total
+            if missing == 0
                 && selected > 0
                 && Button::new(Look::Secondary, "Select none")
                     .icon("cancel")

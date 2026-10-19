@@ -2566,6 +2566,12 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
             }
+            // PkgDeck's own checks already say it in a sentence, such as
+            // "This cleanup task changed or expired."; the source didn't.
+            let said = reason.trim();
+            if !said.contains('\n') && said.starts_with(char::is_uppercase) && said.ends_with('.') {
+                return said.to_owned();
+            }
             match meaningful_line(&strip_debug(reason)) {
                 Some(line) => format!(
                     "{} reported a problem: {}",
@@ -3099,8 +3105,9 @@ fn write_notice(
             })
         }
         Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => {
-            // One line per failure, named the way people know the package.
-            let failed: Vec<(&Operation, String)> = operations
+            // One line per reason, naming the changes it stopped the way
+            // people know them.
+            let failed: Vec<(&Operation, &str)> = operations
                 .iter()
                 .zip(outcomes)
                 .zip(status.lines().skip(1))
@@ -3109,19 +3116,37 @@ fn write_notice(
                     let reason = line
                         .strip_prefix(&format!("{}: ", operation_title(operation)))
                         .unwrap_or(line);
-                    let name = short_name(operation, names);
-                    let line = if reason.starts_with(&name) {
-                        reason.to_owned()
-                    } else {
-                        format!("{name}: {reason}")
-                    };
-                    (operation, line)
+                    (operation, reason)
                 })
                 .collect();
+            let mut reasons: Vec<(Vec<String>, &str)> = vec![];
+            for (operation, reason) in &failed {
+                let name = short_name(operation, names);
+                if reason.starts_with(&name) {
+                    reasons.push((vec![], reason));
+                } else if let Some((named, _)) = reasons
+                    .iter_mut()
+                    .find(|(named, same)| !named.is_empty() && same == reason)
+                {
+                    named.push(name);
+                } else {
+                    reasons.push((vec![name], reason));
+                }
+            }
             let detail = batch_status_text(
-                &failed
+                &reasons
                     .iter()
-                    .map(|(_, line)| line.as_str())
+                    .map(|(named, reason)| match named.as_slice() {
+                        [] => (*reason).to_owned(),
+                        [one] => format!("{one}: {reason}"),
+                        [first, second] => format!("{first} and {second}: {reason}"),
+                        [first, second, third] => {
+                            format!("{first}, {second} and {third}: {reason}")
+                        }
+                        [first, second, rest @ ..] => {
+                            format!("{first}, {second} and {} more: {reason}", rest.len())
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
                 sudo,
@@ -13405,6 +13430,62 @@ mod tests {
         }
     }
     #[test]
+    fn failures_with_the_same_reason_share_one_line() {
+        let clean = |key: &str| {
+            Operation::Clean(CleanupId {
+                backend: "dev-caches".into(),
+                key: key.into(),
+            })
+        };
+        let names = Names::new();
+        let notice = |keys: &[&str], reasons: &[&str]| {
+            let operations: Vec<_> = keys.iter().map(|key| clean(key)).collect();
+            let mut status = format!("Completed 0 of {} cleanup tasks.", keys.len());
+            for (operation, reason) in operations.iter().zip(reasons) {
+                status.push_str(&format!("\n{}: {reason}", operation_title(operation)));
+            }
+            let outcomes = vec![Outcome::Failed; keys.len()];
+            write_notice(
+                &Job::CleanAll(operations),
+                &Ok(Payload::Batch(status, outcomes)),
+                false,
+                &names,
+            )
+        };
+        let name = |key: &str| short_name(&clean(key), &names);
+        let (busy, gone) = ("The disk is busy.", "It's gone.");
+        let two = notice(&["a", "b"], &[busy, busy]);
+        assert_eq!(two["title"], "2 of 2 changes failed");
+        assert_eq!(
+            two["detail"],
+            format!("{} and {}: {busy}", name("a"), name("b"))
+        );
+        let three = notice(&["a", "b", "c"], &[busy, gone, busy]);
+        assert_eq!(
+            three["detail"],
+            format!(
+                "{} and {}: {busy}\n{}: {gone}",
+                name("a"),
+                name("c"),
+                name("b")
+            )
+        );
+        let many = notice(&["a", "b", "c", "d", "e"], &[busy; 5]);
+        assert_eq!(
+            many["detail"],
+            format!("{}, {} and 3 more: {busy}", name("a"), name("b"))
+        );
+        let four = notice(&["a", "b", "c"], &[busy; 3]);
+        assert_eq!(
+            four["detail"],
+            format!("{}, {} and {}: {busy}", name("a"), name("b"), name("c"))
+        );
+        // A reason that already names its change stays on its own line.
+        let named = format!("{} couldn't run.", name("a"));
+        let own = notice(&["a", "b"], &[&named, busy]);
+        assert_eq!(own["detail"], format!("{named}\n{}: {busy}", name("b")));
+    }
+    #[test]
     fn update_all_skips_updates_that_failed_until_they_work() {
         let available = |backend: &str, name: &str, display: &str, version: &str| {
             let mut package = synthetic_package(name, display);
@@ -16262,6 +16343,19 @@ mod tests {
                 false
             ),
             "Snap reported a problem."
+        );
+        // PkgDeck's own sentence needs no source in front.
+        assert_eq!(
+            plain_error(
+                &EngineError::InvalidResponse {
+                    backend: "dev-caches".into(),
+                    reason: "This cleanup task changed or expired. Reload and review it again."
+                        .into()
+                },
+                None,
+                false
+            ),
+            "This cleanup task changed or expired. Reload and review it again."
         );
         let skipped = EngineError::InvalidResponse {
             backend: "macos-apps".into(),

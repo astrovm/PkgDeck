@@ -190,7 +190,8 @@ impl Desktop {
         fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o700)).unwrap();
         let displayfile = dir.0.join("display");
         let output = fs::File::create(&displayfile).unwrap();
-        let server = Process(
+        let errors = dir.0.join("xvfb.log");
+        let mut server = Process(
             Command::new("Xvfb")
                 .args([
                     "-displayfd",
@@ -203,12 +204,22 @@ impl Desktop {
                     "-ac",
                 ])
                 .stdout(output)
+                .stderr(fs::File::create(&errors).unwrap())
                 .spawn()
                 .unwrap(),
         );
+        // A busy runner can take a while to start it; one that stops says why.
         until(
-            || fs::read_to_string(&displayfile).unwrap().contains('\n'),
-            10,
+            || {
+                if let Ok(Some(status)) = server.0.try_wait() {
+                    panic!(
+                        "Xvfb stopped ({status}): {}",
+                        fs::read_to_string(&errors).unwrap_or_default()
+                    );
+                }
+                fs::read_to_string(&displayfile).unwrap().contains('\n')
+            },
+            30,
         );
         let number = fs::read_to_string(displayfile).unwrap();
         assert!(number.trim().chars().all(|c| c.is_ascii_digit()));

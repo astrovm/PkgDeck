@@ -568,6 +568,41 @@ fn homebrew_cleanup_uses_native_dry_run_plans() {
     let cleanup = items.iter().find(|item| item.id.key == "cleanup");
     // Sized from what brew says it would free.
     assert_eq!(cleanup.and_then(|item| item.bytes), Some(1_000_000));
+    // A file that grew, or one gone, still runs; a new one needs a review.
+    let reviewed = CleanupItem {
+        preview: "Would remove: /cache/a (1MB)\nWould remove: /cache/b (3 files, 2MB)\nPruned 1 symbolic links\n==> This operation would free approximately 3MB of disk space.".into(),
+        ..cleanup.unwrap().clone()
+    };
+    let changed = |preview: &str| CleanupItem {
+        preview: preview.into(),
+        ..reviewed.clone()
+    };
+    assert!(brew.cleanup_still_reviewed(&reviewed, &reviewed));
+    assert!(brew.cleanup_still_reviewed(
+        &reviewed,
+        &changed("Would remove: /cache/a (1.5MB)\nPruned 1 symbolic links\n==> This operation would free approximately 1.5MB of disk space.")
+    ));
+    assert!(!brew.cleanup_still_reviewed(
+        &reviewed,
+        &changed("Would remove: /cache/a (1MB)\nWould remove: /cache/c (1MB)")
+    ));
+    assert!(!brew.cleanup_still_reviewed(&reviewed, &changed("Pruned 2 symbolic links")));
+    let other = items
+        .iter()
+        .find(|item| item.id.key == "autoremove")
+        .unwrap();
+    assert!(!brew.cleanup_still_reviewed(
+        other,
+        &CleanupItem {
+            preview: String::new(),
+            ..other.clone()
+        }
+    ));
+    let renamed = CleanupItem {
+        summary: "Other".into(),
+        ..changed("Would remove: /cache/a (1MB)")
+    };
+    assert!(!brew.cleanup_still_reviewed(&reviewed, &renamed));
     for item in items {
         brew.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();

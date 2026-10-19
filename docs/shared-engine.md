@@ -133,8 +133,9 @@ total.
 
 ### Batches
 
-`execute_batch` checks every change and its saved plan first. If
-any check fails, every change gets an error and nothing runs. When the bundled
+`execute_batch` checks every change and its saved plan first. A change
+that fails its check gets an error and doesn't run, nor do the changes that
+would share its transaction. The rest still run. When the bundled
 helper is available, it asks for permission once, before any change, and only
 allows the commands in that batch. Consecutive APT changes of the same kind
 run in one APT transaction but still get one result each.
@@ -156,6 +157,11 @@ never contains shell code or arbitrary paths. A backend only supports `Clean`
 if it can find a plan without changing anything, and map the key back to a
 fixed command. The app and CLI show the preview and ask before running it.
 Backends that can't do this return `Unsupported`.
+
+Before cleaning, the engine finds the plan again. It runs only if the plan is
+the one reviewed. Container sources also run a list that got shorter, such as
+when an image came into use, and remove only what is still unused. Homebrew's
+cleanup runs when its files only changed size or some are gone.
 
 ## Tests
 

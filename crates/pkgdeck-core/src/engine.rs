@@ -310,6 +310,12 @@ pub trait Backend: Send {
             .find(|item| item.id == *id)
             .ok_or(EngineError::NotFound)
     }
+    /// Whether `current`, a fresh plan for a task reviewed as `reviewed`,
+    /// may still run. By default only the same plan may; a backend can also
+    /// allow one that removes only part of what was reviewed.
+    fn cleanup_still_reviewed(&self, reviewed: &CleanupItem, current: &CleanupItem) -> bool {
+        reviewed == current
+    }
     fn apt_upgrade_plan(&mut self, _cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
         Err(EngineError::Unsupported {
             backend: self.id().into(),
@@ -1406,7 +1412,7 @@ impl Engine {
                     // this exact task (APT clean, for example). A general
                     // discovery would omit it and reject a valid reviewed plan.
                     let current = backend.cleanup_plan(id, cancel)?;
-                    if expected.as_ref() != Some(&current) {
+                    if !still_reviewed(&**backend, expected.as_ref(), &current) {
                         return Err(EngineError::InvalidResponse {
                             backend: id.backend.clone(),
                             reason:
@@ -1442,7 +1448,8 @@ impl Engine {
     }
 
     /// Check every native preview and typed target before authorization. A
-    /// failure prevents every write in this confirmation scope.
+    /// change that fails doesn't run, nor does any that shares its
+    /// transaction.
     fn preflight(
         &mut self,
         operation: &Operation,
@@ -1471,7 +1478,7 @@ impl Engine {
         }
         if let Operation::Clean(id) = operation {
             let current = backend.cleanup_plan(id, cancel)?;
-            if expected_cleanup.as_ref() != Some(&current) {
+            if !still_reviewed(&**backend, expected_cleanup.as_ref(), &current) {
                 return Err(EngineError::InvalidResponse {
                     backend: id.backend.clone(),
                     reason: "This cleanup task changed or expired. Reload and review it again."
@@ -1614,16 +1621,60 @@ impl Engine {
                 self.preflight(operation, cancel)
             })
             .collect();
-        if checked.iter().any(Result::is_err) {
-            return operations.iter().zip(checked).map(|(operation, result)| {
-                let result = Err(result.err().unwrap_or_else(|| EngineError::InvalidResponse {
-                    backend: operation.backend().into(),
-                    reason: "Another change in this batch could not be checked. Review the batch again.".into(),
-                }));
-                events(Event::Started(operation.clone()));
-                events(Event::Finished { operation: operation.clone(), result: result.clone() });
-                result
-            }).collect();
+        if !checked.iter().any(Result::is_err) {
+            return self.execute_checked(operations, cancel, events);
+        }
+        // A change that fails its check doesn't run, nor do the ones that
+        // would share its transaction. The rest were checked and still run.
+        let mut results: Vec<Option<Result<OperationOutcome, EngineError>>> =
+            (0..operations.len()).map(|_| None).collect();
+        let mut index = 0;
+        while index < operations.len() {
+            let end = crate::batch::group_end(operations, index);
+            if checked[index..end].iter().any(Result::is_err) {
+                for position in index..end {
+                    let operation = &operations[position];
+                    let result = Err(checked[position].clone().err().unwrap_or_else(|| {
+                        EngineError::InvalidResponse {
+                            backend: operation.backend().into(),
+                            reason: "Another change that runs together with this one could not be checked. Review them again.".into(),
+                        }
+                    }));
+                    events(Event::Started(operation.clone()));
+                    events(Event::Finished {
+                        operation: operation.clone(),
+                        result: result.clone(),
+                    });
+                    results[position] = Some(result);
+                }
+            }
+            index = end;
+        }
+        let rest: Vec<Operation> = operations
+            .iter()
+            .zip(&results)
+            .filter(|(_, result)| result.is_none())
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        let mut ran = self.execute_checked(&rest, cancel, events).into_iter();
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| ran.next().unwrap_or(Err(EngineError::Cancelled)))
+            })
+            .collect()
+    }
+
+    /// Runs `operations`, each already checked, with one authorization for
+    /// all of them when they need one.
+    fn execute_checked(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        if operations.is_empty() {
+            return vec![];
         }
         let protected = crate::batch::batch_commands(operations)
             .expect("individual protected commands were validated above")
@@ -1879,6 +1930,15 @@ impl Engine {
             })
             .collect()
     }
+}
+
+/// Whether a cleanup plan found again may still run as `reviewed`.
+fn still_reviewed(
+    backend: &dyn Backend,
+    reviewed: Option<&CleanupItem>,
+    current: &CleanupItem,
+) -> bool {
+    reviewed.is_some_and(|reviewed| backend.cleanup_still_reviewed(reviewed, current))
 }
 
 #[cfg(test)]
@@ -2226,7 +2286,7 @@ mod apt_upgrade_tests {
     }
 
     #[test]
-    fn changed_later_plan_blocks_every_batch_write_before_authorization() {
+    fn changed_later_plan_blocks_only_its_own_write_before_authorization() {
         struct UserFixture(Arc<AtomicUsize>);
         impl Backend for UserFixture {
             fn id(&self) -> &str {
@@ -2274,8 +2334,10 @@ mod apt_upgrade_tests {
         ];
         let mut events = Vec::new();
         let results = engine.execute_batch(&operations, &cancel, &mut |event| events.push(event));
-        assert!(results.iter().all(Result::is_err));
-        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        // Only the changed plan is refused; the other change still runs.
+        assert!(results[0].is_ok(), "{:?}", results[0]);
+        assert!(results[1].is_err());
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert_eq!(
             events
                 .iter()
@@ -2307,7 +2369,7 @@ mod apt_upgrade_tests {
         engine.plan_apt_upgrade(&cancel).unwrap();
         let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
         assert!(results.iter().all(Result::is_ok));
-        assert_eq!(writes.load(Ordering::SeqCst), 2);
+        assert_eq!(writes.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -2433,16 +2495,14 @@ mod apt_upgrade_tests {
             Err(EngineError::InvalidResponse { backend, reason })
                 if backend == "fwupd" && reason.contains("never updated automatically")
         ));
-        assert!(matches!(
-            &results[1],
-            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("could not be checked")
-        ));
-        assert_eq!(writes.load(Ordering::SeqCst), 0);
-        // With someone there, the same source runs.
+        // The other source still runs on its own.
+        assert!(results[1].is_ok(), "{:?}", results[1]);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // With someone there, it runs again.
         engine.set_unattended(false);
         let results = engine.execute_batch(&operations[1..], &Cancellation::default(), &mut |_| {});
         assert!(results.iter().all(Result::is_ok), "{results:?}");
-        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
     }
 
     #[test]

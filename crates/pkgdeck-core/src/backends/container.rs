@@ -549,10 +549,9 @@ impl<T: Transport> Container<T> {
 
 impl<T: Transport> Container<T> {
     /// Remove the stopped containers, unused images or unused volumes the
-    /// reviewed preview listed, after checking they are still exactly
-    /// those. Nothing is forced: a container that started, or an image or
-    /// volume that came into use, makes the engine refuse. `None` for any
-    /// other task.
+    /// reviewed preview listed that are still stopped or unused. Nothing is
+    /// forced: a container that started, or an image or volume that came
+    /// into use, stays. `None` for any other task.
     fn clean_unused(
         &mut self,
         key: &str,
@@ -586,8 +585,13 @@ impl<T: Transport> Container<T> {
             ),
             _ => return Ok(None),
         };
-        let planned = planned.ok_or(EngineError::NotFound)?;
-        if planned.is_empty() || current? != planned {
+        let current = current?;
+        let planned: Vec<_> = planned
+            .ok_or(EngineError::NotFound)?
+            .into_iter()
+            .filter(|planned| current.contains(planned))
+            .collect();
+        if planned.is_empty() {
             return Err(EngineError::InvalidResponse {
                 backend: self.kind.id().into(),
                 reason: format!("The {what} changed. Reload and review them again."),
@@ -612,6 +616,30 @@ impl<T: Transport> Container<T> {
 impl<T: Transport> Backend for Container<T> {
     fn id(&self) -> &str {
         self.kind.id()
+    }
+    /// A container that started, or an image or volume that came into use,
+    /// while the list was reviewed leaves the rest still safe to remove.
+    fn cleanup_still_reviewed(&self, reviewed: &CleanupItem, current: &CleanupItem) -> bool {
+        if reviewed == current {
+            return true;
+        }
+        if !matches!(
+            current.id.key.as_str(),
+            "stopped-containers" | "unused-images" | "unused-volumes"
+        ) || (&reviewed.id, &reviewed.kind, &reviewed.title)
+            != (&current.id, &current.kind, &current.title)
+        {
+            return false;
+        }
+        // The first line says what happens to them, the rest list them.
+        let (Some((said, listed)), Some((saying, listing))) = (
+            reviewed.preview.split_once('\n'),
+            current.preview.split_once('\n'),
+        ) else {
+            return false;
+        };
+        let listed: Vec<_> = listed.lines().collect();
+        said == saying && listing.lines().all(|line| listed.contains(&line))
     }
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
@@ -1698,7 +1726,7 @@ mod tests {
                 "",
             ),
             ("unused-images", "image ls --no-trunc --format", ""),
-            ("unused-volumes", "volume ls", "pgdata\nother\n"),
+            ("unused-volumes", "volume ls", ""),
         ] {
             let mut backend = Container::docker(busy_store());
             backend.cleanup(&cancel).unwrap();
@@ -1741,6 +1769,88 @@ mod tests {
             ),
             Err(EngineError::Execution(ExecutionError::Failed(_)))
         ));
+    }
+
+    #[test]
+    fn a_list_that_got_shorter_since_the_review_removes_what_is_left() {
+        let cancel = Cancellation::default();
+        let mut backend = Container::podman(busy_store());
+        let reviewed = backend.cleanup(&cancel).unwrap().remove(1);
+        // redis:latest came into use.
+        backend.transport.answers.insert(
+            0,
+            (
+                "image ls --no-trunc --format".into(),
+                format!("sha256:{USED}\tnginx:1\nsha256:{SPARE}\tredis:7\n"),
+            ),
+        );
+        let current = backend.cleanup(&cancel).unwrap().remove(1);
+        assert_ne!(reviewed, current);
+        assert!(backend.cleanup_still_reviewed(&reviewed, &current));
+        assert!(backend.cleanup_still_reviewed(&current, &current));
+        // A longer list, or a different one, needs a new review.
+        assert!(!backend.cleanup_still_reviewed(&current, &reviewed));
+        let reworded = CleanupItem {
+            preview: current.preview.replacen("Removes", "Deletes", 1),
+            ..current.clone()
+        };
+        assert!(!backend.cleanup_still_reviewed(&reviewed, &reworded));
+        let other = CleanupItem {
+            id: CleanupId {
+                backend: "podman".into(),
+                key: "dangling-images".into(),
+            },
+            ..current.clone()
+        };
+        let other_reviewed = CleanupItem {
+            id: other.id.clone(),
+            ..reviewed.clone()
+        };
+        assert!(!backend.cleanup_still_reviewed(&other_reviewed, &other));
+        // A preview with no list can't be told apart.
+        let unlisted = CleanupItem {
+            preview: "Removes these images.".into(),
+            ..current.clone()
+        };
+        assert!(!backend.cleanup_still_reviewed(&reviewed, &unlisted));
+        backend
+            .execute(&Operation::Clean(current.id.clone()), &cancel, &mut ignore)
+            .unwrap();
+        let last = backend
+            .transport
+            .calls
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.1, ["image", "rm", "redis:7"]);
+        // One that showed up after the last check isn't removed.
+        let mut backend = Container::podman(busy_store());
+        backend.cleanup(&cancel).unwrap();
+        backend
+            .transport
+            .answers
+            .insert(0, ("volume ls".into(), "pgdata\nother\n".into()));
+        backend
+            .execute(
+                &Operation::Clean(CleanupId {
+                    backend: "podman".into(),
+                    key: "unused-volumes".into(),
+                }),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap();
+        let last = backend
+            .transport
+            .calls
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.1, ["volume", "rm", "pgdata"]);
     }
 
     #[test]

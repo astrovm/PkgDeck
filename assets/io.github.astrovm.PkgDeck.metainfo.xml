@@ -10,6 +10,20 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.1" date="2026-10-19">
+      <description>
+        <p>One cleanup task that changed no longer stops the others.</p>
+        <ul>
+          <li>If a task changed since you reviewed it, only that task is skipped and the rest are cleaned</li>
+          <li>Podman and Docker cleanups still run when an image, volume or container came into use, and keep what is in use</li>
+          <li>Automatic updates skip only the sources that can't run on their own, not the whole batch</li>
+          <li>Select all no longer checks cleanups that start unchecked, such as unused volumes and sccache</li>
+          <li>npm and pnpm installed with fnm, Volta or nvm are found again</li>
+          <li>Homebrew cleanup still runs when a file it lists changed size</li>
+          <li>Errors read more clearly, and Activity shows each reason once</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-10-18">
       <description>
         <p>Updates from different sources run at the same time, and pacman updates work on Arch again.</p>
