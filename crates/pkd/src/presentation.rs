@@ -1,6 +1,6 @@
 //! Human-readable command-line presentation.
 use pkgdeck_core::{
-    engine::EngineError,
+    engine::{EngineError, Refusal},
     package::{Operation, PackageId, Scope},
 };
 use serde_json::Value;
@@ -170,6 +170,8 @@ pub fn error_text(error: &Value) -> String {
                     source_name(&field(inner, "backend")),
                     field(inner, "reason")
                 ),
+                "Refused" => serde_json::from_value::<Refusal>(inner["refusal"].clone())
+                    .map_or_else(|_| value(error), |refusal| refusal.to_string()),
                 "InvalidResponse" => {
                     format!(
                         "{}: {}",
@@ -1607,6 +1609,18 @@ mod tests {
             (
                 json!({"InvalidResponse": {"backend": "apt", "reason": "odd"}}),
                 "APT: odd",
+            ),
+            (
+                json!({"Refused": {"backend": "apt", "refusal": "PlanChanged"}}),
+                "The planned changes are different now. Review them again.",
+            ),
+            (
+                json!({"Refused": {"backend": "appimage", "refusal": {"Explained": "Nothing was changed."}}}),
+                "Nothing was changed.",
+            ),
+            (
+                json!({"Refused": {"backend": "apt", "refusal": "Unknown"}}),
+                "{\"Refused\":{\"backend\":\"apt\",\"refusal\":\"Unknown\"}}",
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),

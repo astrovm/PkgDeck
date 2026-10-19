@@ -34,6 +34,11 @@ pub enum EngineError {
         backend: String,
         reason: String,
     },
+    /// PkgDeck stopped the change itself, before the source ran it.
+    Refused {
+        backend: String,
+        refusal: Refusal,
+    },
     NotFound,
     Ambiguous(Vec<PackageId>),
     Incomplete(Vec<BackendFailure>),
@@ -55,6 +60,7 @@ impl std::fmt::Display for EngineError {
             Self::InvalidResponse { backend, reason } => {
                 write!(f, "invalid response from {backend}: {reason}")
             }
+            Self::Refused { refusal, .. } => refusal.fmt(f),
             Self::NotFound => f.write_str("no package matches the selection"),
             Self::Ambiguous(ids) => write!(
                 f,
@@ -69,6 +75,35 @@ impl std::fmt::Display for EngineError {
             Self::Cancelled => f.write_str("operation cancelled"),
             Self::Execution(error) => error.fmt(f),
         }
+    }
+}
+/// Why PkgDeck stopped a change. Each one is a sentence people can read.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub enum Refusal {
+    /// The source would now do something other than what was reviewed.
+    PlanChanged,
+    /// The cleanup task changed or expired since it was reviewed.
+    CleanupChanged,
+    /// Automatic updates never touch this source.
+    NotUnattended,
+    /// A change that has to run together with this one failed its check.
+    PartnerFailed,
+    /// PkgDeck's own explanation, already a full sentence.
+    Explained(String),
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PlanChanged => "The planned changes are different now. Review them again.",
+            Self::CleanupChanged => {
+                "This cleanup task changed or expired. Reload and review it again."
+            }
+            Self::NotUnattended => "This source is never updated automatically.",
+            Self::PartnerFailed => {
+                "Another change that runs together with this one could not be checked. Review them again."
+            }
+            Self::Explained(sentence) => sentence,
+        })
     }
 }
 impl std::error::Error for EngineError {
@@ -1399,11 +1434,9 @@ impl Engine {
                 if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                     let current = backend.apt_upgrade_plan(cancel)?;
                     if expected_apt.as_ref() != Some(&current) {
-                        return Err(EngineError::InvalidResponse {
+                        return Err(EngineError::Refused {
                             backend: "apt".into(),
-                            reason:
-                                "APT upgrade plan changed or was not reviewed; preview it again."
-                                    .into(),
+                            refusal: Refusal::PlanChanged,
                         });
                     }
                 }
@@ -1413,21 +1446,18 @@ impl Engine {
                     // discovery would omit it and reject a valid reviewed plan.
                     let current = backend.cleanup_plan(id, cancel)?;
                     if !still_reviewed(&**backend, expected.as_ref(), &current) {
-                        return Err(EngineError::InvalidResponse {
+                        return Err(EngineError::Refused {
                             backend: id.backend.clone(),
-                            reason:
-                                "This cleanup task changed or expired. Reload and review it again."
-                                    .into(),
+                            refusal: Refusal::CleanupChanged,
                         });
                     }
                 }
                 if let Some(expected) = &expected_plan {
                     let current = backend.operation_plan(operation, cancel)?;
                     if current.as_ref() != Some(expected) {
-                        return Err(EngineError::InvalidResponse {
+                        return Err(EngineError::Refused {
                             backend: operation.backend().into(),
-                            reason: "The planned changes are different now. Review them again."
-                                .into(),
+                            refusal: Refusal::PlanChanged,
                         });
                     }
                 }
@@ -1469,29 +1499,27 @@ impl Engine {
         if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
             let current = backend.apt_upgrade_plan(cancel)?;
             if expected_apt.as_ref() != Some(&current) {
-                return Err(EngineError::InvalidResponse {
+                return Err(EngineError::Refused {
                     backend: "apt".into(),
-                    reason: "APT upgrade plan changed or was not reviewed; preview it again."
-                        .into(),
+                    refusal: Refusal::PlanChanged,
                 });
             }
         }
         if let Operation::Clean(id) = operation {
             let current = backend.cleanup_plan(id, cancel)?;
             if !still_reviewed(&**backend, expected_cleanup.as_ref(), &current) {
-                return Err(EngineError::InvalidResponse {
+                return Err(EngineError::Refused {
                     backend: id.backend.clone(),
-                    reason: "This cleanup task changed or expired. Reload and review it again."
-                        .into(),
+                    refusal: Refusal::CleanupChanged,
                 });
             }
         }
         if let Some(expected) = expected_plan {
             let current = backend.operation_plan(operation, cancel)?;
             if current.as_ref() != Some(&expected) {
-                return Err(EngineError::InvalidResponse {
+                return Err(EngineError::Refused {
                     backend: operation.backend().into(),
-                    reason: "The planned changes are different now. Review them again.".into(),
+                    refusal: Refusal::PlanChanged,
                 });
             }
         }
@@ -1613,9 +1641,9 @@ impl Engine {
                     && crate::unattended::unattended(operation.backend())
                         == crate::unattended::Unattended::Never
                 {
-                    return Err(EngineError::InvalidResponse {
+                    return Err(EngineError::Refused {
                         backend: operation.backend().into(),
-                        reason: "This source is never updated automatically.".into(),
+                        refusal: Refusal::NotUnattended,
                     });
                 }
                 self.preflight(operation, cancel)
@@ -1635,9 +1663,9 @@ impl Engine {
                 for position in index..end {
                     let operation = &operations[position];
                     let result = Err(checked[position].clone().err().unwrap_or_else(|| {
-                        EngineError::InvalidResponse {
+                        EngineError::Refused {
                             backend: operation.backend().into(),
-                            reason: "Another change that runs together with this one could not be checked. Review them again.".into(),
+                            refusal: Refusal::PartnerFailed,
                         }
                     }));
                     events(Event::Started(operation.clone()));
@@ -2492,8 +2520,8 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
         assert!(matches!(
             &results[0],
-            Err(EngineError::InvalidResponse { backend, reason })
-                if backend == "fwupd" && reason.contains("never updated automatically")
+            Err(EngineError::Refused { backend, refusal: Refusal::NotUnattended })
+                if backend == "fwupd"
         ));
         // The other source still runs on its own.
         assert!(results[1].is_ok(), "{:?}", results[1]);

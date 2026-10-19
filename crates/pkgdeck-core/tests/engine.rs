@@ -1168,7 +1168,10 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
     let mut events = Vec::new();
     assert!(matches!(
         engine.execute(&operation, &cancel, &mut |event| events.push(event)),
-        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("Reload")
+        Err(EngineError::Refused {
+            refusal: Refusal::CleanupChanged,
+            ..
+        })
     ));
     assert_eq!(events.len(), 2);
     let plan = engine.cleanup(&cancel).items.remove(0);
@@ -1207,7 +1210,10 @@ fn confirmed_batch_rejects_a_stale_cleanup_and_runs_the_rest() {
     assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
     assert!(matches!(
         &outcomes[1],
-        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("changed or expired")
+        Err(EngineError::Refused {
+            refusal: Refusal::CleanupChanged,
+            ..
+        })
     ));
     assert_eq!(
         events
@@ -1331,9 +1337,13 @@ fn batch_rejects_a_changed_or_misdirected_native_preview() {
         Authorization::Polkit,
     );
     let results = changed.execute_batch(&[operation], &cancel, &mut |_| {});
-    assert!(
-        matches!(&results[0], Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("planned changes are different now"))
-    );
+    assert!(matches!(
+        &results[0],
+        Err(EngineError::Refused {
+            refusal: Refusal::PlanChanged,
+            ..
+        })
+    ));
 }
 
 #[derive(Clone, Copy)]

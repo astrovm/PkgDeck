@@ -295,10 +295,20 @@ pub struct ProposedChange {
     pub detail: String,
 }
 
+const UNCHECKED: &str = "The source could not be checked. Try the preview again.";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Preview {
     pub schema_version: u32,
     pub packages: Vec<PreviewEntry>,
+}
+impl Preview {
+    /// A source failed to answer, so some entries are unknown.
+    pub fn incomplete(&self) -> bool {
+        self.packages
+            .iter()
+            .any(|entry| entry.status == PreviewStatus::Unavailable && entry.reason == UNCHECKED)
+    }
 }
 
 /// The caller supplies read-only installed and search reports. No operation is
@@ -321,10 +331,7 @@ pub fn preview(
                 .iter()
                 .any(|failure| failure.backend == entry.backend)
             {
-                (
-                    PreviewStatus::Unavailable,
-                    "The source could not be checked. Try the preview again.".into(),
-                )
+                (PreviewStatus::Unavailable, UNCHECKED.into())
             } else if let Some(source) = sources.iter().find(|s| s.backend == entry.backend) {
                 match &source.availability {
                     Ok(Availability::Available)
@@ -773,6 +780,7 @@ mod tests {
         let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
         assert_eq!(result.packages[0].status, PreviewStatus::Installable);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!result.incomplete());
 
         let mut engine = Engine::default();
         engine
@@ -786,6 +794,7 @@ mod tests {
         let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
         assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
         assert!(result.packages[0].reason.contains("could not be checked"));
+        assert!(result.incomplete());
         assert!(result.packages[0].proposed_changes.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -819,6 +828,8 @@ mod tests {
         let result = preview(&manifest, &[], &[], &[install_source], &[]).unwrap();
         assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
         assert!(result.packages[0].reason.contains("Source is unavailable"));
+        // A source that answered "unavailable" is a result, not a gap.
+        assert!(!result.incomplete());
     }
 
     #[test]

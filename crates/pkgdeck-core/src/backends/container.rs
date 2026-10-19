@@ -592,9 +592,9 @@ impl<T: Transport> Container<T> {
             .filter(|planned| current.contains(planned))
             .collect();
         if planned.is_empty() {
-            return Err(EngineError::InvalidResponse {
+            return Err(EngineError::Refused {
                 backend: self.kind.id().into(),
-                reason: format!("The {what} changed. Reload and review them again."),
+                refusal: Refusal::CleanupChanged,
             });
         }
         progress(Progress::Message(format!(
@@ -904,9 +904,9 @@ impl<T: Transport> Backend for Container<T> {
                     .clone()
                     .ok_or(EngineError::NotFound)?;
                 if planned.is_empty() || self.build_cache(cancel)?.0 != planned {
-                    return Err(EngineError::InvalidResponse {
+                    return Err(EngineError::Refused {
                         backend: self.kind.id().into(),
-                        reason: "The build cache changed. Reload and review it again.".into(),
+                        refusal: Refusal::CleanupChanged,
                     });
                 }
                 self.cleanup_build_cache = None;
@@ -950,9 +950,9 @@ impl<T: Transport> Backend for Container<T> {
             let planned = self.cleanup_images.clone().ok_or(EngineError::NotFound)?;
             let current = self.dangling_images(cancel)?;
             if current != planned || planned.is_empty() {
-                return Err(EngineError::InvalidResponse {
+                return Err(EngineError::Refused {
                     backend: self.kind.id().into(),
-                    reason: "The images to clean changed. Reload and review them again.".into(),
+                    refusal: Refusal::CleanupChanged,
                 });
             }
             self.cleanup_images = None;
