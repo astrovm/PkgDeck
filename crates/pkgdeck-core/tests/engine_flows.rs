@@ -130,11 +130,9 @@ fn authorized(backend: Fixture) -> Engine {
     );
     engine
 }
-fn invalid(result: &Result<OperationOutcome, EngineError>, expected: &str) {
+fn refused(result: &Result<OperationOutcome, EngineError>, expected: Refusal) {
     match result {
-        Err(EngineError::InvalidResponse { reason, .. }) => {
-            assert!(reason.contains(expected), "{reason}")
-        }
+        Err(EngineError::Refused { refusal, .. }) => assert_eq!(*refusal, expected),
         other => panic!("expected {expected:?}, got {other:?}"),
     }
 }
@@ -231,14 +229,14 @@ fn a_batch_rechecks_unreviewed_or_changed_plans_before_authorization() {
         &cancel,
         &mut |_| {},
     );
-    invalid(&results[0], "not reviewed");
+    refused(&results[0], Refusal::PlanChanged);
     // A cleanup task nobody reviewed is refused.
     let clean = Operation::Clean(CleanupId {
         backend: "apt".into(),
         key: "cache".into(),
     });
     let results = engine.execute_batch(std::slice::from_ref(&clean), &cancel, &mut |_| {});
-    invalid(&results[0], "changed or expired");
+    refused(&results[0], Refusal::CleanupChanged);
     // So is an operation whose native plan changed since review.
     let install = apt_install("tool");
     let fixture = Fixture {
@@ -249,7 +247,7 @@ fn a_batch_rechecks_unreviewed_or_changed_plans_before_authorization() {
     let mut engine = authorized(fixture);
     engine.plan_operation(&install, &cancel).unwrap();
     let results = engine.execute_batch(std::slice::from_ref(&install), &cancel, &mut |_| {});
-    invalid(&results[0], "different now");
+    refused(&results[0], Refusal::PlanChanged);
     assert_eq!(writes.load(Ordering::SeqCst), 0);
     assert_eq!(writes_changed.load(Ordering::SeqCst), 0);
 }
@@ -275,7 +273,7 @@ fn grouped_apt_changes_are_rechecked_right_before_the_transaction() {
     });
     assert_eq!(results.len(), 2);
     for result in &results {
-        invalid(result, "different now");
+        refused(result, Refusal::PlanChanged);
     }
     assert_eq!(finished, 2);
     assert_eq!(writes.load(Ordering::SeqCst), 0);
@@ -329,7 +327,7 @@ fn a_changed_change_in_a_batch_leaves_the_rest_to_run() {
             finished += 1;
         }
     });
-    invalid(&results[0], "changed or expired");
+    refused(&results[0], Refusal::CleanupChanged);
     assert!(results[1].is_ok(), "{:?}", results[1]);
     assert_eq!(finished, 2);
     assert_eq!(stale_writes.load(Ordering::SeqCst), 0);
@@ -357,8 +355,8 @@ fn a_changed_change_in_a_batch_leaves_the_rest_to_run() {
             .clone(),
     );
     let results = engine.execute_batch(&[first, second, clean], &cancel, &mut |_| {});
-    invalid(&results[0], "different now");
-    invalid(&results[1], "runs together with this one");
+    refused(&results[0], Refusal::PlanChanged);
+    refused(&results[1], Refusal::PartnerFailed);
     assert!(results[2].is_ok(), "{:?}", results[2]);
     assert_eq!(apt_writes.load(Ordering::SeqCst), 0);
     assert_eq!(fresh_writes.load(Ordering::SeqCst), 1);

@@ -774,9 +774,9 @@ fn plan_adoption(
         return plan_appimage_adoption(engine, app, cancel);
     }
     const CASK: &str = "homebrew-cask";
-    let refuse = |reason: String| EngineError::InvalidResponse {
+    let refuse = |reason: String| EngineError::Refused {
         backend: CASK.into(),
-        reason: format!("{reason} Nothing was changed."),
+        refusal: Refusal::Explained(format!("{reason} Nothing was changed.")),
     };
     let token = app
         .adopt_with
@@ -860,12 +860,12 @@ fn plan_appimage_adoption(
             operation,
             Box::new(plan),
         )),
-        _ => Err(EngineError::InvalidResponse {
+        _ => Err(EngineError::Refused {
             backend: "appimage".into(),
-            reason: format!(
+            refusal: Refusal::Explained(format!(
                 "{} isn't installed some other way anymore. Nothing was changed.",
                 app.id.name
-            ),
+            )),
         }),
     }
 }
@@ -2162,8 +2162,13 @@ fn repreview_changed_plan(
     result: &Result<Payload, EngineError>,
     packages: &[Package],
 ) -> Option<Job> {
-    if !matches!(result, Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("plan changed"))
-    {
+    if !matches!(
+        result,
+        Err(EngineError::Refused {
+            refusal: Refusal::PlanChanged,
+            ..
+        })
+    ) {
         return None;
     }
     match job {
@@ -2566,12 +2571,6 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
             }
-            // PkgDeck's own checks already say it in a sentence, such as
-            // "This cleanup task changed or expired."; the source didn't.
-            let said = reason.trim();
-            if !said.contains('\n') && said.starts_with(char::is_uppercase) && said.ends_with('.') {
-                return said.to_owned();
-            }
             match meaningful_line(&strip_debug(reason)) {
                 Some(line) => format!(
                     "{} reported a problem: {}",
@@ -2581,6 +2580,8 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
                 None => format!("{} reported a problem.", source_display_name(source)),
             }
         }
+        // PkgDeck's own checks already say it in a sentence.
+        EngineError::Refused { refusal, .. } => refusal.to_string(),
         EngineError::Unsupported { backend, .. } => format!(
             "{} can't do this.",
             source_display_name(backend)
@@ -9557,9 +9558,9 @@ mod tests {
             restart_required: None,
             adopts: None,
         };
-        let drift = Err(EngineError::InvalidResponse {
+        let drift = Err(EngineError::Refused {
             backend: "apt".into(),
-            reason: "Transaction plan changed; review again".into(),
+            refusal: Refusal::PlanChanged,
         });
         let single = Job::Write(operation.clone(), Some(Box::new(plan)));
         assert!(
@@ -9581,6 +9582,56 @@ mod tests {
         assert!(
             repreview_changed_plan(&Job::Load("Updates".into(), "".into()), &drift, &[]).is_none()
         );
+    }
+    /// A source whose plan is different every time it is asked.
+    struct Drifting(usize);
+    impl Backend for Drifting {
+        fn id(&self) -> &str {
+            "drifting"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Install]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            self.0 += 1;
+            Ok(Some(TransactionPlan {
+                operation: operation.clone(),
+                native_preview: format!("Synthetic plan {}", self.0),
+                changes: vec![],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+                adopts: None,
+            }))
+        }
+    }
+    #[test]
+    fn a_single_change_whose_plan_changed_opens_for_review_again() {
+        let mut engine = Engine::default();
+        engine.register(Drifting(0)).unwrap();
+        let cancel = Cancellation::default();
+        let mut package = synthetic_package("synthetic", "Synthetic");
+        package.id.backend = "drifting".into();
+        let operation = Operation::Install(package.id);
+        let plan = engine.plan_operation(&operation, &cancel).unwrap().unwrap();
+        engine.remember_operation_plan(plan.clone());
+        let job = Job::Write(operation.clone(), Some(Box::new(plan)));
+        let result = expect!(
+            run_job(&mut engine, job.clone(), &cancel).pop(),
+            Some(Reply::Done(result)) => result
+        );
+        // The engine's own answer, not a made-up one, brings the review back.
+        assert!(matches!(
+            repreview_changed_plan(&job, &result, &[]),
+            Some(Job::PlanOperation(next)) if next == operation
+        ));
     }
     #[test]
     fn retry_rejects_unknown_or_disabled_sources_without_starting_work() {
@@ -10989,9 +11040,9 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Reply::Done(Err(EngineError::InvalidResponse {
+            .send(Reply::Done(Err(EngineError::Refused {
                 backend: "missing-fixture".into(),
-                reason: "Transaction plan changed".into(),
+                refusal: Refusal::PlanChanged,
             })))
             .unwrap();
         let mut controller = ffi::create_controller();
@@ -16347,10 +16398,9 @@ mod tests {
         // PkgDeck's own sentence needs no source in front.
         assert_eq!(
             plain_error(
-                &EngineError::InvalidResponse {
+                &EngineError::Refused {
                     backend: "dev-caches".into(),
-                    reason: "This cleanup task changed or expired. Reload and review it again."
-                        .into()
+                    refusal: Refusal::CleanupChanged,
                 },
                 None,
                 false
@@ -17443,7 +17493,7 @@ mod tests {
         // No longer installed elsewhere: nothing to take over.
         assert!(matches!(
             plan_appimage_adoption_with(None, app.clone()),
-            Reply::Done(Err(EngineError::InvalidResponse { reason, .. })) if reason.contains("isn't installed some other way anymore")
+            Reply::Done(Err(EngineError::Refused { refusal: Refusal::Explained(reason), .. })) if reason.contains("isn't installed some other way anymore")
         ));
         // A failed read of the file is reported as is.
         let mut failing = app.clone();
@@ -17739,7 +17789,7 @@ mod tests {
             assert!(
                 matches!(
                     &reply,
-                    Reply::Done(Err(EngineError::InvalidResponse { backend, reason }))
+                    Reply::Done(Err(EngineError::Refused { backend, refusal: Refusal::Explained(reason) }))
                         if backend == "homebrew-cask"
                             && reason.contains(words)
                             && reason.ends_with("Nothing was changed.")
@@ -17942,9 +17992,9 @@ mod tests {
         // A refused adoption explains itself before anything runs.
         let refusal = preflight_notice(
             &Job::PlanAdoption(Box::new(adoptable_app())),
-            &EngineError::InvalidResponse {
+            &EngineError::Refused {
                 backend: "homebrew-cask".into(),
-                reason: "The obsidian cask would install another copy instead of managing /Applications/Obsidian.app. Nothing was changed.".into(),
+                refusal: Refusal::Explained("The obsidian cask would install another copy instead of managing /Applications/Obsidian.app. Nothing was changed.".into()),
             },
             false,
             &Names::new(),
@@ -20329,8 +20379,10 @@ mod tests {
             .start(Job::Write(upgrade, Some(Box::new(plan))));
         settle(&mut controller);
         let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
-        // The fixture now plans nothing, so the reviewed plan is stale.
-        assert!(notice["detail"]
+        // The fixture now plans nothing, so the reviewed plan is stale: it
+        // asks for a new review instead of failing.
+        assert_eq!(notice["kind"], "info");
+        assert!(notice["title"]
             .as_str()
             .unwrap()
             .contains("The planned changes are different now."));

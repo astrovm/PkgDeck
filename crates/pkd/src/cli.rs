@@ -6,7 +6,7 @@ use pkgdeck_core::{
     engine::*,
     host::{Authorization, Host},
     inspection::{audit, inspect_native, native_leftovers, OwnerState},
-    manifest::{self, PreviewStatus},
+    manifest,
     package::*,
     process::{Cancellation, ExecutionError},
 };
@@ -714,10 +714,7 @@ fn dispatch_command(
                     .and_then(|document| manifest::inspect(engine, &document, cancel))
                 {
                     Ok(preview) => {
-                        let incomplete = preview.packages.iter().any(|entry| {
-                            matches!(entry.status, PreviewStatus::Unavailable)
-                                && entry.reason.contains("could not be checked")
-                        });
+                        let incomplete = preview.incomplete();
                         (
                             json!({"manifest_preview":preview}),
                             if incomplete { 8 } else { 0 },
