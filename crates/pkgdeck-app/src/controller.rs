@@ -2566,14 +2566,13 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
             }
+            // PkgDeck's own checks already say it in a sentence, such as
+            // "This cleanup task changed or expired."; the source didn't.
+            let said = reason.trim();
+            if !said.contains('\n') && said.starts_with(char::is_uppercase) && said.ends_with('.') {
+                return said.to_owned();
+            }
             match meaningful_line(&strip_debug(reason)) {
-                // PkgDeck's own checks already say it in a sentence, such as
-                // "This cleanup task changed or expired."; the source didn't.
-                Some(line)
-                    if line.starts_with(char::is_uppercase) && line.trim_end().ends_with('.') =>
-                {
-                    line.trim().to_owned()
-                }
                 Some(line) => format!(
                     "{} reported a problem: {}",
                     source_display_name(source),
