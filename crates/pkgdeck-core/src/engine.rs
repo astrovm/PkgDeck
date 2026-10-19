@@ -1970,6 +1970,43 @@ fn still_reviewed(
 }
 
 #[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn each_refusal_says_what_to_do_next() {
+        for (refusal, sentence) in [
+            (
+                Refusal::PlanChanged,
+                "The planned changes are different now. Review them again.",
+            ),
+            (
+                Refusal::CleanupChanged,
+                "This cleanup task changed or expired. Reload and review it again.",
+            ),
+            (
+                Refusal::NotUnattended,
+                "This source is never updated automatically.",
+            ),
+            (
+                Refusal::PartnerFailed,
+                "Another change that runs together with this one could not be checked. Review them again.",
+            ),
+            (
+                Refusal::Explained("Nothing was changed.".into()),
+                "Nothing was changed.",
+            ),
+        ] {
+            let error = EngineError::Refused {
+                backend: "fixture".into(),
+                refusal,
+            };
+            assert_eq!(error.to_string(), sentence);
+        }
+    }
+}
+
+#[cfg(test)]
 mod apt_upgrade_tests {
     use super::*;
     use crate::host::Runtime;
