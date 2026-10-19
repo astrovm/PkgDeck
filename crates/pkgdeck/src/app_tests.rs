@@ -1497,6 +1497,30 @@ fn select_all_never_checks_a_task_that_deletes_data() {
 }
 
 #[test]
+fn select_all_and_none_touch_every_row_off_clean_and_only_tasks_on_it() {
+    let mut app = app();
+    app.page = Page::Updates;
+    let rows = json!([
+        {"kind":"package", "name":"tool", "source":"apt"},
+        {"kind":"package", "name":"other", "source":"apt"}
+    ]);
+    app.c().set_rows(rows.to_string().into());
+    app.react();
+    app.refresh_items();
+    let row = |index: usize| serde_json::from_value::<Row>(rows[index].clone()).unwrap();
+    assert!(app.select_all_checks(&row(0)));
+    app.set_all_checked(false);
+    assert!(!app.row_checked(&row(0)) && !app.row_checked(&row(1)));
+    app.set_all_checked(true);
+    assert!(app.row_checked(&row(0)) && app.row_checked(&row(1)));
+    // On Clean, a row that isn't a task is left as it is.
+    app.page = Page::Clean;
+    assert!(!app.select_all_checks(&row(0)));
+    app.set_all_checked(false);
+    assert!(app.row_checked(&row(0)));
+}
+
+#[test]
 fn clean_selected_reviews_only_the_checked_batch_tasks() {
     let mut app = app();
     app.page = Page::Clean;
