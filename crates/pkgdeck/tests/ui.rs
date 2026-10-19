@@ -1574,9 +1574,14 @@ fn clean_checkboxes_select_only_the_requested_tasks_and_sizes() {
     assert!(harness.query_by_label("Select all").is_none());
     click_in_view(&mut harness, None, "Select none");
     assert!(harness.query_by_label_contains("Clean selected").is_none());
+    // Select all leaves the volume out once it's unchecked again.
     click_in_view(&mut harness, None, "Select all");
-    assert!(harness.query_by_label("Clean all (12 MB)").is_some());
+    assert!(harness.query_by_label("Clean selected (3.0 MB)").is_some());
+    assert!(harness.query_by_label("Select all").is_none());
     click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
+    assert!(harness.query_by_label_contains("Clean selected").is_none());
+    click_in_view(&mut harness, Some(Role::CheckBox), "Select all tasks");
+    assert!(harness.query_by_label("Clean selected (3.0 MB)").is_some());
     assert!(harness.query_by_label("Clean all (12 MB)").is_none());
 }
 
