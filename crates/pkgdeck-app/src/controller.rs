@@ -20379,8 +20379,10 @@ mod tests {
             .start(Job::Write(upgrade, Some(Box::new(plan))));
         settle(&mut controller);
         let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
-        // The fixture now plans nothing, so the reviewed plan is stale.
-        assert!(notice["detail"]
+        // The fixture now plans nothing, so the reviewed plan is stale: it
+        // asks for a new review instead of failing.
+        assert_eq!(notice["kind"], "info");
+        assert!(notice["title"]
             .as_str()
             .unwrap()
             .contains("The planned changes are different now."));

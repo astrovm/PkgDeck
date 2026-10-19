@@ -1181,7 +1181,10 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
     // A used confirmation cannot be replayed without a new preview.
     assert!(matches!(
         engine.execute(&operation, &cancel, &mut |_| {}),
-        Err(EngineError::InvalidResponse { .. })
+        Err(EngineError::Refused {
+            refusal: Refusal::CleanupChanged,
+            ..
+        })
     ));
 }
 
@@ -2058,6 +2061,12 @@ fn a_reviewed_cleanup_runs_in_its_own_lane_once() {
     // Its lane used the confirmation up.
     assert!(matches!(
         engine.execute_batch(&operations, &cancel, &mut |_| {})[..],
-        [Ok(_), Err(EngineError::InvalidResponse { .. })]
+        [
+            Ok(_),
+            Err(EngineError::Refused {
+                refusal: Refusal::CleanupChanged,
+                ..
+            })
+        ]
     ));
 }
