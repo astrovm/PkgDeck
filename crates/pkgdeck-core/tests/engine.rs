@@ -1183,7 +1183,7 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
 }
 
 #[test]
-fn confirmed_batch_rejects_stale_cleanup_before_any_step_runs() {
+fn confirmed_batch_rejects_a_stale_cleanup_and_runs_the_rest() {
     let mut engine = engine(Fault::None);
     engine.register(Cleaner).unwrap();
     let cancel = Cancellation::default();
@@ -1203,9 +1203,12 @@ fn confirmed_batch_rejects_stale_cleanup_before_any_step_runs() {
     ];
     let mut events = Vec::new();
     let outcomes = engine.execute_batch(&operations, &cancel, &mut |event| events.push(event));
-    assert!(outcomes
-        .iter()
-        .all(|result| matches!(result, Err(EngineError::InvalidResponse { .. }))));
+    // The refresh was checked and still runs; the stale cleanup never starts.
+    assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
+    assert!(matches!(
+        &outcomes[1],
+        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("changed or expired")
+    ));
     assert_eq!(
         events
             .iter()
@@ -1220,9 +1223,10 @@ fn confirmed_batch_rejects_stale_cleanup_before_any_step_runs() {
             .count(),
         2
     );
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, Event::Progress { .. })));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::Progress { operation, .. } if *operation == operations[1]
+    )));
 }
 
 #[test]

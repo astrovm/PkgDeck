@@ -296,6 +296,75 @@ fn a_reviewed_cleanup_runs_in_a_batch() {
 }
 
 #[test]
+fn a_changed_change_in_a_batch_leaves_the_rest_to_run() {
+    let cancel = Cancellation::default();
+    // A cleanup whose plan changed since review, next to one that didn't.
+    let (stale, fresh) = (
+        Fixture {
+            stable_reads: 1,
+            ..Fixture::new("stale", APT)
+        },
+        Fixture::new("user", APT),
+    );
+    let (stale_writes, fresh_writes) = (stale.writes.clone(), fresh.writes.clone());
+    let mut engine = authorized(stale);
+    engine.register(fresh).unwrap();
+    let report = engine.cleanup(&cancel);
+    let cleans: Vec<_> = ["stale", "user"]
+        .map(|backend| {
+            Operation::Clean(
+                report
+                    .items
+                    .iter()
+                    .find(|item| item.id.backend == backend)
+                    .unwrap()
+                    .id
+                    .clone(),
+            )
+        })
+        .into();
+    let mut finished = 0;
+    let results = engine.execute_batch(&cleans, &cancel, &mut |event| {
+        if matches!(event, Event::Finished { .. }) {
+            finished += 1;
+        }
+    });
+    invalid(&results[0], "changed or expired");
+    assert!(results[1].is_ok(), "{:?}", results[1]);
+    assert_eq!(finished, 2);
+    assert_eq!(stale_writes.load(Ordering::SeqCst), 0);
+    assert_eq!(fresh_writes.load(Ordering::SeqCst), 1);
+
+    // A change that would share a transaction with a changed one waits too.
+    let (first, second) = (apt_install("one"), apt_install("two"));
+    let apt = Fixture {
+        stable_reads: 1,
+        ..Fixture::new("apt", APT)
+    };
+    let fresh = Fixture::new("user", APT);
+    let (apt_writes, fresh_writes) = (apt.writes.clone(), fresh.writes.clone());
+    let mut engine = authorized(apt);
+    engine.register(fresh).unwrap();
+    engine.plan_operation(&first, &cancel).unwrap();
+    let report = engine.cleanup(&cancel);
+    let clean = Operation::Clean(
+        report
+            .items
+            .iter()
+            .find(|item| item.id.backend == "user")
+            .unwrap()
+            .id
+            .clone(),
+    );
+    let results = engine.execute_batch(&[first, second, clean], &cancel, &mut |_| {});
+    invalid(&results[0], "different now");
+    invalid(&results[1], "runs together with this one");
+    assert!(results[2].is_ok(), "{:?}", results[2]);
+    assert_eq!(apt_writes.load(Ordering::SeqCst), 0);
+    assert_eq!(fresh_writes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn apt_refreshes_in_a_batch_run_on_their_own() {
     let cancel = Cancellation::default();
     let fixture = Fixture::new("apt", APT);
