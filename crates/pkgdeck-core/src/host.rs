@@ -1014,13 +1014,13 @@ impl Host {
                     .user_install(executable)?
                     .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
                 // npm and pnpm start the `node` next to them, through PATH.
-                if let Some(dir) = path.parent() {
-                    let key = OsString::from("PATH");
-                    let dirs = std::iter::once(dir.to_owned())
-                        .chain(std::env::split_paths(&self.env[&key]));
-                    if let Ok(joined) = std::env::join_paths(dirs) {
-                        host.to_mut().env.insert(key, joined);
-                    }
+                // A folder whose name can't join PATH (it has a `:`) is left out.
+                let key = OsString::from("PATH");
+                let mut dirs: Vec<PathBuf> =
+                    path.parent().map(Path::to_owned).into_iter().collect();
+                dirs.extend(std::env::split_paths(&self.env[&key]));
+                if let Ok(joined) = std::env::join_paths(dirs) {
+                    host.to_mut().env.insert(key, joined);
                 }
                 path
             }
@@ -2822,6 +2822,18 @@ mod boundary_tests {
         assert_eq!(
             String::from_utf8(result.stdout).unwrap(),
             format!("{}:{}", fnm.display(), bin.display())
+        );
+        // A folder that can't join PATH leaves it as it is.
+        let odd = root.join("odd:home");
+        let odd_npm = odd.join(".volta/bin/npm");
+        executable(&odd_npm, "printf %s \"$PATH\"");
+        let odd_host = self::host(Runtime::Native, &[("HOME", &odd), ("PATH", &bin)]);
+        let result = odd_host
+            .dev_tool("npm", "npm", &[], &Cancellation::default(), false)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            bin.to_str().unwrap()
         );
         // One on PATH wins, with PATH as it is.
         executable(&bin.join("npm"), "printf %s \"$PATH\"");
