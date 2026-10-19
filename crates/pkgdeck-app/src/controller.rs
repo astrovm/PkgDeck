@@ -285,6 +285,70 @@ impl Job {
         }
     }
 }
+/// How each change in a batch ended, kept as data so the summary, the
+/// notice, failed rows and Retry all read the same facts.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Batch {
+    /// What the changes are, such as "updates" or "cleanup tasks".
+    noun: &'static str,
+    /// One per change, in the order they were asked for.
+    steps: Vec<Ended>,
+    /// What people must still do, such as restarting after firmware.
+    note: Option<&'static str>,
+}
+/// How one change in a batch ended.
+#[derive(Clone, Debug, PartialEq)]
+struct Ended {
+    /// The change as `operation_title` names it.
+    title: String,
+    outcome: Outcome,
+    said: Said,
+}
+/// What a step has to say about how it ended.
+#[derive(Clone, Debug, PartialEq)]
+enum Said {
+    Completed,
+    /// It finished before the cancel reached it, so its changes stay.
+    KeptAfterCancel,
+    /// Administrator access was refused. The advice depends on the
+    /// permission option, so it is worded only when shown.
+    Denied,
+    /// Why it failed or was skipped, already in plain words.
+    Because(String),
+}
+impl Said {
+    fn text(&self, sudo: bool) -> String {
+        match self {
+            Self::Completed => "Completed".into(),
+            Self::KeptAfterCancel => {
+                "Finished before it could be cancelled. Changes were kept.".into()
+            }
+            Self::Denied => plain_error(
+                &EngineError::Execution(ExecutionError::AuthorizationDenied),
+                None,
+                sudo,
+            ),
+            Self::Because(reason) => reason.clone(),
+        }
+    }
+}
+impl Batch {
+    fn outcomes(&self) -> impl Iterator<Item = Outcome> + '_ {
+        self.steps.iter().map(|step| step.outcome)
+    }
+    /// "Completed 1 of 2 updates.", then each step and the note.
+    fn text(&self, sudo: bool) -> String {
+        let done = self.outcomes().filter(|o| *o == Outcome::Finished).count();
+        let mut text = format!("Completed {done} of {} {}.", self.steps.len(), self.noun);
+        for step in &self.steps {
+            text.push_str(&format!("\n{}: {}", step.title, step.said.text(sudo)));
+        }
+        if let Some(note) = self.note {
+            text.push_str(&format!("\n{note}"));
+        }
+        text
+    }
+}
 struct Confirmed {
     job: Job,
     activity_id: Option<u64>,
@@ -304,8 +368,8 @@ enum Payload {
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
     Written(OperationOutcome),
-    Batch(String, Vec<Outcome>),
-    CheckedUpdates(Box<PackageReport>, String, Vec<Outcome>),
+    Batch(Batch),
+    CheckedUpdates(Box<PackageReport>, Batch),
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
@@ -898,7 +962,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         manifest::write_new(&path, &document)?;
                         Ok(Payload::ManifestExport(document.packages.len()))
                     })
-                    .map_err(|error| EngineError::Execution(ExecutionError::Invalid(error.to_string())))
+                    .map_err(|error| {
+                        EngineError::Execution(ExecutionError::Invalid(error.to_string()))
+                    })
             } else {
                 Err(EngineError::Execution(ExecutionError::Invalid(
                     "some package sources could not be read; retry the export".into(),
@@ -917,26 +983,40 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::CheckUpdates(operations, _) => {
             // Index-only sources still need a fresh check. Sources with a
             // refresh operation fetch below, so don't fetch them twice.
-            let refreshing: Vec<_> = operations.iter().map(|op| op.backend().to_owned()).collect();
+            let refreshing: Vec<_> = operations
+                .iter()
+                .map(|op| op.backend().to_owned())
+                .collect();
             let mut failures = engine.refresh_update_indexes(&refreshing, cancel);
-            let (status, outcomes) = batch(engine, &operations, vec![], cancel, &mut |reply| {
-                if let Reply::ProgressEvent(Event::Finished { operation, result: Err(error) }) = &reply {
-                    failures.push(BackendFailure { backend: operation.backend().into(), error: error.clone() });
+            let ran = batch(engine, &operations, vec![], cancel, &mut |reply| {
+                if let Reply::ProgressEvent(Event::Finished {
+                    operation,
+                    result: Err(error),
+                }) = &reply
+                {
+                    failures.push(BackendFailure {
+                        backend: operation.backend().into(),
+                        error: error.clone(),
+                    });
                 }
                 send(reply);
             });
             if cancel.requested() {
-                Ok(Payload::Batch(status, outcomes))
+                Ok(Payload::Batch(ran))
             } else {
                 send(Reply::Progress("Checking for updates…".into()));
                 let mut report = engine.installed(cancel);
                 if cancel.requested() {
-                    Ok(Payload::Batch(status, outcomes))
+                    Ok(Payload::Batch(ran))
                 } else {
                     // A cached index can still be read after its refresh failed.
                     // Preserve that failure instead of claiming a fresh check.
-                    report.successful_sources.retain(|source| !failures.iter().any(|f| &f.backend == source));
-                    report.failures.retain(|failure| !failures.iter().any(|f| f.backend == failure.backend));
+                    report
+                        .successful_sources
+                        .retain(|source| !failures.iter().any(|f| &f.backend == source));
+                    report
+                        .failures
+                        .retain(|failure| !failures.iter().any(|f| f.backend == failure.backend));
                     report.failures.extend(failures);
                     // A missing tool isn't a failed check. Broken installs and real errors stay.
                     report.failures.retain(|failure| {
@@ -944,7 +1024,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                             if pkgdeck_core::backends::is_missing_tool_reason(reason))
                     });
                     filter_updates(&mut report);
-                    Ok(Payload::CheckedUpdates(Box::new(report), status, outcomes))
+                    Ok(Payload::CheckedUpdates(Box::new(report), ran))
                 }
             }
         }
@@ -1042,7 +1122,8 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 Ok(Payload::UpgradePreview(operations, count, None))
             }
         }
-        Job::PlanOperation(operation) => engine.plan_operation(&operation, cancel)
+        Job::PlanOperation(operation) => engine
+            .plan_operation(&operation, cancel)
             .map(|plan| Payload::OperationPreview(operation, plan.map(Box::new))),
         Job::PlanAdoption(app) => plan_adoption(engine, &app, cancel),
         Job::PlanAdoptAll(apps) => {
@@ -1068,20 +1149,32 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
-        Job::AutoClean { caches, worktrees, preferences } => {
+        Job::AutoClean {
+            caches,
+            worktrees,
+            preferences,
+        } => {
             let items: Vec<_> = engine
                 .cleanup(cancel)
                 .items
                 .into_iter()
-                .filter(|item| preferences.includes_item(item) && ((caches && item.automatic()) || (worktrees && item.kind == CleanupKind::Worktree && item.id.backend == "projects")))
+                .filter(|item| {
+                    preferences.includes_item(item)
+                        && ((caches && item.automatic())
+                            || (worktrees
+                                && item.kind == CleanupKind::Worktree
+                                && item.id.backend == "projects"))
+                })
                 .collect();
             let operations: Vec<_> = items
                 .iter()
                 .map(|item| Operation::Clean(item.id.clone()))
                 .collect();
-            let outcomes = match operations.is_empty() {
+            let outcomes: Vec<_> = match operations.is_empty() {
                 true => vec![],
-                false => batch(engine, &operations, Vec::new(), cancel, send).1,
+                false => batch(engine, &operations, Vec::new(), cancel, send)
+                    .outcomes()
+                    .collect(),
             };
             let finished = |outcome: &&Outcome| **outcome == Outcome::Finished;
             Ok(Payload::AutoCleaned {
@@ -1136,18 +1229,31 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         Progress::Package(name) => format!("Updating {name}…"),
                     }));
                 }
-                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
+                if !matches!(
+                    &event,
+                    Event::Progress {
+                        progress: Progress::Message(_),
+                        ..
+                    }
+                ) {
                     send(Reply::ProgressEvent(event));
                 }
             })
-            .map(|outcome| {
-                if matches!(&op, Operation::Upgrade(id) if id.backend == "fwupd") {
-                    Payload::Batch(if outcome.cancellation_deferred {
-                        "Firmware update finished before it could be cancelled. Restart or shut down the device if required.".into()
-                    } else {
-                        "Firmware update finished. Restart or shut down the device if required.".into()
-                    }, vec![Outcome::Finished])
-                } else { Payload::Written(outcome) }
+            .map(|outcome| match firmware_note(std::slice::from_ref(&op)) {
+                Some(note) => Payload::Batch(Batch {
+                    noun: "updates",
+                    steps: vec![Ended {
+                        title: operation_title(&op),
+                        outcome: Outcome::Finished,
+                        said: if outcome.cancellation_deferred {
+                            Said::KeptAfterCancel
+                        } else {
+                            Said::Completed
+                        },
+                    }],
+                    note: Some(note),
+                }),
+                None => Payload::Written(outcome),
             }),
     };
     send(Reply::Done(result));
@@ -1162,18 +1268,16 @@ fn run_batch(
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Payload {
-    let (status, outcomes) = batch(engine, operations, held, cancel, send);
-    Payload::Batch(status, outcomes)
+    Payload::Batch(batch(engine, operations, held, cancel, send))
 }
-/// Run `operations` in order, skipping `held` ones with their reason: the
-/// status line and each one's outcome.
+/// Run `operations` in order, skipping `held` ones with their reason.
 fn batch(
     engine: &mut Engine,
     operations: &[Operation],
     held: Vec<(Operation, String)>,
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
-) -> (String, Vec<Outcome>) {
+) -> Batch {
     let runnable: Vec<_> = operations
         .iter()
         .filter(|op| !held.iter().any(|(held, _)| held == *op))
@@ -1211,7 +1315,6 @@ fn batch(
                 .map_err(|error| (error, None)),
         })
         .collect();
-    let completed = results.iter().filter(|r| r.is_ok()).count();
     let noun = if operations
         .iter()
         .all(|op| matches!(op, Operation::Clean(_)))
@@ -1225,8 +1328,7 @@ fn batch(
     } else {
         "updates"
     };
-    let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
-    let mut outcomes = Vec::new();
+    let mut steps = Vec::new();
     let mut failure_output = Vec::new();
     for (operation, result) in operations.iter().zip(results) {
         if let Err((error, None)) = &result {
@@ -1239,37 +1341,43 @@ fn batch(
                 }
             }
         }
-        outcomes.push(match &result {
+        let outcome = match &result {
             Ok(_) => Outcome::Finished,
             Err((EngineError::Cancelled, None)) => Outcome::Cancelled,
             Err(_) => Outcome::Failed,
-        });
-        let outcome = match result {
-            Ok(outcome) if outcome.cancellation_deferred => {
-                "Finished before it could be cancelled. Changes were kept.".into()
-            }
-            Ok(_) => "Completed".into(),
-            Err((_, Some(reason))) => reason,
-            // A denial keeps the engine's words; the frontend
-            // explains it for the chosen permission option. The App
-            // Store has its own explanation, independent of it.
-            Err((error, None)) if is_denied(&error) && operation.backend() != "mas" => {
-                error.to_string()
-            }
-            Err((error, None)) => plain_error(&error, Some(operation.backend()), false),
         };
-        status.push_str(&format!("\n{}: {outcome}", operation_title(operation)));
-    }
-    if operations
-        .iter()
-        .any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd"))
-    {
-        status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
+        let said = match result {
+            Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
+            Ok(_) => Said::Completed,
+            Err((_, Some(reason))) => Said::Because(reason),
+            // The App Store explains a denial its own way, whatever the
+            // permission option is.
+            Err((error, None)) if is_denied(&error) && operation.backend() != "mas" => Said::Denied,
+            Err((error, None)) => {
+                Said::Because(plain_error(&error, Some(operation.backend()), false))
+            }
+        };
+        steps.push(Ended {
+            title: operation_title(operation),
+            outcome,
+            said,
+        });
     }
     if !failure_output.is_empty() {
         send(Reply::FailureOutput(failure_output.join("\n\n")));
     }
-    (status, outcomes)
+    Batch {
+        noun,
+        steps,
+        note: firmware_note(operations),
+    }
+}
+/// A firmware update may need a restart before it takes effect.
+fn firmware_note(operations: &[Operation]) -> Option<&'static str> {
+    operations
+        .iter()
+        .any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd"))
+        .then_some("Firmware: Restart or shut down the device if the update asked for it.")
 }
 
 /// The upgrade-only helper mode the saved approval covers, for automatic
@@ -2191,66 +2299,19 @@ fn repreview_changed_plan(
 fn details_fresh(selected: Option<&PackageId>, details: &PackageDetails) -> bool {
     selected.is_some_and(|id| *id == details.package.id)
 }
-/// The name people know a package source by, matching the GUI's source list.
-// TODO(merge): use pkgdeck_core display_name
+/// The name people know a package source by, as the source list shows it.
+/// A CLI's own updater says "(standalone)", apart from that CLI from npm
+/// or Homebrew, unless its name already says how it was installed.
 fn source_display_name(id: &str) -> String {
-    match id {
-        "apt" => "APT",
-        "dnf" => "DNF",
-        "pacman" => "Pacman",
-        "zypper" => "Zypper",
-        "snap" => "Snap",
-        "homebrew" => "Homebrew",
-        "homebrew-cask" => "Homebrew Casks",
-        "macos-apps" => "macOS Applications",
-        "mas" => "Mac App Store",
-        "aur" => "AUR",
-        "apk" => "apk",
-        "xbps" => "XBPS",
-        "system-image" => "System image",
-        "macports" => "MacPorts",
-        "macos-updates" => "macOS Updates",
-        "rustup" => "rustup",
-        "nix" => "Nix",
-        "go" => "Go",
-        "dotnet" => ".NET tools",
-        "appimage" => "AppImage",
-        "flatpak" => "Flatpak",
-        "docker" => "Docker images",
-        "podman" => "Podman images",
-        "toolbox" => "Toolbx containers",
-        "distrobox" => "Distrobox containers",
-        "cargo" => "Cargo",
-        "npm" => "npm",
-        "pnpm" => "pnpm",
-        "bun" => "Bun",
-        "pip" => "pip",
-        "pipx" => "pipx",
-        "uv" => "uv",
-        "pixi" => "pixi",
-        "conda" => "Conda",
-        "composer" => "Composer",
-        "gem" => "RubyGems",
-        "oh-my-zsh" => "Oh My Zsh",
-        "fwupd" => "Firmware",
-        "codex" => "Codex (standalone)",
-        "claude" => "Claude Code (standalone)",
-        "grok" => "Grok (standalone)",
-        "opencode" => "OpenCode (standalone)",
-        "cursor" => "Cursor CLI (standalone)",
-        "copilot" => "GitHub Copilot CLI (standalone)",
-        "kiro" => "Kiro CLI (standalone)",
-        "antigravity" => "Antigravity CLI (standalone)",
-        "amp" => "Amp (standalone)",
-        "droid" => "Factory Droid (standalone)",
-        "solana" => "Solana CLI (Agave)",
-        "anchor" => "Anchor (AVM)",
-        "foundry" => "Foundry",
-        "dev-caches" => "Developer caches",
-        "projects" => "Old projects",
-        other => other,
+    let name = pkgdeck_core::backends::display_name(id);
+    let standalone = pkgdeck_core::backends::StandaloneTool::ALL
+        .iter()
+        .any(|tool| tool.id() == id);
+    if standalone && !name.ends_with(')') {
+        format!("{name} (standalone)")
+    } else {
+        name.to_owned()
     }
-    .to_owned()
 }
 /// A cleanup task for a confirmation: what, where, how much, then exactly
 /// what it does.
@@ -2829,33 +2890,6 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
         "urgent": is_denied(error),
     }))
 }
-/// A batch reports each error as text on its own line. A denial keeps the
-/// engine's words so the right advice for the chosen permission option can
-/// be given here; every other line is already plain.
-const DENIED: &str = ": authorization denied or unavailable";
-fn batch_status_text(status: &str, sudo: bool) -> String {
-    status
-        .lines()
-        .map(|line| {
-            line.strip_suffix(DENIED).map_or_else(
-                || line.to_owned(),
-                |label| {
-                    format!(
-                        "{label}: {}",
-                        plain_error(
-                            &EngineError::Execution(
-                                pkgdeck_core::process::ExecutionError::AuthorizationDenied,
-                            ),
-                            None,
-                            sudo,
-                        )
-                    )
-                },
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 /// The inverse change a toast may offer as Undo. Only an install and a
 /// removal undo each other; updates and cleanups cannot be reversed, and
 /// a package removed from a local file or a direct download can't be
@@ -2959,7 +2993,7 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
             return None
         }
         Err(_) => job.operations().iter().map(|_| true).collect(),
-        Ok(Payload::Batch(_, outcomes)) => outcomes.iter().map(|o| *o == Outcome::Failed).collect(),
+        Ok(Payload::Batch(ran)) => ran.outcomes().map(|o| o == Outcome::Failed).collect(),
         Ok(_) => return None,
     };
     let keep = |operations: &[Operation]| -> Vec<Operation> {
@@ -2998,13 +3032,13 @@ fn password_notice(
     password_casks: &[PackageId],
     names: &Names,
 ) -> Option<Value> {
-    let (Job::AutoUpgrade(operations, _), Ok(Payload::Batch(_, outcomes))) = (job, result) else {
+    let (Job::AutoUpgrade(operations, _), Ok(Payload::Batch(ran))) = (job, result) else {
         return None;
     };
     let failed: Vec<&PackageId> = operations
         .iter()
-        .zip(outcomes)
-        .filter(|(_, outcome)| **outcome != Outcome::Finished)
+        .zip(ran.outcomes())
+        .filter(|(_, outcome)| *outcome != Outcome::Finished)
         .map(|(operation, _)| match operation {
             Operation::Upgrade(id) if password_casks.contains(id) => Some(id),
             _ => None,
@@ -3070,7 +3104,7 @@ fn write_notice(
         many => format!("{} changes", many.len()),
     };
     let succeeded = match result {
-        Ok(Payload::Batch(_, outcomes)) => outcomes.iter().all(|o| *o == Outcome::Finished),
+        Ok(Payload::Batch(ran)) => ran.outcomes().all(|o| o == Outcome::Finished),
         Ok(_) => true,
         Err(_) => false,
     };
@@ -3096,65 +3130,58 @@ fn write_notice(
             },
             "detail": write_error_text(error, job_backend(&operations), sudo),
         }),
-        Ok(Payload::Batch(_, outcomes))
-            if !outcomes.contains(&Outcome::Failed) && outcomes.contains(&Outcome::Cancelled) =>
+        Ok(Payload::Batch(ran))
+            if !ran.outcomes().any(|o| o == Outcome::Failed)
+                && ran.outcomes().any(|o| o == Outcome::Cancelled) =>
         {
-            let done = outcomes.iter().filter(|o| **o == Outcome::Finished).count();
+            let done = ran.outcomes().filter(|o| *o == Outcome::Finished).count();
             json!({
                 "kind": "info",
-                "title": format!("{done} of {} changes finished. The rest were cancelled.", outcomes.len()),
+                "title": format!("{done} of {} changes finished. The rest were cancelled.", ran.steps.len()),
             })
         }
-        Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => {
+        Ok(Payload::Batch(ran)) if ran.outcomes().any(|o| o == Outcome::Failed) => {
             // One line per reason, naming the changes it stopped the way
             // people know them.
-            let failed: Vec<(&Operation, &str)> = operations
+            let failed: Vec<(&Operation, String)> = operations
                 .iter()
-                .zip(outcomes)
-                .zip(status.lines().skip(1))
-                .filter(|((_, outcome), _)| **outcome == Outcome::Failed)
-                .map(|((operation, _), line)| {
-                    let reason = line
-                        .strip_prefix(&format!("{}: ", operation_title(operation)))
-                        .unwrap_or(line);
-                    (operation, reason)
-                })
+                .zip(&ran.steps)
+                .filter(|(_, step)| step.outcome == Outcome::Failed)
+                .map(|(operation, step)| (operation, step.said.text(sudo)))
                 .collect();
             let mut reasons: Vec<(Vec<String>, &str)> = vec![];
             for (operation, reason) in &failed {
+                let reason = reason.as_str();
                 let name = short_name(operation, names);
                 if reason.starts_with(&name) {
                     reasons.push((vec![], reason));
                 } else if let Some((named, _)) = reasons
                     .iter_mut()
-                    .find(|(named, same)| !named.is_empty() && same == reason)
+                    .find(|(named, same)| !named.is_empty() && *same == reason)
                 {
                     named.push(name);
                 } else {
                     reasons.push((vec![name], reason));
                 }
             }
-            let detail = batch_status_text(
-                &reasons
-                    .iter()
-                    .map(|(named, reason)| match named.as_slice() {
-                        [] => (*reason).to_owned(),
-                        [one] => format!("{one}: {reason}"),
-                        [first, second] => format!("{first} and {second}: {reason}"),
-                        [first, second, third] => {
-                            format!("{first}, {second} and {third}: {reason}")
-                        }
-                        [first, second, rest @ ..] => {
-                            format!("{first}, {second} and {} more: {reason}", rest.len())
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                sudo,
-            );
+            let detail = reasons
+                .iter()
+                .map(|(named, reason)| match named.as_slice() {
+                    [] => (*reason).to_owned(),
+                    [one] => format!("{one}: {reason}"),
+                    [first, second] => format!("{first} and {second}: {reason}"),
+                    [first, second, third] => {
+                        format!("{first}, {second} and {third}: {reason}")
+                    }
+                    [first, second, rest @ ..] => {
+                        format!("{first}, {second} and {} more: {reason}", rest.len())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             let title = match failed.as_slice() {
                 [(one, _)] => failed_title(one, names),
-                many => format!("{} of {} changes failed", many.len(), outcomes.len()),
+                many => format!("{} of {} changes failed", many.len(), ran.steps.len()),
             };
             json!({"kind": "error", "title": title, "detail": detail})
         }
@@ -3162,11 +3189,12 @@ fn write_notice(
             // Keep what the user must still do or know, such as a firmware
             // restart or a cancellation that came too late.
             let detail = match payload {
-                Payload::Batch(status, _) => status
-                    .lines()
-                    .filter(|line| {
-                        !line.starts_with("Completed ") && !line.ends_with(": Completed")
-                    })
+                Payload::Batch(ran) => ran
+                    .steps
+                    .iter()
+                    .filter(|step| step.said != Said::Completed)
+                    .map(|step| format!("{}: {}", step.title, step.said.text(sudo)))
+                    .chain(ran.note.map(str::to_owned))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 Payload::Written(outcome) if outcome.cancellation_deferred => {
@@ -4766,9 +4794,7 @@ impl ffi::PackageController {
     ) {
         let operations = job.operations();
         let failed: Vec<bool> = match result {
-            Ok(Payload::Batch(_, outcomes)) => {
-                outcomes.iter().map(|o| *o == Outcome::Failed).collect()
-            }
+            Ok(Payload::Batch(ran)) => ran.outcomes().map(|o| o == Outcome::Failed).collect(),
             Ok(_) => vec![false; operations.len()],
             Err(
                 EngineError::Cancelled
@@ -4920,22 +4946,12 @@ impl ffi::PackageController {
                     (operation, Some(reason))
                 })
                 .collect(),
-            // One status line per step, after the summary.
-            Ok(Payload::Batch(status, outcomes)) => operations
+            Ok(Payload::Batch(ran)) => operations
                 .into_iter()
-                .zip(outcomes)
-                .zip(status.lines().skip(1).chain(std::iter::repeat("")))
-                .filter_map(|((operation, outcome), line)| match outcome {
+                .zip(&ran.steps)
+                .filter_map(|(operation, step)| match step.outcome {
                     Outcome::Finished => Some((operation, None)),
-                    Outcome::Failed => {
-                        // A denial is rewritten while its `title: ` label
-                        // is still there to match.
-                        let line = batch_status_text(line, sudo);
-                        let reason = line
-                            .strip_prefix(&format!("{}: ", operation_title(&operation)))
-                            .unwrap_or(&line);
-                        Some((operation, Some(reason.to_owned())))
-                    }
+                    Outcome::Failed => Some((operation, Some(step.said.text(sudo)))),
                     _ => None,
                 })
                 .collect(),
@@ -5438,7 +5454,7 @@ impl ffi::PackageController {
                         }
                         let _ = sender.send(Reply::Rows(PreparedRows::new(&report.packages)));
                     }
-                    Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => {
+                    Reply::Done(Ok(Payload::CheckedUpdates(report, _))) => {
                         for package in &mut report.packages {
                             crate::metadata::enrich_cached(package);
                         }
@@ -7076,13 +7092,14 @@ impl ffi::PackageController {
                     self.set_status("Package details loaded.".into());
                 }
             }
-            Ok(Payload::Batch(status, _)) => {
+            Ok(Payload::Batch(ran)) => {
                 // Native writes may change dependencies in other rows.
                 self.as_mut()
                     .apply(Ok(Payload::Written(OperationOutcome::default())));
-                self.set_status(status.as_str().into());
+                let sudo = self.rust().sudo;
+                self.set_status(ran.text(sudo).as_str().into());
             }
-            Ok(Payload::CheckedUpdates(report, _, _)) => {
+            Ok(Payload::CheckedUpdates(report, _)) => {
                 self.apply(Ok(Payload::Packages(*report)));
             }
             Ok(Payload::Written(outcome)) => {
@@ -7624,11 +7641,10 @@ impl ffi::PackageController {
                     .remember(&needed, &waiting);
             }
             if let Job::AutoUpgrade(operations, _) = &job {
-                if let Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) =
+                if let Some(Reply::Done(Ok(Payload::Batch(ran)))) =
                     replies.iter().find(|reply| matches!(reply, Reply::Done(_)))
                 {
-                    let count =
-                        |outcome: Outcome| outcomes.iter().filter(|o| **o == outcome).count();
+                    let count = |outcome: Outcome| ran.outcomes().filter(|o| *o == outcome).count();
                     self.as_mut().set_auto_update_result(encoded(json!({
                         "updated": count(Outcome::Finished),
                         "failed": count(Outcome::Failed) + count(Outcome::Cancelled),
@@ -7638,20 +7654,20 @@ impl ffi::PackageController {
             }
             // A source that just refreshed was checked successfully, even
             // before any page has listed it.
-            let finished: Vec<Operation> =
-                match replies.iter().find(|reply| matches!(reply, Reply::Done(_))) {
-                    Some(Reply::Done(Ok(
-                        Payload::Batch(_, outcomes) | Payload::CheckedUpdates(_, _, outcomes),
-                    ))) => job
-                        .operations()
-                        .into_iter()
-                        .zip(outcomes)
-                        .filter(|(_, outcome)| **outcome == Outcome::Finished)
-                        .map(|(operation, _)| operation)
-                        .collect(),
-                    Some(Reply::Done(Ok(_))) => job.operations(),
-                    _ => vec![],
-                };
+            let finished: Vec<Operation> = match replies
+                .iter()
+                .find(|reply| matches!(reply, Reply::Done(_)))
+            {
+                Some(Reply::Done(Ok(Payload::Batch(ran) | Payload::CheckedUpdates(_, ran)))) => job
+                    .operations()
+                    .into_iter()
+                    .zip(ran.outcomes())
+                    .filter(|(_, outcome)| *outcome == Outcome::Finished)
+                    .map(|(operation, _)| operation)
+                    .collect(),
+                Some(Reply::Done(Ok(_))) => job.operations(),
+                _ => vec![],
+            };
             let refreshed: Vec<String> = finished
                 .iter()
                 .filter(|operation| matches!(operation, Operation::Refresh { .. }))
@@ -7750,8 +7766,8 @@ impl ffi::PackageController {
                     }
                     Reply::Done(result) => {
                         let (result, checked) = match result {
-                            Ok(Payload::CheckedUpdates(report, status, outcomes)) => {
-                                (Ok(Payload::Batch(status, outcomes)), Some(*report))
+                            Ok(Payload::CheckedUpdates(report, ran)) => {
+                                (Ok(Payload::Batch(ran)), Some(*report))
                             }
                             result => (result, None),
                         };
@@ -7825,7 +7841,7 @@ impl ffi::PackageController {
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
                                 if let Some(store) = self.rust().activity_store.clone() {
                                     let outcomes = match &result {
-                                        Ok(Payload::Batch(_, outcomes)) => outcomes.clone(),
+                                        Ok(Payload::Batch(ran)) => ran.outcomes().collect(),
                                         Ok(_) => job
                                             .operations()
                                             .iter()
@@ -8035,6 +8051,7 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pkgdeck_core::fake::Fake;
     #[test]
     fn a_running_change_reads_as_what_it_is_doing() {
         for (title, running) in [
@@ -8066,6 +8083,35 @@ mod tests {
                 _ => panic!("expected {}", stringify!($pattern)),
             }
         };
+    }
+    /// A finished batch of updates: how each step ended and what it said.
+    fn ran(steps: &[(&str, Outcome, Said)]) -> Payload {
+        Payload::Batch(Batch {
+            noun: "updates",
+            steps: steps
+                .iter()
+                .map(|(title, outcome, said)| Ended {
+                    title: (*title).into(),
+                    outcome: *outcome,
+                    said: said.clone(),
+                })
+                .collect(),
+            note: None,
+        })
+    }
+    /// A batch where only how each step ended matters.
+    fn ended(outcomes: &[Outcome]) -> Payload {
+        let steps: Vec<_> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                Outcome::Finished => ("Change", *outcome, Said::Completed),
+                _ => ("Change", *outcome, because("It stopped.")),
+            })
+            .collect();
+        ran(&steps)
+    }
+    fn because(reason: &str) -> Said {
+        Said::Because(reason.into())
     }
     #[test]
     fn write_progress_tracks_real_steps_and_transfer_totals() {
@@ -10931,10 +10977,10 @@ mod tests {
             .unwrap();
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Reply::Done(Ok(Payload::Batch(
-                "One completed, one failed".into(),
-                vec![Outcome::Finished, Outcome::Failed],
-            ))))
+            .send(Reply::Done(Ok(ran(&[
+                ("First", Outcome::Finished, Said::Completed),
+                ("Second", Outcome::Failed, because("busy")),
+            ]))))
             .unwrap();
         controller.as_mut().rust_mut().active_activity_id = Some(id);
         controller.as_mut().rust_mut().worker = Some(Worker {
@@ -11560,21 +11606,30 @@ mod tests {
         );
         let partial = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 1 of 2 updates.\nUpdate all APT packages: Completed\nUpdate all Flatpak packages: busy".into(),
-                vec![Outcome::Finished, Outcome::Failed],
-            )),
-            false, &Names::new(),
+            &Ok(ran(&[
+                (
+                    "Update all APT packages",
+                    Outcome::Finished,
+                    Said::Completed,
+                ),
+                (
+                    "Update all Flatpak packages",
+                    Outcome::Failed,
+                    because("busy"),
+                ),
+            ])),
+            false,
+            &Names::new(),
         );
         // One failure names the source, without the step's long title.
         assert_eq!(partial["title"], "Flatpak didn't update");
         assert_eq!(partial["detail"], "Flatpak: busy");
         let cancelled_batch = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                String::new(),
-                vec![Outcome::Finished, Outcome::Cancelled],
-            )),
+            &Ok(ran(&[
+                ("APT", Outcome::Finished, Said::Completed),
+                ("Flatpak", Outcome::Cancelled, because("Cancelled.")),
+            ])),
             false,
             &Names::new(),
         );
@@ -11585,21 +11640,22 @@ mod tests {
         );
         let mixed = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 0 of 2 updates.\nx: busy".into(),
-                vec![Outcome::Failed, Outcome::Cancelled],
-            )),
+            &Ok(ran(&[
+                ("APT", Outcome::Failed, because("busy")),
+                ("Flatpak", Outcome::Cancelled, because("Cancelled.")),
+            ])),
             false,
             &Names::new(),
         );
         assert_eq!(mixed["kind"], "error");
         let denied_batch = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 0 of 2 updates.\nUpdate all APT packages: authorization denied or unavailable\nUpdate all Flatpak packages: Completed".into(),
-                vec![Outcome::Failed, Outcome::Finished],
-            )),
-            false, &Names::new(),
+            &Ok(ran(&[
+                ("APT", Outcome::Failed, Said::Denied),
+                ("Flatpak", Outcome::Finished, Said::Completed),
+            ])),
+            false,
+            &Names::new(),
         );
         assert_eq!(denied_batch["kind"], "error");
         assert!(denied_batch["detail"]
@@ -11608,11 +11664,9 @@ mod tests {
             .contains("password prompt"));
         let denied_sudo = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 0 of 1 updates.\nUpdate all packages from apt: authorization denied or unavailable".into(),
-                vec![Outcome::Failed],
-            )),
-            true, &Names::new(),
+            &Ok(ran(&[("APT", Outcome::Failed, Said::Denied)])),
+            true,
+            &Names::new(),
         );
         assert!(denied_sudo["detail"]
             .as_str()
@@ -11644,20 +11698,28 @@ mod tests {
         assert!(preflight_notice(&job, &E::LockBusy.into(), false, &Names::new()).is_none());
         let all = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 2 of 2 updates.".into(),
-                vec![Outcome::Finished; 2],
-            )),
+            &Ok(ran(&[
+                ("APT", Outcome::Finished, Said::Completed),
+                ("Flatpak", Outcome::Finished, Said::Completed),
+            ])),
             false,
             &Names::new(),
         );
         assert_eq!(all["title"], "2 changes finished");
         let firmware = write_notice(
             &job,
-            &Ok(Payload::Batch(
-                "Firmware update finished. Restart or shut down the device if required.".into(),
-                vec![Outcome::Finished],
-            )),
+            &Ok(Payload::Batch(Batch {
+                noun: "updates",
+                steps: vec![Ended {
+                    title: "Update firmware".into(),
+                    outcome: Outcome::Finished,
+                    said: Said::Completed,
+                }],
+                note: firmware_note(&[Operation::Upgrade(PackageId {
+                    backend: "fwupd".into(),
+                    ..synthetic_package("bios", "BIOS").id
+                })]),
+            })),
             false,
             &Names::new(),
         );
@@ -11668,11 +11730,20 @@ mod tests {
             .contains("Restart or shut down"));
         let batch_done = write_notice(
             &batch,
-            &Ok(Payload::Batch(
-                "Completed 2 of 2 updates.\nUpdate all packages from apt: Completed\nUpdate all packages from flatpak: Finished before it could be cancelled. Changes were kept.".into(),
-                vec![Outcome::Finished; 2],
-            )),
-            false, &Names::new(),
+            &Ok(ran(&[
+                (
+                    "Update all packages from apt",
+                    Outcome::Finished,
+                    Said::Completed,
+                ),
+                (
+                    "Update all packages from flatpak",
+                    Outcome::Finished,
+                    Said::KeptAfterCancel,
+                ),
+            ])),
+            false,
+            &Names::new(),
         );
         assert_eq!(
             batch_done["detail"],
@@ -12992,11 +13063,19 @@ mod tests {
         controller.as_mut().propose_checked("[]".into());
         assert!(controller.rust().pending.is_none());
         assert!(controller.status().to_string().contains("No selected"));
-        controller.as_mut().apply(Ok(Payload::Batch(
-            "Firmware completed. Restart required.".into(),
-            vec![Outcome::Finished],
-        )));
-        assert!(controller.status().to_string().contains("Restart required"));
+        controller.as_mut().apply(Ok(Payload::Batch(Batch {
+            noun: "updates",
+            steps: vec![Ended {
+                title: "Update Synthetic BIOS".into(),
+                outcome: Outcome::Finished,
+                said: Said::Completed,
+            }],
+            note: firmware_note(&[Operation::Upgrade(package.id.clone())]),
+        })));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Restart or shut down"));
         assert!(!controller.rust().packages.is_empty());
         assert!(!*controller.upgradable());
     }
@@ -13491,17 +13570,11 @@ mod tests {
         let names = Names::new();
         let notice = |keys: &[&str], reasons: &[&str]| {
             let operations: Vec<_> = keys.iter().map(|key| clean(key)).collect();
-            let mut status = format!("Completed 0 of {} cleanup tasks.", keys.len());
-            for (operation, reason) in operations.iter().zip(reasons) {
-                status.push_str(&format!("\n{}: {reason}", operation_title(operation)));
-            }
-            let outcomes = vec![Outcome::Failed; keys.len()];
-            write_notice(
-                &Job::CleanAll(operations),
-                &Ok(Payload::Batch(status, outcomes)),
-                false,
-                &names,
-            )
+            let steps: Vec<_> = reasons
+                .iter()
+                .map(|reason| ("Clean", Outcome::Failed, because(reason)))
+                .collect();
+            write_notice(&Job::CleanAll(operations), &Ok(ran(&steps)), false, &names)
         };
         let name = |key: &str| short_name(&clean(key), &names);
         let (busy, gone) = ("The disk is busy.", "It's gone.");
@@ -13675,20 +13748,18 @@ mod tests {
         tool.id.reference = Some("/home/fixture/.avm/bin/avm".into());
         let operation = Operation::Upgrade(tool.id.clone());
         let names = Names::from([(tool.id.clone(), "Anchor (AVM)".to_owned())]);
-        let line = format!(
-            "{}: Anchor (AVM) couldn't run: No such file or directory (os error 2).",
-            operation_title(&operation)
-        );
+        let title = operation_title(&operation);
         assert!(
-            line.contains("/home/fixture"),
-            "the old line named the path"
+            title.contains("/home/fixture"),
+            "the step's title names the path"
         );
         let notice = write_notice(
             &Job::AutoUpgrade(vec![operation.clone()], false),
-            &Ok(Payload::Batch(
-                format!("Completed 0 of 1 updates.\n{line}"),
-                vec![Outcome::Failed],
-            )),
+            &Ok(ran(&[(
+                &title,
+                Outcome::Failed,
+                because("Anchor (AVM) couldn't run: No such file or directory (os error 2)."),
+            )])),
             false,
             &names,
         );
@@ -13820,13 +13891,11 @@ mod tests {
         });
         let notice = write_notice(
             &Job::CleanAll(vec![clean.clone()]),
-            &Ok(Payload::Batch(
-                format!(
-                    "Completed 0 of 1 cleanup tasks.\n{}: disk full",
-                    operation_title(&clean)
-                ),
-                vec![Outcome::Failed],
-            )),
+            &Ok(ran(&[(
+                &operation_title(&clean),
+                Outcome::Failed,
+                because("disk full"),
+            )])),
             false,
             &Names::new(),
         );
@@ -13843,13 +13912,11 @@ mod tests {
         finish_write(
             &mut controller,
             Job::UpgradeAll(vec![upgrade.clone()], None),
-            Ok(Payload::Batch(
-                format!(
-                    "Completed 0 of 1 updates.\n{}{DENIED}",
-                    operation_title(&upgrade)
-                ),
-                vec![Outcome::Failed],
-            )),
+            Ok(ran(&[(
+                &operation_title(&upgrade),
+                Outcome::Failed,
+                Said::Denied,
+            )])),
         );
         let advice = plain_error(
             &EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied),
@@ -13905,18 +13972,21 @@ mod tests {
         };
         let (kept_id, gone_id) = (id("worktrees:/code/kept"), id("worktrees:/code/gone"));
         let (kept, gone) = (Operation::Clean(kept_id.clone()), Operation::Clean(gone_id));
-        let status = format!(
-            "Completed 0 of 2 cleanup tasks.\n{}: Couldn't remove ~/kept: b is busy\n{}: Couldn't remove ~/gone: it is busy",
-            operation_title(&kept),
-            operation_title(&gone)
-        );
         finish_write(
             &mut controller,
             Job::CleanAll(vec![kept.clone(), gone.clone()]),
-            Ok(Payload::Batch(
-                status,
-                vec![Outcome::Failed, Outcome::Failed],
-            )),
+            Ok(ran(&[
+                (
+                    &operation_title(&kept),
+                    Outcome::Failed,
+                    because("Couldn't remove ~/kept: b is busy"),
+                ),
+                (
+                    &operation_title(&gone),
+                    Outcome::Failed,
+                    because("Couldn't remove ~/gone: it is busy"),
+                ),
+            ])),
         );
         let rows = parsed(controller.failed_rows());
         assert_eq!(
@@ -13986,10 +14056,7 @@ mod tests {
         finish_write(
             &mut controller,
             Job::CleanAll(vec![clean]),
-            Ok(Payload::Batch(
-                "Completed 0 of 1 cleanup tasks.\nCancelled".into(),
-                vec![Outcome::Cancelled],
-            )),
+            Ok(ran(&[("Clean", Outcome::Cancelled, because("Cancelled."))])),
         );
         assert_eq!(controller.failed_rows().to_string(), "[]");
         assert_eq!(controller.failure().to_string(), "{}");
@@ -14194,13 +14261,11 @@ mod tests {
         let names = controller.rust().names_for(std::slice::from_ref(&clean));
         let notice = write_notice(
             &Job::CleanAll(vec![clean.clone()]),
-            &Ok(Payload::Batch(
-                format!(
-                    "Completed 0 of 1 cleanup tasks.\n{}: Couldn't remove ~/.trees/b: b is busy",
-                    operation_title(&clean)
-                ),
-                vec![Outcome::Failed],
-            )),
+            &Ok(ran(&[(
+                &operation_title(&clean),
+                Outcome::Failed,
+                because("Couldn't remove ~/.trees/b: b is busy"),
+            )])),
             false,
             &names,
         );
@@ -14319,11 +14384,15 @@ mod tests {
                 Job::AutoUpgrade(vec![all("apt"), all("homebrew")], allowed),
                 &Cancellation::default(),
             );
-            let (status, outcomes) = expect!(
+            let ran = expect!(
                 replies.into_iter().last(),
-                Some(Reply::Done(Ok(Payload::Batch(status, outcomes)))) => (status, outcomes)
+                Some(Reply::Done(Ok(Payload::Batch(ran)))) => ran
             );
-            assert_eq!(outcomes, [apt_outcome.clone(), Outcome::Finished]);
+            let status = ran.text(false);
+            assert_eq!(
+                ran.outcomes().collect::<Vec<_>>(),
+                [apt_outcome, Outcome::Finished]
+            );
             assert_eq!(
                 status.contains("it would remove 1 package. Review it with Update all."),
                 apt_outcome == Outcome::Failed,
@@ -14478,7 +14547,7 @@ mod tests {
 
         let job = Job::AutoUpgrade(vec![upgrade(&mail), upgrade(&editor)], false);
         let names = Names::from([(mail.id.clone(), "Mail App".to_owned())]);
-        let batch = |outcomes: Vec<Outcome>| Ok(Payload::Batch(String::new(), outcomes));
+        let batch = |outcomes: Vec<Outcome>| Ok(ended(&outcomes));
         let notice = password_notice(
             &job,
             &batch(vec![Outcome::Failed, Outcome::Finished]),
@@ -14851,9 +14920,9 @@ mod tests {
         );
         assert!(matches!(
             replies.last(),
-            Some(Reply::Done(Ok(Payload::Batch(status, outcomes))))
-                if status == "Firmware update finished. Restart or shut down the device if required."
-                    && outcomes == &[Outcome::Finished]
+            Some(Reply::Done(Ok(Payload::Batch(ran))))
+                if ran.text(false).ends_with("Restart or shut down the device if the update asked for it.")
+                    && ran.outcomes().eq([Outcome::Finished])
         ));
 
         // A failed source makes an export incomplete, so nothing is written.
@@ -14925,8 +14994,8 @@ mod tests {
         );
         assert!(matches!(
             replies.last(),
-            Some(Reply::Done(Ok(Payload::Batch(status, outcomes))))
-                if status.contains(": Completed") && outcomes == &[Outcome::Finished]
+            Some(Reply::Done(Ok(Payload::Batch(ran))))
+                if ran.steps[0].said == Said::Completed && ran.outcomes().eq([Outcome::Finished])
         ));
         cancel.cancel();
         let replies = run_job(
@@ -14936,7 +15005,7 @@ mod tests {
         );
         assert!(matches!(
             replies.last(),
-            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes == &[Outcome::Cancelled]
+            Some(Reply::Done(Ok(Payload::Batch(ran)))) if ran.outcomes().eq([Outcome::Cancelled])
         ));
     }
     #[test]
@@ -15884,7 +15953,7 @@ mod tests {
             );
             let status = expect!(
                 replies.pop().unwrap(),
-                Reply::Done(Ok(Payload::Batch(status, _))) => status
+                Reply::Done(Ok(Payload::Batch(ran))) => ran.text(false)
             );
             assert!(status.contains("Restart or shut down"));
         }
@@ -15950,14 +16019,15 @@ mod tests {
                     Reply::Done(Ok(Payload::Sources(sources))) => {
                         assert_eq!(sources[0].backend, "fixture")
                     }
-                    Reply::Done(Ok(Payload::Batch(status, _))) => {
+                    Reply::Done(Ok(Payload::Batch(ran))) => {
+                        let status = ran.text(false);
                         assert!(status.contains(if fail {
                             "Completed 0 of 1"
                         } else {
                             "Completed 1 of 1"
                         }));
                         assert!(status.contains("Update all fixture packages"));
-                        assert!(status.contains(if fail { "authorization" } else { "cancel" }));
+                        assert!(status.contains(if fail { "administrator" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
                         assert!(outcome.cancellation_deferred)
@@ -16045,7 +16115,7 @@ mod tests {
             ("droid", "Factory Droid (standalone)"),
             ("solana", "Solana CLI (Agave)"),
             ("anchor", "Anchor (AVM)"),
-            ("foundry", "Foundry"),
+            ("foundry", "Foundry (standalone)"),
             ("dev-caches", "Developer caches"),
             ("projects", "Old projects"),
             ("fixture", "fixture"),
@@ -16189,15 +16259,9 @@ mod tests {
             backend: backend.into(),
         };
         let job = Job::UpgradeAll(vec![upgrade("cargo"), upgrade("npm")], None);
-        let partial = Ok(Payload::Batch(
-            String::new(),
-            vec![Outcome::Finished, Outcome::Failed],
-        ));
+        let partial = Ok(ended(&[Outcome::Finished, Outcome::Failed]));
         assert_eq!(names(&retry_job(&job, &partial)), 1);
-        let none_failed = Ok(Payload::Batch(
-            String::new(),
-            vec![Outcome::Finished, Outcome::Finished],
-        ));
+        let none_failed = Ok(ended(&[Outcome::Finished, Outcome::Finished]));
         assert!(retry_job(&job, &none_failed).is_none());
         assert_eq!(names(&retry_job(&job, &Err(EngineError::NotFound))), 2);
         assert!(retry_job(&job, &Err(EngineError::Cancelled)).is_none());
@@ -16212,10 +16276,7 @@ mod tests {
             })
         };
         let clean = Job::CleanAll(vec![cache("apt"), cache("npm")]);
-        let one_failed = Ok(Payload::Batch(
-            String::new(),
-            vec![Outcome::Failed, Outcome::Finished],
-        ));
+        let one_failed = Ok(ended(&[Outcome::Failed, Outcome::Finished]));
         assert_eq!(names(&retry_job(&clean, &one_failed)), 1);
         assert!(retry_job(&clean, &none_failed).is_none());
     }
@@ -16480,17 +16541,22 @@ mod tests {
             ),
             Some("Held packages".into())
         );
-        // Batch lines keep the engine's denial until it is explained here.
+        // A denial in a batch is worded for the chosen permission option.
+        let denied = expect!(
+            ran(&[
+                ("Update x (APT)", Outcome::Failed, Said::Denied),
+                ("Update y (APT)", Outcome::Finished, Said::KeptAfterCancel),
+            ]),
+            Payload::Batch(ran) => ran
+        );
         assert_eq!(
-            batch_status_text(
-                "Update x (APT): authorization denied or unavailable\nok",
-                true
-            ),
+            denied.text(true),
             format!(
-                "Update x (APT): {}\nok",
+                "Completed 1 of 2 updates.\nUpdate x (APT): {}\nUpdate y (APT): Finished before it could be cancelled. Changes were kept.",
                 plain_error(&E::AuthorizationDenied.into(), None, true)
             )
         );
+        assert_ne!(denied.text(true), denied.text(false));
     }
     #[test]
     fn errors_shown_by_the_controller_are_plain() {
@@ -18755,7 +18821,8 @@ mod tests {
             assert_eq!(log.lock().unwrap()[0], "refresh:apt");
             assert!(log.lock().unwrap().contains(&"read:npm".into()));
             assert!(!log.lock().unwrap().contains(&"refresh:npm".into()));
-            let (report, outcomes) = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, outcomes))) => (report, outcomes));
+            let (report, ran) = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, ran))) => (report, ran));
+            let outcomes: Vec<_> = ran.outcomes().collect();
             assert_eq!(report.packages.len(), if failure { 1 } else { 2 });
             assert_eq!(report.failures.len(), usize::from(failure));
             assert_eq!(report.successful_sources.contains(&"apt".into()), !failure);
@@ -18774,7 +18841,7 @@ mod tests {
                 );
                 let retry = retry_job(
                     &Job::CheckUpdates(operations, vec!["apt".into(), "npm".into()]),
-                    &Ok(Payload::Batch("failed".into(), outcomes)),
+                    &Ok(Payload::Batch(ran)),
                 );
                 assert!(
                     matches!(retry, Some(Job::CheckUpdates(ops, sources)) if ops.len() == 1 && sources == ["apt", "npm"])
@@ -18805,7 +18872,7 @@ mod tests {
         );
         assert_eq!(*log.lock().unwrap(), ["read:npm"]);
         assert!(
-            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::CheckedUpdates(report, _, outcomes)))) if report.packages.len() == 1 && outcomes.is_empty())
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::CheckedUpdates(report, ran)))) if report.packages.len() == 1 && ran.steps.is_empty())
         );
     }
     #[test]
@@ -18832,7 +18899,7 @@ mod tests {
                 &Cancellation::default(),
                 &mut |r| replies.push(r),
             );
-            let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => report);
+            let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _))) => report);
             assert_eq!(report.failures.len(), usize::from(failure));
             assert_eq!(report.successful_sources.contains(&"npm".into()), !failure);
             assert_eq!(log.lock().unwrap().last().unwrap(), "read:npm");
@@ -18872,7 +18939,7 @@ mod tests {
             &Cancellation::default(),
             &mut |r| replies.push(r),
         );
-        let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _, _))) => report);
+        let report = expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::CheckedUpdates(report, _))) => report);
         assert_eq!(report.failures.len(), 2);
         let apt = report.failures.iter().find(|f| f.backend == "apt").unwrap();
         assert_eq!(
@@ -18908,8 +18975,7 @@ mod tests {
             ),
             vec![Reply::Done(Ok(Payload::CheckedUpdates(
                 Box::default(),
-                "failed".into(),
-                vec![Outcome::Failed, Outcome::Finished],
+                expect!(ended(&[Outcome::Failed, Outcome::Finished]), Payload::Batch(ran) => ran),
             )))],
         ));
         settle(&mut ctl);
@@ -19005,19 +19071,9 @@ mod tests {
     }
 
     /// A source whose tool is missing: detection says it isn't installed.
-    struct NotInstalled {
-        id: &'static str,
-    }
-    impl Backend for NotInstalled {
-        fn id(&self) -> &str {
-            self.id
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Installed, Capability::Refresh]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Unavailable(format!("{} not found", self.id)))
-        }
+    fn not_installed(id: &str) -> Fake {
+        Fake::new(id, &[Capability::Installed, Capability::Refresh])
+            .unavailable(&format!("{id} not found"))
     }
     const NOT_INSTALLED: [&str; 25] = [
         "amp",
@@ -19056,7 +19112,7 @@ mod tests {
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
             for id in NOT_INSTALLED {
-                engine.register(NotInstalled { id }).unwrap();
+                engine.register(not_installed(id)).unwrap();
             }
             Ok(engine)
         }
@@ -19096,7 +19152,7 @@ mod tests {
             _: &Cancellation,
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
-            engine.register(NotInstalled { id: "amp" }).unwrap();
+            engine.register(not_installed("amp")).unwrap();
             engine
                 .register(UpdateCheckFixture {
                     id: "npm",
@@ -19124,23 +19180,6 @@ mod tests {
 
     /// A source that is installed but broken: detection says it's unavailable
     /// for a reason other than a missing tool.
-    struct BrokenInstall {
-        id: &'static str,
-    }
-    impl Backend for BrokenInstall {
-        fn id(&self) -> &str {
-            self.id
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Installed, Capability::Refresh]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Unavailable(
-                "Docker is installed but unavailable: daemon stopped".into(),
-            ))
-        }
-    }
-
     #[test]
     fn refresh_an_installed_but_broken_source_still_reports_a_failed_check() {
         fn engine(
@@ -19150,8 +19189,13 @@ mod tests {
             _: &Cancellation,
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
-            engine.register(NotInstalled { id: "amp" }).unwrap();
-            engine.register(BrokenInstall { id: "docker" }).unwrap();
+            engine.register(not_installed("amp")).unwrap();
+            engine
+                .register(
+                    Fake::new("docker", &[Capability::Installed, Capability::Refresh])
+                        .unavailable("Docker is installed but unavailable: daemon stopped"),
+                )
+                .unwrap();
             Ok(engine)
         }
         let mut controller = ffi::create_synthetic_controller(engine);
@@ -19194,7 +19238,7 @@ mod tests {
         );
         assert_eq!(*log.lock().unwrap(), ["refresh:apt"]);
         assert!(
-            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes == [Outcome::Cancelled])
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::Batch(ran)))) if ran.outcomes().eq([Outcome::Cancelled]))
         );
     }
     #[test]
@@ -19219,7 +19263,7 @@ mod tests {
         execute(&mut engine, job.clone(), &cancel, &mut |r| replies.push(r));
         assert_eq!(*log.lock().unwrap(), ["read:npm"]);
         assert!(
-            matches!(replies.last(), Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes.is_empty())
+            matches!(replies.last(), Some(Reply::Done(Ok(Payload::Batch(ran)))) if ran.steps.is_empty())
         );
         let mut controller = synthetic_controller();
         let mut ctl = controller.pin_mut();
@@ -19260,14 +19304,13 @@ mod tests {
                 failures: vec![],
                 successful_sources: vec!["fixture".into()],
             }),
-            "Checked".into(),
-            vec![],
+            Batch::default(),
         )));
         assert_eq!(ctl.rust().packages.len(), 1);
         assert!(ctl.rust().worker.is_none());
         assert!(retry_job(
             &Job::CheckUpdates(vec![], vec!["npm".into()]),
-            &Ok(Payload::Batch("Checked".into(), vec![]))
+            &Ok(Payload::Batch(Batch::default()))
         )
         .is_none());
     }
@@ -19367,8 +19410,7 @@ mod tests {
                 Job::CheckUpdates(vec![], vec!["apt".into()]),
                 vec![Reply::Done(Ok(Payload::CheckedUpdates(
                     Box::new(report),
-                    "Completed".into(),
-                    vec![],
+                    Batch::default(),
                 )))],
             ));
             wait_until(&mut ctl, |ctl| !ctl.checking_updates());
@@ -19467,8 +19509,7 @@ mod tests {
             Job::CheckUpdates(vec![], vec!["npm".into()]),
             vec![Reply::Done(Ok(Payload::CheckedUpdates(
                 Box::new(report),
-                "Completed".into(),
-                vec![],
+                Batch::default(),
             )))],
         ));
         ctl.as_mut().set_busy(true);
@@ -19505,19 +19546,20 @@ mod tests {
                 ran: std::sync::Arc::clone(&ran),
             })
             .unwrap();
-        let (status, outcomes) = batch(
+        let finished = batch(
             &mut engine,
             &[refresh("fixture")],
             vec![],
             &Cancellation::default(),
             &mut |_| {},
         );
+        let status = finished.text(false);
         // The fixture only cleans, so its refresh fails.
         assert!(
             status.starts_with("Completed 0 of 1 source refreshes."),
             "{status}"
         );
-        assert_eq!(outcomes, [Outcome::Failed]);
+        assert!(finished.outcomes().eq([Outcome::Failed]));
         assert!(ran.lock().unwrap().is_empty());
     }
 
@@ -20611,7 +20653,7 @@ mod tests {
         );
         let outcomes = expect!(
             replies.into_iter().last(),
-            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+            Some(Reply::Done(Ok(Payload::Batch(ran)))) => ran.outcomes().collect::<Vec<_>>()
         );
         assert_eq!(outcomes, [Outcome::Finished]);
         // APT isn't there to plan, so it is held with the reason and the
@@ -20623,7 +20665,7 @@ mod tests {
         );
         let outcomes = expect!(
             replies.into_iter().last(),
-            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+            Some(Reply::Done(Ok(Payload::Batch(ran)))) => ran.outcomes().collect::<Vec<_>>()
         );
         assert_eq!(outcomes, [Outcome::Failed, Outcome::Finished]);
         // A cleanup batch names its tasks as such.
@@ -20637,7 +20679,7 @@ mod tests {
         );
         let status = expect!(
             replies.into_iter().last(),
-            Some(Reply::Done(Ok(Payload::Batch(status, _)))) => status
+            Some(Reply::Done(Ok(Payload::Batch(ran)))) => ran.text(false)
         );
         assert!(
             status.starts_with("Completed 0 of 1 cleanup tasks."),

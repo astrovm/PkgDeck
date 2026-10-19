@@ -23,6 +23,8 @@ pub mod background;
 pub mod disk;
 pub mod engine;
 pub mod failed_updates;
+#[doc(hidden)]
+pub mod fake;
 pub mod flatpak_bundle;
 pub mod flatpak_ref;
 pub mod hold;

@@ -43,7 +43,11 @@ pub fn side(app: &mut App, ui: &mut Ui, rect: Rect, narrow: bool) {
     };
     if row.is_package() {
         let details = app.details_for_selection().cloned();
-        app_page(app, ui, rect, &row, details, narrow, false);
+        let layout = Layout {
+            narrow,
+            opened: false,
+        };
+        app_page(app, ui, rect, &row, details, layout);
     } else {
         panel(app, ui, rect, &row, narrow);
     }
@@ -58,15 +62,11 @@ pub fn opened_page(app: &mut App, ui: &mut Ui, rect: Rect) {
     let rect = rect.translate(vec2((1.0 - entered) * 32.0, 0.0));
     ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt("opened"), |ui| {
         ui.multiply_opacity(entered);
-        app_page(
-            app,
-            ui,
-            rect,
-            &row,
-            Some(opened),
-            rect.width() < 600.0,
-            true,
-        );
+        let layout = Layout {
+            narrow: rect.width() < 600.0,
+            opened: true,
+        };
+        app_page(app, ui, rect, &row, Some(opened), layout);
     });
 }
 
@@ -246,16 +246,23 @@ enum Main {
     Row(model::Action),
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How a package page shows.
+#[derive(Clone, Copy)]
+struct Layout {
+    narrow: bool,
+    /// It shows an opened file or link, not a row of the list.
+    opened: bool,
+}
+
 fn app_page(
     app: &mut App,
     ui: &mut Ui,
     rect: Rect,
     row: &Row,
     details: Option<Details>,
-    narrow: bool,
-    opened: bool,
+    layout: Layout,
 ) {
+    let Layout { narrow, opened } = layout;
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
     paint_card(ui, rect, &palette);
@@ -579,7 +586,7 @@ fn app_page(
                     match details {
                         Some(details) if loaded || !details.description.is_empty() => {
                             ui.multiply_opacity(0.55 + 0.45 * fade);
-                            body(app, ui, row, &details, raw, appimage, opened, narrow);
+                            body(app, ui, row, &details, raw, appimage, layout);
                             if details.more && !opened {
                                 skeleton(ui, &palette);
                             }
@@ -731,7 +738,6 @@ fn review_card(app: &mut App, ui: &mut Ui) {
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn body(
     app: &mut App,
     ui: &mut Ui,
@@ -739,9 +745,9 @@ fn body(
     details: &Details,
     raw: Option<usize>,
     appimage: bool,
-    opened: bool,
-    narrow: bool,
+    layout: Layout,
 ) {
+    let Layout { narrow, opened } = layout;
     let palette = Palette::current(ui.ctx());
     // Screenshots.
     if let Some(shots) = details.screenshots.as_ref().filter(|s| !s.is_empty()) {

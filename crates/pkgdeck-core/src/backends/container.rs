@@ -623,23 +623,21 @@ impl<T: Transport> Backend for Container<T> {
         if reviewed == current {
             return true;
         }
-        if !matches!(
+        // The first line says what happens to them, the rest list them.
+        fn said(preview: &str) -> Option<&str> {
+            preview.split_once('\n').map(|(said, _)| said)
+        }
+        fn listed(preview: &str) -> Vec<&str> {
+            preview
+                .split_once('\n')
+                .map_or(vec![], |(_, listed)| listed.lines().collect())
+        }
+        matches!(
             current.id.key.as_str(),
             "stopped-containers" | "unused-images" | "unused-volumes"
-        ) || (&reviewed.id, &reviewed.kind, &reviewed.title)
-            != (&current.id, &current.kind, &current.title)
-        {
-            return false;
-        }
-        // The first line says what happens to them, the rest list them.
-        let (Some((said, listed)), Some((saying, listing))) = (
-            reviewed.preview.split_once('\n'),
-            current.preview.split_once('\n'),
-        ) else {
-            return false;
-        };
-        let listed: Vec<_> = listed.lines().collect();
-        said == saying && listing.lines().all(|line| listed.contains(&line))
+        ) && said(&reviewed.preview).is_some()
+            && said(&reviewed.preview) == said(&current.preview)
+            && only_fewer(reviewed, current, listed)
     }
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES

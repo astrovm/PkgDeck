@@ -660,6 +660,21 @@ impl Host {
         )
     }
 
+    /// Add `dir` to PATH, `first` or last. A folder whose name can't join
+    /// PATH (it has a `:`) is left out.
+    fn add_to_path(&mut self, dir: &Path, first: bool) {
+        let key = OsString::from("PATH");
+        let mut dirs: Vec<PathBuf> = std::env::split_paths(&self.env[&key]).collect();
+        if first {
+            dirs.insert(0, dir.to_owned());
+        } else {
+            dirs.push(dir.to_owned());
+        }
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            self.env.insert(key, joined);
+        }
+    }
+
     /// Run an already identified standalone installation as its owner. The
     /// adapter supplies fixed updater arguments, never a user shell command.
     pub(crate) fn standalone_write(
@@ -679,12 +694,7 @@ impl Host {
                 .as_deref()
                 .and_then(Path::parent)
             {
-                let key = OsString::from("PATH");
-                let mut dirs: Vec<PathBuf> = std::env::split_paths(&host.env[&key]).collect();
-                dirs.push(dir.to_owned());
-                if let Ok(path) = std::env::join_paths(dirs) {
-                    host.env.insert(key, path);
-                }
+                host.add_to_path(dir, false);
             }
         }
         host.env.extend(
@@ -1014,13 +1024,8 @@ impl Host {
                     .user_install(executable)?
                     .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
                 // npm and pnpm start the `node` next to them, through PATH.
-                // A folder whose name can't join PATH (it has a `:`) is left out.
-                let key = OsString::from("PATH");
-                let mut dirs: Vec<PathBuf> =
-                    path.parent().map(Path::to_owned).into_iter().collect();
-                dirs.extend(std::env::split_paths(&self.env[&key]));
-                if let Ok(joined) = std::env::join_paths(dirs) {
-                    host.to_mut().env.insert(key, joined);
+                if let Some(dir) = path.parent() {
+                    host.to_mut().add_to_path(dir, true);
                 }
                 path
             }

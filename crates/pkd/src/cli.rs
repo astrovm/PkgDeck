@@ -455,9 +455,12 @@ pub fn dispatch_with(
                     names: names.clone(),
                     allow_removals: *allow_removals,
                 };
-                dispatch_command(
-                    engine, args, &upgrade, &failures, history, cancel, confirm, authorize, events,
-                )
+                let asks = Asks {
+                    confirm,
+                    authorize,
+                    events,
+                };
+                dispatch_command(engine, args, &upgrade, &failures, history, cancel, asks)
             };
             data["refresh"] = json!({
                 "operations": refreshed.operations,
@@ -478,9 +481,11 @@ pub fn dispatch_with(
             &[],
             history,
             cancel,
-            confirm,
-            authorize,
-            events,
+            Asks {
+                confirm,
+                authorize,
+                events,
+            },
         ),
     }
 }
@@ -614,7 +619,13 @@ fn refresh_report(
 }
 /// Every command but `refresh` and `update`, plus the upgrade `update` runs
 /// after its refresh, with the sources that refresh failed for.
-#[allow(clippy::too_many_arguments)]
+/// How a command checks with the person running it: it asks to go ahead,
+/// asks for access once approved, and shows its progress.
+struct Asks<'a> {
+    confirm: &'a mut dyn FnMut(&[Operation]) -> bool,
+    authorize: &'a mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
+    events: &'a mut dyn FnMut(Event),
+}
 fn dispatch_command(
     engine: &mut Engine,
     args: &Args,
@@ -622,9 +633,11 @@ fn dispatch_command(
     refresh_failures: &[BackendFailure],
     history: Option<&History>,
     cancel: &Cancellation,
-    confirm: &mut dyn FnMut(&[Operation]) -> bool,
-    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
-    events: &mut dyn FnMut(Event),
+    Asks {
+        confirm,
+        authorize,
+        events,
+    }: Asks,
 ) -> (Value, u8) {
     match command {
         Commands::Repos { .. } => {
@@ -2472,25 +2485,14 @@ mod tests {
         let doctor = Args::try_parse_from(["pkd", "doctor"]).unwrap();
         assert!(working_label(doctor.command.as_ref().unwrap()).is_none());
     }
-    struct NoRefresh(&'static str);
-    impl Backend for NoRefresh {
-        fn id(&self) -> &str {
-            self.0
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Search, Capability::Installed]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Available)
-        }
-        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-            Ok(vec![])
-        }
+    /// A source that lists packages but has nothing to refresh.
+    fn no_refresh(id: &str) -> pkgdeck_core::fake::Fake {
+        pkgdeck_core::fake::Fake::new(id, &[Capability::Search, Capability::Installed])
     }
     #[test]
     fn refresh_refreshes_only_capable_sources_without_asking() {
         let mut engine = engine();
-        engine.register(NoRefresh("npm")).unwrap();
+        engine.register(no_refresh("npm")).unwrap();
         let args = Args::try_parse_from(["pkd", "refresh"]).unwrap();
         assert!(!args.command.as_ref().unwrap().writes());
         let (data, code) = dispatch(
@@ -2509,7 +2511,7 @@ mod tests {
         // A source without package lists, even asked for by name, checks
         // for updates as it lists.
         let mut engine = Engine::default();
-        engine.register(NoRefresh("npm")).unwrap();
+        engine.register(no_refresh("npm")).unwrap();
         let (data, code) = call(&mut engine, &["--from", "npm", "refresh"], true);
         assert_eq!((code, &data["operations"]), (0, &json!([])), "{data}");
         let (data, code) = call(&mut engine, &["--from", "npm", "update"], true);

@@ -1437,52 +1437,25 @@ fn a_failed_clean_is_a_toast_a_marked_row_and_a_card_in_activity() {
 #[test]
 fn a_failed_cleanup_keeps_its_retry_after_loading_another_source() {
     use pkgdeck_core::{
-        engine::{Backend, Engine, EngineError},
-        package::{
-            Availability, Capability, CleanupId, CleanupItem, CleanupKind, Operation,
-            OperationOutcome, Progress,
-        },
-        process::Cancellation,
+        engine::{Engine, EngineError},
+        fake::Fake,
+        package::{Capability, CleanupId, CleanupItem, CleanupKind},
     };
-    struct Cleaner(&'static str);
-    impl Backend for Cleaner {
-        fn id(&self) -> &str {
-            self.0
+    fn tasks(source: &str) -> Vec<CleanupItem> {
+        if source != "projects" {
+            return vec![];
         }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Clean]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Available)
-        }
-        fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
-            Ok(if self.0 == "projects" {
-                vec![CleanupItem {
-                    id: CleanupId {
-                        backend: self.0.into(),
-                        key: "worktrees:/code/fixture".into(),
-                    },
-                    kind: CleanupKind::Worktree,
-                    title: "Fixture worktrees".into(),
-                    summary: "Finished worktrees".into(),
-                    preview: "Remove the fixture worktree".into(),
-                    bytes: Some(1000),
-                }]
-            } else {
-                vec![]
-            })
-        }
-        fn execute(
-            &mut self,
-            _: &Operation,
-            _: &Cancellation,
-            _: &mut dyn FnMut(Progress),
-        ) -> Result<OperationOutcome, EngineError> {
-            Err(EngineError::InvalidResponse {
-                backend: self.0.into(),
-                reason: "Fixture is busy".into(),
-            })
-        }
+        vec![CleanupItem {
+            id: CleanupId {
+                backend: source.into(),
+                key: "worktrees:/code/fixture".into(),
+            },
+            kind: CleanupKind::Worktree,
+            title: "Fixture worktrees".into(),
+            summary: "Finished worktrees".into(),
+            preview: "Remove the fixture worktree".into(),
+            bytes: Some(1000),
+        }]
     }
     fn settle(app: &mut App) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1501,7 +1474,14 @@ fn a_failed_cleanup_keeps_its_retry_after_loading_another_source() {
         let mut engine = Engine::default();
         for source in ["projects", "dev-caches"] {
             if sources.is_empty() || sources.iter().any(|id| id == source) {
-                engine.register(Cleaner(source)).unwrap();
+                let busy = EngineError::InvalidResponse {
+                    backend: source.into(),
+                    reason: "Fixture is busy".into(),
+                };
+                let cleaner = Fake::new(source, &[Capability::Clean])
+                    .cleaning(tasks(source))
+                    .answering(Err(busy));
+                engine.register(cleaner).unwrap();
             }
         }
         Ok(engine)
@@ -1950,41 +1930,29 @@ fn refresh_header_reports_fresh_partial_and_running_checks_and_preserves_batch_p
 #[test]
 fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewed() {
     use pkgdeck_core::{
-        engine::{Backend, Engine, EngineError},
-        package::{Availability, Capability, Package, PackageId, Scope, UpdateAvailability},
-        process::Cancellation,
+        engine::Engine,
+        fake::Fake,
+        package::{Capability, Package, PackageId, Scope, UpdateAvailability},
     };
-    struct Fixture;
-    impl Backend for Fixture {
-        fn id(&self) -> &str {
-            "flatpak"
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Installed, Capability::Upgrade]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Available)
-        }
-        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-            Ok(vec![Package {
-                id: PackageId {
-                    backend: "flatpak".into(),
-                    name: "org.example.Fixture".into(),
-                    architecture: "all".into(),
-                    scope: Scope::User { uid: 1234 },
-                    remote: None,
-                    reference: None,
-                },
-                display_name: "Fixture".into(),
-                summary: "Synthetic package".into(),
-                installed_version: Some("1.0".into()),
-                candidate_version: Some("2.0".into()),
-                update: UpdateAvailability::Available,
-                icon: None,
-                component_ids: vec![],
-                homepages: vec![],
-                adopt_with: None,
-            }])
+    fn package() -> Package {
+        Package {
+            id: PackageId {
+                backend: "flatpak".into(),
+                name: "org.example.Fixture".into(),
+                architecture: "all".into(),
+                scope: Scope::User { uid: 1234 },
+                remote: None,
+                reference: None,
+            },
+            display_name: "Fixture".into(),
+            summary: "Synthetic package".into(),
+            installed_version: Some("1.0".into()),
+            candidate_version: Some("2.0".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
         }
     }
     let (store, settings) = Store::open(None, None);
@@ -1992,7 +1960,8 @@ fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewe
     platform.record_notifications();
     let controller = create_synthetic_controller(|_, _, _, _| {
         let mut engine = Engine::default();
-        engine.register(Fixture).unwrap();
+        let flatpak = Fake::new("flatpak", &[Capability::Installed, Capability::Upgrade]);
+        engine.register(flatpak.listing(vec![package()])).unwrap();
         Ok(engine)
     });
     let mut app = App::with_controller(controller, settings, store, platform, Launch::default());

@@ -139,20 +139,10 @@ fn refused(result: &Result<OperationOutcome, EngineError>, expected: Refusal) {
 
 #[test]
 fn backends_without_an_upgrade_preview_cannot_plan_a_full_upgrade() {
-    struct Plain;
-    impl Backend for Plain {
-        fn id(&self) -> &str {
-            "apt"
-        }
-        fn capabilities(&self) -> &[Capability] {
-            APT
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Available)
-        }
-    }
     let mut engine = Engine::default();
-    engine.register(Plain).unwrap();
+    engine
+        .register(pkgdeck_core::fake::Fake::new("apt", APT))
+        .unwrap();
     let cancel = Cancellation::default();
     assert_eq!(
         engine.plan_apt_upgrade(&cancel),

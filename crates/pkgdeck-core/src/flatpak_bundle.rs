@@ -98,9 +98,10 @@ pub(crate) fn read_from(reader: &mut (impl Read + Seek), len: u64) -> Result<Bun
             return Err(malformed());
         }
         let (key, value) = entry_value(reader, entry, end - entry)?;
+        let typed = |ty: &[u8]| value.filter(|v| v.ty == ty).map(|v| v.bytes);
         match key.as_slice() {
-            b"ref" => reference = value.filter(|(ty, _)| ty == b"s").map(|(_, body)| body),
-            b"appdata" => appdata = value.filter(|(ty, _)| ty == b"ay").map(|(_, body)| body),
+            b"ref" => reference = typed(b"s"),
+            b"appdata" => appdata = typed(b"ay"),
             _ => {}
         }
         start = end;
@@ -130,15 +131,19 @@ pub(crate) fn read_from(reader: &mut (impl Read + Seek), len: u64) -> Result<Bun
     })
 }
 
+/// A variant's GVariant type and its bytes.
+struct Variant {
+    ty: Vec<u8>,
+    bytes: Vec<u8>,
+}
+
 /// The key of the `{sv}` entry at `entry`, and for `ref` and `appdata` its
-/// value's type and bytes. Other values, such as the delta parts, are not
-/// read.
-#[allow(clippy::type_complexity)]
+/// value. Other values, such as the delta parts, are not read.
 fn entry_value(
     reader: &mut (impl Read + Seek),
     entry: u64,
     len: u64,
-) -> Result<(Vec<u8>, Option<(Vec<u8>, Vec<u8>)>), String> {
+) -> Result<(Vec<u8>, Option<Variant>), String> {
     let size = offset_size(len);
     if len <= size {
         return Err(malformed());
@@ -171,7 +176,7 @@ fn entry_value(
     };
     let ty = variant.split_off(separator + 1);
     variant.pop();
-    Ok((key, Some((ty, variant))))
+    Ok((key, Some(Variant { ty, bytes: variant })))
 }
 
 /// The version of the first `<release>` in gzipped AppStream XML, which
