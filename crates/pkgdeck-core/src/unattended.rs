@@ -196,13 +196,15 @@ pub fn root_owned(path: &Path) -> bool {
 fn save_rule(grant: bool) -> Result<(), ExecutionError> {
     save_rule_as(
         grant,
-        rustix::process::geteuid().is_root(),
-        ["PKEXEC_UID", "SUDO_UID"]
-            .into_iter()
-            .find_map(|name| std::env::var(name).ok()),
-        user_name,
-        helper_path,
-        root_owned,
+        System {
+            root: rustix::process::geteuid().is_root(),
+            uid: ["PKEXEC_UID", "SUDO_UID"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok()),
+            name_of: user_name,
+            runner: helper_path,
+            trusted: root_owned,
+        },
         Path::new(RULES_DIR),
         &mut io::stdout().lock(),
     )
@@ -218,14 +220,26 @@ fn user_name(uid: u32) -> io::Result<Output> {
 fn helper_path() -> io::Result<PathBuf> {
     std::fs::canonicalize(std::env::current_exe()?)
 }
-#[allow(clippy::too_many_arguments)]
-fn save_rule_as(
-    grant: bool,
+/// What saving the rule asks the system: who runs it, as whom, and where
+/// the helper is. Tests answer instead.
+struct System {
     root: bool,
+    /// The user pkexec or sudo ran for.
     uid: Option<String>,
     name_of: fn(u32) -> io::Result<Output>,
     runner: fn() -> io::Result<PathBuf>,
+    /// Only root can change the helper.
     trusted: fn(&Path) -> bool,
+}
+fn save_rule_as(
+    grant: bool,
+    System {
+        root,
+        uid,
+        name_of,
+        runner,
+        trusted,
+    }: System,
     dir: &Path,
     out: &mut impl Write,
 ) -> Result<(), ExecutionError> {
@@ -633,21 +647,30 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let save = |grant, uid: Option<&str>, name_of, runner, trusted, dir: &Path| {
             let mut out = Vec::new();
-            let result = save_rule_as(
-                grant,
-                true,
-                uid.map(Into::into),
+            let system = System {
+                root: true,
+                uid: uid.map(Into::into),
                 name_of,
                 runner,
                 trusted,
-                dir,
-                &mut out,
-            );
+            };
+            let result = save_rule_as(grant, system, dir, &mut out);
             result.map(|()| String::from_utf8(out).unwrap())
         };
         let mut out = Vec::new();
         assert_eq!(
-            save_rule_as(true, false, None, astro, installed, yes, &dir, &mut out),
+            save_rule_as(
+                true,
+                System {
+                    root: false,
+                    uid: None,
+                    name_of: astro,
+                    runner: installed,
+                    trusted: yes,
+                },
+                &dir,
+                &mut out
+            ),
             Err(invalid("host runner requires root"))
         );
         for caller in [None, Some("0"), Some("abc")] {

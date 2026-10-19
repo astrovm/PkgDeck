@@ -619,6 +619,19 @@ pub struct MacApps {
     uid: u32,
 }
 
+/// What one walk through the application folders has gathered so far.
+struct Walk<'a> {
+    /// How many more entries it may read.
+    budget: usize,
+    /// Bundles already listed, by their real path.
+    seen: BTreeSet<PathBuf>,
+    apps: Vec<Listed>,
+    /// Folders and entries it had to skip.
+    errors: Vec<EngineError>,
+    ownership: &'a Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
+    cancel: &'a Cancellation,
+}
+
 impl MacApps {
     pub fn native(transport: NativeTransport) -> Self {
         let host = transport.host.clone();
@@ -659,23 +672,20 @@ impl MacApps {
             if cancel.requested() || matches!(&ownership, Err(EngineError::Cancelled)) {
                 return Err(EngineError::Cancelled);
             }
-            let mut apps = Vec::new();
-            let mut seen = BTreeSet::new();
-            let mut budget = MAX_ENTRIES;
-            let mut errors = Vec::new();
+            let mut walk = Walk {
+                budget: MAX_ENTRIES,
+                seen: BTreeSet::new(),
+                apps: Vec::new(),
+                errors: Vec::new(),
+                ownership: &ownership,
+                cancel,
+            };
             for (root, scope) in &self.roots {
-                self.scan(
-                    root,
-                    scope,
-                    0,
-                    &mut budget,
-                    &mut seen,
-                    &mut apps,
-                    &mut errors,
-                    &ownership,
-                    cancel,
-                )?;
+                self.scan(root, scope, 0, &mut walk)?;
             }
+            let Walk {
+                mut apps, errors, ..
+            } = walk;
             apps.sort_by(|a, b| a.details.package.id.cmp(&b.details.package.id));
             self.snapshot = Some(apps);
             self.scan_errors = errors;
@@ -726,19 +736,14 @@ impl MacApps {
         Err(EngineError::NotFound)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn scan(
         &self,
         root: &Path,
         scope: &Scope,
         depth: usize,
-        budget: &mut usize,
-        seen: &mut BTreeSet<PathBuf>,
-        apps: &mut Vec<Listed>,
-        errors: &mut Vec<EngineError>,
-        ownership: &Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
-        cancel: &Cancellation,
+        walk: &mut Walk,
     ) -> Result<(), EngineError> {
+        let cancel = walk.cancel;
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -746,7 +751,7 @@ impl MacApps {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) if depth > 0 => {
-                errors.push(invalid(
+                walk.errors.push(invalid(
                     ID,
                     format!("skipped folder {}: {error}", root.display()),
                 ));
@@ -760,12 +765,13 @@ impl MacApps {
             if cancel.requested() {
                 return Err(EngineError::Cancelled);
             }
-            *budget = budget
+            walk.budget = walk
+                .budget
                 .checked_sub(1)
                 .ok_or_else(|| invalid(ID, "application inventory exceeds 4096 entries"))?;
             match entry {
                 Ok(path) => paths.push(path),
-                Err(error) => errors.push(invalid(
+                Err(error) => walk.errors.push(invalid(
                     ID,
                     format!("skipped entry in {}: {error}", root.display()),
                 )),
@@ -779,7 +785,7 @@ impl MacApps {
             let metadata = match self.io.symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    errors.push(invalid(
+                    walk.errors.push(invalid(
                         ID,
                         format!("skipped entry {}: {error}", path.display()),
                     ));
@@ -790,7 +796,7 @@ impl MacApps {
                 // Identities are strings; a lossy name would point elsewhere
                 // and could collide with another bundle's identity.
                 if path.to_str().is_none() {
-                    errors.push(invalid(
+                    walk.errors.push(invalid(
                         ID,
                         format!("skipped entry {}: path is not valid UTF-8", path.display()),
                     ));
@@ -799,15 +805,16 @@ impl MacApps {
                 let canonical = match self.io.canonicalize(&path) {
                     Ok(canonical) => canonical,
                     Err(error) => {
-                        errors.push(invalid(
+                        walk.errors.push(invalid(
                             ID,
                             format!("skipped entry {}: {error}", path.display()),
                         ));
                         continue;
                     }
                 };
-                if seen.insert(canonical.clone()) {
-                    apps.push(self.describe(&path, &canonical, scope, ownership, cancel)?);
+                if walk.seen.insert(canonical.clone()) {
+                    let app = self.describe(&path, &canonical, scope, walk.ownership, cancel)?;
+                    walk.apps.push(app);
                 }
                 // Never recurse into app bundles and list their helper apps.
             } else if metadata.is_dir()
@@ -816,17 +823,7 @@ impl MacApps {
                     .file_name()
                     .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."))
             {
-                self.scan(
-                    &path,
-                    scope,
-                    depth + 1,
-                    budget,
-                    seen,
-                    apps,
-                    errors,
-                    ownership,
-                    cancel,
-                )?;
+                self.scan(&path, scope, depth + 1, walk)?;
             }
         }
         Ok(())

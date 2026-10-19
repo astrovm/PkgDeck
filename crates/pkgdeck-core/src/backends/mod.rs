@@ -3083,17 +3083,9 @@ impl<T: Transport> Backend for Homebrew<T> {
         if reviewed == current {
             return true;
         }
-        let listed = removes(&reviewed.preview);
         current.id.key == "cleanup"
-            && (
-                &reviewed.id,
-                &reviewed.kind,
-                &reviewed.title,
-                &reviewed.summary,
-            ) == (&current.id, &current.kind, &current.title, &current.summary)
-            && removes(&current.preview)
-                .iter()
-                .all(|line| listed.contains(line))
+            && reviewed.summary == current.summary
+            && only_fewer(reviewed, current, removes)
     }
     fn has_update_index(&self) -> bool {
         true

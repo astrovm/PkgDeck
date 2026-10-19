@@ -1969,6 +1969,21 @@ fn still_reviewed(
     reviewed.is_some_and(|reviewed| backend.cleanup_still_reviewed(reviewed, current))
 }
 
+/// `current` is the `reviewed` cleanup task with some entries gone and none
+/// new: the same task, and every entry `entries` reads from its preview now
+/// was listed then. For [`Backend::cleanup_still_reviewed`].
+pub fn only_fewer(
+    reviewed: &CleanupItem,
+    current: &CleanupItem,
+    entries: fn(&str) -> Vec<&str>,
+) -> bool {
+    let listed = entries(&reviewed.preview);
+    (&reviewed.id, &reviewed.kind, &reviewed.title) == (&current.id, &current.kind, &current.title)
+        && entries(&current.preview)
+            .iter()
+            .all(|entry| listed.contains(entry))
+}
+
 #[cfg(test)]
 mod refusal_tests {
     use super::*;

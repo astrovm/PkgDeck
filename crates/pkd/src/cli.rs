@@ -455,9 +455,12 @@ pub fn dispatch_with(
                     names: names.clone(),
                     allow_removals: *allow_removals,
                 };
-                dispatch_command(
-                    engine, args, &upgrade, &failures, history, cancel, confirm, authorize, events,
-                )
+                let asks = Asks {
+                    confirm,
+                    authorize,
+                    events,
+                };
+                dispatch_command(engine, args, &upgrade, &failures, history, cancel, asks)
             };
             data["refresh"] = json!({
                 "operations": refreshed.operations,
@@ -478,9 +481,11 @@ pub fn dispatch_with(
             &[],
             history,
             cancel,
-            confirm,
-            authorize,
-            events,
+            Asks {
+                confirm,
+                authorize,
+                events,
+            },
         ),
     }
 }
@@ -614,7 +619,13 @@ fn refresh_report(
 }
 /// Every command but `refresh` and `update`, plus the upgrade `update` runs
 /// after its refresh, with the sources that refresh failed for.
-#[allow(clippy::too_many_arguments)]
+/// How a command checks with the person running it: it asks to go ahead,
+/// asks for access once approved, and shows its progress.
+struct Asks<'a> {
+    confirm: &'a mut dyn FnMut(&[Operation]) -> bool,
+    authorize: &'a mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
+    events: &'a mut dyn FnMut(Event),
+}
 fn dispatch_command(
     engine: &mut Engine,
     args: &Args,
@@ -622,9 +633,11 @@ fn dispatch_command(
     refresh_failures: &[BackendFailure],
     history: Option<&History>,
     cancel: &Cancellation,
-    confirm: &mut dyn FnMut(&[Operation]) -> bool,
-    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
-    events: &mut dyn FnMut(Event),
+    Asks {
+        confirm,
+        authorize,
+        events,
+    }: Asks,
 ) -> (Value, u8) {
     match command {
         Commands::Repos { .. } => {

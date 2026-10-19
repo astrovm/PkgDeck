@@ -130,7 +130,14 @@ fn draw_details(
             }
             let rect = ui.max_rect();
             if row.is_package() {
-                app_page(app, ui, rect, &row, Some(details.clone()), narrow, opened);
+                app_page(
+                    app,
+                    ui,
+                    rect,
+                    &row,
+                    Some(details.clone()),
+                    Layout { narrow, opened },
+                );
             } else {
                 panel(app, ui, rect, &row, narrow);
             }
