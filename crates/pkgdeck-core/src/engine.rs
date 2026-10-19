@@ -2535,31 +2535,12 @@ mod apt_upgrade_tests {
 
     #[test]
     fn unattended_batches_refuse_sources_that_need_someone_there() {
-        struct Fixture(&'static str, Arc<AtomicUsize>);
-        impl Backend for Fixture {
-            fn id(&self) -> &str {
-                self.0
-            }
-            fn capabilities(&self) -> &[Capability] {
-                &[Capability::Refresh]
-            }
-            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-                Ok(Availability::Available)
-            }
-            fn execute(
-                &mut self,
-                _: &Operation,
-                _: &Cancellation,
-                _: &mut dyn FnMut(Progress),
-            ) -> Result<OperationOutcome, EngineError> {
-                self.1.fetch_add(1, Ordering::SeqCst);
-                Ok(OperationOutcome::default())
-            }
-        }
-        let writes = Arc::new(AtomicUsize::new(0));
+        let fwupd = crate::fake::Fake::new("fwupd", &[Capability::Refresh]);
+        let user = crate::fake::Fake::new("user", &[Capability::Refresh]);
+        let (firmware, users) = (fwupd.ran.clone(), user.ran.clone());
         let mut engine = Engine::default();
-        engine.register(Fixture("fwupd", writes.clone())).unwrap();
-        engine.register(Fixture("user", writes.clone())).unwrap();
+        engine.register(fwupd).unwrap();
+        engine.register(user).unwrap();
         engine.enable_batch_authorization(
             Host::new(Runtime::Native, Default::default()),
             Authorization::Polkit,
@@ -2577,12 +2558,13 @@ mod apt_upgrade_tests {
         ));
         // The other source still runs on its own.
         assert!(results[1].is_ok(), "{:?}", results[1]);
-        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert!(firmware.lock().unwrap().is_empty());
+        assert_eq!(users.lock().unwrap().len(), 1);
         // With someone there, it runs again.
         engine.set_unattended(false);
         let results = engine.execute_batch(&operations[1..], &Cancellation::default(), &mut |_| {});
         assert!(results.iter().all(Result::is_ok), "{results:?}");
-        assert_eq!(writes.load(Ordering::SeqCst), 2);
+        assert_eq!(users.lock().unwrap().len(), 2);
     }
 
     #[test]

@@ -8051,6 +8051,7 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pkgdeck_core::fake::Fake;
     #[test]
     fn a_running_change_reads_as_what_it_is_doing() {
         for (title, running) in [
@@ -19070,19 +19071,9 @@ mod tests {
     }
 
     /// A source whose tool is missing: detection says it isn't installed.
-    struct NotInstalled {
-        id: &'static str,
-    }
-    impl Backend for NotInstalled {
-        fn id(&self) -> &str {
-            self.id
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Installed, Capability::Refresh]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Unavailable(format!("{} not found", self.id)))
-        }
+    fn not_installed(id: &str) -> Fake {
+        Fake::new(id, &[Capability::Installed, Capability::Refresh])
+            .unavailable(&format!("{id} not found"))
     }
     const NOT_INSTALLED: [&str; 25] = [
         "amp",
@@ -19121,7 +19112,7 @@ mod tests {
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
             for id in NOT_INSTALLED {
-                engine.register(NotInstalled { id }).unwrap();
+                engine.register(not_installed(id)).unwrap();
             }
             Ok(engine)
         }
@@ -19161,7 +19152,7 @@ mod tests {
             _: &Cancellation,
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
-            engine.register(NotInstalled { id: "amp" }).unwrap();
+            engine.register(not_installed("amp")).unwrap();
             engine
                 .register(UpdateCheckFixture {
                     id: "npm",
@@ -19189,23 +19180,6 @@ mod tests {
 
     /// A source that is installed but broken: detection says it's unavailable
     /// for a reason other than a missing tool.
-    struct BrokenInstall {
-        id: &'static str,
-    }
-    impl Backend for BrokenInstall {
-        fn id(&self) -> &str {
-            self.id
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Installed, Capability::Refresh]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Unavailable(
-                "Docker is installed but unavailable: daemon stopped".into(),
-            ))
-        }
-    }
-
     #[test]
     fn refresh_an_installed_but_broken_source_still_reports_a_failed_check() {
         fn engine(
@@ -19215,8 +19189,13 @@ mod tests {
             _: &Cancellation,
         ) -> Result<Engine, EngineError> {
             let mut engine = Engine::default();
-            engine.register(NotInstalled { id: "amp" }).unwrap();
-            engine.register(BrokenInstall { id: "docker" }).unwrap();
+            engine.register(not_installed("amp")).unwrap();
+            engine
+                .register(
+                    Fake::new("docker", &[Capability::Installed, Capability::Refresh])
+                        .unavailable("Docker is installed but unavailable: daemon stopped"),
+                )
+                .unwrap();
             Ok(engine)
         }
         let mut controller = ffi::create_synthetic_controller(engine);

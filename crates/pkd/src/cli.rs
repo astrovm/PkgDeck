@@ -2485,25 +2485,14 @@ mod tests {
         let doctor = Args::try_parse_from(["pkd", "doctor"]).unwrap();
         assert!(working_label(doctor.command.as_ref().unwrap()).is_none());
     }
-    struct NoRefresh(&'static str);
-    impl Backend for NoRefresh {
-        fn id(&self) -> &str {
-            self.0
-        }
-        fn capabilities(&self) -> &[Capability] {
-            &[Capability::Search, Capability::Installed]
-        }
-        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-            Ok(Availability::Available)
-        }
-        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-            Ok(vec![])
-        }
+    /// A source that lists packages but has nothing to refresh.
+    fn no_refresh(id: &str) -> pkgdeck_core::fake::Fake {
+        pkgdeck_core::fake::Fake::new(id, &[Capability::Search, Capability::Installed])
     }
     #[test]
     fn refresh_refreshes_only_capable_sources_without_asking() {
         let mut engine = engine();
-        engine.register(NoRefresh("npm")).unwrap();
+        engine.register(no_refresh("npm")).unwrap();
         let args = Args::try_parse_from(["pkd", "refresh"]).unwrap();
         assert!(!args.command.as_ref().unwrap().writes());
         let (data, code) = dispatch(
@@ -2522,7 +2511,7 @@ mod tests {
         // A source without package lists, even asked for by name, checks
         // for updates as it lists.
         let mut engine = Engine::default();
-        engine.register(NoRefresh("npm")).unwrap();
+        engine.register(no_refresh("npm")).unwrap();
         let (data, code) = call(&mut engine, &["--from", "npm", "refresh"], true);
         assert_eq!((code, &data["operations"]), (0, &json!([])), "{data}");
         let (data, code) = call(&mut engine, &["--from", "npm", "update"], true);
