@@ -21,7 +21,7 @@ sha2.workspace = true
 hex.workspace = true
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 rfd = "=0.17.2"
-memmap2 = "=0.9.11"
+memmap2 = "=0.9.12"
 # The window's handle, to ask the desktop to blur behind glass styles.
 raw-window-handle = "=0.6.2"
 
