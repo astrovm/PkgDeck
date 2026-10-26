@@ -35,14 +35,15 @@ script='
     run() { sudo -u pkgdeck-test /opt/pkd --json --from "$@"; }
     row() { jq -ec --arg name "$1" '\''.data.packages[] | select(.id.name == $name)'\''; }
 
-    # The AUR RPC drops connections now and then. A command that still fails
-    # prints its report before the assertion stops the test.
+    # The AUR RPC drops connections now and then, sometimes for half a
+    # minute or more, so retries span about a minute. A command that still
+    # fails prints its report before the assertion stops the test.
     ok() {
         local out attempt
-        for attempt in 1 2 3; do
+        for attempt in 1 2 3 4 5; do
             out=$(run "$@" || true)
             if jq -e ".exit_code == 0" <<<"$out" >/dev/null; then echo "$out"; return; fi
-            [[ $attempt == 3 ]] || sleep 10
+            [[ $attempt == 5 ]] || sleep 15
         done
         echo "$out" >&2
         return 1
@@ -67,10 +68,10 @@ script='
     jq -e ".exit_code != 0" <<<"$out" >/dev/null || { echo "AUR install was not refused: $out" >&2; exit 1; }
     # Without a helper there is nothing to build with, and nothing changes.
     # The update check reads the AUR first; a dropped connection is retried.
-    for attempt in 1 2 3 4; do
+    for attempt in 1 2 3 4 5; do
         out=$(run aur --yes upgrade yay || true)
         grep -q "install paru or yay" <<<"$out" && break
-        [[ $attempt == 4 ]] || sleep 10
+        [[ $attempt == 5 ]] || sleep 15
     done
     grep -q "install paru or yay" <<<"$out" || { echo "Expected a missing-helper error: $out" >&2; exit 1; }
     [[ $(pacman -Q yay) == "yay 0.1-1" ]]
