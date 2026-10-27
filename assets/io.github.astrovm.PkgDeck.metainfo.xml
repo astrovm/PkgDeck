@@ -10,6 +10,16 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.4" date="2026-10-27">
+      <description>
+        <p>Links in the window open again.</p>
+        <ul>
+          <li>GitHub in Settings, About opens the project page</li>
+          <li>A package's homepage opens in the browser</li>
+          <li>Show in folder opens an AppImage's folder in the file manager</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.3" date="2026-10-27">
       <description>
         <p>Installing a new version of an AppImage replaces the old one, instead of adding a second app.</p>
