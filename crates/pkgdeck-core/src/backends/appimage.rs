@@ -673,17 +673,10 @@ impl AppImage {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        if let Some(repository) = self.github_source(old_name) {
-            if self.github_source(new).is_none() {
-                self.save_github_source(new, Some(&repository))?;
-            }
-        }
-        self.remove_managed(old_name).map_err(|e| {
-            Self::invalid(format!(
-                "PkgDeck installed the new copy, but couldn't remove the old one at {}: {e}",
-                old.display()
-            ))
-        })
+        self.github_source(old_name).map_or(Ok(()), |repository| {
+            self.save_github_source(new, Some(&repository))
+        })?;
+        self.remove_managed(old_name)
     }
     fn package(&self, path: PathBuf) -> Result<Package, EngineError> {
         let name = path
@@ -1053,8 +1046,9 @@ impl AppImage {
             }
         })();
         let _ = fs::remove_file(&temporary);
-        for (_, old) in result? {
-            self.replace_managed(&old, &name)?;
+        // The oldest goes first, so the latest one's update source wins.
+        for (_, old) in result?.iter().rev() {
+            self.replace_managed(old, &name)?;
         }
         taken_over.map_or(Ok(()), |original| self.retire(&original))
     }
@@ -2274,6 +2268,38 @@ mod tests {
         assert_eq!(backend.installed(&cancel).unwrap().len(), 2);
         assert!(backend.cleanup(&cancel).unwrap().is_empty());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_same_app_has_the_same_name_and_window_class() {
+        let app = |name: Option<&str>, class: Option<&str>| Contents {
+            name: name.map(Into::into),
+            startup_wm_class: class.map(Into::into),
+            ..Contents::default()
+        };
+        for (a, b, same) in [
+            (
+                app(Some("Zap Fast"), Some("zap")),
+                app(Some("zap-fast"), Some("zap")),
+                true,
+            ),
+            // One that names no window class is still the same app.
+            (
+                app(Some("ZapFast"), None),
+                app(Some("ZapFast"), Some("zap")),
+                true,
+            ),
+            (
+                app(Some("ZapFast"), Some("zap")),
+                app(Some("ZapFast"), Some("zap-beta")),
+                false,
+            ),
+            (app(Some("ZapFast"), None), app(Some("Other"), None), false),
+            (app(None, None), app(None, None), false),
+            (app(Some(" "), None), app(Some("-"), None), false),
+        ] {
+            assert_eq!(AppImage::same_app(&a, &b), same, "{a:?} {b:?}");
+        }
     }
 
     #[test]
