@@ -20,6 +20,12 @@ success() {
         return 1
     fi
 }
+# Installer downloads drop now and then (a 5xx, a TLS handshake cut short).
+# Fetch to a file so curl can retry the whole transfer, then run it: a
+# script piped straight to a shell can't be retried.
+fetch() {
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o "$2" "$1"
+}
 have() {
     local output start=$SECONDS
     output=$(run list) || true
@@ -48,7 +54,7 @@ setup_node() {
 setup_python() {
     # Provision virtual environments through uv's managed interpreter so the
     # test runner needs no system Python packages or elevation.
-    command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+    command -v uv >/dev/null || { fetch https://astral.sh/uv/install.sh "$HOME/uv-install.sh" && sh "$HOME/uv-install.sh"; }
     export PATH="$HOME/.local/bin:$PATH"
     uv venv --help >/dev/null
 }
@@ -65,7 +71,7 @@ setup_pipx() {
 }
 
 setup_uv() {
-    command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+    command -v uv >/dev/null || { fetch https://astral.sh/uv/install.sh "$HOME/uv-install.sh" && sh "$HOME/uv-install.sh"; }
     export PATH="$HOME/.local/bin:$PATH"
     command -v uv
     uv --version
@@ -82,7 +88,7 @@ setup_composer() {
 }
 
 setup_mise() {
-    command -v mise >/dev/null || curl -fsSL https://mise.run | sh
+    command -v mise >/dev/null || { fetch https://mise.run "$HOME/mise-install.sh" && sh "$HOME/mise-install.sh"; }
     export PATH="$HOME/.local/bin:$PATH"
     mise --version
 }
@@ -91,7 +97,7 @@ setup_mise() {
 # desktop app finds them, so pkd has to look in their usual places.
 setup_pixi() {
     export PIXI_HOME="$HOME/.pixi"
-    [[ -x $PIXI_HOME/bin/pixi ]] || curl -fsSL https://pixi.sh/install.sh | PIXI_NO_PATH_UPDATE=1 bash
+    [[ -x $PIXI_HOME/bin/pixi ]] || { fetch https://pixi.sh/install.sh "$HOME/pixi-install.sh" && PIXI_NO_PATH_UPDATE=1 bash "$HOME/pixi-install.sh"; }
     pixi() { "$PIXI_HOME/bin/pixi" "$@"; }
     pixi --version
 }
@@ -105,14 +111,12 @@ setup_micromamba() {
     *) platform=linux-64 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    # The download server answers 5xx now and then. Fetch to a file so curl
-    # can retry, then extract. If it stays down, GitHub hosts the same binary.
-    if curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
-        "https://micro.mamba.pm/api/micromamba/$platform/latest"; then
+    # If the download server stays down, GitHub hosts the same binary.
+    if fetch "https://micro.mamba.pm/api/micromamba/$platform/latest" "$HOME/micromamba.tar.bz2"; then
         tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
     else
-        curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/.local/bin/micromamba" \
-            "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-$platform"
+        fetch "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-$platform" \
+            "$HOME/.local/bin/micromamba"
         chmod +x "$HOME/.local/bin/micromamba"
     fi
     export MAMBA_ROOT_PREFIX="$HOME/micromamba"
@@ -137,8 +141,8 @@ setup_gem() {
 setup_rustup() {
     local bin=${CARGO_HOME:-$HOME/.cargo}/bin
     if [[ ! -x $bin/rustup ]] && ! command -v rustup >/dev/null; then
-        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs |
-            sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+        fetch https://sh.rustup.rs "$HOME/rustup-init.sh"
+        sh "$HOME/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain stable
     fi
     rustup_bin=$(command -v rustup || echo "$bin/rustup")
     rustup() { "$rustup_bin" "$@"; }
@@ -154,13 +158,13 @@ setup_nix() {
     if [[ $(uname -s) == Darwin ]]; then
         nix_bin=/nix/var/nix/profiles/default/bin/nix
         if [[ ! -x $nix_bin ]]; then
-            curl --proto '=https' --tlsv1.2 -fsSL -o "$HOME/nix-install" https://nixos.org/nix/install
+            fetch https://nixos.org/nix/install "$HOME/nix-install"
             sh "$HOME/nix-install" --daemon --yes --no-modify-profile
         fi
     else
         nix_bin=$HOME/.nix-profile/bin/nix
         if [[ ! -x $nix_bin ]]; then
-            curl --proto '=https' --tlsv1.2 -fsSL -o "$HOME/nix-install" https://nixos.org/nix/install
+            fetch https://nixos.org/nix/install "$HOME/nix-install"
             sh "$HOME/nix-install" --no-daemon --no-modify-profile
         fi
     fi
@@ -193,7 +197,7 @@ setup_go() {
 setup_dotnet() {
     export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
     if ! command -v dotnet >/dev/null && [[ ! -x $HOME/.dotnet/dotnet ]]; then
-        curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$HOME/dotnet-install.sh"
+        fetch https://dot.net/v1/dotnet-install.sh "$HOME/dotnet-install.sh"
         bash "$HOME/dotnet-install.sh" --channel LTS --install-dir "$HOME/.dotnet" --no-path
     fi
     dotnet_bin=$(command -v dotnet || echo "$HOME/.dotnet/dotnet")
@@ -281,7 +285,7 @@ pnpm)
 bun)
     setup_node
     if ! command -v bun >/dev/null; then
-        if ! { curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh && bash /tmp/bun-install.sh; }; then
+        if ! { fetch https://bun.sh/install /tmp/bun-install.sh && bash /tmp/bun-install.sh; }; then
             npm install --global bun
         fi
         export PATH="$HOME/.bun/bin:$PATH"

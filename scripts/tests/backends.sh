@@ -27,11 +27,13 @@ esac
 
 # Runner networks drop out for tens of seconds at a time, longer than curl's
 # default backoff covers. Every curl the backends run, installer scripts
-# included, reads this config and keeps retrying for about a minute.
+# included, reads this config and keeps retrying for about a minute. Any
+# error counts: a TLS handshake cut short (exit 35) isn't one curl retries
+# on its own.
 if [[ -n ${GITHUB_ACTIONS:-} ]]; then
     export CURL_HOME=${RUNNER_TEMP:-/tmp}/pkgdeck-curl
     mkdir -p "$CURL_HOME"
-    printf 'retry = 6\nretry-delay = 10\nretry-connrefused\n' >"$CURL_HOME/.curlrc"
+    printf 'retry = 6\nretry-delay = 10\nretry-connrefused\nretry-all-errors\n' >"$CURL_HOME/.curlrc"
 fi
 
 failed=()
