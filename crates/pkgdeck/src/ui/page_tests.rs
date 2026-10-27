@@ -322,13 +322,15 @@ fn an_appimage_file_opened_without_installing_can_still_launch() {
 fn the_homepage_and_an_appimage_folder_open_on_the_desktop() {
     let mut row = row("package");
     row.source = "appimage".into();
-    let mut app = app(&row, Page::Installed);
-    app.app_file.folder = Some("/home/fixture/My Apps".into());
     let details = Details {
         homepage: "https://example.invalid/fixture".into(),
         ..fixture_details(&row)
     };
+    let app = app(&row, Page::Installed);
     let mut harness = draw_details(app, row, details, 700.0, false, false, false);
+    // The first frame reads the file's facts; this one is in a folder.
+    harness.state_mut().1.app_file.folder = Some("/home/fixture/My Apps".into());
+    harness.run_steps(2);
     harness.get_by_label("example.invalid/fixture ↗").click();
     harness.run_steps(2);
     harness.get_by_label("Show in folder").click();
