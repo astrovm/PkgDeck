@@ -29,12 +29,12 @@ raw-window-handle = "=0.6.2"
 ksni = { version = "=0.3.7", default-features = false, features = ["async-io", "blocking"] }
 notify-rust = "=4.18.2"
 # Reads the desktop's reduce-motion setting through its settings portal.
-zbus = { version = "=6.0.0", default-features = false, features = ["default-rt"] }
+zbus = { version = "=6.1.0", default-features = false, features = ["default-rt"] }
 # Asks KWin on X11 to blur behind glass styles; winit only does it on Wayland.
 x11rb = { version = "=0.14.0", default-features = false }
 
 [build-dependencies]
-cc = "=1.9.0"
+cc = "=1.10.0"
 
 [dev-dependencies]
 egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }

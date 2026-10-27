@@ -676,9 +676,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -3125,7 +3125,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "x11rb 0.14.0",
- "zbus 6.0.0",
+ "zbus 6.1.0",
 ]
 
 [[package]]
@@ -3157,7 +3157,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "zbus 6.0.0",
+ "zbus 6.1.0",
 ]
 
 [[package]]
@@ -5223,9 +5223,9 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.0.0"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "266223222c9d81e5966455a9da0783e35d56a7ccab79a03c2366b2d98f8fc8a9"
+checksum = "fcff5faa63a63d5b81051740f7382017f10b3440b3f401d97f0cf0b3b39c62d9"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
