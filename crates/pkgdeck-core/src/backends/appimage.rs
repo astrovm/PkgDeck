@@ -489,6 +489,12 @@ impl AppImage {
         }
         Arc::new(contents)
     }
+    /// What the AppImages opened in this run say about themselves, by digest:
+    /// one opened from a link is gone by the time its install is reviewed.
+    fn opened() -> &'static Mutex<HashMap<String, Arc<Contents>>> {
+        static OPENED: OnceLock<Mutex<HashMap<String, Arc<Contents>>>> = OnceLock::new();
+        OPENED.get_or_init(Default::default)
+    }
     /// Where what AppImages say about themselves is remembered, next to the
     /// icons read out of them.
     fn contents_file(&self) -> PathBuf {
@@ -1626,6 +1632,10 @@ impl Backend for AppImage {
             let desktop = self.applications.join(format!("pkgdeck-{digest}.desktop"));
             let already_imported = Self::existing_import(&destination, &desktop, &digest)?;
             let contents = self.contents(&source);
+            Self::opened()
+                .lock()
+                .unwrap()
+                .insert(digest.clone(), contents.clone());
             let icon = self.icon_for(&format!("pkgdeck-{digest}"), &source, &contents);
             let version = contents.version.clone();
             return Ok(vec![Package {
@@ -1737,12 +1747,27 @@ impl Backend for AppImage {
             return Ok(None);
         };
         let source = Path::new(&id.name);
-        if id.scope != self.import_scope() || !source.is_absolute() {
+        // One opened from a link was read when it was opened.
+        let downloaded = id
+            .reference
+            .as_deref()
+            .and_then(|reference| reference.strip_prefix("artifact:appimage:"))
+            .and_then(|reference| reference.split(':').next());
+        if id.scope != self.import_scope() || (downloaded.is_none() && !source.is_absolute()) {
             return Ok(None);
         }
-        let original = self.external_at(source);
-        let contents = self.contents(original.as_deref().unwrap_or(source));
-        let digest = id.reference.as_deref().unwrap_or_default();
+        let original = downloaded
+            .is_none()
+            .then(|| self.external_at(source))
+            .flatten();
+        let contents = match downloaded {
+            Some(digest) => match Self::opened().lock().unwrap().get(digest).cloned() {
+                Some(contents) => contents,
+                None => return Ok(None),
+            },
+            None => self.contents(original.as_deref().unwrap_or(source)),
+        };
+        let digest = downloaded.unwrap_or(id.reference.as_deref().unwrap_or_default());
         let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
         let replaced = self.managed_copies(&contents, &id.architecture, &destination);
         if original.is_none() && replaced.is_empty() {
@@ -2189,6 +2214,32 @@ mod tests {
         assert!(plan
             .native_preview
             .starts_with("Replaces the Demo App PkgDeck already has at "));
+        // Opened from a link, it was read when it was opened, so its review
+        // says the same.
+        let link = "https://example.invalid/demo-2.1.AppImage";
+        let downloaded = PackageId {
+            name: link.into(),
+            reference: Some(format!(
+                "artifact:appimage:{}::{link}",
+                preview.id.reference.as_deref().unwrap()
+            )),
+            ..preview.id.clone()
+        };
+        let linked = backend
+            .operation_plan(&Operation::Install(downloaded.clone()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.changes, plan.changes);
+        let unread = PackageId {
+            reference: Some(format!("artifact:appimage:{}::{link}", "0".repeat(64))),
+            ..downloaded
+        };
+        assert_eq!(
+            backend
+                .operation_plan(&Operation::Install(unread), &cancel)
+                .unwrap(),
+            None
+        );
         backend.execute(&install, &cancel, &mut ignore).unwrap();
         // Only the new one is left, started and updated like the old one.
         let installed = backend.installed(&cancel).unwrap();

@@ -10,6 +10,16 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.3" date="2026-10-27">
+      <description>
+        <p>Installing a new version of an AppImage replaces the old one, instead of adding a second app.</p>
+        <ul>
+          <li>The new version keeps the old one's launch settings and where it updates from</li>
+          <li>The review says which copy it replaces, also for AppImages opened from a link</li>
+          <li>Clean offers the older copies left by earlier versions of PkgDeck</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.2" date="2026-10-19">
       <description>
         <p>A change whose plan moved on opens for review again, instead of failing.</p>
