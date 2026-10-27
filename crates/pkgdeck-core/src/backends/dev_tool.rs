@@ -243,6 +243,13 @@ struct BunManifest {
     homepage: Option<String>,
 }
 
+/// Whether a `package.json` dependency comes from the npm registry: a
+/// version, range or tag, not `github:`, `git+`, `file:`, `link:`, a URL,
+/// an `npm:` alias or `owner/repo`.
+fn registry_spec(spec: &serde_json::Value) -> bool {
+    spec.as_str().is_some_and(|spec| !spec.contains([':', '/']))
+}
+
 /// PEP 508 bare project names for `pip`/`pipx`/`uv`: no options, paths,
 /// URLs, extras, or version specifiers.
 pub(super) fn python_name(name: &str) -> bool {
@@ -963,7 +970,12 @@ impl<T: Transport> DevTool<T> {
             .collect();
         for detail in &mut details {
             let package = &mut detail.package;
-            if !updates.covers(&package.id.name) {
+            // A tool from git, a folder or a link has no registry version.
+            let from_registry = manifest
+                .dependencies
+                .get(&package.id.name)
+                .is_some_and(registry_spec);
+            if !updates.covers(&package.id.name) || !from_registry {
                 continue;
             }
             let installed = package.installed_version.as_deref().unwrap_or_default();
@@ -1753,7 +1765,7 @@ impl<T: Transport> DevTool<T> {
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let result = match self.kind {
-            DevKind::Cargo => self.call(&["install", "--force", name], cancel, true)?,
+            DevKind::Cargo => self.cargo_reinstall(&home, name, cancel)?,
             DevKind::Npm => self.call(&["update", "--global", name], cancel, true)?,
             DevKind::Pnpm | DevKind::Bun => {
                 let latest = format!("{name}@latest");
@@ -1817,15 +1829,15 @@ impl<T: Transport> DevTool<T> {
         }
         if self.kind == DevKind::Uv {
             // `tool upgrade --all` keeps exact pins like per-package upgrade,
-            // so reinstall every tool at `@latest` as the single transaction.
-            for package in self.inventory(Updates::None, cancel)? {
-                let name = &package.package.id.name;
-                progress(Progress::Package(name.clone()));
+            // so reinstall each outdated tool at `@latest` as the single
+            // transaction.
+            return self.each_outdated(cancel, &mut |name| {
+                progress(Progress::Package(name.into()));
                 progress(Progress::Message(format!("Updating {name} to latest…")));
                 let latest = format!("{name}@latest");
                 self.call(&["tool", "install", "--force", &latest], cancel, true)?;
-            }
-            return Ok(OperationOutcome::default());
+                Ok(())
+            });
         }
         if self.kind == DevKind::Mise {
             // Plain `mise upgrade` also covers tools of the project in the
@@ -1853,10 +1865,9 @@ impl<T: Transport> DevTool<T> {
         }
         if self.kind == DevKind::Composer {
             // `global update` respects pinned constraints, so re-require each
-            // installed package to reach the reported latest candidates.
-            for package in self.inventory(Updates::None, cancel)? {
-                let name = &package.package.id.name;
-                progress(Progress::Package(name.clone()));
+            // outdated package to reach the reported latest candidates.
+            return self.each_outdated(cancel, &mut |name| {
+                progress(Progress::Package(name.into()));
                 progress(Progress::Message(format!("Updating {name}…")));
                 self.call(
                     &[
@@ -1869,8 +1880,8 @@ impl<T: Transport> DevTool<T> {
                     cancel,
                     true,
                 )?;
-            }
-            return Ok(OperationOutcome::default());
+                Ok(())
+            });
         }
         if self.kind == DevKind::Gem {
             progress(Progress::Message("Updating RubyGems…".into()));
@@ -1879,29 +1890,142 @@ impl<T: Transport> DevTool<T> {
                 cancellation_deferred: result.cancellation_deferred,
             });
         }
-        for package in self.inventory(Updates::None, cancel)? {
-            let name = &package.package.id.name;
-            if self.kind == DevKind::Cargo {
-                progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Reinstalling {name}…")));
-                self.call(&["install", "--force", name], cancel, true)?;
-            } else if self.kind == DevKind::Pip {
-                let home = self
-                    .home
-                    .clone()
-                    .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
-                progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Updating {name}…")));
-                self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
-            } else {
-                progress(Progress::Package(name.clone()));
-                progress(Progress::Message(format!("Updating {name} to latest…")));
-                let latest = format!("{name}@latest");
-                self.call(&["add", "--global", &latest], cancel, true)?;
+        let home = self
+            .home
+            .clone()
+            .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+        self.each_outdated(cancel, &mut |name| {
+            progress(Progress::Package(name.into()));
+            match self.kind {
+                DevKind::Cargo => {
+                    progress(Progress::Message(format!("Reinstalling {name}…")));
+                    self.cargo_reinstall(&home, name, cancel)?;
+                }
+                DevKind::Pip => {
+                    progress(Progress::Message(format!("Updating {name}…")));
+                    self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
+                }
+                _ => {
+                    progress(Progress::Message(format!("Updating {name} to latest…")));
+                    let latest = format!("{name}@latest");
+                    self.call(&["add", "--global", &latest], cancel, true)?;
+                }
+            }
+            Ok(())
+        })
+    }
+    /// Runs `update` for each tool its registry has a newer version of, and
+    /// only those: a tool installed from git or a folder has none, and
+    /// reinstalling it by name would fetch whatever the registry has under
+    /// that name. One tool failing doesn't stop the others; the first
+    /// failure is reported once all were tried.
+    fn each_outdated(
+        &self,
+        cancel: &Cancellation,
+        update: &mut dyn FnMut(&str) -> Result<(), EngineError>,
+    ) -> Result<OperationOutcome, EngineError> {
+        let mut failed = None;
+        for detail in self.inventory(Updates::All, cancel)? {
+            if detail.package.update != UpdateAvailability::Available {
+                continue;
+            }
+            match update(&detail.package.id.name) {
+                Ok(()) => {}
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error) => {
+                    failed.get_or_insert(error);
+                }
             }
         }
-        Ok(OperationOutcome::default())
+        failed.map_or(Ok(OperationOutcome::default()), Err)
     }
+    /// Reinstalls a crates.io tool at its latest version with the features
+    /// it was built with. Tools from git or a folder are refused: Cargo
+    /// would look their name up on crates.io, where it can be another crate.
+    fn cargo_reinstall(
+        &self,
+        home: &std::path::Path,
+        name: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let id = self.kind.id();
+        let list = String::from_utf8(bytes(
+            id,
+            self.call(&["install", "--list"], cancel, false)?,
+        )?)
+        .map_err(|e| invalid(id, e))?;
+        let source = list
+            .lines()
+            .filter_map(|line| line.strip_suffix(':'))
+            .find_map(|header| {
+                let (tool, rest) = header.split_once(' ')?;
+                (tool == name).then(|| rest.split_once(' ').map(|(_, source)| source))
+            })
+            .ok_or(EngineError::NotFound)?;
+        if let Some(source) = source.filter(|&source| {
+            !matches!(
+                source,
+                "(registry+https://github.com/rust-lang/crates.io-index)"
+                    | "(registry+sparse+https://index.crates.io/)"
+            )
+        }) {
+            let from = source.trim_start_matches('(').trim_end_matches(')');
+            return Err(EngineError::Refused {
+                backend: id.into(),
+                refusal: Refusal::Explained(format!(
+                    "{name} was installed from {from}, not crates.io. Update it the way you installed it."
+                )),
+            });
+        }
+        let mut args = vec!["install".to_owned(), "--force".to_owned()];
+        args.extend(cargo_features(home, name));
+        args.push(name.to_owned());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        Ok(self.call(&args, cancel, true)?)
+    }
+}
+
+/// How Cargo's own record (`.crates2.json` in its home) says `name` was
+/// built: its features, as `cargo install` flags.
+fn cargo_features(home: &std::path::Path, name: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(default)]
+        installs: std::collections::BTreeMap<String, Install>,
+    }
+    #[derive(Deserialize)]
+    struct Install {
+        #[serde(default)]
+        features: Vec<String>,
+        #[serde(default)]
+        all_features: bool,
+        #[serde(default)]
+        no_default_features: bool,
+    }
+    let Some(install) = std::fs::read_to_string(host_metadata_path(&home.join(".crates2.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Record>(&text).ok())
+        .and_then(|record| {
+            record
+                .installs
+                .into_iter()
+                .find(|(key, _)| key.split(' ').next() == Some(name))
+                .map(|(_, install)| install)
+        })
+    else {
+        return vec![];
+    };
+    let mut flags = vec![];
+    if install.all_features {
+        flags.push("--all-features".into());
+    }
+    if install.no_default_features {
+        flags.push("--no-default-features".into());
+    }
+    if !install.features.is_empty() {
+        flags.push(format!("--features={}", install.features.join(",")));
+    }
+    flags
 }
 
 impl<T: Transport> Backend for DevTool<T> {
