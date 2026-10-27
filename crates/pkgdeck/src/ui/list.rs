@@ -1928,6 +1928,7 @@ mod grid_tests {
                 let (store, settings) = Store::open(None, None);
                 let mut platform = Platform::start(|| {});
                 platform.record_notifications();
+                platform.record_links();
                 let mut app = App::with_controller(
                     create_synthetic_controller(|_, _, _, _| {
                         Ok(pkgdeck_core::engine::Engine::default())

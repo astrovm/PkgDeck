@@ -151,6 +151,7 @@ fn start(packages: Vec<Package>) -> (MutexGuard<'static, ()>, App) {
     let (store, settings) = Store::open(None, None);
     let mut platform = Platform::start(|| {});
     platform.record_notifications();
+    platform.record_links();
     let app = App::with_controller(
         create_synthetic_controller(engine),
         Settings {
