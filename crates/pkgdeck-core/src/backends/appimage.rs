@@ -607,6 +607,78 @@ impl AppImage {
             && name.ends_with(".AppImage")
             && name[8..72].bytes().all(|b| b.is_ascii_hexdigit())
     }
+    /// Whether two AppImages are the same app: the same name, and the same
+    /// window class when both say one.
+    fn same_app(a: &Contents, b: &Contents) -> bool {
+        let plain = |name: &str| name.to_lowercase().replace([' ', '-', '_', '.'], "");
+        a.name
+            .as_deref()
+            .zip(b.name.as_deref())
+            .is_some_and(|(a, b)| !plain(a).is_empty() && plain(a) == plain(b))
+            && match (&a.startup_wm_class, &b.startup_wm_class) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+    /// The AppImages PkgDeck manages of the app in `contents` for
+    /// `architecture`, other than `except`: the latest installed first.
+    fn managed_copies(
+        &self,
+        contents: &Contents,
+        architecture: &str,
+        except: &Path,
+    ) -> Vec<(std::time::SystemTime, PathBuf)> {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return vec![];
+        };
+        let mut copies: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path != except
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(Self::managed_name)
+                    && Self::type2(path).is_ok_and(|found| found == architecture)
+                    && Self::same_app(contents, &self.contents(path))
+            })
+            .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
+            .collect();
+        copies.sort_by(|a, b| b.cmp(a));
+        copies
+    }
+    /// Remove an AppImage PkgDeck manages, with its menu entry, icons and
+    /// update source.
+    fn remove_managed(&self, name: &str) -> Result<(), EngineError> {
+        fs::remove_file(self.root.join(name)).map_err(|e| Self::invalid(e.to_string()))?;
+        let _ = fs::remove_file(
+            self.applications
+                .join(format!("pkgdeck-{}.desktop", &name[8..72])),
+        );
+        self.remove_icons(&name[..72]);
+        let _ = self.save_github_source(name, None);
+        Ok(())
+    }
+    /// A new copy of an app PkgDeck already manages replaced `old`: where it
+    /// updated from carries over, then the old copy goes.
+    fn replace_managed(&self, old: &Path, new: &str) -> Result<(), EngineError> {
+        let old_name = old
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if let Some(repository) = self.github_source(old_name) {
+            if self.github_source(new).is_none() {
+                self.save_github_source(new, Some(&repository))?;
+            }
+        }
+        self.remove_managed(old_name).map_err(|e| {
+            Self::invalid(format!(
+                "PkgDeck installed the new copy, but couldn't remove the old one at {}: {e}",
+                old.display()
+            ))
+        })
+    }
     fn package(&self, path: PathBuf) -> Result<Package, EngineError> {
         let name = path
             .file_name()
@@ -919,6 +991,20 @@ impl AppImage {
                 .and_then(|s| s.to_str())
                 .unwrap_or("Imported AppImage");
             let contents = self.contents(&destination);
+            // Another version of this app PkgDeck already manages gives way
+            // to this one, which starts the way the latest of them did.
+            let replaced = self.managed_copies(&contents, &architecture, &destination);
+            let carried = carried.or_else(|| {
+                replaced.first().and_then(|(_, old)| {
+                    let old = old.file_name()?.to_str()?;
+                    Self::exec_line(
+                        &self
+                            .applications
+                            .join(format!("pkgdeck-{}.desktop", &old[8..72])),
+                    )
+                    .and_then(|exec| desktop_exec::Command::parse(&exec))
+                })
+            });
             let icon = self.icon_for(&format!("pkgdeck-{digest}"), &destination, &contents);
             let mut desktop =
                 Self::desktop_entry(&destination, fallback_name, &contents, icon.as_deref());
@@ -951,7 +1037,7 @@ impl AppImage {
                 file.write_all(desktop.as_bytes())?;
                 file.sync_all()
             })() {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(replaced),
                 Err(error) => {
                     let _ = fs::remove_file(&entry);
                     let _ = fs::remove_file(&destination);
@@ -961,7 +1047,9 @@ impl AppImage {
             }
         })();
         let _ = fs::remove_file(&temporary);
-        result?;
+        for (_, old) in result? {
+            self.replace_managed(&old, &name)?;
+        }
         taken_over.map_or(Ok(()), |original| self.retire(&original))
     }
     /// An AppImage that was installed elsewhere moved in: its old file and
@@ -1638,7 +1726,8 @@ impl Backend for AppImage {
         })
     }
     /// Installing an AppImage that's already installed some other way moves
-    /// it in; say so, so the move is reviewed before it happens.
+    /// it in, and one of an app PkgDeck already manages replaces that copy;
+    /// say so, so either is reviewed before it happens.
     fn operation_plan(
         &mut self,
         operation: &Operation,
@@ -1651,32 +1740,54 @@ impl Backend for AppImage {
         if id.scope != self.import_scope() || !source.is_absolute() {
             return Ok(None);
         }
-        let Some(original) = self.external_at(source) else {
+        let original = self.external_at(source);
+        let contents = self.contents(original.as_deref().unwrap_or(source));
+        let digest = id.reference.as_deref().unwrap_or_default();
+        let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
+        let replaced = self.managed_copies(&contents, &id.architecture, &destination);
+        if original.is_none() && replaced.is_empty() {
             return Ok(None);
-        };
-        let contents = self.contents(&original);
+        }
         let name = contents.name.clone().unwrap_or_else(|| {
             source
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| id.name.clone())
         });
-        Ok(Some(TransactionPlan {
-            operation: operation.clone(),
-            native_preview: format!(
+        let mut notes = vec![];
+        let mut changes = vec![];
+        if let Some(original) = &original {
+            notes.push(format!(
                 "Moves {} into PkgDeck's folder and replaces its menu entries.",
-                Self::shown_path(&original)
-            ),
-            changes: vec![PlannedChange {
+                Self::shown_path(original)
+            ));
+            changes.push(PlannedChange {
                 action: PlannedAction::Install,
-                name,
+                name: name.clone(),
                 installed_version: None,
                 candidate_version: contents.version.clone(),
-            }],
+            });
+        }
+        for (_, old) in &replaced {
+            notes.push(format!(
+                "Replaces the {name} PkgDeck already has at {}, keeping how it starts and where it updates from.",
+                Self::shown_path(old)
+            ));
+            changes.push(PlannedChange {
+                action: PlannedAction::Remove,
+                name: name.clone(),
+                installed_version: self.contents(old).version.clone(),
+                candidate_version: None,
+            });
+        }
+        Ok(Some(TransactionPlan {
+            operation: operation.clone(),
+            native_preview: notes.join(" "),
+            changes,
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
-            adopts: Some(original),
+            adopts: original,
         }))
     }
     /// Copies of an app PkgDeck already manages, installed some other way
@@ -1692,6 +1803,34 @@ impl Backend for AppImage {
             .filter(|package| Self::managed_name(&package.id.name))
             .map(|package| plain(&package.display_name))
             .collect();
+        // Older copies of an app PkgDeck manages, installed before it
+        // replaced them on install: the latest one stays.
+        let older = packages
+            .iter()
+            .filter(|package| Self::managed_name(&package.id.name))
+            .filter_map(|package| {
+                let path = self.root.join(&package.id.name);
+                let installed = fs::metadata(&path).ok()?.modified().ok()?;
+                let latest = self
+                    .managed_copies(&self.contents(&path), &package.id.architecture, &path)
+                    .into_iter()
+                    .next()?;
+                (latest > (installed, path.clone())).then(|| CleanupItem {
+                    id: CleanupId {
+                        backend: "appimage".into(),
+                        key: package.id.name.clone(),
+                    },
+                    kind: CleanupKind::DuplicateCopy,
+                    title: format!("Older copy of {}", package.display_name),
+                    summary: format!(
+                        "PkgDeck has a newer copy of {}. This one and its menu entry can go.",
+                        package.display_name
+                    ),
+                    preview: format!("Removes {} and its menu entry.", Self::shown_path(&path)),
+                    bytes: Some(crate::disk::usage(&path, cancel)),
+                })
+            })
+            .collect::<Vec<_>>();
         Ok(packages
             .iter()
             .filter(|package| {
@@ -1716,6 +1855,7 @@ impl Backend for AppImage {
                     bytes: Some(crate::disk::usage(Path::new(&package.id.name), cancel)),
                 }
             })
+            .chain(older)
             .collect())
     }
     fn execute(
@@ -1749,14 +1889,7 @@ impl Backend for AppImage {
                 progress(Progress::Message(
                     "Removing the AppImage and its desktop entry…".into(),
                 ));
-                fs::remove_file(self.root.join(&id.name))
-                    .map_err(|e| Self::invalid(e.to_string()))?;
-                let _ = fs::remove_file(
-                    self.applications
-                        .join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
-                );
-                self.remove_icons(&id.name[..72]);
-                let _ = self.save_github_source(&id.name, None);
+                self.remove_managed(&id.name)?;
             }
             Operation::Remove(id)
                 if id.backend == "appimage" && id.scope == self.scope() && id.remote.is_none() =>
@@ -2015,6 +2148,133 @@ mod tests {
         assert_eq!(file.path, root.join(&managed.name));
         assert_eq!(file.bytes, fs::metadata(&original).unwrap().len());
         assert!(file.modified > 0);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_new_version_replaces_the_one_pkgdeck_already_has() {
+        let base = test_base("new-version");
+        let (mut backend, old, old_entry) = managed_demo(&base);
+        let root = base.join("pkgdeck/appimages");
+        let cancel = Cancellation::default();
+        backend
+            .set_launch_settings(&old, "--name Mine %U", &[("GREETING".into(), "hi".into())])
+            .unwrap();
+        backend.set_update_source(&old, "owner/demo").unwrap();
+        // The next version, downloaded by hand: the same app, another file.
+        let newer = base.join("demo-2.1.AppImage");
+        let entry = String::from_utf8_lossy(DEMO_ENTRY).replace("Version=2.0", "Version=2.1");
+        appimage_with(
+            &newer,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", entry.as_bytes()), ("demo.png", DEMO_PNG)],
+        );
+        let preview = backend
+            .search(newer.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let install = Operation::Install(preview.id.clone());
+        let plan = backend.operation_plan(&install, &cancel).unwrap().unwrap();
+        assert_eq!(plan.adopts, None);
+        assert_eq!(
+            plan.changes,
+            vec![PlannedChange {
+                action: PlannedAction::Remove,
+                name: "Demo App".into(),
+                installed_version: Some("2.0".into()),
+                candidate_version: None,
+            }]
+        );
+        assert!(plan
+            .native_preview
+            .starts_with("Replaces the Demo App PkgDeck already has at "));
+        backend.execute(&install, &cancel, &mut ignore).unwrap();
+        // Only the new one is left, started and updated like the old one.
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1, "{installed:?}");
+        let new = &installed[0].id;
+        assert_eq!(installed[0].installed_version.as_deref(), Some("2.1"));
+        assert!(!root.join(&old.name).exists());
+        assert!(!old_entry.exists());
+        let settings = backend.launch_settings(new).unwrap();
+        assert_eq!(settings.arguments, "--name Mine %U");
+        assert_eq!(settings.environment, vec![("GREETING".into(), "hi".into())]);
+        assert_eq!(
+            backend.update_source(new).unwrap().github.as_deref(),
+            Some("owner/demo")
+        );
+        assert!(backend.github_source(&old.name).is_none());
+        // Another app, or the same name for another window, stays.
+        let other = base.join("other.AppImage");
+        let entry = String::from_utf8_lossy(DEMO_ENTRY).replace("demo-app", "demo-beta");
+        appimage_with(
+            &other,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", entry.as_bytes())],
+        );
+        let preview = backend
+            .search(other.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let install = Operation::Install(preview.id);
+        assert_eq!(backend.operation_plan(&install, &cancel).unwrap(), None);
+        backend.execute(&install, &cancel, &mut ignore).unwrap();
+        assert_eq!(backend.installed(&cancel).unwrap().len(), 2);
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn older_copies_installed_before_replacing_existed_are_cleaned_up() {
+        let base = test_base("older-copies");
+        let (mut backend, old, old_entry) = managed_demo(&base);
+        let root = base.join("pkgdeck/appimages");
+        let cancel = Cancellation::default();
+        // Put the old copy aside, so the newer one installs next to it, the
+        // way PkgDeck used to.
+        let aside = base.join("aside");
+        fs::create_dir_all(&aside).unwrap();
+        fs::rename(root.join(&old.name), aside.join("file")).unwrap();
+        fs::rename(&old_entry, aside.join("entry")).unwrap();
+        let newer = base.join("demo-2.1.AppImage");
+        let entry = String::from_utf8_lossy(DEMO_ENTRY).replace("Version=2.0", "Version=2.1");
+        appimage_with(
+            &newer,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", entry.as_bytes())],
+        );
+        let preview = backend
+            .search(newer.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(&Operation::Install(preview.id), &cancel, &mut ignore)
+            .unwrap();
+        fs::rename(aside.join("file"), root.join(&old.name)).unwrap();
+        fs::rename(aside.join("entry"), &old_entry).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join(&old.name))
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(backend.installed(&cancel).unwrap().len(), 2);
+        let items = backend.cleanup(&cancel).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].kind, CleanupKind::DuplicateCopy);
+        assert_eq!(items[0].title, "Older copy of Demo App");
+        assert_eq!(items[0].id.key, old.name);
+        backend
+            .execute(&Operation::Clean(items[0].id.clone()), &cancel, &mut ignore)
+            .unwrap();
+        assert!(!root.join(&old.name).exists());
+        assert!(!old_entry.exists());
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].installed_version.as_deref(), Some("2.1"));
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
         fs::remove_dir_all(base).unwrap();
     }
 
