@@ -152,7 +152,13 @@ other sources still appear as they answer.
 
 Cargo and Bun have no command that lists outdated tools, so PkgDeck asks
 crates.io and the npm registry about each installed tool when it lists them.
-Tools Cargo installed from Git or a local folder aren't checked.
+Tools installed from Git, a local folder or a link aren't checked: the
+registry may have another package with the same name.
+
+Updating all of Cargo, Bun, pnpm, pip, uv or Composer updates only the tools
+with a newer version, and one that fails doesn't stop the rest. Cargo tools
+keep the features they were built with. A Cargo tool from Git or a folder is
+never updated by name; update it the way you installed it.
 
 An update shows the new version first, then the one it replaces, when the
 source provides both. Some
@@ -272,7 +278,8 @@ stopped. The row shows the reason too, and the whole text when you point at it.
 Turn on **Clean automatically** in **Settings** → **Clean**. It needs
 **Background checks**.
 
-- At most once a day, after a background check.
+- At most once a day, when no background check or update is running. An
+  automatic update doesn't put it off; it cleans right after.
 - Every task checked on Clean, volumes included.
 - Only sources that run as you, so it never asks for a password. APT and
   other system cleanups wait for you.

@@ -12075,6 +12075,58 @@ fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {
     );
     assert_eq!(state(&quiet)["cleaned"]["tasks"], 0);
 }
+#[test]
+fn automatic_cleaning_runs_between_checks_after_updates_and_holds() {
+    let scheduled = |controller: &Pin<&mut ffi::PackageController>| {
+        matches!(
+            controller
+                .rust()
+                .validated_confirmed
+                .as_ref()
+                .map(|entry| &entry.job),
+            Some(Job::AutoClean { .. })
+        )
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().natives.hold = building;
+    let now = epoch_seconds();
+    controller.as_mut().set_auto_clean(true, now - 25 * 60 * 60);
+    // The last check was just now, so none is due.
+    controller.as_mut().resume_checks(now);
+    let tick = |controller: &mut Pin<&mut ffi::PackageController>, enabled: bool| {
+        controller
+            .as_mut()
+            .check_updates("apt".into(), enabled, false, false, false);
+    };
+    // A build was running when the check finished.
+    tick(&mut controller, true);
+    assert!(!scheduled(&controller));
+    // The build ends, but an automatic update is about to run.
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+    controller.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
+        job: Job::AutoUpgrade(vec![], false),
+        activity_id: None,
+        cleanup_preview: vec![],
+    });
+    tick(&mut controller, true);
+    assert!(matches!(
+        controller
+            .rust()
+            .validated_confirmed
+            .as_ref()
+            .map(|c| &c.job),
+        Some(Job::AutoUpgrade(..))
+    ));
+    // Without background checks, nothing runs on its own.
+    controller.as_mut().rust_mut().validated_confirmed = None;
+    tick(&mut controller, false);
+    assert!(!scheduled(&controller));
+    // The update is done: the next tick cleans, without waiting for a check.
+    tick(&mut controller, true);
+    assert!(scheduled(&controller));
+    assert!(controller.rust().worker.is_none());
+}
 fn cleanup_item(key: &str) -> CleanupItem {
     CleanupItem {
         id: CleanupId {
