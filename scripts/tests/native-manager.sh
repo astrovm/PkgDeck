@@ -19,7 +19,10 @@ case "$backend" in
     apk) image=docker.io/library/alpine:latest; bootstrap='apk add bash sudo'; query='apk info -e jq'; writers=/sbin/apk; adduser='adduser -D pkgdeck-test' ;;
     # XBPS must update itself before it installs anything else. The image has
     # no /etc/shadow, which sudo's PAM account check needs.
-    xbps) image=ghcr.io/void-linux/void-glibc:latest; bootstrap='xbps-install -Syu xbps && xbps-install -yu && xbps-install -y bash sudo shadow'; query='xbps-query jq >/dev/null'; writers='/usr/bin/xbps-install, /usr/bin/xbps-remove'; adduser='pwconv && useradd -m pkgdeck-test' ;;
+    xbps) image=ghcr.io/void-linux/void-glibc:latest; bootstrap='xbps-install -Syu xbps && xbps-install -yu && xbps-install -y bash sudo shadow'; query='xbps-query jq >/dev/null'; writers='/usr/bin/xbps-install, /usr/bin/xbps-remove'; adduser='pwconv && useradd -m pkgdeck-test'
+        # repo-default.voidlinux.org can time out for minutes; Void's German
+        # mirror serves the same repository.
+        fallback='mkdir -p /etc/xbps.d && sed "s|repo-default.voidlinux.org|repo-de.voidlinux.org|g" /usr/share/xbps.d/00-repository-main.conf >/etc/xbps.d/00-repository-main.conf' ;;
     *) echo "Expected dnf, pacman, zypper, apk, or xbps" >&2; exit 2 ;;
 esac
 
