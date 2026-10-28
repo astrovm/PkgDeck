@@ -88,6 +88,8 @@ pub enum Refusal {
     NotUnattended,
     /// A change that has to run together with this one failed its check.
     PartnerFailed,
+    /// A build that may use what the cleanup task removes is running.
+    Building,
     /// PkgDeck's own explanation, already a full sentence.
     Explained(String),
 }
@@ -102,6 +104,7 @@ impl std::fmt::Display for Refusal {
             Self::PartnerFailed => {
                 "Another change that runs together with this one could not be checked. Review them again."
             }
+            Self::Building => "Something that uses it is being built. Clean again when it finishes.",
             Self::Explained(sentence) => sentence,
         })
     }
@@ -350,6 +353,12 @@ pub trait Backend: Send {
     /// allow one that removes only part of what was reviewed.
     fn cleanup_still_reviewed(&self, reviewed: &CleanupItem, current: &CleanupItem) -> bool {
         reviewed == current
+    }
+    /// Whether nothing the `reviewed` task would remove is left, now that
+    /// it isn't offered anymore. Then it is already done. By default a task
+    /// goes away only once there is nothing left for it.
+    fn cleanup_gone(&self, _reviewed: &CleanupItem) -> bool {
+        true
     }
     fn apt_upgrade_plan(&mut self, _cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
         Err(EngineError::Unsupported {
@@ -1444,12 +1453,12 @@ impl Engine {
                     // Backends may need an explicitly authorized preview for
                     // this exact task (APT clean, for example). A general
                     // discovery would omit it and reject a valid reviewed plan.
-                    let current = backend.cleanup_plan(id, cancel)?;
-                    if !still_reviewed(&**backend, expected.as_ref(), &current) {
-                        return Err(EngineError::Refused {
-                            backend: id.backend.clone(),
-                            refusal: Refusal::CleanupChanged,
+                    if already_clean(&mut **backend, id, expected.as_ref(), cancel)? {
+                        events(Event::Progress {
+                            operation: operation.clone(),
+                            progress: Progress::Message("Already clean.".into()),
                         });
+                        return Ok(OperationOutcome::default());
                     }
                 }
                 if let Some(expected) = &expected_plan {
@@ -1506,13 +1515,7 @@ impl Engine {
             }
         }
         if let Operation::Clean(id) = operation {
-            let current = backend.cleanup_plan(id, cancel)?;
-            if !still_reviewed(&**backend, expected_cleanup.as_ref(), &current) {
-                return Err(EngineError::Refused {
-                    backend: id.backend.clone(),
-                    refusal: Refusal::CleanupChanged,
-                });
-            }
+            already_clean(&mut **backend, id, expected_cleanup.as_ref(), cancel)?;
         }
         if let Some(expected) = expected_plan {
             let current = backend.operation_plan(operation, cancel)?;
@@ -1958,6 +1961,32 @@ impl Engine {
             })
             .collect()
     }
+}
+
+/// Looks at the cleanup task `id`, reviewed as `reviewed`, again before it
+/// runs: whether what it would remove is gone already, so it has nothing
+/// left to do. A task that changed in any other way is refused.
+fn already_clean(
+    backend: &mut dyn Backend,
+    id: &CleanupId,
+    reviewed: Option<&CleanupItem>,
+    cancel: &Cancellation,
+) -> Result<bool, EngineError> {
+    let current = match backend.cleanup_plan(id, cancel) {
+        Err(EngineError::NotFound)
+            if reviewed.is_some_and(|reviewed| backend.cleanup_gone(reviewed)) =>
+        {
+            return Ok(true);
+        }
+        current => current?,
+    };
+    if !still_reviewed(&*backend, reviewed, &current) {
+        return Err(EngineError::Refused {
+            backend: id.backend.clone(),
+            refusal: Refusal::CleanupChanged,
+        });
+    }
+    Ok(false)
 }
 
 /// Whether a cleanup plan found again may still run as `reviewed`.

@@ -1,6 +1,10 @@
 //! Bounded, local operation history shared by GUI and CLI.
-//! Native progress and error strings are deliberately never persisted.
-use crate::package::Operation;
+//! Native progress and error output is deliberately never persisted, only
+//! PkgDeck's own sentence about why a change didn't finish.
+use crate::{
+    engine::{EngineError, Refusal},
+    package::{Operation, OperationOutcome},
+};
 use rustix::fs::{flock, FlockOperation};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -38,6 +42,10 @@ pub enum Outcome {
     Finished,
     Failed,
     Cancelled,
+    /// It waits for a build to finish, then runs.
+    Waiting,
+    /// It was left alone, as its reason says.
+    Skipped,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +57,9 @@ pub struct Entry {
     pub finished_at: Option<u64>,
     pub state: State,
     pub outcomes: Vec<Outcome>,
+    /// Why each change didn't finish, beside its outcome, when one says.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<Option<String>>,
     pub owner_pid: u32,
 }
 
@@ -138,6 +149,33 @@ impl History {
                 finished_at: None,
                 state,
                 outcomes: vec![],
+                reasons: vec![],
+                owner_pid: std::process::id(),
+            });
+            id
+        })
+    }
+    /// Adds a run that already ended, like automatic cleaning, which only
+    /// knows what it did once it is done.
+    pub fn record(
+        &self,
+        frontend: &str,
+        operations: Vec<Operation>,
+        started_at: u64,
+        ended: Vec<(Outcome, Option<String>)>,
+    ) -> io::Result<u64> {
+        let (outcomes, reasons) = ended.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+        self.edit(|entries| {
+            let id = entries.last().map_or(1, |entry| entry.id + 1);
+            entries.push(Entry {
+                id,
+                frontend: frontend.into(),
+                operations,
+                started_at,
+                finished_at: Some(now()),
+                state: ended_as(&outcomes),
+                reasons: said(reasons),
+                outcomes,
                 owner_pid: std::process::id(),
             });
             id
@@ -153,19 +191,40 @@ impl History {
             }
         })
     }
-    pub fn finish(&self, id: u64, outcomes: Vec<Outcome>) -> io::Result<()> {
+    /// How each change ended, in order, and why when it didn't finish.
+    pub fn finish(&self, id: u64, ended: Vec<(Outcome, Option<String>)>) -> io::Result<()> {
+        let (outcomes, reasons) = ended.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
         self.edit(|entries| {
             if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
-                entry.state = if outcomes.iter().all(|outcome| *outcome == Outcome::Finished) {
-                    State::Finished
-                } else if outcomes.contains(&Outcome::Failed) {
-                    State::Failed
-                } else {
-                    State::Cancelled
-                };
+                entry.state = ended_as(&outcomes);
                 entry.outcomes = outcomes;
+                entry.reasons = said(reasons);
                 entry.finished_at = Some(now());
             }
+        })
+    }
+    /// How the change at `index` of run `id` ended after all, like a
+    /// cleanup task that waited for a build.
+    pub fn settle(
+        &self,
+        id: u64,
+        index: usize,
+        outcome: Outcome,
+        reason: Option<String>,
+    ) -> io::Result<()> {
+        self.edit(|entries| {
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+                return;
+            };
+            if index >= entry.outcomes.len() {
+                return;
+            }
+            entry.outcomes[index] = outcome;
+            entry.reasons.resize(entry.outcomes.len(), None);
+            entry.reasons[index] = reason;
+            entry.reasons = said(std::mem::take(&mut entry.reasons));
+            entry.state = ended_as(&entry.outcomes);
+            entry.finished_at = Some(now());
         })
     }
     pub fn recover_dead(&self) -> io::Result<()> {
@@ -179,12 +238,84 @@ impl History {
                     .is_some_and(|pid| {
                         rustix::process::test_kill_process(pid) != Err(rustix::io::Errno::SRCH)
                     });
-                if !entry.state.terminal() && !alive {
+                if alive {
+                    continue;
+                }
+                if !entry.state.terminal() {
                     entry.state = State::Interrupted;
                     entry.finished_at = Some(now());
                 }
+                // Nothing runs what it left waiting anymore.
+                if entry.outcomes.contains(&Outcome::Waiting) {
+                    entry.reasons.resize(entry.outcomes.len(), None);
+                    for (outcome, reason) in entry.outcomes.iter_mut().zip(&mut entry.reasons) {
+                        if *outcome == Outcome::Waiting {
+                            *outcome = Outcome::Skipped;
+                            *reason = Some(CLOSED_WHILE_WAITING.into());
+                        }
+                    }
+                }
             }
         })
+    }
+}
+
+/// How a change that ran on its own ended, as Activity keeps it. One that
+/// PkgDeck left alone, because a build uses what it removes or it changed
+/// since it was reviewed, is skipped, not failed: nothing went wrong.
+pub fn ended(result: &Result<OperationOutcome, EngineError>) -> (Outcome, Option<String>) {
+    match result {
+        Ok(_) => (Outcome::Finished, None),
+        Err(EngineError::Cancelled) => (Outcome::Cancelled, None),
+        Err(
+            error @ EngineError::Refused {
+                refusal: Refusal::Building | Refusal::CleanupChanged,
+                ..
+            },
+        ) => (Outcome::Skipped, Some(reason(error))),
+        Err(error) => (Outcome::Failed, Some(reason(error))),
+    }
+}
+
+/// Why `error` stopped a change, as Activity keeps it. What a tool answered
+/// stays out: it can be long, or say more than it should.
+pub fn reason(error: &EngineError) -> String {
+    let said = match error {
+        EngineError::InvalidResponse { backend, .. } => {
+            format!("{backend} answered in a way PkgDeck didn't understand")
+        }
+        error => error.to_string(),
+    };
+    let mut letters = said.chars();
+    let first = letters.next().map(|first| first.to_uppercase().collect::<String>());
+    let said = first.unwrap_or_default() + letters.as_str();
+    if said.ends_with('.') {
+        said
+    } else {
+        said + "."
+    }
+}
+
+/// Why a change that waited for a build never ran.
+pub const CLOSED_WHILE_WAITING: &str = "PkgDeck closed before the build finished, so it didn't run.";
+
+/// What a run whose changes ended as `outcomes` counts as. A change that
+/// was skipped or waits did what PkgDeck meant it to, so it fails nothing.
+fn ended_as(outcomes: &[Outcome]) -> State {
+    if outcomes.contains(&Outcome::Failed) {
+        State::Failed
+    } else if outcomes.contains(&Outcome::Cancelled) {
+        State::Cancelled
+    } else {
+        State::Finished
+    }
+}
+/// `reasons` as stored: nothing at all when no change says why.
+fn said(reasons: Vec<Option<String>>) -> Vec<Option<String>> {
+    if reasons.iter().all(Option::is_none) {
+        vec![]
+    } else {
+        reasons
     }
 }
 

@@ -3,7 +3,7 @@
 //! like), and Git worktrees that are done with. Projects are found under the
 //! folders in [`ProjectSettings`], the home folder unless changed.
 use super::*;
-use crate::{disk, host::Host};
+use crate::{disk, hold::Toolchain, host::Host};
 use dev_caches::{not_while_building, shown};
 use std::{
     collections::BTreeSet,
@@ -229,6 +229,35 @@ fn build_folder(name: &str, siblings: &BTreeSet<String>) -> bool {
         "obj" | "bin" => siblings.iter().any(|file| dotnet(file)),
         _ => false,
     }
+}
+
+/// The builds that may use what is in `dirs`: the ones their project files
+/// name, and native builds, which could be any project's.
+fn builds_using<'a>(dirs: impl IntoIterator<Item = &'a Path>) -> Vec<Toolchain> {
+    let mut builds = BTreeSet::from([Toolchain::Native]);
+    for dir in dirs {
+        let names: BTreeSet<String> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        let has = |file: &str| names.contains(file);
+        let named: [(bool, &[Toolchain]); 7] = [
+            (has("Cargo.toml"), &[Toolchain::Rust]),
+            (GRADLE.iter().any(|file| has(file)), &[Toolchain::Gradle]),
+            (has("pom.xml"), &[Toolchain::Maven]),
+            (has("go.mod"), &[Toolchain::Go]),
+            (has("Package.swift"), &[Toolchain::Apple]),
+            // Flutter builds with Gradle for Android and Xcode for Apple.
+            (has("pubspec.yaml"), &[Toolchain::Gradle, Toolchain::Apple]),
+            (names.iter().any(|name| dotnet(name)), &[Toolchain::Dotnet]),
+        ];
+        for (_, toolchains) in named.into_iter().filter(|(found, _)| *found) {
+            builds.extend(toolchains);
+        }
+    }
+    builds.into_iter().collect()
 }
 
 /// Finds projects under one folder.
@@ -892,6 +921,27 @@ impl Backend for Projects {
         item.filter(|item| item.id == *id)
             .ok_or(EngineError::NotFound)
     }
+    /// A project offered no more may only have changed: it is done once
+    /// every folder the review listed is gone.
+    fn cleanup_gone(&self, reviewed: &CleanupItem) -> bool {
+        let home = self.host.var("HOME").map(PathBuf::from);
+        reviewed.preview.lines().skip(1).all(|line| {
+            // A worktree line ends with its branch, which has no spaces, or
+            // says the folder is gone.
+            let shown = match reviewed.kind {
+                CleanupKind::Worktree => line
+                    .rsplit_once(" (")
+                    .filter(|(_, said)| said.ends_with(')'))
+                    .map_or(line, |(path, _)| path),
+                _ => line,
+            };
+            let path = match (shown.strip_prefix("~/"), &home) {
+                (Some(rest), Some(home)) => home.join(rest),
+                _ => PathBuf::from(shown),
+            };
+            fs::symlink_metadata(path).is_err()
+        })
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -903,7 +953,6 @@ impl Backend for Projects {
         };
         // What is removed is what a fresh look finds, never the key itself.
         let plan = self.cleanup_plan(id, cancel)?;
-        not_while_building(&self.host)?;
         let failed = |what: &Path, error: String| {
             EngineError::Execution(ExecutionError::Io(format!(
                 "Couldn't remove {}: {error}",
@@ -915,6 +964,9 @@ impl Backend for Projects {
                 .into_iter()
                 .find(|project| project.root == root)
                 .ok_or(EngineError::NotFound)?;
+            let parents = project.folders.iter().filter_map(|folder| folder.parent());
+            let builds = builds_using(std::iter::once(root).chain(parents));
+            not_while_building(&self.host, self.id(), &builds)?;
             progress(Progress::Message(format!("Cleaning {}…", plan.title)));
             // Real folders only: a link stays, wherever it leads.
             let folders = project.folders.iter().filter(|folder| {
@@ -930,6 +982,9 @@ impl Backend for Projects {
             // `cleanup_plan` found the task, so it is one or the other.
             let repository = Path::new(id.key.strip_prefix("worktrees:").unwrap_or_default());
             let worktrees = self.worktrees(repository, self.cutoff(), cancel);
+            let checkouts = worktrees.iter().map(|worktree| worktree.path.as_path());
+            let builds = builds_using(std::iter::once(repository).chain(checkouts));
+            not_while_building(&self.host, self.id(), &builds)?;
             progress(Progress::Message(format!("Cleaning {}…", plan.title)));
             if worktrees.iter().any(|worktree| worktree.missing) {
                 self.git(repository, &["worktree", "prune"], cancel)

@@ -4,7 +4,7 @@ use crate::qt::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
-use pkgdeck_core::hold::{Hold, Waits};
+use pkgdeck_core::hold::{waits_for_builds, Hold, Waits};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{
@@ -250,6 +250,9 @@ enum Job {
         preferences: CleanupPreferences,
     },
     CleanAll(Vec<Operation>),
+    /// Cleanup tasks that waited for a build, tried again as they were
+    /// reviewed.
+    RetryCleans(Vec<CleanupItem>),
     /// Refresh the selected sources, then read their updates in the same worker.
     CheckUpdates(Vec<Operation>, Vec<String>),
     ManifestExport(PathBuf, Vec<PackageId>),
@@ -283,6 +286,10 @@ impl Job {
             | Self::AutoUpgrade(operations, _)
             | Self::CleanAll(operations)
             | Self::CheckUpdates(operations, _) => operations.clone(),
+            Self::RetryCleans(items) => items
+                .iter()
+                .map(|item| Operation::Clean(item.id.clone()))
+                .collect(),
             _ => vec![],
         }
     }
@@ -305,6 +312,20 @@ struct Ended {
     title: String,
     outcome: Outcome,
     said: Said,
+    /// Why it didn't finish, as Activity keeps it: what `said` says,
+    /// without anything a tool printed.
+    kept: Option<String>,
+}
+/// What a cleanup task waiting for a build says.
+const WAITS_FOR_BUILD: &str = "Waits for a build that uses it to finish, then cleans on its own.";
+/// How often cleanup tasks waiting for a build are tried again.
+const RETRY_CLEANS_EVERY: u64 = 60;
+/// A cleanup task waiting for a build: the plan it was reviewed as, and
+/// which change of which Activity runs it is, to settle once it runs.
+#[derive(Clone, Debug, PartialEq)]
+struct WaitingClean {
+    item: CleanupItem,
+    activity: Vec<(u64, usize)>,
 }
 /// What a step has to say about how it ended.
 #[derive(Clone, Debug, PartialEq)]
@@ -337,6 +358,20 @@ impl Said {
 impl Batch {
     fn outcomes(&self) -> impl Iterator<Item = Outcome> + '_ {
         self.steps.iter().map(|step| step.outcome)
+    }
+    /// "Title: why" for each step that waits for a build or was left alone.
+    fn left_alone(&self, sudo: bool) -> impl Iterator<Item = String> + '_ {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step.outcome, Outcome::Waiting | Outcome::Skipped))
+            .map(move |step| format!("{}: {}", step.title, step.said.text(sudo)))
+    }
+    /// Each step as Activity keeps it.
+    fn ended(&self) -> Vec<(Outcome, Option<String>)> {
+        self.steps
+            .iter()
+            .map(|step| (step.outcome, step.kept.clone()))
+            .collect()
     }
     /// "Completed 1 of 2 updates.", then each step and the note.
     fn text(&self, sudo: bool) -> String {
@@ -384,12 +419,17 @@ enum Payload {
     ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
     /// What automatic cleaning did: tasks finished and failed, and about
-    /// how much it freed.
+    /// how much it freed. `tasks` is what it ran, in order, each as it ended,
+    /// and `started_at` when, for Activity.
     AutoCleaned {
         cleaned: usize,
         failed: usize,
         bytes: u64,
+        tasks: Vec<(CleanupItem, Outcome, Option<String>)>,
+        started_at: u64,
     },
+    /// How cleanup tasks that waited for a build ended when tried again.
+    RetriedCleans(Batch),
 }
 enum Reply {
     Progress(String),
@@ -1172,23 +1212,47 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 .iter()
                 .map(|item| Operation::Clean(item.id.clone()))
                 .collect();
-            let outcomes: Vec<_> = match operations.is_empty() {
+            let started_at = epoch_seconds();
+            let ended = match operations.is_empty() {
                 true => vec![],
-                false => batch(engine, &operations, Vec::new(), cancel, send)
-                    .outcomes()
-                    .collect(),
+                false => batch(engine, &operations, Vec::new(), cancel, send).ended(),
             };
-            let finished = |outcome: &&Outcome| **outcome == Outcome::Finished;
+            let tasks: Vec<_> = items
+                .into_iter()
+                .zip(ended)
+                .map(|(item, (outcome, kept))| (item, outcome, kept))
+                .collect();
+            let finished = |(_, outcome, _): &&(CleanupItem, Outcome, _)| {
+                *outcome == Outcome::Finished
+            };
             Ok(Payload::AutoCleaned {
-                cleaned: outcomes.iter().filter(finished).count(),
-                failed: outcomes.iter().filter(|o| **o == Outcome::Failed).count(),
-                bytes: items
+                cleaned: tasks.iter().filter(finished).count(),
+                failed: tasks
                     .iter()
-                    .zip(&outcomes)
-                    .filter(|(_, outcome)| finished(outcome))
-                    .filter_map(|(item, _)| item.bytes)
+                    .filter(|(_, outcome, _)| *outcome == Outcome::Failed)
+                    .count(),
+                bytes: tasks
+                    .iter()
+                    .filter(finished)
+                    .filter_map(|(item, ..)| item.bytes)
                     .sum(),
+                tasks,
+                started_at,
             })
+        }
+        Job::RetryCleans(items) => {
+            // Each runs as it was reviewed, however long ago that was.
+            for item in &items {
+                engine.remember_cleanup_plan(item.clone());
+            }
+            let operations = Job::RetryCleans(items).operations();
+            Ok(Payload::RetriedCleans(batch(
+                engine,
+                &operations,
+                Vec::new(),
+                cancel,
+                send,
+            )))
         }
         Job::AutoUpgrade(operations, removals) => {
             // Nobody reviews this run. Unless removals are allowed, APT goes
@@ -1252,6 +1316,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         } else {
                             Said::Completed
                         },
+                        kept: None,
                     }],
                     note: Some(note),
                 }),
@@ -1343,15 +1408,18 @@ fn batch(
                 }
             }
         }
-        let outcome = match &result {
-            Ok(_) => Outcome::Finished,
-            Err((EngineError::Cancelled, None)) => Outcome::Cancelled,
-            Err(_) => Outcome::Failed,
+        let (outcome, kept) = match &result {
+            Ok(_) => (Outcome::Finished, None),
+            Err((_, Some(reason))) => (Outcome::Failed, Some(reason.clone())),
+            Err((error, None)) => ended_by(error, operation.backend()),
         };
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
             Err((_, Some(reason))) => Said::Because(reason),
+            Err((EngineError::Refused { refusal: Refusal::Building, .. }, None)) => {
+                Said::Because(WAITS_FOR_BUILD.into())
+            }
             // The App Store explains a denial its own way, whatever the
             // permission option is.
             Err((error, None)) if is_denied(&error) && operation.backend() != "mas" => Said::Denied,
@@ -1363,6 +1431,7 @@ fn batch(
             title: operation_title(operation),
             outcome,
             said,
+            kept,
         });
     }
     if !failure_output.is_empty() {
@@ -1372,6 +1441,23 @@ fn batch(
         noun,
         steps,
         note: firmware_note(operations),
+    }
+}
+/// How a change `error` stopped ended, as Activity keeps it. A cleanup task
+/// waiting for a build, or left alone because it changed since it was
+/// reviewed, didn't fail.
+fn ended_by(error: &EngineError, backend: &str) -> (Outcome, Option<String>) {
+    match error {
+        EngineError::Cancelled => (Outcome::Cancelled, None),
+        EngineError::Refused {
+            refusal: Refusal::Building,
+            ..
+        } => (Outcome::Waiting, Some(WAITS_FOR_BUILD.into())),
+        EngineError::Refused {
+            refusal: refusal @ Refusal::CleanupChanged,
+            ..
+        } => (Outcome::Skipped, Some(refusal.to_string())),
+        error => (Outcome::Failed, Some(kept_reason(error, backend))),
     }
 }
 /// A firmware update may need a restart before it takes effect.
@@ -1773,6 +1859,8 @@ pub struct Controller {
     waits: Waits,
     /// Why the updates the last background check found wait, if they do.
     auto_held: Option<Hold>,
+    /// The sources whose updates a build holds, by name.
+    auto_held_sources: Vec<String>,
     /// Let Update all remove packages when APT's plan does.
     allow_removals: bool,
     /// Clean once a day after a background check.
@@ -1781,6 +1869,10 @@ pub struct Controller {
     cleanup_preferences: CleanupPreferences,
     /// When automatic cleaning last ran, in seconds since 1970.
     auto_cleaned_at: u64,
+    /// Cleanup tasks waiting for a build, tried again until it's over.
+    waiting_cleans: Vec<WaitingClean>,
+    /// When waiting tasks were last tried, in seconds since 1970.
+    cleans_tried_at: u64,
     /// A window shows the sections; see `set_window_open`.
     window_open: bool,
     source_filter: Vec<String>,
@@ -1918,11 +2010,14 @@ impl Default for Controller {
             manual_sources: vec![],
             waits: Waits::default(),
             auto_held: None,
+            auto_held_sources: Vec::new(),
             allow_removals: true,
             auto_clean: false,
             auto_clean_worktrees: false,
             cleanup_preferences: CleanupPreferences::default(),
             auto_cleaned_at: 0,
+            waiting_cleans: Vec::new(),
+            cleans_tried_at: 0,
             source_filter: Vec::new(),
             window_open: true,
             sudo: false,
@@ -1984,6 +2079,28 @@ impl Controller {
             || self.activity_worker.is_some()
             || self.awaiting_prefetch
             || self.window_open && !self.prefetch.is_empty() && !held
+    }
+    /// Keep `waiting` tasks waiting for a build. A task already waiting
+    /// takes the newer review, and settles every run it waits in.
+    fn keep_waiting(&mut self, waiting: Vec<WaitingClean>) {
+        for mut new in waiting {
+            if let Some(at) = self
+                .waiting_cleans
+                .iter()
+                .position(|old| old.item.id == new.item.id)
+            {
+                let old = self.waiting_cleans.remove(at);
+                new.activity.splice(0..0, old.activity);
+            }
+            self.waiting_cleans.push(new);
+        }
+    }
+    /// The sources whose automatic updates wait for builds right now.
+    fn held_for_builds(&self) -> &[String] {
+        match self.auto_held {
+            Some(Hold::Build) => &self.auto_held_sources,
+            _ => &[],
+        }
     }
     /// Whether the saved approval still covers the helper this app would
     /// start, so an unattended update can't stop at a password prompt.
@@ -2216,6 +2333,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::CheckUpdates(_, sources) => sources.clone(),
         Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::RetryCleans(items) => items.iter().map(|item| item.id.backend.clone()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
@@ -2838,6 +2956,14 @@ fn write_notice(
         ) => {
             json!({"kind": "info", "title": "Cancelled. Nothing else was changed."})
         }
+        Err(EngineError::Refused {
+            refusal: Refusal::Building,
+            ..
+        }) => json!({
+            "kind": "info",
+            "title": format!("{title} waits for a build"),
+            "detail": WAITS_FOR_BUILD,
+        }),
         Err(error) => json!({
             "kind": "error",
             "title": match operations.as_slice() {
@@ -2899,6 +3025,11 @@ fn write_notice(
                 [(one, _)] => failed_title(one, names),
                 many => format!("{} of {} changes failed", many.len(), ran.steps.len()),
             };
+            // Then what waits or was left alone, which needs nothing now.
+            let detail = std::iter::once(detail)
+                .chain(ran.left_alone(sudo))
+                .collect::<Vec<_>>()
+                .join("\n");
             json!({"kind": "error", "title": title, "detail": detail})
         }
         Ok(payload) => {
@@ -2918,10 +3049,23 @@ fn write_notice(
                 }
                 _ => String::new(),
             };
-            if detail.is_empty() {
-                json!({"kind": "success", "title": format!("{title} finished")})
-            } else {
-                json!({"kind": "success", "title": format!("{title} finished"), "detail": detail})
+            match payload {
+                // Some wait for a build or were left alone: not done yet,
+                // but nothing went wrong.
+                Payload::Batch(ran) if ran.left_alone(sudo).next().is_some() => {
+                    let done = ran.outcomes().filter(|o| *o == Outcome::Finished).count();
+                    json!({
+                        "kind": "info",
+                        "title": format!("{done} of {} {} finished", ran.steps.len(), ran.noun),
+                        "detail": detail,
+                    })
+                }
+                _ if detail.is_empty() => {
+                    json!({"kind": "success", "title": format!("{title} finished")})
+                }
+                _ => {
+                    json!({"kind": "success", "title": format!("{title} finished"), "detail": detail})
+                }
             }
         }
     };
@@ -4231,6 +4375,7 @@ impl ffi::PackageController {
             let mut state: Value =
                 serde_json::from_str(&self.background_state().to_string()).unwrap_or_default();
             state["waiting"] = json!(hold.map(Hold::key));
+            state["waiting_for"] = json!(self.rust().held_for_builds());
             state["notify"] = json!(false);
             self.as_mut().set_background_state(encoded(state));
         }
@@ -4310,12 +4455,14 @@ impl ffi::PackageController {
             return;
         }
         // Cleaning downloads nothing, so a metered connection doesn't count.
+        // A build holds only the tasks that remove what it uses: they wait
+        // for it on their own.
         let natives = rust.natives;
         let waits = Waits {
             metered: false,
             ..rust.waits
         };
-        if (natives.hold)(&(natives.host)(), waits).is_some() {
+        if (natives.hold)(&(natives.host)(), waits) == Some(Hold::Battery) {
             return;
         }
         let job = Job::AutoClean {
@@ -4329,6 +4476,135 @@ impl ffi::PackageController {
             cleanup_preview: vec![],
         });
         self.sync_needs_poll();
+    }
+    /// Remember the cleanup tasks of `job` that wait for a build, as they
+    /// were reviewed, to try them again until it's over. `activity` is the
+    /// Activity run they belong to.
+    fn wait_for_builds(
+        mut self: Pin<&mut Self>,
+        job: &Job,
+        ended: &[(Outcome, Option<String>)],
+        activity: Option<u64>,
+    ) {
+        let waiting: Vec<WaitingClean> = job
+            .operations()
+            .iter()
+            .zip(ended)
+            .enumerate()
+            .filter(|(_, (_, (outcome, _)))| *outcome == Outcome::Waiting)
+            .filter_map(|(index, (operation, _))| {
+                let Operation::Clean(id) = operation else {
+                    return None;
+                };
+                let item = self.rust().cleanup.iter().find(|item| item.id == *id)?;
+                Some(WaitingClean {
+                    item: item.clone(),
+                    activity: activity.map(|activity| (activity, index)).into_iter().collect(),
+                })
+            })
+            .collect();
+        self.as_mut().rust_mut().keep_waiting(waiting);
+    }
+    /// Show what automatic cleaning ran in Activity, and keep the tasks
+    /// that wait for a build waiting.
+    fn record_auto_clean(
+        mut self: Pin<&mut Self>,
+        tasks: Vec<(CleanupItem, Outcome, Option<String>)>,
+        started_at: u64,
+    ) {
+        if tasks.is_empty() {
+            return;
+        }
+        for (item, ..) in &tasks {
+            let title = item.title.clone();
+            self.as_mut()
+                .rust_mut()
+                .names
+                .cleanup
+                .insert(item.id.clone(), title);
+        }
+        let operations = tasks
+            .iter()
+            .map(|(item, ..)| Operation::Clean(item.id.clone()))
+            .collect();
+        let ended = tasks
+            .iter()
+            .map(|(_, outcome, kept)| (*outcome, kept.clone()))
+            .collect();
+        let activity = self
+            .rust()
+            .activity_store
+            .clone()
+            .and_then(|store| store.record("auto", operations, started_at, ended).ok());
+        let waiting = tasks
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (_, outcome, _))| *outcome == Outcome::Waiting)
+            .map(|(index, (item, ..))| WaitingClean {
+                item,
+                activity: activity.map(|id| (id, index)).into_iter().collect(),
+            })
+            .collect();
+        self.as_mut().rust_mut().keep_waiting(waiting);
+        self.as_mut().refresh_activity();
+    }
+    /// Try the cleanup tasks waiting for a build again, at most once a
+    /// minute and only while nothing else runs. The window calls this on a
+    /// timer; a task still waiting just keeps waiting.
+    pub fn retry_waiting_cleans(mut self: Pin<&mut Self>) {
+        let now = epoch_seconds();
+        let rust = self.rust();
+        if rust.waiting_cleans.is_empty()
+            || now < rust.cleans_tried_at.saturating_add(RETRY_CLEANS_EVERY)
+            || rust.worker.is_some()
+            || rust.pending.is_some()
+            || rust.queued.is_some()
+            || rust.validated_confirmed.is_some()
+            || !rust.confirmed_queue.is_empty()
+        {
+            return;
+        }
+        let items = rust
+            .waiting_cleans
+            .iter()
+            .map(|waiting| waiting.item.clone())
+            .collect();
+        self.as_mut().rust_mut().cleans_tried_at = now;
+        // Behind anything the person asks for, like a background check.
+        self.as_mut().rust_mut().background = true;
+        self.start(Job::RetryCleans(items));
+    }
+    /// Settle the waiting tasks a retry ran in Activity. Those still waiting,
+    /// or that the retry didn't reach, keep waiting.
+    fn finish_retried_cleans(mut self: Pin<&mut Self>, items: &[CleanupItem], ran: &Batch) {
+        let store = self.rust().activity_store.clone();
+        let mut cleaned = false;
+        for (item, step) in items.iter().zip(&ran.steps) {
+            if matches!(step.outcome, Outcome::Waiting | Outcome::Cancelled) {
+                continue;
+            }
+            let rust = self.as_mut().rust_mut();
+            let Some(at) = rust
+                .waiting_cleans
+                .iter()
+                .position(|waiting| waiting.item.id == item.id)
+            else {
+                continue;
+            };
+            let waiting = rust.waiting_cleans.remove(at);
+            cleaned |= step.outcome == Outcome::Finished;
+            if let Some(store) = &store {
+                for (id, index) in waiting.activity {
+                    let _ = store.settle(id, index, step.outcome, step.kept.clone());
+                }
+            }
+        }
+        if cleaned {
+            // Cleaning may remove packages, images and caches lists show.
+            self.as_mut()
+                .apply(Ok(Payload::Written(OperationOutcome::default())));
+        }
+        self.as_mut().refresh_activity();
     }
     pub fn set_allow_removals(mut self: Pin<&mut Self>, allowed: bool) {
         self.as_mut().rust_mut().allow_removals = allowed;
@@ -4446,19 +4722,41 @@ impl ffi::PackageController {
         if operations.is_empty() {
             return None;
         }
-        // On battery, a metered connection or during a build, wait:
-        // check_updates tries again once that's over.
+        // On battery or a metered connection, wait: check_updates tries
+        // again once that's over. A build holds only the updates that could
+        // change what it runs; the rest go ahead.
         let natives = self.rust().natives;
         let hold = (natives.hold)(&(natives.host)(), self.rust().waits);
-        if hold.is_some() {
-            self.as_mut().rust_mut().auto_held = hold;
+        let (operations, held): (Vec<_>, Vec<_>) = match hold {
+            Some(Hold::Build) => operations
+                .into_iter()
+                .partition(|operation| !waits_for_builds(operation.backend())),
+            _ => (operations, vec![]),
+        };
+        let mut held_sources: Vec<String> = held
+            .iter()
+            .map(|operation| source_display_name(operation.backend()))
+            .collect();
+        held_sources.sort();
+        held_sources.dedup();
+        self.as_mut().rust_mut().auto_held_sources = held_sources;
+        self.as_mut().rust_mut().auto_held = match hold {
+            Some(Hold::Build) if held.is_empty() => None,
+            hold => hold,
+        };
+        if matches!(hold, Some(Hold::Battery | Hold::Metered)) || operations.is_empty() {
             return None;
         }
         let left = report
             .packages
             .iter()
             .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-            .filter(|p| !operations.iter().any(|o| o.backend() == p.id.backend))
+            .filter(|p| {
+                !operations
+                    .iter()
+                    .chain(&held)
+                    .any(|o| o.backend() == p.id.backend)
+            })
             .count() as u64;
         let versions = packages
             .iter()
@@ -4792,7 +5090,8 @@ impl ffi::PackageController {
         self.as_mut()
             .set_notification_history(saved.as_str().into());
         let waiting = self.rust().auto_held.map(Hold::key);
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && left != Some(0), "manual": left, "waiting": waiting})));
+        let waiting_for = self.rust().held_for_builds().to_vec();
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && left != Some(0), "manual": left, "waiting": waiting, "waiting_for": waiting_for})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -4961,7 +5260,7 @@ impl ffi::PackageController {
                 .job
                 .operations()
                 .iter()
-                .map(|_| Outcome::Failed)
+                .map(|_| (Outcome::Failed, None))
                 .collect();
             let _ = store.finish(id, outcomes);
         }
@@ -4989,7 +5288,7 @@ impl ffi::PackageController {
                     .job
                     .operations()
                     .iter()
-                    .map(|_| Outcome::Cancelled)
+                    .map(|_| (Outcome::Cancelled, None))
                     .collect();
                 let _ = store.finish(id, outcomes);
             }
@@ -6256,13 +6555,18 @@ impl ffi::PackageController {
         }
         match result {
             Ok(Payload::BackgroundUpdates(report)) => self.as_mut().finish_background_check(report),
+            // Settled where the retry's reply arrives, behind everything.
+            Ok(Payload::RetriedCleans(_)) => {}
             Ok(Payload::AutoCleaned {
                 cleaned,
                 failed,
                 bytes,
+                tasks,
+                started_at,
             }) => {
                 let now = epoch_seconds();
                 self.as_mut().rust_mut().auto_cleaned_at = now;
+                self.as_mut().record_auto_clean(tasks, started_at);
                 if cleaned > 0 {
                     // Cleaning may remove packages, images and caches lists show.
                     self.as_mut()
@@ -7430,6 +7734,13 @@ impl ffi::PackageController {
                 if self.rust().background {
                     if !cancel.requested() {
                         match reply {
+                            Reply::Done(Ok(Payload::RetriedCleans(ran))) => {
+                                if let Job::RetryCleans(items) = &job {
+                                    self.as_mut().finish_retried_cleans(items, &ran);
+                                }
+                            }
+                            // Tasks a retry couldn't start keep waiting.
+                            Reply::Done(Err(_)) if matches!(job, Job::RetryCleans(_)) => {}
                             Reply::Done(Ok(Payload::BackgroundUpdates(report))) => {
                                 self.as_mut().finish_background_check(report)
                             }
@@ -7561,27 +7872,24 @@ impl ffi::PackageController {
                             {
                                 self.as_mut().set_notice(encoded(notice));
                             }
-                            if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
+                            let ended: Vec<_> = match &result {
+                                Ok(Payload::Batch(ran)) => ran.ended(),
+                                Ok(_) => job
+                                    .operations()
+                                    .iter()
+                                    .map(|_| (Outcome::Finished, None))
+                                    .collect(),
+                                Err(error) => job
+                                    .operations()
+                                    .iter()
+                                    .map(|operation| ended_by(error, operation.backend()))
+                                    .collect(),
+                            };
+                            let activity = self.as_mut().rust_mut().active_activity_id.take();
+                            self.as_mut().wait_for_builds(&job, &ended, activity);
+                            if let Some(id) = activity {
                                 if let Some(store) = self.rust().activity_store.clone() {
-                                    let outcomes = match &result {
-                                        Ok(Payload::Batch(ran)) => ran.outcomes().collect(),
-                                        Ok(_) => job
-                                            .operations()
-                                            .iter()
-                                            .map(|_| Outcome::Finished)
-                                            .collect(),
-                                        Err(EngineError::Cancelled) => job
-                                            .operations()
-                                            .iter()
-                                            .map(|_| Outcome::Cancelled)
-                                            .collect(),
-                                        Err(_) => job
-                                            .operations()
-                                            .iter()
-                                            .map(|_| Outcome::Failed)
-                                            .collect(),
-                                    };
-                                    let _ = store.finish(id, outcomes);
+                                    let _ = store.finish(id, ended);
                                 }
                                 self.as_mut().refresh_activity();
                             }

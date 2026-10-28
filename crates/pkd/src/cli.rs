@@ -2,7 +2,7 @@ use crate::live::Live;
 use crate::session::Session;
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
-    activity::{History, Outcome, State},
+    activity::{self, History, State},
     engine::*,
     host::{Authorization, Host},
     inspection::{audit, inspect_native, native_leftovers, OwnerState},
@@ -1080,15 +1080,7 @@ fn execute(
         .and_then(|store| store.begin("cli", operations.to_vec(), State::Running).ok());
     let results = engine.execute_batch(operations, cancel, events);
     if let (Some(store), Some(id)) = (history, activity_id) {
-        let outcomes = results
-            .iter()
-            .map(|result| match result {
-                Ok(_) => Outcome::Finished,
-                Err(EngineError::Cancelled) => Outcome::Cancelled,
-                Err(_) => Outcome::Failed,
-            })
-            .collect();
-        let _ = store.finish(id, outcomes);
+        let _ = store.finish(id, results.iter().map(activity::ended).collect());
     }
     results
 }
