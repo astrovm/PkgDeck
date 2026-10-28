@@ -3368,7 +3368,7 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
     std::fs::create_dir_all(base.join(".cargo")).unwrap();
     std::fs::write(
         base.join(".cargo/.crates2.json"),
-        r#"{"installs": {"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)": {"features": ["pcre2"], "all_features": false, "no_default_features": true}}}"#,
+        r#"{"installs": {"bat 0.24.0 (registry+https://github.com/rust-lang/crates.io-index)": {"all_features": true}, "ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)": {"features": ["pcre2"], "all_features": false, "no_default_features": true}}}"#,
     )
     .unwrap();
     // Two outdated crates.io tools, a current one, and two from elsewhere
@@ -3394,7 +3394,7 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
     assert_eq!(
         fixture.writes("cargo"),
         [
-            vec!["install", "--force", "bat"],
+            vec!["install", "--force", "--all-features", "bat"],
             vec![
                 "install",
                 "--force",
@@ -3500,6 +3500,23 @@ fn bun_checks_the_registry_for_newer_versions() {
             .as_deref(),
         Some("1.5.0")
     );
+    // Updating all updates only the outdated tool.
+    let all = Operation::UpgradeAll {
+        backend: "bun".into(),
+    };
+    backend.execute(&all, &cancel, &mut |_| {}).unwrap();
+    assert_eq!(fixture.writes("bun"), [["add", "--global", "alpha@latest"]]);
+    // Cancelled while updating, it stops there.
+    let stop = Cancellation::default();
+    assert_eq!(
+        backend.execute(&all, &stop, &mut |progress| {
+            if matches!(progress, Progress::Package(_)) {
+                stop.cancel();
+            }
+        }),
+        Err(EngineError::Cancelled)
+    );
+    assert_eq!(fixture.writes("bun").len(), 1);
     let mut offline = DevTool::bun(DevFixture {
         outdated: None,
         ..fixture.clone()

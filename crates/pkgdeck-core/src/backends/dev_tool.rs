@@ -800,6 +800,12 @@ impl<T: Transport> DevTool<T> {
         }
         Some((name, version, crates_io))
     }
+    /// What `cargo install --list` says.
+    fn cargo_list(&self, cancel: &Cancellation) -> Result<String, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(id, self.call(&["install", "--list"], cancel, false)?)?;
+        String::from_utf8(output).map_err(|e| invalid(id, e))
+    }
     fn cargo_inventory(
         &self,
         home: &std::path::Path,
@@ -807,8 +813,7 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let id = self.kind.id();
-        let output = bytes(id, self.call(&["install", "--list"], cancel, false)?)?;
-        let text = String::from_utf8(output).map_err(|e| invalid(id, e))?;
+        let text = self.cargo_list(cancel)?;
         let mut details = Vec::new();
         for line in text.lines() {
             if line.is_empty() || line.starts_with([' ', '\t']) {
@@ -1949,11 +1954,7 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
         let id = self.kind.id();
-        let list = String::from_utf8(bytes(
-            id,
-            self.call(&["install", "--list"], cancel, false)?,
-        )?)
-        .map_err(|e| invalid(id, e))?;
+        let list = self.cargo_list(cancel)?;
         let source = list
             .lines()
             .filter_map(|line| line.strip_suffix(':'))
