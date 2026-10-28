@@ -8635,6 +8635,37 @@ fn activity_refreshes_off_the_gui_thread_and_repeats_when_asked_again() {
     std::fs::remove_dir_all(path).unwrap();
 }
 #[test]
+fn activity_shows_once_its_reader_replies_even_before_its_thread_ends() {
+    let path = std::env::temp_dir().join(format!("pkgdeck-activity-reply-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    let store = ActivityStore::at(path.join("activity.json"));
+    store
+        .begin(
+            "gui",
+            vec![Operation::Refresh {
+                backend: "flatpak".into(),
+            }],
+            vec![],
+            State::Queued,
+        )
+        .unwrap();
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    // The reader replied and woke the window; its thread ends a moment later.
+    let (sender, receiver) = mpsc::channel();
+    sender.send(store.load()).unwrap();
+    let handle = thread::spawn(|| thread::sleep(Duration::from_millis(300)));
+    controller.as_mut().rust_mut().activity_worker = Some(ActivityWorker { handle, receiver });
+    controller.as_mut().poll();
+    assert!(controller
+        .activity()
+        .to_string()
+        .contains("Refresh Flatpak package lists"));
+    assert!(controller.rust().activity_worker.is_none());
+    assert!(!*controller.needs_poll());
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[test]
 fn needs_poll_is_true_exactly_while_work_is_outstanding() {
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();

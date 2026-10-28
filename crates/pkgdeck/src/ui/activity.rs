@@ -119,19 +119,34 @@ fn content(app: &mut App, ui: &mut Ui) {
     }
     super::scrollbar::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = 8.0;
+            let origin = ui.min_rect().top();
             // Borrowed out, not copied: logs can be long. A card that
             // cancels may read a newer list, which then stays.
             let entries = std::mem::take(&mut app.activity);
             for entry in entries.iter().rev() {
-                entry_card(app, ui, entry);
+                // Only the cards in view are laid out, so a long history
+                // costs no more a frame than a short one. The rest keep the
+                // room they took when last shown.
+                let top = ui.cursor().top() - origin;
+                let height = app.ui.activity_heights.get(&entry.id).copied();
+                let height = height.unwrap_or(CARD_HEIGHT);
+                if top + height < viewport.top() || top > viewport.bottom() {
+                    ui.allocate_space(vec2(ui.available_width(), height));
+                } else {
+                    let height = entry_card(app, ui, entry);
+                    app.ui.activity_heights.insert(entry.id, height);
+                }
             }
             if app.activity.is_empty() {
                 app.activity = entries;
             }
         });
 }
+
+/// A card's height before it was ever shown: one line, collapsed.
+const CARD_HEIGHT: f32 = 44.0;
 
 /// The last change that failed: why, with Retry and what it printed. It
 /// stays until dismissed, retried, or a later look shows it fixed.
@@ -232,7 +247,8 @@ fn failure_card(app: &mut App, ui: &mut Ui) {
     ui.add_space(10.0);
 }
 
-fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
+/// Draws one entry and returns how tall it is.
+fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) -> f32 {
     let palette = Palette::current(ui.ctx());
     let color = tone(&palette, entry.tone());
     let others = entry.others();
@@ -433,5 +449,85 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                 app.expanded.insert(entry.id);
             }
         }
+    }
+    rect.height()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app::Launch, platform::Platform, settings::Store};
+    use egui_kittest::Harness;
+    use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+    fn app() -> App {
+        let (store, settings) = Store::open(None, None);
+        let mut platform = Platform::start(|| {});
+        platform.record_notifications();
+        App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            platform,
+            Launch::default(),
+        )
+    }
+
+    fn laid_out(harness: &Harness<'_, (bool, App)>) -> std::collections::HashMap<u64, f32> {
+        harness.state().1.ui.activity_heights.clone()
+    }
+
+    #[test]
+    fn only_the_cards_in_view_are_laid_out() {
+        let mut app = app();
+        app.activity = (1..=100)
+            .map(|id| Activity {
+                id,
+                frontend: "gui".into(),
+                started_at: 1_700_000_000 + id as i64,
+                finished_at: Some(1_700_000_010 + id as i64),
+                state: "done".into(),
+                labels: vec![format!("Install fixture {id}")],
+                ..Activity::default()
+            })
+            .collect();
+        app.drawer_open = true;
+        let mut harness = Harness::builder()
+            .with_size(vec2(900.0, 600.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ui.ctx(), &root, None);
+                        set_reduce_motion(ui.ctx(), true);
+                        *ready = true;
+                        return;
+                    }
+                    let window = ui.max_rect();
+                    drawer(app, ui, window);
+                },
+                (false, app),
+            );
+        harness.run_steps(4);
+        // Newest first: the top of the list, and nothing far below it.
+        let shown = laid_out(&harness);
+        assert!(shown.contains_key(&100) && !shown.contains_key(&1));
+        assert!(shown.len() < 15, "{} cards laid out", shown.len());
+        // A card never shown holds the room one line takes.
+        assert_eq!(shown[&100], CARD_HEIGHT);
+        // Scrolled to the end, the oldest shows too.
+        harness.hover_at(pos2(700.0, 300.0));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Wheel,
+            delta: vec2(0.0, -100_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        harness.run_steps(60);
+        let shown = laid_out(&harness);
+        assert!(shown.contains_key(&1));
+        assert!(shown.len() < 40, "{} cards laid out", shown.len());
     }
 }

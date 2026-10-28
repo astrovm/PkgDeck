@@ -35,7 +35,7 @@ use eframe::egui::{
 };
 pub use frame::{desktop, set_desktop, system_frame, Desktop};
 pub use settings_page::Tab as SettingsTab;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use widgets::*;
 
 /// What the window remembers that the app core doesn't need.
@@ -72,6 +72,9 @@ pub struct State {
     pub hide_progress_for: Option<u64>,
     pub started: bool,
     pub settings_tab: SettingsTab,
+    /// How tall each Activity card was when last shown, by entry, so the
+    /// cards out of view keep their place without being laid out.
+    pub activity_heights: HashMap<u64, f32>,
 }
 
 /// Widths the layout switches at.

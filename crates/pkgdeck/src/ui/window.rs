@@ -100,7 +100,7 @@ impl<'a> Window<'a> {
         if self.shown {
             self.app.sync_tray();
         } else {
-            self.app.ask_about_setup();
+            self.app.window_shown();
         }
         self.shown = true;
         match ui::window_request(self.app) {

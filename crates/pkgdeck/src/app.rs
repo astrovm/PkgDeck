@@ -190,7 +190,6 @@ pub struct App {
 }
 
 const POLL_BUSY: Duration = Duration::from_millis(40);
-const POLL_IDLE: Duration = Duration::from_millis(200);
 /// The longest the window sleeps with nothing due, so times like
 /// "2 minutes ago" stay current.
 const SLEEP: Duration = Duration::from_secs(15);
@@ -423,11 +422,12 @@ impl App {
         for event in self.platform.events() {
             self.platform_event(event);
         }
-        let interval = if self.busy { POLL_BUSY } else { POLL_IDLE };
         let polling = self.busy || *self.ctl.needs_poll();
         let since_poll = now.duration_since(self.last_poll);
-        // A poll that comes too soon after the last waits its turn.
-        let deferred = polling && since_poll < interval;
+        // While a change runs, its output comes line by line, so a poll
+        // that comes too soon after the last waits its turn. Otherwise a
+        // worker's reply shows the frame it wakes the window.
+        let deferred = self.busy && since_poll < POLL_BUSY;
         if polling && !deferred {
             self.last_poll = now;
             self.c().poll();
@@ -476,7 +476,7 @@ impl App {
         // Workers wake the window when they reply, so it only has to come
         // back for a poll it put off and for its own timers.
         let mut wait = if deferred {
-            interval - since_poll
+            POLL_BUSY - since_poll
         } else if self.busy || *self.ctl.needs_poll() {
             // In case a worker stops without a reply.
             Duration::from_secs(1)
@@ -984,6 +984,13 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Once the window's first frame is up: offers the setup it may still
+    /// need, and reads Activity so the drawer opens with it already there.
+    pub fn window_shown(&mut self) {
+        self.ask_about_setup();
+        self.c().refresh_activity();
     }
 
     /// Opens the first-run dialog once: start at login, install updates
