@@ -66,6 +66,11 @@ case $backend in
 toolbox)
     toolbox create --assumeyes --image "$toolbx_image" --container "$box"
     distrobox create --yes --name "$other" --image "$toolbx_image"
+    # Ubuntu's systemd upgrade touches /run/systemd/system/tmp.mount when /tmp
+    # isn't a tmpfs. Toolbx shares the host's /tmp and a /run/systemd/system
+    # the container can't write, so on a runner whose /tmp is on disk no tool
+    # can upgrade systemd there. Hold it; every other package still upgrades.
+    toolbox run --container "$box" sudo apt-mark hold systemd >/dev/null
     ;;
 distrobox)
     distrobox create --yes --name "$box" --image "$distrobox_image"

@@ -12,11 +12,15 @@
   <releases>
     <release version="0.12.4" date="2026-10-27">
       <description>
-        <p>Links in the window open again.</p>
+        <p>Links in the window open again, and automatic updates and cleaning stop getting stuck.</p>
         <ul>
           <li>GitHub in Settings, About opens the project page</li>
           <li>A package's homepage opens in the browser</li>
           <li>Show in folder opens an AppImage's folder in the file manager</li>
+          <li>Automatic cleaning runs once a day even when every check finds updates</li>
+          <li>Updating Cargo, Bun, pnpm, pip, uv or Composer tools updates only the outdated ones, and one failing doesn't stop the rest</li>
+          <li>A Cargo tool installed from Git is no longer reinstalled from crates.io, where its name can be another crate</li>
+          <li>Cargo tools keep the features they were built with</li>
         </ul>
       </description>
     </release>

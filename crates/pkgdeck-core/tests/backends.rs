@@ -2471,12 +2471,14 @@ fn cargo_lifecycle() {
         installed[0].id.name.clone()
     ]));
     assert!(writes.contains(&vec!["uninstall".into(), installed[0].id.name.clone()]));
+    // Offline, no tool is known to be outdated, so updating all reinstalls
+    // none of them.
     assert_eq!(
         writes
             .iter()
             .filter(|args| args.contains(&"--force".into()))
             .count(),
-        4
+        1
     );
 }
 
@@ -3360,11 +3362,84 @@ fn cargo_checks_crates_io_for_newer_versions() {
 }
 
 #[test]
+fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-cargo-updates-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join(".cargo")).unwrap();
+    std::fs::write(
+        base.join(".cargo/.crates2.json"),
+        r#"{"installs": {"bat 0.24.0 (registry+https://github.com/rust-lang/crates.io-index)": {"all_features": true}, "ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)": {"features": ["pcre2"], "all_features": false, "no_default_features": true}}}"#,
+    )
+    .unwrap();
+    // Two outdated crates.io tools, a current one, and two from elsewhere
+    // whose names crates.io has for other crates.
+    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\n";
+    let fixture = DevFixture {
+        home: Some(base.to_str().unwrap().into()),
+        version: "cargo 1.98.1\n".into(),
+        list: list.into(),
+        registry: Some(
+            "bat = \"0.25.0\"\nfd-find = \"10.0.0\"\nripgrep = \"15.2.0\"\navm = \"9.0.0\"\nlocal = \"9.0.0\"\n"
+                .into(),
+        ),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::cargo(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let all = Operation::UpgradeAll {
+        backend: "cargo".into(),
+    };
+    backend.execute(&all, &cancel, &mut |_| {}).unwrap();
+    assert_eq!(
+        fixture.writes("cargo"),
+        [
+            vec!["install", "--force", "--all-features", "bat"],
+            vec![
+                "install",
+                "--force",
+                "--no-default-features",
+                "--features=pcre2",
+                "ripgrep"
+            ]
+        ]
+    );
+    // Updating a tool from git by hand is refused, instead of installing
+    // crates.io's crate of the same name.
+    let installed = backend.installed(&cancel).unwrap();
+    let avm = installed.iter().find(|p| p.id.name == "avm").unwrap();
+    assert_eq!(
+        backend
+            .execute(&Operation::Upgrade(avm.id.clone()), &cancel, &mut |_| {})
+            .unwrap_err()
+            .to_string(),
+        "avm was installed from https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b, not crates.io. Update it the way you installed it."
+    );
+    assert_eq!(fixture.writes("cargo").len(), 2);
+    // One tool failing doesn't keep the next from updating.
+    let failing = DevFixture {
+        fail_writes: true,
+        calls: Default::default(),
+        ..fixture
+    };
+    let mut backend = DevTool::cargo(failing.clone());
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    assert!(backend.execute(&all, &cancel, &mut |_| {}).is_err());
+    assert_eq!(failing.writes("cargo").len(), 2);
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
 fn bun_checks_the_registry_for_newer_versions() {
     let base = std::env::temp_dir().join(format!("pkgdeck-bun-updates-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let global = base.join(".bun/install/global");
-    for (name, version) in [("alpha", "1.0.0"), ("beta", "2.0.0"), ("odd", "1.0")] {
+    for (name, version) in [
+        ("alpha", "1.0.0"),
+        ("beta", "2.0.0"),
+        ("odd", "1.0"),
+        ("forked", "1.0.0"),
+    ] {
         let dir = global.join("node_modules").join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -3375,7 +3450,7 @@ fn bun_checks_the_registry_for_newer_versions() {
     }
     std::fs::write(
         global.join("package.json"),
-        r#"{"dependencies": {"alpha": "*", "beta": "*", "odd": "*"}}"#,
+        r#"{"dependencies": {"alpha": "*", "beta": "*", "odd": "*", "forked": "github:me/forked"}}"#,
     )
     .unwrap();
     let fixture = DevFixture {
@@ -3395,6 +3470,8 @@ fn bun_checks_the_registry_for_newer_versions() {
     // Older than installed, or not a version PkgDeck can compare.
     assert_eq!(find("beta").update, UpdateAvailability::Current);
     assert_eq!(find("odd").update, UpdateAvailability::Current);
+    // From git, so npm's package of the same name is another one.
+    assert_eq!(find("forked").update, UpdateAvailability::Current);
     let views: Vec<Vec<String>> = fixture
         .calls()
         .into_iter()
@@ -3423,6 +3500,23 @@ fn bun_checks_the_registry_for_newer_versions() {
             .as_deref(),
         Some("1.5.0")
     );
+    // Updating all updates only the outdated tool.
+    let all = Operation::UpgradeAll {
+        backend: "bun".into(),
+    };
+    backend.execute(&all, &cancel, &mut |_| {}).unwrap();
+    assert_eq!(fixture.writes("bun"), [["add", "--global", "alpha@latest"]]);
+    // Cancelled while updating, it stops there.
+    let stop = Cancellation::default();
+    assert_eq!(
+        backend.execute(&all, &stop, &mut |progress| {
+            if matches!(progress, Progress::Package(_)) {
+                stop.cancel();
+            }
+        }),
+        Err(EngineError::Cancelled)
+    );
+    assert_eq!(fixture.writes("bun").len(), 1);
     let mut offline = DevTool::bun(DevFixture {
         outdated: None,
         ..fixture.clone()
@@ -3615,6 +3709,7 @@ fn dev_managers_reject_relative_roots_and_failed_writes() {
         home: Some("/home/test".into()),
         version: "cargo 1.98.1\n".into(),
         list: CARGO_LIST.into(),
+        registry: Some("ripgrep = \"15.2.0\"\n".into()),
         fail_writes: true,
         ..DevFixture::default()
     };

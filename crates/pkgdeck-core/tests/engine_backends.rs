@@ -1400,13 +1400,15 @@ fn development_inventories_report_failed_listings() {
         .with_env("COMPOSER_HOME", "/opt/composer"),
     ));
     native_failure(composer.installed(&cancel), 1);
-    // Composer upgrades each installed package; a failed one stops the batch.
+    // Composer upgrades each outdated package; a failed one fails the batch.
     let script = Script::new(|line| match line {
         "composer --version" => ok("Composer 2\n"),
         "composer global show --format=json" => {
             ok(r#"{"installed":[{"name":"vendor/tool","version":"1.0.0"}]}"#)
         }
-        "composer global show --outdated --format=json" => ok(r#"{"installed":[]}"#),
+        "composer global show --outdated --format=json" => {
+            ok(r#"{"installed":[{"name":"vendor/tool","version":"1.0.0","latest":"1.1.0"}]}"#)
+        }
         _ => failed(1),
     })
     .with_env("COMPOSER_HOME", "/opt/composer");

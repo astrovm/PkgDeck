@@ -4166,6 +4166,12 @@ impl ffi::PackageController {
             busy,
             force || retry,
         ) {
+            // Cleaning is due once a day, whatever the checks find. Tied to
+            // checks alone, an automatic update or a build at check time
+            // would put it off again and again.
+            if enabled && !busy {
+                self.as_mut().schedule_auto_clean();
+            }
             return;
         }
         let sources: Vec<String> = sources
@@ -4287,8 +4293,9 @@ impl ffi::PackageController {
     pub fn auto_clean_worktrees(&self) -> bool {
         self.rust().auto_clean_worktrees
     }
-    /// Clean after this check when it's been a day, nothing else is
-    /// waiting to run, and the computer is plugged in and not building.
+    /// Clean when it's been a day, nothing else is waiting to run, and the
+    /// computer is plugged in and not building: after a check that started
+    /// no update, or between checks.
     fn schedule_auto_clean(mut self: Pin<&mut Self>) {
         const DAY: u64 = 24 * 60 * 60;
         let now = epoch_seconds();
