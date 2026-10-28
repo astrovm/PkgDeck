@@ -12233,7 +12233,7 @@ fn activity_names_a_cleanup_task_after_it_is_gone() {
         rows[0]["labels"].clone()
     };
     assert_eq!(
-        labels(&[entry.clone()], &Names::new()),
+        labels(std::slice::from_ref(&entry), &Names::new()),
         json!([
             "Clean Remove orphans",
             "Install Fixture App (fixture)",
@@ -12245,7 +12245,10 @@ fn activity_names_a_cleanup_task_after_it_is_gone() {
         cleanup: BTreeMap::from([(item.id.clone(), "Orphans".to_owned())]),
         ..Names::new()
     };
-    assert_eq!(labels(&[entry.clone()], &known)[0], "Clean Orphans");
+    assert_eq!(
+        labels(std::slice::from_ref(&entry), &known)[0],
+        "Clean Orphans"
+    );
     // An entry from before names were kept goes by its key.
     let mut old = entry;
     old.names.clear();
