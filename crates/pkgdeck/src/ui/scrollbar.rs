@@ -19,7 +19,7 @@ use eframe::egui::{
     self, pos2, scroll_area::ScrollAreaOutput, vec2, Color32, CornerRadius, Id, Painter, Rect,
     Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui,
 };
-use std::hash::Hash;
+use std::{collections::HashMap, hash::Hash};
 
 /// How far an arrow scrolls on a click, and how fast it scrolls while held.
 const STEP: f32 = 40.0;
@@ -201,6 +201,33 @@ impl Scroll {
             };
         }
         area
+    }
+}
+
+/// Lays out only the items that show in `viewport`, the part of a
+/// [`Scroll::show_viewport`]'s content in view, so a long list costs a frame
+/// no more than a short one. An item out of view keeps the room it took
+/// when last shown, kept in `heights` by its key, or `guess` until then.
+pub fn in_view<T, K: Copy + Eq + Hash + std::fmt::Debug>(
+    ui: &mut Ui,
+    viewport: Rect,
+    items: impl IntoIterator<Item = T>,
+    heights: &mut HashMap<K, f32>,
+    key: impl Fn(&T) -> K,
+    guess: impl Fn(&T) -> f32,
+    mut draw: impl FnMut(&mut Ui, T),
+) {
+    let origin = ui.min_rect().top();
+    for item in items {
+        let key = key(&item);
+        let top = ui.cursor().top() - origin;
+        let height = heights.get(&key).copied().unwrap_or_else(|| guess(&item));
+        if top + height < viewport.top() || top > viewport.bottom() {
+            ui.allocate_space(vec2(ui.available_width(), height));
+        } else {
+            let shown = ui.push_id(key, |ui| draw(ui, item)).response.rect;
+            heights.insert(key, shown.height());
+        }
     }
 }
 
@@ -1313,6 +1340,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_what_shows_is_laid_out_and_the_rest_keeps_its_room() {
+        let ctx = egui::Context::default();
+        let mut heights = HashMap::new();
+        let frame = |offset: f32, heights: &mut HashMap<u32, f32>| {
+            let mut drawn = Vec::new();
+            let mut content = 0.0;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(300.0, 300.0))),
+                ..RawInput::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                // A pass egui runs again starts the count over.
+                drawn.clear();
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let out = vertical()
+                    .max_height(100.0)
+                    .scroll_offset(offset)
+                    .show_viewport(ui, |ui, viewport| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        in_view(
+                            ui,
+                            viewport,
+                            0..300u32,
+                            heights,
+                            |i| *i,
+                            |_| 10.0,
+                            |ui, i| {
+                                drawn.push(i);
+                                ui.allocate_space(vec2(10.0, 20.0));
+                            },
+                        );
+                    });
+                content = out.content_size.y;
+            });
+            (drawn, content)
+        };
+        // Items never shown hold their guess; shown ones, what they took.
+        let (drawn, content) = frame(0.0, &mut heights);
+        assert_eq!(drawn, (0..=5).collect::<Vec<_>>());
+        assert_eq!(content, 6.0 * 20.0 + 294.0 * 10.0);
+        // Farther down, only what shows there.
+        let (drawn, content) = frame(1000.0, &mut heights);
+        assert!(drawn.iter().all(|i| (90..110).contains(i)), "{drawn:?}");
+        assert!(drawn.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        assert!(!drawn.is_empty() && drawn.len() <= 11, "{drawn:?}");
+        assert_eq!(
+            content,
+            (6.0 + drawn.len() as f32) * 20.0 + (294.0 - drawn.len() as f32) * 10.0
+        );
+        assert_eq!(heights.len(), 6 + drawn.len());
     }
 
     #[test]

@@ -121,24 +121,20 @@ fn content(app: &mut App, ui: &mut Ui) {
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            let origin = ui.min_rect().top();
             // Borrowed out, not copied: logs can be long. A card that
             // cancels may read a newer list, which then stays.
             let entries = std::mem::take(&mut app.activity);
-            for entry in entries.iter().rev() {
-                // Only the cards in view are laid out, so a long history
-                // costs no more a frame than a short one. The rest keep the
-                // room they took when last shown.
-                let top = ui.cursor().top() - origin;
-                let height = app.ui.activity_heights.get(&entry.id).copied();
-                let height = height.unwrap_or(CARD_HEIGHT);
-                if top + height < viewport.top() || top > viewport.bottom() {
-                    ui.allocate_space(vec2(ui.available_width(), height));
-                } else {
-                    let height = entry_card(app, ui, entry);
-                    app.ui.activity_heights.insert(entry.id, height);
-                }
-            }
+            let mut heights = std::mem::take(&mut app.ui.activity_heights);
+            super::scrollbar::in_view(
+                ui,
+                viewport,
+                entries.iter().rev(),
+                &mut heights,
+                |entry| entry.id,
+                |_| CARD_HEIGHT,
+                |ui, entry| entry_card(app, ui, entry),
+            );
+            app.ui.activity_heights = heights;
             if app.activity.is_empty() {
                 app.activity = entries;
             }
@@ -247,8 +243,7 @@ fn failure_card(app: &mut App, ui: &mut Ui) {
     ui.add_space(10.0);
 }
 
-/// Draws one entry and returns how tall it is.
-fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) -> f32 {
+fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
     let palette = Palette::current(ui.ctx());
     let color = tone(&palette, entry.tone());
     let others = entry.others();
@@ -450,7 +445,6 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) -> f32 {
             }
         }
     }
-    rect.height()
 }
 
 #[cfg(test)]

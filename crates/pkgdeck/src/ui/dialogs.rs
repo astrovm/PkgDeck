@@ -12,7 +12,7 @@ use eframe::egui::{
     self, pos2, vec2, Color32, Id, Key, Modifiers, Rect, Response, Sense, Stroke, Ui, Vec2,
 };
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default)]
 pub struct AddRepo {
@@ -226,10 +226,10 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         super::scrollbar::vertical()
                             .max_height(260.0)
-                            .show(ui, |ui| {
+                            .show_viewport(ui, |ui, viewport| {
                                 // Leave room for the scroll bar beside long versions.
                                 ui.set_width(ui.available_width() - 14.0);
-                                detail_list(ui, &data, &palette);
+                                detail_list(ui, viewport, &data, &palette);
                             });
                     });
             }
@@ -273,8 +273,9 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
 }
 
 /// What a confirmation changes: rows grouped by source, each with its
-/// version change and size, then any text that goes with them.
-fn detail_list(ui: &mut Ui, data: &model::Confirmation, palette: &Palette) {
+/// version change and size, then any text that goes with them. An upgrade
+/// can list hundreds, so only the lines in `viewport` are laid out.
+fn detail_list(ui: &mut Ui, viewport: Rect, data: &model::Confirmation, palette: &Palette) {
     ui.spacing_mut().item_spacing.y = 3.0;
     let mut groups: Vec<(&str, Vec<&model::ConfirmItem>)> = Vec::new();
     for item in &data.items {
@@ -283,45 +284,83 @@ fn detail_list(ui: &mut Ui, data: &model::Confirmation, palette: &Palette) {
             None => groups.push((&item.group, vec![item])),
         }
     }
+    // Each line with the room above it.
+    let mut lines = Vec::new();
     for (index, (group, rows)) in groups.iter().enumerate() {
-        if index > 0 {
-            ui.add_space(8.0);
-        }
+        let mut above = if index > 0 { 8.0 } else { 0.0 };
         if !group.is_empty() {
-            ui.horizontal(|ui| {
-                let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                theme::paint_icon(ui.painter(), icon, &rows[0].icon_name, palette.muted);
-                ui.label(
-                    egui::RichText::new(*group)
-                        .font(theme::bold(13.0))
-                        .color(palette.ink),
-                );
-                ui.label(
-                    egui::RichText::new(format!("· {}", rows.len()))
-                        .font(theme::font(12.5))
-                        .color(palette.muted),
-                );
-            });
-            ui.add_space(2.0);
+            lines.push((above, Line::Group(group, rows)));
+            above = 2.0;
         }
         for item in rows {
-            detail_row(ui, item, !group.is_empty(), palette);
+            lines.push((above, Line::Item(item, !group.is_empty())));
+            above = 0.0;
         }
     }
     let text = data.details.trim();
     if !text.is_empty() {
-        if !data.items.is_empty() {
-            ui.add_space(8.0);
-        }
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .font(theme::font(13.0))
-                    .color(palette.muted),
-            )
-            .selectable(true),
-        );
+        let above = if data.items.is_empty() { 0.0 } else { 8.0 };
+        lines.push((above, Line::Text(text)));
     }
+    let key = ui.scope_id().with("detail-heights");
+    let mut heights = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<HashMap<Id, f32>>(key))
+        .unwrap_or_default();
+    super::scrollbar::in_view(
+        ui,
+        viewport,
+        lines.into_iter().enumerate(),
+        &mut heights,
+        |(index, (_, line))| match line {
+            Line::Group(group, _) => Id::unique((index, "group", group)),
+            Line::Item(item, _) => Id::unique((index, &item.title)),
+            Line::Text(text) => Id::unique((index, text)),
+        },
+        |(_, (above, _))| above + 18.0,
+        |ui, (_, (above, line))| {
+            ui.add_space(above);
+            match line {
+                Line::Group(group, rows) => {
+                    ui.horizontal(|ui| {
+                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                        theme::paint_icon(ui.painter(), icon, &rows[0].icon_name, palette.muted);
+                        ui.label(
+                            egui::RichText::new(group)
+                                .font(theme::bold(13.0))
+                                .color(palette.ink),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("· {}", rows.len()))
+                                .font(theme::font(12.5))
+                                .color(palette.muted),
+                        );
+                    });
+                }
+                Line::Item(item, grouped) => detail_row(ui, item, grouped, palette),
+                Line::Text(text) => {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .font(theme::font(13.0))
+                                .color(palette.muted),
+                        )
+                        .selectable(true),
+                    );
+                }
+            }
+        },
+    );
+    ui.ctx().data_mut(|d| d.insert_temp(key, heights));
+}
+
+/// One line of a confirmation's details.
+enum Line<'a> {
+    /// A source's heading, over its rows.
+    Group(&'a str, &'a [&'a model::ConfirmItem]),
+    /// A row, and whether it sits under a heading.
+    Item(&'a model::ConfirmItem, bool),
+    Text(&'a str),
 }
 
 fn detail_row(ui: &mut Ui, item: &model::ConfirmItem, grouped: bool, palette: &Palette) {
