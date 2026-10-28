@@ -1648,16 +1648,11 @@ impl ActivityStore {
     }
     /// Read the history without writing it: a shared lock lets `pkd` and
     /// other readers go on, and nothing is synced to disk. Only when an
-    /// entry's owner has died is the history rewritten to mark it
-    /// interrupted, and then read again.
+    /// entry's owner has died is the history rewritten to settle it, and
+    /// then read again.
     fn load(&self) -> std::io::Result<Vec<pkgdeck_core::activity::Entry>> {
         let entries = read_activity(&self.path)?;
-        if entries.iter().any(|entry| {
-            !matches!(
-                entry.state,
-                State::Finished | State::Failed | State::Cancelled | State::Interrupted
-            ) && !std::path::Path::new(&format!("/proc/{}", entry.owner_pid)).exists()
-        }) {
+        if entries.iter().any(pkgdeck_core::activity::Entry::orphaned) {
             self.history.recover_dead()?;
             return read_activity(&self.path);
         }

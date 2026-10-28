@@ -8578,6 +8578,33 @@ fn activity_reads_share_the_lock_and_never_write() {
     )
     .unwrap();
     assert_eq!(store.load().unwrap()[1].state, State::Interrupted);
+    // A change its dead owner left waiting for a build won't run any more,
+    // though the run it's in already ended.
+    let waiting = store
+        .record(
+            "auto",
+            vec![Operation::Refresh {
+                backend: "apt".into(),
+            }],
+            vec![],
+            1,
+            vec![(Outcome::Waiting, None)],
+        )
+        .unwrap();
+    assert_eq!(store.load().unwrap()[2].outcomes, [Outcome::Waiting]);
+    let mut raw: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
+    raw[2]["owner_pid"] = json!(u32::MAX - 1);
+    std::fs::write(
+        path.join("activity.json"),
+        serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    let entry = store.load().unwrap().remove(2);
+    assert_eq!(
+        (entry.id, entry.outcomes),
+        (waiting, vec![Outcome::Skipped])
+    );
     // A broken file reads as no history rather than failing.
     std::fs::write(path.join("activity.json"), b"not json").unwrap();
     assert!(read_activity(&path.join("activity.json"))

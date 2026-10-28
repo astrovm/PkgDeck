@@ -1353,7 +1353,7 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(300.0, 300.0))),
                 ..RawInput::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let mut output = ctx.run_ui(input, |ui| {
                 // A pass egui runs again starts the count over.
                 drawn.clear();
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -1377,6 +1377,7 @@ mod tests {
                     });
                 content = out.content_size.y;
             });
+            output.textures_delta.clear();
             (drawn, content)
         };
         // Items never shown hold their guess; shown ones, what they took.

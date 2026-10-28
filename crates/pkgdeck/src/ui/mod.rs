@@ -75,6 +75,8 @@ pub struct State {
     /// How tall each Activity card was when last shown, by entry, so the
     /// cards out of view keep their place without being laid out.
     pub activity_heights: HashMap<u64, f32>,
+    /// Whether Activity was laid out once, out of sight if it never showed.
+    pub activity_warm: bool,
 }
 
 /// Widths the layout switches at.
