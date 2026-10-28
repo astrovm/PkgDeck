@@ -12108,10 +12108,13 @@ fn automatic_cleaning_runs_between_checks_after_updates_and_holds() {
             .as_mut()
             .check_updates("apt".into(), enabled, false, false, false);
     };
-    // A build was running when the check finished.
+    // A build doesn't hold cleaning back: each task that build uses waits
+    // for it on its own.
     tick(&mut controller, true);
-    assert!(!scheduled(&controller));
-    // The build ends, but an automatic update is about to run.
+    assert!(scheduled(&controller));
+    controller.as_mut().rust_mut().validated_confirmed = None;
+    controller.as_mut().set_auto_clean(true, now - 25 * 60 * 60);
+    // An automatic update is about to run.
     controller.as_mut().rust_mut().natives.hold = never_hold;
     controller.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
         job: Job::AutoUpgrade(vec![], false),
@@ -13174,7 +13177,7 @@ fn a_cleanup_a_build_uses_waits_and_cleans_once_the_build_ends() {
     assert_eq!(notice["kind"], "info");
     assert_eq!(notice["title"], "Clean cargo task waits for a build");
     assert_eq!(notice["detail"], WAITS_FOR_BUILD);
-    assert_eq!(controller.failure().to_string(), "");
+    assert_eq!(controller.failure().to_string(), "{}");
     let entry = store.entries().unwrap().pop().unwrap();
     assert_eq!(
         (entry.id, entry.outcomes),
@@ -13307,7 +13310,7 @@ fn a_retry_settles_only_the_tasks_it_ran() {
     ));
     controller.as_mut().poll();
     assert_eq!(controller.rust().waiting_cleans.len(), 2);
-    assert_eq!(controller.failure().to_string(), "");
+    assert_eq!(controller.failure().to_string(), "{}");
     // Without a history, a cleaned task just stops waiting.
     controller.as_mut().rust_mut().activity_store = None;
     controller.as_mut().finish_retried_cleans(
@@ -13404,7 +13407,9 @@ fn a_cleanup_left_alone_is_not_a_failure() {
     assert_eq!(notice["kind"], "error");
     assert_eq!(
         notice["detail"],
-        format!("app task: Disk full.\nClean Cargo: {WAITS_FOR_BUILD}\nClean images: It changed.")
+        format!(
+            "Clean app (Old projects): Disk full.\nClean Cargo: {WAITS_FOR_BUILD}\nClean images: It changed."
+        )
     );
     // Without a failure it says how many finished.
     let mut fine = ran;
@@ -13434,17 +13439,17 @@ fn automatic_updates_during_a_build_hold_only_what_a_build_may_run() {
     let mut controller = controller.pin_mut();
     controller.as_mut().set_auto_update(true);
     controller.as_mut().rust_mut().natives.hold = building;
-    // An app updates; the tools a build may run wait.
+    // A coding assistant updates; the tools a build may run wait.
     controller.as_mut().finish_background_check(report(vec![
         package("homebrew", "wget"),
         package("npm", "typescript"),
-        package("flatpak", "org.example.App"),
+        package("codex", "codex"),
     ]));
     let confirmed = controller.rust().validated_confirmed.as_ref().unwrap();
     assert!(matches!(
         &confirmed.job,
         Job::AutoUpgrade(operations, _)
-            if operations.iter().map(Operation::backend).collect::<Vec<_>>() == ["flatpak"]
+            if operations.iter().map(Operation::backend).collect::<Vec<_>>() == ["codex"]
     ));
     assert_eq!(controller.rust().auto_held, Some(Hold::Build));
     assert_eq!(state(&controller)["waiting"], "build");
@@ -13452,14 +13457,14 @@ fn automatic_updates_during_a_build_hold_only_what_a_build_may_run() {
         state(&controller)["waiting_for"],
         json!(["Homebrew", "npm"])
     );
-    // Only apps to update: nothing waits.
+    // Only what a build never runs: nothing waits.
     let mut controller = idle_controller();
     let mut controller = controller.pin_mut();
     controller.as_mut().set_auto_update(true);
     controller.as_mut().rust_mut().natives.hold = building;
     controller
         .as_mut()
-        .finish_background_check(report(vec![package("flatpak", "org.example.App")]));
+        .finish_background_check(report(vec![package("codex", "codex")]));
     assert!(controller.rust().validated_confirmed.is_some());
     assert_eq!(controller.rust().auto_held, None);
     assert_eq!(state(&controller)["waiting"], Value::Null);
