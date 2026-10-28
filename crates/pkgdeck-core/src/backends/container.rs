@@ -1806,6 +1806,19 @@ mod tests {
             ..reviewed.clone()
         };
         assert!(!backend.cleanup_still_reviewed(&other_reviewed, &other));
+        // Dangling images removed by something else leave the rest.
+        let dangling = |preview: &str| CleanupItem {
+            id: CleanupId {
+                backend: "podman".into(),
+                key: "dangling-images".into(),
+            },
+            preview: preview.into(),
+            ..current.clone()
+        };
+        assert!(backend.cleanup_still_reviewed(
+            &dangling("Removes these untagged images.\naaa\nbbb"),
+            &dangling("Removes these untagged images.\nbbb")
+        ));
         // A preview with no list can't be told apart.
         let unlisted = CleanupItem {
             preview: "Removes these images.".into(),

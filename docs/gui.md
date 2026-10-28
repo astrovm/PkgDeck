@@ -218,7 +218,13 @@ that failed are shown separately.
 
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and its local files meet your chosen protection rule. Removing it keeps the branch.
-- Old project build files wait while something is being built.
+- A task waits while a build uses what it removes. The Cargo cache waits
+  for Rust builds, Gradle's for Gradle builds, and a project's build folders
+  for builds of that kind of project. Other tasks clean right away. Yarn and
+  Bun caches never wait. Activity shows **Waiting for a build**, and PkgDeck
+  cleans it on its own once the build ends, while PkgDeck runs.
+- Something already gone counts as cleaned. If something else removed part of
+  it, PkgDeck removes the rest.
 - APT finds unused dependencies and sizes its download cache without a
   password. Cleaning the cache deletes every cached download, so a package
   you reinstall downloads again. Both ask for your password when they run.
@@ -239,6 +245,8 @@ tasks that start unchecked until you check them yourself.
 
 When some tasks fail, **Activity** shows each reason once, with the tasks it
 stopped. The row shows the reason too, and the whole text when you point at it.
+Activity keeps why each task failed, waits or was skipped: open its card to
+read it.
 
 ### Clean settings
 
@@ -284,9 +292,12 @@ Turn on **Clean automatically** in **Settings** → **Clean**. It needs
 - Only sources that run as you, so it never asks for a password. APT and
   other system cleanups wait for you.
 - Worktrees have their own switch, **Clean finished worktrees**.
-- Like automatic updates, it waits for the charger, for builds, and for other
-  changes to finish. It runs on a metered connection, since it downloads
-  nothing. Turn off **Wait for the charger** to clean on battery too.
+- It waits for the charger and for other changes to finish. It runs on a
+  metered connection, since it downloads nothing. Turn off **Wait for the
+  charger** to clean on battery too.
+- A task a build uses waits for that build, like when you clean it
+  yourself. The rest clean right away.
+- Each run shows in Activity, marked **Automatic**, with what it cleaned.
 - A notification says how much space it freed.
 
 ## Sources
@@ -561,9 +572,14 @@ others) need **Skip the password** first. **Update automatically** in
   something is being built. Both switches start on. Builds always count:
   Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake, Xcode, Gradle,
   Maven, Bazel, `go build` or `go test`, `dotnet build`.
-  The check still tells you about the updates, and Settings shows what
-  they wait for. Within 5 minutes of plugging in, leaving the metered
-  connection or the build ending, PkgDeck checks again and installs them.
+- A build holds only updates that could change what it runs. Flatpak,
+  AppImages, Docker and Podman images, Oh My Zsh and coding assistants like
+  Codex and Claude Code update during builds. Snap waits, since classic snaps
+  carry compilers and SDKs.
+- The check still tells you about the updates, and Settings shows what
+  they wait for, naming the sources that wait for a build. Within 5 minutes
+  of plugging in, leaving the metered connection or the build ending,
+  PkgDeck checks again and installs them.
 - Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and other
   developer tools) update right away.
 - Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox

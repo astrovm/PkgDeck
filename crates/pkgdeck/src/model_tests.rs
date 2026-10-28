@@ -296,6 +296,49 @@ fn activity_entries_say_what_happened() {
         entry(json!({"state": "finished", "outcomes": ["ok", {"error": "x"}, "cancelled"]}));
     assert_eq!(mixed.result(), "1 completed, 1 failed, 1 cancelled");
     assert_eq!(mixed.tone(), Tone::Warning);
+    // Waiting for a build or left alone isn't failing.
+    assert_eq!(one(json!("waiting")), "Waiting for a build");
+    assert_eq!(one(json!("skipped")), "Skipped");
+    let waits = entry(json!({
+        "state": "finished",
+        "outcomes": ["finished", "waiting", "skipped"],
+        "reasons": [null, "Waits for a build.", "It changed."],
+        "labels": ["Clean Bun cache", "Clean Cargo downloads", "Clean images"],
+    }));
+    assert_eq!(waits.result(), "1 completed, 1 waiting, 1 skipped");
+    assert_eq!(waits.tone(), Tone::Muted);
+    assert_eq!(
+        waits.reason_lines(),
+        [
+            "Clean Cargo downloads: Waits for a build.",
+            "Clean images: It changed."
+        ]
+    );
+    let skipped =
+        entry(json!({"state": "finished", "outcomes": ["skipped"], "reasons": ["It changed."]}));
+    assert_eq!(skipped.tone(), Tone::Muted);
+    // One change says why on its own, and steps go by their operations
+    // when there are no labels.
+    let failed = entry(json!({
+        "state": "failed",
+        "outcomes": ["failed"],
+        "reasons": ["Disk full."],
+        "operations": [install],
+    }));
+    assert_eq!(failed.reason_lines(), ["Disk full."]);
+    let unlabeled = entry(json!({
+        "outcomes": ["failed", "failed"],
+        "reasons": ["Disk full.", "Busy."],
+        "operations": [install],
+    }));
+    assert_eq!(
+        unlabeled.reason_lines(),
+        [
+            "Install org.kde.krita (Flatpak, System): Disk full.",
+            "Busy."
+        ]
+    );
+    assert!(entry(json!({})).reason_lines().is_empty());
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");
@@ -1305,4 +1348,26 @@ fn only_short_confirmation_details_start_open() {
     assert!(!confirmation(json!({})).has_details());
     assert!(!confirmation(json!({"details": " \n"})).has_details());
     assert!(confirmation(json!({"items": item(1)})).has_details());
+}
+
+#[test]
+fn settings_name_the_updates_that_wait_for_builds() {
+    let waiting = |waiting: &str, waiting_for: &[&str]| {
+        BackgroundState {
+            waiting: Some(waiting.into()),
+            waiting_for: waiting_for.iter().map(|name| (*name).to_owned()).collect(),
+            ..BackgroundState::default()
+        }
+        .waiting_text()
+    };
+    assert_eq!(
+        waiting("build", &["APT"]).as_deref(),
+        Some("APT updates wait for builds to finish")
+    );
+    assert_eq!(
+        waiting("build", &["APT", "Cargo"]).as_deref(),
+        Some("APT and Cargo updates wait for builds to finish")
+    );
+    assert_eq!(waiting("later", &[]), None);
+    assert_eq!(BackgroundState::default().waiting_text(), None);
 }

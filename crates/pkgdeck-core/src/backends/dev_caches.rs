@@ -4,11 +4,7 @@
 //! these tools has a command that clears them, so PkgDeck empties the
 //! folders itself, and never while a build that uses one is running.
 use super::*;
-use crate::{
-    disk,
-    hold::Toolchain,
-    host::Host,
-};
+use crate::{disk, hold::Toolchain, host::Host};
 use std::path::Path;
 
 const CAPABILITIES: &[Capability] = &[Capability::Clean];
@@ -527,6 +523,49 @@ mod tests {
         assert!(
             root_user || result.is_err_and(|error| error.to_string().contains("~/.m2/repository")),
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_build_holds_only_the_caches_it_uses() {
+        let root = home("building");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        // A Gradle build, and the compiler it started.
+        fs::write(
+            bin.join("ps"),
+            "#!/bin/sh\nprintf '10 1 java org.gradle.launcher.GradleMain build\\n11 10 javac Main.java\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            bin.join("ps"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        fill(&root.join(".gradle/caches"), 2 * 1024 * 1024);
+        fill(&root.join(".bun/install/cache"), 2 * 1024 * 1024);
+        fill(&root.join(".cargo/registry"), 2 * 1024 * 1024);
+        let mut backend = caches_in(&root, &[("PATH", &bin)]);
+        let cancel = Cancellation::default();
+        let clean = |backend: &mut DevCaches, key: &str| {
+            let id = CleanupId {
+                backend: "dev-caches".into(),
+                key: key.into(),
+            };
+            backend.execute(&Operation::Clean(id), &cancel, &mut |_| {})
+        };
+        assert!(matches!(
+            clean(&mut backend, "gradle"),
+            Err(EngineError::Refused {
+                refusal: Refusal::Building,
+                ..
+            })
+        ));
+        assert!(root.join(".gradle/caches/blob").exists());
+        clean(&mut backend, "bun").unwrap();
+        clean(&mut backend, "cargo").unwrap();
+        assert!(!root.join(".bun/install/cache/blob").exists());
+        assert!(!root.join(".cargo/registry/blob").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 

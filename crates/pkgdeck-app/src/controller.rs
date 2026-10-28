@@ -266,6 +266,7 @@ impl Job {
                 | Self::UpgradeAll(..)
                 | Self::AutoUpgrade(..)
                 | Self::AutoClean { .. }
+                | Self::RetryCleans(_)
                 | Self::CleanAll(_)
                 | Self::CheckUpdates(..)
                 | Self::Repositories(Some(_))
@@ -1222,9 +1223,8 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 .zip(ended)
                 .map(|(item, (outcome, kept))| (item, outcome, kept))
                 .collect();
-            let finished = |(_, outcome, _): &&(CleanupItem, Outcome, _)| {
-                *outcome == Outcome::Finished
-            };
+            let finished =
+                |(_, outcome, _): &&(CleanupItem, Outcome, _)| *outcome == Outcome::Finished;
             Ok(Payload::AutoCleaned {
                 cleaned: tasks.iter().filter(finished).count(),
                 failed: tasks
@@ -1417,9 +1417,13 @@ fn batch(
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
             Err((_, Some(reason))) => Said::Because(reason),
-            Err((EngineError::Refused { refusal: Refusal::Building, .. }, None)) => {
-                Said::Because(WAITS_FOR_BUILD.into())
-            }
+            Err((
+                EngineError::Refused {
+                    refusal: Refusal::Building,
+                    ..
+                },
+                None,
+            )) => Said::Because(WAITS_FOR_BUILD.into()),
             // The App Store explains a denial its own way, whatever the
             // permission option is.
             Err((error, None)) if is_denied(&error) && operation.backend() != "mas" => Said::Denied,
@@ -4499,7 +4503,10 @@ impl ffi::PackageController {
                 let item = self.rust().cleanup.iter().find(|item| item.id == *id)?;
                 Some(WaitingClean {
                     item: item.clone(),
-                    activity: activity.map(|activity| (activity, index)).into_iter().collect(),
+                    activity: activity
+                        .map(|activity| (activity, index))
+                        .into_iter()
+                        .collect(),
                 })
             })
             .collect();
@@ -4956,9 +4963,14 @@ impl ffi::PackageController {
         let operations = job.operations();
         let sudo = self.rust().sudo;
         let outcomes: Vec<(Operation, Option<String>)> = match result {
+            // A task waiting for a build hasn't failed.
             Err(
                 EngineError::Cancelled
-                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
+                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled)
+                | EngineError::Refused {
+                    refusal: Refusal::Building,
+                    ..
+                },
             ) => return,
             Err(error) => operations
                 .into_iter()

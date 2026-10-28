@@ -1138,7 +1138,7 @@ fn automatic_updates(app: &mut App, ui: &mut Ui) {
             .waiting_text()
             .filter(|_| app.settings.background_mode && app.settings.auto_update)
         {
-            status_line(ui, "clock", waiting, palette.muted);
+            status_line(ui, "clock", &waiting, palette.muted);
         }
     });
 }

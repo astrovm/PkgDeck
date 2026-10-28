@@ -234,27 +234,8 @@ const TOOLCHAIN_BUILDERS: &[(&str, Toolchain)] = &[
 /// started them. Started by nothing that names a toolchain, they count as
 /// [`Toolchain::Native`].
 const BUILDERS: &[&str] = &[
-    "cc",
-    "c++",
-    "gcc",
-    "g++",
-    "clang",
-    "clang++",
-    "cc1",
-    "cc1plus",
-    "cc1obj",
-    "collect2",
-    "ld",
-    "ld64",
-    "ld.lld",
-    "ld.gold",
-    "lld",
-    "mold",
-    "make",
-    "gmake",
-    "ninja",
-    "cmake",
-    "bazel",
+    "cc", "c++", "gcc", "g++", "clang", "clang++", "cc1", "cc1plus", "cc1obj", "collect2", "ld",
+    "ld64", "ld.lld", "ld.gold", "lld", "mold", "make", "gmake", "ninja", "cmake", "bazel",
     "bazelisk",
 ];
 /// Java compilers, which Gradle and Maven builds both run.
@@ -299,9 +280,11 @@ fn read_process(args: &str) -> (Option<Toolchain>, Option<&'static [Toolchain]>)
     if let Some((_, toolchain)) = TOOLCHAIN_BUILDERS.iter().find(|(tool, _)| *tool == name) {
         return (Some(*toolchain), Some(NATIVE));
     }
-    if let Some((_, toolchain, commands)) = BUILD_COMMANDS.iter().find(|(tool, ..)| *tool == name)
-    {
-        return (Some(*toolchain), commands.contains(&command).then_some(NATIVE));
+    if let Some((_, toolchain, commands)) = BUILD_COMMANDS.iter().find(|(tool, ..)| *tool == name) {
+        return (
+            Some(*toolchain),
+            commands.contains(&command).then_some(NATIVE),
+        );
     }
     if BUILDERS.contains(&name) {
         return (None, Some(NATIVE));
@@ -634,6 +617,24 @@ mod tests {
             Some(3_000_000)
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_sources_a_build_may_run_wait_for_builds() {
+        for backend in ["apt", "snap", "brew", "cargo", "npm", "rustup", "fwupd"] {
+            assert!(waits_for_builds(backend), "{backend}");
+        }
+        for backend in [
+            "flatpak",
+            "appimage",
+            "podman",
+            "docker",
+            "oh-my-zsh",
+            "codex",
+            "claude",
+        ] {
+            assert!(!waits_for_builds(backend), "{backend}");
+        }
     }
 
     #[test]

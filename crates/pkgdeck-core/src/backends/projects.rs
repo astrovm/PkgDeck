@@ -1303,14 +1303,29 @@ mod tests {
         age_files(&home, 30);
         let cancel = Cancellation::default();
         // Something is being built.
-        let bin = tools(&home, "/usr/bin/cargo build\\n");
+        let bin = tools(&home, "10 1 /usr/bin/cargo build\\n");
         let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
         let id = backend.cleanup(&cancel).unwrap()[0].id.clone();
         assert!(matches!(
             backend.execute(&Operation::Clean(id.clone()), &cancel, &mut |_| {}),
-            Err(EngineError::Execution(ExecutionError::Disabled(_)))
+            Err(EngineError::Refused {
+                refusal: Refusal::Building,
+                ..
+            })
         ));
         assert!(project.join("target/x").exists());
+        // A build of something else leaves it free to clean.
+        let bin = tools(
+            &home,
+            "10 1 java org.gradle.wrapper.GradleWrapperMain build\\n",
+        );
+        let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
+        backend
+            .execute(&Operation::Clean(id.clone()), &cancel, &mut |_| {})
+            .unwrap();
+        assert!(!project.join("target").exists());
+        write(&project.join("target/x"), "built");
+        age_files(&home, 30);
         // Only folders the settings name, written plainly.
         let bin = tools(&home, "");
         // A folder in the settings that is gone is skipped.
@@ -2292,5 +2307,78 @@ mod tests {
             age(now + Duration::from_secs(60), now),
             "Unchanged for a few days"
         );
+    }
+
+    #[test]
+    fn a_project_waits_only_for_builds_of_its_own_kind() {
+        let home = scratch("kinds");
+        let mixed = home.join("mixed");
+        for file in [
+            "Cargo.toml",
+            "settings.gradle",
+            "pom.xml",
+            "go.mod",
+            "App.csproj",
+        ] {
+            write(&mixed.join(file), "");
+        }
+        let flutter = home.join("flutter");
+        write(&flutter.join("pubspec.yaml"), "");
+        write(&home.join("swift/Package.swift"), "");
+        use Toolchain::*;
+        assert_eq!(builds_using([home.as_path()]), [Native]);
+        assert_eq!(
+            builds_using([mixed.as_path()]),
+            [Rust, Gradle, Maven, Go, Dotnet, Native]
+        );
+        assert_eq!(
+            builds_using([flutter.as_path(), home.join("swift").as_path()]),
+            [Gradle, Apple, Native]
+        );
+        // A folder that is gone names nothing.
+        assert_eq!(builds_using([home.join("missing").as_path()]), [Native]);
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_task_is_gone_when_every_folder_it_listed_is() {
+        let home = scratch("gone");
+        let bin = tools(&home, "");
+        let backend = projects(&home, &bin, vec![home.join("code")], 7);
+        let item = |kind, lines: &[String]| CleanupItem {
+            id: CleanupId {
+                backend: "projects".into(),
+                key: "build:/x".into(),
+            },
+            kind,
+            title: String::new(),
+            summary: String::new(),
+            preview: format!("Deletes these folders.\n{}", lines.join("\n")),
+            bytes: None,
+        };
+        write(&home.join("code/app/target/x"), "built");
+        let elsewhere = home.join("elsewhere/out");
+        let builds = |lines: &[String]| item(CleanupKind::BuildFiles, lines);
+        assert!(backend.cleanup_gone(&builds(&["~/code/app/node_modules".into()])));
+        assert!(backend.cleanup_gone(&builds(&[elsewhere.display().to_string()])));
+        assert!(!backend.cleanup_gone(&builds(&[
+            "~/code/app/node_modules".into(),
+            "~/code/app/target".into()
+        ])));
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert!(!backend.cleanup_gone(&builds(&[elsewhere.display().to_string()])));
+        // A worktree line names its branch or says it was gone already.
+        let trees = |lines: &[String]| item(CleanupKind::Worktree, lines);
+        assert!(backend.cleanup_gone(&trees(&[
+            "~/.trees/done (feature)".into(),
+            "~/.trees/lost (folder already gone)".into(),
+            "~/.trees/detached".into(),
+        ])));
+        write(&home.join(".trees/done/README"), "hi");
+        assert!(!backend.cleanup_gone(&trees(&["~/.trees/done (feature)".into()])));
+        // Without a home, a path is read as written.
+        let homeless = Projects::new(Host::new(Runtime::Native, BTreeMap::new()));
+        assert!(homeless.cleanup_gone(&trees(&["~/.trees/done (feature)".into()])));
+        fs::remove_dir_all(&home).unwrap();
     }
 }

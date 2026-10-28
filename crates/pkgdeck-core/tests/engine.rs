@@ -1189,6 +1189,37 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
 }
 
 #[test]
+fn a_reviewed_cleanup_that_is_gone_already_counts_as_done() {
+    let mut engine = Engine::default();
+    engine
+        .register(BrokenCleaner {
+            name: "gone",
+            result: Ok(vec![]),
+        })
+        .unwrap();
+    let cancel = Cancellation::default();
+    let reviewed = cleanup_item("gone", "cache", "Synthetic cache");
+    let operation = Operation::Clean(reviewed.id.clone());
+    engine.remember_cleanup_plan(reviewed);
+    let mut events = Vec::new();
+    assert!(engine
+        .execute(&operation, &cancel, &mut |event| events.push(event))
+        .is_ok());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Progress {
+            progress: Progress::Message(text),
+            ..
+        } if text == "Already clean."
+    )));
+    // With no review to go by, a task that isn't there isn't found.
+    assert!(matches!(
+        engine.execute(&operation, &cancel, &mut |_| {}),
+        Err(EngineError::NotFound)
+    ));
+}
+
+#[test]
 fn confirmed_batch_rejects_a_stale_cleanup_and_runs_the_rest() {
     let mut engine = engine(Fault::None);
     engine.register(Cleaner).unwrap();

@@ -281,14 +281,20 @@ pub fn ended(result: &Result<OperationOutcome, EngineError>) -> (Outcome, Option
 /// stays out: it can be long, or say more than it should.
 pub fn reason(error: &EngineError) -> String {
     let said = match error {
-        EngineError::InvalidResponse { backend, .. } => {
-            format!("{backend} answered in a way PkgDeck didn't understand")
+        // A name like npm keeps its own case.
+        EngineError::InvalidResponse { backend, .. } => format!(
+            "{} answered in a way PkgDeck didn't understand",
+            crate::backends::display_name(backend)
+        ),
+        error => {
+            let said = error.to_string();
+            let mut letters = said.chars();
+            let first = letters
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>());
+            first.unwrap_or_default() + letters.as_str()
         }
-        error => error.to_string(),
     };
-    let mut letters = said.chars();
-    let first = letters.next().map(|first| first.to_uppercase().collect::<String>());
-    let said = first.unwrap_or_default() + letters.as_str();
     if said.ends_with('.') {
         said
     } else {
@@ -297,7 +303,8 @@ pub fn reason(error: &EngineError) -> String {
 }
 
 /// Why a change that waited for a build never ran.
-pub const CLOSED_WHILE_WAITING: &str = "PkgDeck closed before the build finished, so it didn't run.";
+pub const CLOSED_WHILE_WAITING: &str =
+    "PkgDeck closed before the build finished, so it didn't run.";
 
 /// What a run whose changes ended as `outcomes` counts as. A change that
 /// was skipped or waits did what PkgDeck meant it to, so it fails nothing.
@@ -338,7 +345,7 @@ mod tests {
                     State::Queued,
                 )
                 .unwrap();
-            store.finish(id, vec![Outcome::Finished]).unwrap();
+            store.finish(id, vec![(Outcome::Finished, None)]).unwrap();
         }
         let mut entries = store.entries().unwrap();
         assert_eq!(entries.len(), LIMIT);
@@ -397,7 +404,11 @@ mod tests {
         store
             .finish(
                 activity_id,
-                vec![Outcome::Finished, Outcome::Failed, Outcome::Cancelled],
+                vec![
+                    (Outcome::Finished, None),
+                    (Outcome::Failed, None),
+                    (Outcome::Cancelled, None),
+                ],
             )
             .unwrap();
         let entries = store.entries().unwrap();
@@ -429,10 +440,15 @@ mod tests {
         assert_eq!(entry.state, State::Cancelled);
         assert!(entry.finished_at.is_some());
         store.state(id + 1, State::Running).unwrap();
-        store.finish(id + 1, vec![Outcome::Finished]).unwrap();
+        store
+            .finish(id + 1, vec![(Outcome::Finished, None)])
+            .unwrap();
         let second = store.begin("cli", vec![], State::Running).unwrap();
         store
-            .finish(second, vec![Outcome::Finished, Outcome::Cancelled])
+            .finish(
+                second,
+                vec![(Outcome::Finished, None), (Outcome::Cancelled, None)],
+            )
             .unwrap();
         let states: Vec<_> = store
             .entries()
@@ -449,5 +465,134 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_change_that_waits_or_is_skipped_keeps_why_and_fails_nothing() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-waiting-activity-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let store = History::new(path.join("activity.json"));
+        let clean = |key: &str| {
+            Operation::Clean(crate::package::CleanupId {
+                backend: "dev-caches".into(),
+                key: key.into(),
+            })
+        };
+        let waits = Some("Waits for a build.".to_owned());
+        let id = store
+            .record(
+                "auto",
+                vec![clean("cargo"), clean("bun"), clean("gradle")],
+                5,
+                vec![
+                    (Outcome::Waiting, waits.clone()),
+                    (Outcome::Finished, None),
+                    (Outcome::Skipped, Some("It changed.".into())),
+                ],
+            )
+            .unwrap();
+        let entry = store.entries().unwrap().remove(0);
+        assert_eq!((entry.frontend.as_str(), entry.started_at), ("auto", 5));
+        assert_eq!(entry.state, State::Finished);
+        assert!(entry.finished_at.is_some());
+        assert_eq!(
+            entry.reasons,
+            [waits.clone(), None, Some("It changed.".into())]
+        );
+        // The build ended: what waited ran, and needs no reason now.
+        store.settle(id, 0, Outcome::Finished, None).unwrap();
+        // Steps and runs that aren't there change nothing.
+        store.settle(id, 9, Outcome::Failed, None).unwrap();
+        store.settle(id + 1, 0, Outcome::Failed, None).unwrap();
+        let entry = store.entries().unwrap().remove(0);
+        assert_eq!(
+            entry.outcomes,
+            [Outcome::Finished, Outcome::Finished, Outcome::Skipped]
+        );
+        assert_eq!(entry.reasons, [None, None, Some("It changed.".into())]);
+        store.settle(id, 2, Outcome::Finished, None).unwrap();
+        let entry = store.entries().unwrap().remove(0);
+        assert!(entry.reasons.is_empty());
+        // Saved without reasons, the file doesn't name them.
+        let stored = fs::read_to_string(path.join("activity.json")).unwrap();
+        assert!(!stored.contains("reasons"), "{stored}");
+        // One that failed fails the run.
+        store
+            .settle(id, 1, Outcome::Failed, Some("It broke.".into()))
+            .unwrap();
+        assert_eq!(store.entries().unwrap()[0].state, State::Failed);
+        // Closing PkgDeck while one waits means it never runs.
+        let waiting = store
+            .record(
+                "auto",
+                vec![clean("cargo"), clean("bun")],
+                6,
+                vec![(Outcome::Waiting, waits), (Outcome::Finished, None)],
+            )
+            .unwrap();
+        store
+            .edit(|rows| {
+                for row in rows {
+                    row.owner_pid = u32::MAX;
+                }
+            })
+            .unwrap();
+        store.recover_dead().unwrap();
+        let entry = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == waiting)
+            .unwrap();
+        assert_eq!(entry.outcomes, [Outcome::Skipped, Outcome::Finished]);
+        assert_eq!(entry.reasons, [Some(CLOSED_WHILE_WAITING.into()), None]);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn how_a_change_ended_says_why_in_a_sentence_without_what_tools_said() {
+        use crate::process::ExecutionError;
+        assert_eq!(
+            ended(&Ok(OperationOutcome::default())),
+            (Outcome::Finished, None)
+        );
+        assert_eq!(
+            ended(&Err(EngineError::Cancelled)),
+            (Outcome::Cancelled, None)
+        );
+        for refusal in [Refusal::Building, Refusal::CleanupChanged] {
+            let error = EngineError::Refused {
+                backend: "dev-caches".into(),
+                refusal: refusal.clone(),
+            };
+            assert_eq!(
+                ended(&Err(error)),
+                (Outcome::Skipped, Some(refusal.to_string()))
+            );
+        }
+        let error = EngineError::InvalidResponse {
+            backend: "npm".into(),
+            reason: "secret output".into(),
+        };
+        assert_eq!(
+            ended(&Err(error)),
+            (
+                Outcome::Failed,
+                Some("npm answered in a way PkgDeck didn't understand.".into())
+            )
+        );
+        assert_eq!(
+            reason(&EngineError::Execution(ExecutionError::Io(
+                "couldn't remove ~/x".into()
+            ))),
+            "Couldn't remove ~/x."
+        );
+        assert_eq!(
+            reason(&EngineError::Execution(ExecutionError::Io(String::new()))),
+            "."
+        );
     }
 }

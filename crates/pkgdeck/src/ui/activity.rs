@@ -376,6 +376,13 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                                 .color(palette.ink),
                         );
                     }
+                    for reason in entry.reason_lines() {
+                        ui.label(
+                            egui::RichText::new(reason)
+                                .font(theme::font(12.5))
+                                .color(palette.ink),
+                        );
+                    }
                     if let Some(finished) = entry.finished_at {
                         ui.label(
                             egui::RichText::new(format!(
