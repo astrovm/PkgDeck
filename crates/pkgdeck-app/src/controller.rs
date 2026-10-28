@@ -4490,26 +4490,26 @@ impl ffi::PackageController {
         ended: &[(Outcome, Option<String>)],
         activity: Option<u64>,
     ) {
-        let waiting: Vec<WaitingClean> = job
-            .operations()
-            .iter()
-            .zip(ended)
-            .enumerate()
-            .filter(|(_, (_, (outcome, _)))| *outcome == Outcome::Waiting)
-            .filter_map(|(index, (operation, _))| {
-                let Operation::Clean(id) = operation else {
-                    return None;
-                };
-                let item = self.rust().cleanup.iter().find(|item| item.id == *id)?;
-                Some(WaitingClean {
-                    item: item.clone(),
-                    activity: activity
-                        .map(|activity| (activity, index))
-                        .into_iter()
-                        .collect(),
+        let waiting: Vec<WaitingClean> =
+            job.operations()
+                .iter()
+                .zip(ended)
+                .enumerate()
+                .filter(|(_, (_, (outcome, _)))| *outcome == Outcome::Waiting)
+                .filter_map(|(index, (operation, _))| {
+                    let item =
+                        self.rust().cleanup.iter().find(
+                            |item| matches!(operation, Operation::Clean(id) if item.id == *id),
+                        )?;
+                    Some(WaitingClean {
+                        item: item.clone(),
+                        activity: activity
+                            .map(|activity| (activity, index))
+                            .into_iter()
+                            .collect(),
+                    })
                 })
-            })
-            .collect();
+                .collect();
         self.as_mut().rust_mut().keep_waiting(waiting);
     }
     /// Show what automatic cleaning ran in Activity, and keep the tasks

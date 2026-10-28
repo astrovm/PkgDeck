@@ -13299,6 +13299,11 @@ fn a_retry_settles_only_the_tasks_it_ran() {
         .map(|waiting| waiting.item.id.key.as_str())
         .collect();
     assert_eq!(left, ["cargo", "bun"]);
+    // A retry's result settles nothing when it reaches the foreground.
+    controller
+        .as_mut()
+        .apply(Ok(Payload::RetriedCleans(Batch::default())));
+    assert_eq!(controller.rust().waiting_cleans.len(), 2);
     // A failed retry keeps them waiting too.
     controller.as_mut().rust_mut().background = true;
     controller.as_mut().rust_mut().worker = Some(fake_worker(
