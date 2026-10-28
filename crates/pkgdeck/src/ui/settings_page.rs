@@ -1568,8 +1568,7 @@ fn about(app: &mut App, ui: &mut Ui) {
                     .show(ui)
                     .clicked()
                 {
-                    ui.ctx()
-                        .open_url(egui::OpenUrl::new_tab("https://github.com/astrovm/PkgDeck"));
+                    app.platform.open("https://github.com/astrovm/PkgDeck");
                 }
             });
         });

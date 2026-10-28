@@ -21,6 +21,7 @@ fn app() -> App {
     let (store, settings) = Store::open(None, None);
     let mut platform = Platform::start(|| {});
     platform.record_notifications();
+    platform.record_links();
     let mut app = App::with_controller(
         create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
         settings,
@@ -1470,6 +1471,7 @@ fn a_failed_cleanup_keeps_its_retry_after_loading_another_source() {
     let (store, settings) = Store::open(None, None);
     let mut platform = Platform::start(|| {});
     platform.record_notifications();
+    platform.record_links();
     let controller = create_synthetic_controller(|sources, _, _, _| {
         let mut engine = Engine::default();
         for source in ["projects", "dev-caches"] {
@@ -1609,6 +1611,17 @@ fn settings_tabs_show_one_part_at_a_time() {
     // Shortcuts are listed without unfolding them.
     settings_tab(&mut harness, SettingsTab::About);
     assert!(harness.query_by_label("Update selected").is_some());
+}
+
+#[test]
+fn github_in_about_opens_the_project_page() {
+    let mut harness = show(Page::Settings);
+    settings_tab(&mut harness, SettingsTab::About);
+    click_in_view(&mut harness, Some(Role::Button), "GitHub");
+    assert_eq!(
+        harness.state().1.platform.opened(),
+        ["https://github.com/astrovm/PkgDeck"]
+    );
 }
 
 #[test]
@@ -1958,6 +1971,7 @@ fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewe
     let (store, settings) = Store::open(None, None);
     let mut platform = Platform::start(|| {});
     platform.record_notifications();
+    platform.record_links();
     let controller = create_synthetic_controller(|_, _, _, _| {
         let mut engine = Engine::default();
         let flatpak = Fake::new("flatpak", &[Capability::Installed, Capability::Upgrade]);

@@ -363,6 +363,8 @@ pub struct Platform {
     authorized: bool,
     /// Notifications kept instead of shown, for tests.
     recorded: Option<std::cell::RefCell<Vec<(String, String)>>>,
+    /// Links kept instead of opened, for tests.
+    opened: Option<std::cell::RefCell<Vec<String>>>,
     /// Whether the desktop asks to keep movement down, and when it was
     /// read.
     motion: Cell<Option<(Instant, bool)>>,
@@ -396,6 +398,7 @@ impl Platform {
             icon: blue(),
             authorized: false,
             recorded: None,
+            opened: None,
             motion: Cell::new(None),
             follows_motion: false,
         }
@@ -448,6 +451,31 @@ impl Platform {
             .as_ref()
             .map(|r| r.borrow().clone())
             .unwrap_or_default()
+    }
+
+    /// Keeps links instead of opening them.
+    #[doc(hidden)]
+    pub fn record_links(&mut self) {
+        self.opened = Some(Default::default());
+    }
+
+    /// What was kept by [`Self::record_links`].
+    #[doc(hidden)]
+    pub fn opened(&self) -> Vec<String> {
+        self.opened
+            .as_ref()
+            .map(|r| r.borrow().clone())
+            .unwrap_or_default()
+    }
+
+    /// Opens a web link in the browser, or a `file://` folder in the file
+    /// manager.
+    pub fn open(&self, url: &str) {
+        if let Some(opened) = &self.opened {
+            opened.borrow_mut().push(url.into());
+            return;
+        }
+        open_url(url);
     }
 
     /// What happened since the last call. The window's own loop delivers
@@ -608,6 +636,51 @@ impl Platform {
             });
         }
     }
+}
+
+/// Hands `url` to the desktop: `open` on a Mac, `xdg-open` elsewhere,
+/// which goes through the desktop portal inside Flatpak.
+fn open_url(url: &str) {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("/usr/bin/open");
+    #[cfg(not(target_os = "macos"))]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // An AppImage or Snap puts its own libraries first, and the browser
+    // it would start can't run with them.
+    if let (Some(paths), Some(appdir)) = (
+        std::env::var_os("LD_LIBRARY_PATH"),
+        std::env::var_os("APPDIR"),
+    ) {
+        match host_libraries(&paths, std::path::Path::new(&appdir)) {
+            Some(kept) => command.env("LD_LIBRARY_PATH", kept),
+            None => command.env_remove("LD_LIBRARY_PATH"),
+        };
+    }
+    match command.spawn() {
+        // Waited for off the window's thread, so it leaves no zombie.
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(error) => eprintln!("pkgdeck: cannot open {url}: {error}"),
+    }
+}
+
+/// `LD_LIBRARY_PATH` without the folders inside `appdir`, or `None` when
+/// nothing is left.
+fn host_libraries(paths: &std::ffi::OsStr, appdir: &std::path::Path) -> Option<std::ffi::OsString> {
+    let kept: Vec<_> = std::env::split_paths(paths)
+        .filter(|path| !path.as_os_str().is_empty() && !path.starts_with(appdir))
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    std::env::join_paths(kept).ok()
 }
 
 /// The colour logo as the StatusNotifierItem wants it: ARGB, big-endian.
@@ -833,6 +906,25 @@ mod tests {
         assert!(platform.tray_available());
         platform.set_badge("");
         platform.refresh_permission();
+    }
+
+    #[test]
+    fn links_open_without_the_bundled_libraries() {
+        let appdir = std::path::Path::new("/tmp/.mount_PkgDeck");
+        let kept = |paths: &str| {
+            host_libraries(std::ffi::OsStr::new(paths), appdir)
+                .map(|kept| kept.into_string().unwrap())
+        };
+        assert_eq!(kept("/tmp/.mount_PkgDeck/usr/lib"), None);
+        assert_eq!(
+            kept("/tmp/.mount_PkgDeck/usr/lib:/opt/cuda/lib64::/usr/local/lib"),
+            Some("/opt/cuda/lib64:/usr/local/lib".into())
+        );
+        // A sibling folder that only starts with the same name stays.
+        assert_eq!(
+            kept("/tmp/.mount_PkgDeckOther/lib"),
+            Some("/tmp/.mount_PkgDeckOther/lib".into())
+        );
     }
 
     #[test]

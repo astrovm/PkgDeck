@@ -907,7 +907,7 @@ fn body(
                         && (details.homepage.starts_with("https://")
                             || details.homepage.starts_with("http://"))
                     {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&details.homepage));
+                        app.platform.open(&details.homepage);
                     }
                     ui.end_row();
                 }
@@ -926,7 +926,7 @@ fn body(
                     "file://{}",
                     folder.split('/').map(percent).collect::<Vec<_>>().join("/")
                 );
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                app.platform.open(&url);
             }
             ui.add_space(8.0);
         }

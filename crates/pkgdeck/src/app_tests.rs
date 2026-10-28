@@ -20,6 +20,7 @@ fn app_with(launch: Launch) -> App {
     let (store, settings) = Store::open(None, None);
     let mut platform = Platform::start(|| {});
     platform.record_notifications();
+    platform.record_links();
     App::with_controller(
         create_synthetic_controller(empty),
         settings,
