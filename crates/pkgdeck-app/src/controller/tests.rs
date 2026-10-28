@@ -42,6 +42,7 @@ fn ran(steps: &[(&str, Outcome, Said)]) -> Payload {
                 title: (*title).into(),
                 outcome: *outcome,
                 said: said.clone(),
+                kept: None,
             })
             .collect(),
         note: None,
@@ -3642,6 +3643,7 @@ fn finished_changes_explain_what_happened() {
                 title: "Update firmware".into(),
                 outcome: Outcome::Finished,
                 said: Said::Completed,
+                kept: None,
             }],
             note: firmware_note(&[Operation::Upgrade(PackageId {
                 backend: "fwupd".into(),
@@ -4991,6 +4993,7 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
             title: "Update Synthetic BIOS".into(),
             outcome: Outcome::Finished,
             said: Said::Completed,
+            kept: None,
         }],
         note: firmware_note(&[Operation::Upgrade(package.id.clone())]),
     })));
@@ -11668,7 +11671,8 @@ fn automatic_cleaning_runs_every_checked_task_that_needs_no_password() {
         Some(Reply::Done(Ok(Payload::AutoCleaned {
             cleaned: 2,
             failed: 1,
-            bytes: 3_000
+            bytes: 3_000,
+            ..
         })))
     ));
     let mut cleaned = ran.lock().unwrap().clone();
@@ -11721,7 +11725,8 @@ fn automatic_cleaning_runs_every_checked_task_that_needs_no_password() {
         Some(Reply::Done(Ok(Payload::AutoCleaned {
             cleaned: 0,
             failed: 0,
-            bytes: 0
+            bytes: 0,
+            ..
         })))
     ));
     assert_eq!(ran.lock().unwrap().len(), 4);
@@ -12048,6 +12053,8 @@ fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {
         cleaned: 2,
         failed: 1,
         bytes: 3_000_000,
+        tasks: vec![],
+        started_at: 0,
     }));
     let after = controller.rust().auto_cleaned_at;
     assert!(after >= now);
@@ -12068,6 +12075,8 @@ fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {
         cleaned: 0,
         failed: 0,
         bytes: 0,
+        tasks: vec![],
+        started_at: 0,
     }));
     assert_ne!(
         serde_json::from_str::<Value>(&quiet.report_state().to_string()).unwrap()["phase"],
@@ -12099,10 +12108,13 @@ fn automatic_cleaning_runs_between_checks_after_updates_and_holds() {
             .as_mut()
             .check_updates("apt".into(), enabled, false, false, false);
     };
-    // A build was running when the check finished.
+    // A build doesn't hold cleaning back: each task that build uses waits
+    // for it on its own.
     tick(&mut controller, true);
-    assert!(!scheduled(&controller));
-    // The build ends, but an automatic update is about to run.
+    assert!(scheduled(&controller));
+    controller.as_mut().rust_mut().validated_confirmed = None;
+    controller.as_mut().set_auto_clean(true, now - 25 * 60 * 60);
+    // An automatic update is about to run.
     controller.as_mut().rust_mut().natives.hold = never_hold;
     controller.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
         job: Job::AutoUpgrade(vec![], false),
@@ -13062,4 +13074,421 @@ fn running_worker_events_publish_progress_only_while_tracking_a_write() {
     drop(sender);
     settle(&mut controller);
     assert_eq!(controller.progress().to_string(), "{}");
+}
+/// Whether the build `BuildingCaches` waits for still runs.
+static CARGO_BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// A Cargo cache that a build uses until `CARGO_BUILDING` turns off.
+struct BuildingCaches;
+impl Backend for BuildingCaches {
+    fn id(&self) -> &str {
+        "dev-caches"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(vec![sized(
+            "dev-caches",
+            "cargo",
+            CleanupKind::PackageCache,
+            Some(10),
+        )])
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if CARGO_BUILDING.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(EngineError::Refused {
+                backend: "dev-caches".into(),
+                refusal: Refusal::Building,
+            });
+        }
+        Ok(OperationOutcome::default())
+    }
+}
+fn building_caches(
+    _: &[String],
+    _: bool,
+    _: Authorization,
+    _: &Cancellation,
+) -> Result<Engine, EngineError> {
+    let mut engine = Engine::default();
+    engine.register(BuildingCaches)?;
+    Ok(engine)
+}
+#[test]
+fn a_cleanup_a_build_uses_waits_and_cleans_once_the_build_ends() {
+    let temp = pkgdeck_tools::Temp::new();
+    let store = ActivityStore::at(temp.0.join("activity.json"));
+    let item = sized("dev-caches", "cargo", CleanupKind::PackageCache, Some(10));
+    // Automatic cleaning finds the cache in use.
+    let mut engine =
+        building_caches(&[], false, Authorization::Polkit, &Cancellation::default()).unwrap();
+    let replies = run_job(
+        &mut engine,
+        Job::AutoClean {
+            caches: true,
+            worktrees: false,
+            preferences: CleanupPreferences::default(),
+        },
+        &Cancellation::default(),
+    );
+    let payload = expect!(replies.into_iter().last(), Some(Reply::Done(Ok(payload))) => payload);
+    assert!(matches!(
+        &payload,
+        Payload::AutoCleaned { cleaned: 0, failed: 0, bytes: 0, tasks, .. }
+            if tasks == &[(item.clone(), Outcome::Waiting, Some(WAITS_FOR_BUILD.to_owned()))]
+    ));
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().natives.engine = building_caches;
+    controller.as_mut().rust_mut().activity_store = Some(store.clone());
+    controller.as_mut().apply(Ok(payload));
+    // Activity shows it, waiting and why.
+    let automatic = store.entries().unwrap().pop().unwrap();
+    assert_eq!(automatic.frontend, "auto");
+    assert_eq!(automatic.state, State::Finished);
+    assert_eq!(automatic.outcomes, [Outcome::Waiting]);
+    assert_eq!(automatic.reasons, [Some(WAITS_FOR_BUILD.to_owned())]);
+    assert_eq!(controller.rust().names.cleanup[&item.id], "cargo task");
+
+    // Cleaning it by hand meanwhile waits too, without failing its row.
+    controller.as_mut().rust_mut().cleanup = vec![item.clone()];
+    let clean = Operation::Clean(item.id.clone());
+    let by_hand = store
+        .begin("gui", vec![clean.clone()], State::Running)
+        .unwrap();
+    controller.as_mut().rust_mut().active_activity_id = Some(by_hand);
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        Job::Write(clean.clone(), None),
+        vec![Reply::Done(Err(EngineError::Refused {
+            backend: "dev-caches".into(),
+            refusal: Refusal::Building,
+        }))],
+    ));
+    controller.as_mut().poll();
+    let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+    assert_eq!(notice["kind"], "info");
+    assert_eq!(notice["title"], "Clean cargo task waits for a build");
+    assert_eq!(notice["detail"], WAITS_FOR_BUILD);
+    assert_eq!(controller.failure().to_string(), "{}");
+    let entry = store.entries().unwrap().pop().unwrap();
+    assert_eq!(
+        (entry.id, entry.outcomes),
+        (by_hand, vec![Outcome::Waiting])
+    );
+    assert_eq!(
+        controller.rust().waiting_cleans,
+        [WaitingClean {
+            item: item.clone(),
+            activity: vec![(automatic.id, 0), (by_hand, 0)],
+        }]
+    );
+
+    // It isn't tried while something else waits to run.
+    controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![]));
+    controller.as_mut().retry_waiting_cleans();
+    assert!(controller.rust().worker.is_none());
+    controller.as_mut().rust_mut().pending = None;
+    let retrying = |controller: &ffi::PackageController| {
+        matches!(
+            controller.rust().worker.as_ref().map(|worker| &worker.job),
+            Some(Job::RetryCleans(_))
+        )
+    };
+    // Still building: it keeps waiting, and isn't tried again for a minute.
+    controller.as_mut().retry_waiting_cleans();
+    assert!(matches!(
+        controller.rust().worker.as_ref().map(|worker| &worker.job),
+        Some(Job::RetryCleans(items)) if items == std::slice::from_ref(&item)
+    ));
+    wait_until(&mut controller, |controller| !retrying(controller));
+    assert_eq!(controller.rust().waiting_cleans.len(), 1);
+    controller.as_mut().retry_waiting_cleans();
+    assert!(!retrying(&controller));
+    // The build ended: it cleans, and both runs say so.
+    CARGO_BUILDING.store(false, std::sync::atomic::Ordering::SeqCst);
+    controller.as_mut().rust_mut().cleans_tried_at = 0;
+    wait_until(&mut controller, |controller| {
+        controller.rust().worker.is_none()
+    });
+    controller.as_mut().retry_waiting_cleans();
+    assert!(retrying(&controller));
+    wait_until(&mut controller, |controller| {
+        controller.rust().waiting_cleans.is_empty()
+    });
+    for entry in store.entries().unwrap() {
+        assert_eq!(entry.outcomes, [Outcome::Finished], "{}", entry.id);
+        assert!(entry.reasons.is_empty());
+    }
+    // Nothing waits, so nothing is tried.
+    controller.as_mut().rust_mut().cleans_tried_at = 0;
+    wait_until(&mut controller, |controller| {
+        controller.rust().worker.is_none()
+    });
+    controller.as_mut().retry_waiting_cleans();
+    assert!(!retrying(&controller));
+}
+#[test]
+fn a_retry_settles_only_the_tasks_it_ran() {
+    let temp = pkgdeck_tools::Temp::new();
+    let store = ActivityStore::at(temp.0.join("activity.json"));
+    let item = |key| sized("dev-caches", key, CleanupKind::PackageCache, None);
+    let (cargo, gradle, bun) = (item("cargo"), item("gradle"), item("bun"));
+    let run = store
+        .record(
+            "auto",
+            [&cargo, &gradle, &bun]
+                .iter()
+                .map(|item| Operation::Clean(item.id.clone()))
+                .collect(),
+            1,
+            vec![(Outcome::Waiting, Some(WAITS_FOR_BUILD.into())); 3],
+        )
+        .unwrap();
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().activity_store = Some(store.clone());
+    let waiting = |item: &CleanupItem, index| WaitingClean {
+        item: item.clone(),
+        activity: vec![(run, index)],
+    };
+    controller.as_mut().rust_mut().keep_waiting(vec![
+        waiting(&cargo, 0),
+        waiting(&gradle, 1),
+        waiting(&bun, 2),
+    ]);
+    let step = |outcome, kept: Option<&str>| Ended {
+        title: String::new(),
+        outcome,
+        said: Said::Completed,
+        kept: kept.map(str::to_owned),
+    };
+    // Gradle failed after all, Bun's retry was cancelled, and a task that
+    // stopped waiting meanwhile is left alone.
+    let other = item("go-build");
+    controller.as_mut().finish_retried_cleans(
+        &[gradle.clone(), bun.clone(), other],
+        &Batch {
+            noun: "cleanup tasks",
+            steps: vec![
+                step(Outcome::Failed, Some("Disk full.")),
+                step(Outcome::Cancelled, None),
+                step(Outcome::Finished, None),
+            ],
+            note: None,
+        },
+    );
+    let entry = store.entries().unwrap().pop().unwrap();
+    assert_eq!(
+        entry.outcomes,
+        [Outcome::Waiting, Outcome::Failed, Outcome::Waiting]
+    );
+    assert_eq!(entry.reasons[1].as_deref(), Some("Disk full."));
+    assert_eq!(entry.state, State::Failed);
+    let left: Vec<_> = controller
+        .rust()
+        .waiting_cleans
+        .iter()
+        .map(|waiting| waiting.item.id.key.as_str())
+        .collect();
+    assert_eq!(left, ["cargo", "bun"]);
+    // A retry's result settles nothing when it reaches the foreground.
+    controller
+        .as_mut()
+        .apply(Ok(Payload::RetriedCleans(Batch::default())));
+    assert_eq!(controller.rust().waiting_cleans.len(), 2);
+    // A task Clean no longer lists has no review to wait with.
+    controller.as_mut().wait_for_builds(
+        &Job::Write(Operation::Clean(item("gone").id), None),
+        &[(Outcome::Waiting, Some(WAITS_FOR_BUILD.into()))],
+        Some(run),
+    );
+    assert_eq!(controller.rust().waiting_cleans.len(), 2);
+    // A failed retry keeps them waiting too.
+    controller.as_mut().rust_mut().background = true;
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        Job::RetryCleans(vec![cargo.clone()]),
+        vec![Reply::Done(Err(EngineError::Unavailable {
+            backend: "dev-caches".into(),
+            reason: "synthetic".into(),
+        }))],
+    ));
+    controller.as_mut().poll();
+    assert_eq!(controller.rust().waiting_cleans.len(), 2);
+    assert_eq!(controller.failure().to_string(), "{}");
+    // Without a history, a cleaned task just stops waiting.
+    controller.as_mut().rust_mut().activity_store = None;
+    controller.as_mut().finish_retried_cleans(
+        &[cargo],
+        &Batch {
+            noun: "cleanup tasks",
+            steps: vec![step(Outcome::Finished, None)],
+            note: None,
+        },
+    );
+    assert_eq!(controller.rust().waiting_cleans.len(), 1);
+}
+#[test]
+fn a_cleanup_left_alone_is_not_a_failure() {
+    let building = EngineError::Refused {
+        backend: "dev-caches".into(),
+        refusal: Refusal::Building,
+    };
+    assert_eq!(
+        ended_by(&building, "dev-caches"),
+        (Outcome::Waiting, Some(WAITS_FOR_BUILD.into()))
+    );
+    let changed = EngineError::Refused {
+        backend: "podman".into(),
+        refusal: Refusal::CleanupChanged,
+    };
+    assert_eq!(
+        ended_by(&changed, "podman"),
+        (Outcome::Skipped, Some(Refusal::CleanupChanged.to_string()))
+    );
+    assert_eq!(
+        ended_by(&EngineError::Cancelled, "apt"),
+        (Outcome::Cancelled, None)
+    );
+    // What a tool printed stays out of what Activity keeps.
+    let failed =
+        EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: Some(1),
+            signal: None,
+            stdout: vec![],
+            stderr: b"secret detail".to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }));
+    assert_eq!(
+        ended_by(&failed, "npm"),
+        (Outcome::Failed, Some("npm stopped with an error.".into()))
+    );
+    let confused = EngineError::InvalidResponse {
+        backend: "snap".into(),
+        reason: "secret detail".into(),
+    };
+    assert_eq!(
+        ended_by(&confused, "snap"),
+        (Outcome::Failed, Some("Snap reported a problem.".into()))
+    );
+    let (outcome, kept) = ended_by(&EngineError::NotFound, "projects");
+    assert_eq!(outcome, Outcome::Failed);
+    assert_eq!(
+        kept,
+        Some(plain_error(&EngineError::NotFound, Some("projects"), false))
+    );
+    // A batch says what waits after what failed, and keeps the reasons.
+    let job = Job::CleanAll(vec![
+        Operation::Clean(sized("dev-caches", "cargo", CleanupKind::PackageCache, None).id),
+        Operation::Clean(sized("podman", "images", CleanupKind::Unused, None).id),
+        Operation::Clean(sized("projects", "app", CleanupKind::BuildFiles, None).id),
+    ]);
+    let step = |title: &str, outcome, said: &str| Ended {
+        title: title.into(),
+        outcome,
+        said: Said::Because(said.into()),
+        kept: Some(said.into()),
+    };
+    let ran = Batch {
+        noun: "cleanup tasks",
+        steps: vec![
+            step("Clean Cargo", Outcome::Waiting, WAITS_FOR_BUILD),
+            step("Clean images", Outcome::Skipped, "It changed."),
+            step("Clean app", Outcome::Failed, "Disk full."),
+        ],
+        note: None,
+    };
+    assert_eq!(
+        ran.ended(),
+        [
+            (Outcome::Waiting, Some(WAITS_FOR_BUILD.into())),
+            (Outcome::Skipped, Some("It changed.".into())),
+            (Outcome::Failed, Some("Disk full.".into())),
+        ]
+    );
+    let names = Names::default();
+    let notice = write_notice(&job, &Ok(Payload::Batch(ran.clone())), false, &names);
+    assert_eq!(notice["kind"], "error");
+    assert_eq!(
+        notice["detail"],
+        format!(
+            "Clean app (Old projects): Disk full.\nClean Cargo: {WAITS_FOR_BUILD}\nClean images: It changed."
+        )
+    );
+    // Without a failure it says how many finished.
+    let mut fine = ran;
+    fine.steps.pop();
+    let notice = write_notice(&job, &Ok(Payload::Batch(fine)), false, &names);
+    assert_eq!(notice["kind"], "info");
+    assert_eq!(notice["title"], "0 of 2 cleanup tasks finished");
+}
+#[test]
+fn automatic_updates_during_a_build_hold_only_what_a_build_may_run() {
+    let package = |backend: &str, name: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = backend.into();
+        package.update = UpdateAvailability::Available;
+        package.candidate_version = Some("2".into());
+        package
+    };
+    let report = |packages: Vec<Package>| PackageReport {
+        successful_sources: packages.iter().map(|p| p.id.backend.clone()).collect(),
+        packages,
+        failures: vec![],
+    };
+    let state = |controller: &ffi::PackageController| -> Value {
+        serde_json::from_str(&controller.background_state().to_string()).unwrap()
+    };
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = building;
+    // A coding assistant updates; the tools a build may run wait.
+    controller.as_mut().finish_background_check(report(vec![
+        package("homebrew", "wget"),
+        package("npm", "typescript"),
+        package("codex", "codex"),
+    ]));
+    let confirmed = controller.rust().validated_confirmed.as_ref().unwrap();
+    assert!(matches!(
+        &confirmed.job,
+        Job::AutoUpgrade(operations, _)
+            if operations.iter().map(Operation::backend).collect::<Vec<_>>() == ["codex"]
+    ));
+    assert_eq!(controller.rust().auto_held, Some(Hold::Build));
+    assert_eq!(state(&controller)["waiting"], "build");
+    assert_eq!(
+        state(&controller)["waiting_for"],
+        json!(["Homebrew", "npm"])
+    );
+    // Only what a build never runs: nothing waits.
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = building;
+    controller
+        .as_mut()
+        .finish_background_check(report(vec![package("codex", "codex")]));
+    assert!(controller.rust().validated_confirmed.is_some());
+    assert_eq!(controller.rust().auto_held, None);
+    assert_eq!(state(&controller)["waiting"], Value::Null);
+    assert_eq!(state(&controller)["waiting_for"], json!([]));
+    // Only tools: they all wait.
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = building;
+    controller
+        .as_mut()
+        .finish_background_check(report(vec![package("homebrew", "wget")]));
+    assert!(controller.rust().validated_confirmed.is_none());
+    assert_eq!(state(&controller)["waiting_for"], json!(["Homebrew"]));
 }

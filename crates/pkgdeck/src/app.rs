@@ -449,6 +449,9 @@ impl App {
             self.next_check = now + CHECK_EVERY;
             self.check_updates(false);
         }
+        // Cleanup tasks that waited for a build run once it's over. The
+        // controller tries at most once a minute.
+        self.c().retry_waiting_cleans();
         if let Some(at) = self.restart_at {
             if now >= at {
                 if self.writing {

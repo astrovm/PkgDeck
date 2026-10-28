@@ -557,6 +557,8 @@ pub struct Activity {
     pub finished_at: Option<i64>,
     pub state: String,
     pub outcomes: Vec<Value>,
+    /// Why each step ended as it did, when PkgDeck said why.
+    pub reasons: Vec<Option<String>>,
     pub labels: Vec<String>,
     pub log: Value,
     pub output: Value,
@@ -576,22 +578,28 @@ impl Activity {
         }
         self.operations.iter().skip(1).map(operation_text).collect()
     }
-    fn outcome_counts(&self) -> (usize, usize, usize) {
-        let mut counts = (0, 0, 0);
+    /// Completed, failed, cancelled, waiting and skipped steps.
+    fn outcome_counts(&self) -> [usize; 5] {
+        let mut counts = [0; 5];
         for outcome in &self.outcomes {
             let text = outcome.to_string().to_lowercase();
-            if text.contains("fail") || text.contains("error") {
-                counts.1 += 1;
+            let at = if text.contains("fail") || text.contains("error") {
+                1
             } else if text.contains("cancel") {
-                counts.2 += 1;
+                2
+            } else if text.contains("wait") {
+                3
+            } else if text.contains("skip") {
+                4
             } else {
-                counts.0 += 1;
-            }
+                0
+            };
+            counts[at] += 1;
         }
         counts
     }
     pub fn result(&self) -> String {
-        let (done, failed, cancelled) = self.outcome_counts();
+        let [done, failed, cancelled, waiting, skipped] = self.outcome_counts();
         match self.outcomes.len() {
             0 => match self.state.as_str() {
                 "queued" => "Queued",
@@ -605,12 +613,16 @@ impl Activity {
             .to_owned(),
             1 if failed == 1 => "Failed".into(),
             1 if cancelled == 1 => "Cancelled".into(),
+            1 if waiting == 1 => "Waiting for a build".into(),
+            1 if skipped == 1 => "Skipped".into(),
             1 => "Completed".into(),
             total if done == total => format!("All {total} completed"),
             _ => [
                 (done, "completed"),
                 (failed, "failed"),
                 (cancelled, "cancelled"),
+                (waiting, "waiting"),
+                (skipped, "skipped"),
             ]
             .into_iter()
             .filter(|(count, _)| *count > 0)
@@ -620,9 +632,10 @@ impl Activity {
         }
     }
     pub fn tone(&self) -> Tone {
-        let (_, failed, _) = self.outcome_counts();
+        let [_, failed, _, waiting, skipped] = self.outcome_counts();
         match self.state.as_str() {
             _ if failed > 0 || self.state == "failed" => Tone::Warning,
+            _ if waiting + skipped > 0 => Tone::Muted,
             "cancelled" | "interrupted" | "queued" => Tone::Muted,
             "running" | "authorizing" => Tone::Accent,
             _ => Tone::Success,
@@ -630,6 +643,21 @@ impl Activity {
     }
     pub fn running(&self) -> bool {
         matches!(self.state.as_str(), "running" | "authorizing")
+    }
+    /// What the open card lists: why the first change didn't finish, when
+    /// PkgDeck said, then each other change with its reason beside it, as
+    /// in "Clean Gradle caches: Waits for a build…".
+    pub fn detail_lines(&self) -> Vec<String> {
+        let reason = |at: usize| self.reasons.get(at).cloned().flatten();
+        let others = self
+            .others()
+            .into_iter()
+            .enumerate()
+            .map(|(at, step)| match reason(at + 1) {
+                Some(reason) => format!("{step}: {reason}"),
+                None => step,
+            });
+        reason(0).into_iter().chain(others).collect()
     }
     /// Whether [`Self::log_text`] has anything, without building it.
     pub fn has_log(&self) -> bool {
@@ -819,6 +847,8 @@ pub struct BackgroundState {
     pub manual: Option<u64>,
     /// What automatic updates wait for, "battery", "metered" or "build".
     pub waiting: Option<String>,
+    /// The sources whose updates wait for builds, when `waiting` is "build".
+    pub waiting_for: Vec<String>,
     /// When automatic cleaning last ran, and what it did.
     pub cleaned_at: Option<u64>,
     pub cleaned: Option<AutoCleaned>,
@@ -858,13 +888,20 @@ fn tasks(count: u64) -> &'static str {
 }
 impl BackgroundState {
     /// What automatic updates wait for, as the Settings page says it.
-    pub fn waiting_text(&self) -> Option<&'static str> {
-        match self.waiting.as_deref()? {
-            "battery" => Some("Updates wait for the charger"),
-            "metered" => Some("Updates wait for an unmetered connection"),
-            "build" => Some("Updates wait for builds to finish"),
-            _ => None,
-        }
+    pub fn waiting_text(&self) -> Option<String> {
+        Some(match self.waiting.as_deref()? {
+            "battery" => "Updates wait for the charger".into(),
+            "metered" => "Updates wait for an unmetered connection".into(),
+            "build" => match self.waiting_for.as_slice() {
+                [] => "Updates wait for builds to finish".into(),
+                [one] => format!("{one} updates wait for builds to finish"),
+                [rest @ .., last] => format!(
+                    "{} and {last} updates wait for builds to finish",
+                    rest.join(", ")
+                ),
+            },
+            _ => return None,
+        })
     }
 }
 

@@ -369,9 +369,9 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
             if open > 0.0 && expanded {
                 ui.scope(|ui| {
                     ui.multiply_opacity(open);
-                    for other in &others {
+                    for line in entry.detail_lines() {
                         ui.label(
-                            egui::RichText::new(other)
+                            egui::RichText::new(line)
                                 .font(theme::font(13.0))
                                 .color(palette.ink),
                         );

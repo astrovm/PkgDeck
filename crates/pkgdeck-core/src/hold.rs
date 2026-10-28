@@ -6,7 +6,12 @@ use crate::{
     host::Host,
     process::{Cancellation, Limits},
 };
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    path::Path,
+    time::Duration,
+};
 
 /// Why automatic updates are waiting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,15 +150,61 @@ fn discharging(supplies: &Path) -> bool {
         })
 }
 
+/// What a running build builds with, which decides the caches and projects
+/// it may be reading or writing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Toolchain {
+    Rust,
+    Gradle,
+    Maven,
+    Go,
+    Dotnet,
+    /// Xcode and Swift.
+    Apple,
+    /// Compilers, linkers and build tools no other build started, which
+    /// could be building anything.
+    Native,
+}
+
+/// Whether automatic updates from `backend` wait while something is being
+/// built. Apps, container images and coding assistants can't change what a
+/// build runs; every other source can swap a compiler, an SDK or a library
+/// out from under it.
+pub fn waits_for_builds(backend: &str) -> bool {
+    !matches!(
+        backend,
+        "flatpak"
+            | "appimage"
+            | "docker"
+            | "podman"
+            | "oh-my-zsh"
+            | "codex"
+            | "claude"
+            | "grok"
+            | "opencode"
+            | "cursor"
+            | "copilot"
+            | "kiro"
+            | "antigravity"
+            | "amp"
+            | "droid"
+    )
+}
+
 /// Whether something is being built right now.
 pub(crate) fn building(host: &Host) -> bool {
+    !builds(host).is_empty()
+}
+/// The toolchains of everything being built right now.
+pub(crate) fn builds(host: &Host) -> BTreeSet<Toolchain> {
     host.resolve("ps")
         .ok()
         .flatten()
-        .is_some_and(|ps| listed_builds(host, &ps))
+        .map_or_else(BTreeSet::new, |ps| listed_builds(host, &ps))
 }
-fn listed_builds(host: &Host, ps: &Path) -> bool {
-    read(host, ps, &["-A", "-o", "args="]).is_some_and(|processes| builds_in(&processes))
+fn listed_builds(host: &Host, ps: &Path) -> BTreeSet<Toolchain> {
+    read(host, ps, &["-A", "-o", "pid=,ppid=,args="])
+        .map_or_else(BTreeSet::new, |processes| builds_in(&processes))
 }
 
 fn read(host: &Host, program: &Path, args: &[&str]) -> Option<String> {
@@ -168,90 +219,180 @@ fn read(host: &Host, program: &Path, args: &[&str]) -> Option<String> {
     (done.code == Some(0)).then(|| String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
-/// Programs that only run while something is being built.
+/// Programs that only run while something is being built, with their
+/// toolchain when they have one of their own.
+const TOOLCHAIN_BUILDERS: &[(&str, Toolchain)] = &[
+    ("cargo", Toolchain::Rust),
+    ("rustc", Toolchain::Rust),
+    ("clippy-driver", Toolchain::Rust),
+    ("xcodebuild", Toolchain::Apple),
+    ("swift-build", Toolchain::Apple),
+    ("swift-frontend", Toolchain::Apple),
+    ("swiftc", Toolchain::Apple),
+];
+/// Programs that only run while something is being built, for whatever
+/// started them. Started by nothing that names a toolchain, they count as
+/// [`Toolchain::Native`].
 const BUILDERS: &[&str] = &[
-    "cargo",
-    "rustc",
-    "clippy-driver",
-    "cc",
-    "c++",
-    "gcc",
-    "g++",
-    "clang",
-    "clang++",
-    "cc1",
-    "cc1plus",
-    "cc1obj",
-    "collect2",
-    "ld",
-    "ld64",
-    "ld.lld",
-    "ld.gold",
-    "lld",
-    "mold",
-    "make",
-    "gmake",
-    "ninja",
-    "cmake",
-    "xcodebuild",
-    "swift-build",
-    "swift-frontend",
-    "swiftc",
-    "javac",
-    "kotlinc",
-    "bazel",
+    "cc", "c++", "gcc", "g++", "clang", "clang++", "cc1", "cc1plus", "cc1obj", "collect2", "ld",
+    "ld64", "ld.lld", "ld.gold", "lld", "mold", "make", "gmake", "ninja", "cmake", "bazel",
     "bazelisk",
 ];
-/// Tools that build only with some subcommands.
-const BUILD_COMMANDS: &[(&str, &[&str])] = &[
-    ("go", &["build", "install", "test", "vet"]),
-    ("dotnet", &["build", "pack", "publish", "test"]),
+/// Java compilers, which Gradle and Maven builds both run.
+const JVM_BUILDERS: &[&str] = &["javac", "kotlinc"];
+/// Tools that build only with some subcommands. Their other commands still
+/// name the toolchain of what they start, like `go run` compiling with cgo.
+const BUILD_COMMANDS: &[(&str, Toolchain, &[&str])] = &[
+    ("go", Toolchain::Go, &["build", "install", "test", "vet"]),
+    (
+        "dotnet",
+        Toolchain::Dotnet,
+        &["build", "pack", "publish", "test"],
+    ),
 ];
 /// The main classes of Java build clients, which run for as long as a
-/// build does. Their daemons stay running between builds, so they don't
-/// count.
-const BUILD_CLASSES: &[&str] = &[
-    "org.gradle.wrapper.GradleWrapperMain",
-    "org.gradle.launcher.GradleMain",
-    "org.codehaus.plexus.classworlds.launcher.Launcher",
+/// build does.
+const BUILD_CLASSES: &[(&str, Toolchain)] = &[
+    ("org.gradle.wrapper.GradleWrapperMain", Toolchain::Gradle),
+    ("org.gradle.launcher.GradleMain", Toolchain::Gradle),
+    (
+        "org.codehaus.plexus.classworlds.launcher.Launcher",
+        Toolchain::Maven,
+    ),
 ];
+/// Build daemons wait between builds, so they aren't builds themselves.
+/// What they start is part of their toolchain's build.
+const DAEMON_CLASSES: &[(&str, Toolchain)] = &[(
+    "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+    Toolchain::Gradle,
+)];
 
-/// Whether a process list, one command line per line, has a build in it.
-fn builds_in(processes: &str) -> bool {
-    processes.lines().any(|line| {
-        let mut words = line.split_whitespace();
-        let program = words.next().unwrap_or_default();
-        let name = program.rsplit('/').next().unwrap_or_default();
-        let command = words.clone().next().unwrap_or_default();
-        BUILDERS.contains(&name)
-            || BUILD_COMMANDS
-                .iter()
-                .any(|(tool, commands)| *tool == name && commands.contains(&command))
-            || words.any(|word| BUILD_CLASSES.contains(&word))
-    })
+/// What one command line says: the toolchain it names, if any, and
+/// whether it builds, as `Some` of the toolchains it counts as when
+/// nothing that started it names one.
+fn read_process(args: &str) -> (Option<Toolchain>, Option<&'static [Toolchain]>) {
+    const NATIVE: &[Toolchain] = &[Toolchain::Native];
+    const JVM: &[Toolchain] = &[Toolchain::Gradle, Toolchain::Maven];
+    let mut words = args.split_whitespace();
+    let program = words.next().unwrap_or_default();
+    let name = program.rsplit('/').next().unwrap_or_default();
+    let command = words.clone().next().unwrap_or_default();
+    if let Some((_, toolchain)) = TOOLCHAIN_BUILDERS.iter().find(|(tool, _)| *tool == name) {
+        return (Some(*toolchain), Some(NATIVE));
+    }
+    if let Some((_, toolchain, commands)) = BUILD_COMMANDS.iter().find(|(tool, ..)| *tool == name) {
+        return (
+            Some(*toolchain),
+            commands.contains(&command).then_some(NATIVE),
+        );
+    }
+    if BUILDERS.contains(&name) {
+        return (None, Some(NATIVE));
+    }
+    if JVM_BUILDERS.contains(&name) {
+        return (None, Some(JVM));
+    }
+    let words: Vec<&str> = words.collect();
+    let class = |classes: &[(&str, Toolchain)]| {
+        classes
+            .iter()
+            .find(|(class, _)| words.contains(class))
+            .map(|(_, toolchain)| *toolchain)
+    };
+    match (class(BUILD_CLASSES), class(DAEMON_CLASSES)) {
+        (Some(toolchain), _) => (Some(toolchain), Some(NATIVE)),
+        (None, daemon) => (daemon, None),
+    }
+}
+
+/// The toolchains a process list builds with. Each line is a process ID,
+/// its parent's, and its command line. A build tool counts for the nearest
+/// process up its tree that names a toolchain, itself included: the linker
+/// `rustc` starts is part of a Rust build.
+fn builds_in(processes: &str) -> BTreeSet<Toolchain> {
+    let mut parents = BTreeMap::new();
+    let mut named = BTreeMap::new();
+    let mut building = vec![];
+    for line in processes.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
+            continue;
+        };
+        let args = fields.collect::<Vec<_>>().join(" ");
+        let (toolchain, builds) = read_process(&args);
+        parents.insert(pid, ppid);
+        if let Some(toolchain) = toolchain {
+            named.insert(pid, toolchain);
+        }
+        if let Some(otherwise) = builds {
+            building.push((pid, otherwise));
+        }
+    }
+    let mut toolchains = BTreeSet::new();
+    for (pid, otherwise) in building {
+        // A list taken while processes come and go can loop; a tree this
+        // deep is one.
+        let named = std::iter::successors(Some(pid), |pid| parents.get(pid).copied())
+            .take(64)
+            .find_map(|pid| named.get(&pid).copied());
+        match named {
+            Some(toolchain) => {
+                toolchains.insert(toolchain);
+            }
+            None => toolchains.extend(otherwise),
+        }
+    }
+    toolchains
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host::Runtime;
-    use std::{collections::BTreeMap, fs};
+    use std::fs;
+    use Toolchain::*;
+
+    /// Whether one command line, started by `launchd`, is a build.
+    fn builds_alone(line: &str) -> BTreeSet<Toolchain> {
+        builds_in(&format!("1 0 /sbin/launchd\n20 1 {line}\n"))
+    }
 
     #[test]
     fn builds_are_compilers_build_tools_and_java_build_clients() {
-        for line in [
-            "/Users/me/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release",
-            "rustc --crate-name pkgdeck --edition=2021 src/lib.rs",
-            "/usr/lib/gcc/x86_64-linux-gnu/13/cc1 -quiet main.c",
-            "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme App",
-            "ninja -C build",
-            "go test ./...",
-            "/usr/local/go/bin/go build -o app .",
-            "dotnet build App.sln",
-            "/usr/bin/java -Xmx64m -classpath gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain assembleDebug",
+        for (line, toolchain) in [
+            (
+                "/Users/me/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --release",
+                Rust,
+            ),
+            ("rustc --crate-name pkgdeck --edition=2021 src/lib.rs", Rust),
+            ("/usr/lib/gcc/x86_64-linux-gnu/13/cc1 -quiet main.c", Native),
+            (
+                "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme App",
+                Apple,
+            ),
+            ("ninja -C build", Native),
+            ("go test ./...", Go),
+            ("/usr/local/go/bin/go build -o app .", Go),
+            ("dotnet build App.sln", Dotnet),
+            (
+                "/usr/bin/java -Xmx64m -classpath gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain assembleDebug",
+                Gradle,
+            ),
+            (
+                "/usr/bin/java -classpath plexus-classworlds.jar org.codehaus.plexus.classworlds.launcher.Launcher package",
+                Maven,
+            ),
         ] {
-            assert!(builds_in(&format!("/sbin/launchd\n{line}\n")), "{line}");
+            assert_eq!(builds_alone(line), BTreeSet::from([toolchain]), "{line}");
         }
+        // A Java compiler nothing else explains could be either JVM build's.
+        assert_eq!(
+            builds_alone("javac Main.java"),
+            BTreeSet::from([Gradle, Maven])
+        );
         for line in [
             "",
             "[kworker/u8:2-events]",
@@ -267,8 +408,65 @@ mod tests {
             "npm test",
             "docker build .",
         ] {
-            assert!(!builds_in(line), "{line}");
+            assert_eq!(builds_alone(line), BTreeSet::new(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_build_tool_belongs_to_the_build_that_started_it() {
+        let tree = |lines: &[&str]| builds_in(&lines.join("\n"));
+        // rustc links with cc, a build script runs make: all one Rust build.
+        assert_eq!(
+            tree(&[
+                "1 0 /sbin/init",
+                "10 1 bash",
+                "11 10 cargo build",
+                "12 11 rustc --crate-name app",
+                "13 12 cc -o app main.o",
+                "14 11 target/debug/build/zstd-sys/build-script-build",
+                "15 14 make -j4",
+            ]),
+            BTreeSet::from([Rust])
+        );
+        // What a Gradle daemon compiles is Gradle's, though the daemon
+        // between builds is no build at all.
+        assert_eq!(
+            tree(&[
+                "1 0 /sbin/init",
+                "30 1 java org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.8",
+                "31 30 cmake --build app/.cxx",
+                "32 30 javac Main.java",
+            ]),
+            BTreeSet::from([Gradle])
+        );
+        assert_eq!(
+            tree(&[
+                "1 0 /sbin/init",
+                "30 1 java org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.8"
+            ]),
+            BTreeSet::new()
+        );
+        // `go run` doesn't build, but the C compiler cgo starts for it does.
+        assert_eq!(
+            tree(&["1 0 /sbin/init", "40 1 go run .", "41 40 gcc -c x.c"]),
+            BTreeSet::from([Go])
+        );
+        // Two builds at once count both; a compiler alone counts as native.
+        assert_eq!(
+            tree(&[
+                "1 0 /sbin/init",
+                "11 1 cargo build",
+                "50 1 /usr/bin/make all",
+            ]),
+            BTreeSet::from([Rust, Native])
+        );
+        // Lines that aren't processes are skipped, and a loop in a list
+        // taken while processes change still ends.
+        assert_eq!(
+            tree(&["PID PPID COMMAND", "x 1 cargo", "60 61 cc a.c", "61 60 sh"]),
+            BTreeSet::from([Native])
+        );
+        assert_eq!(tree(&["7"]), BTreeSet::new());
     }
 
     #[test]
@@ -402,10 +600,16 @@ mod tests {
         assert!(busctl_metered(&host, &hotspot));
         assert!(!busctl_metered(&host, &home));
         assert!(!busctl_metered(&host, &broken));
-        let build = tool(&dir, "build", "echo /sbin/launchd; echo cargo build");
-        let idle = tool(&dir, "idle", "echo /sbin/launchd");
-        assert!(listed_builds(&host, &build));
-        assert!(!listed_builds(&host, &idle));
+        // ps gets asked for each process's parent too.
+        let build = tool(
+            &dir,
+            "build",
+            "[ \"$*\" = '-A -o pid=,ppid=,args=' ] && echo '1 0 /sbin/launchd' && echo '9 1 cargo build'",
+        );
+        let idle = tool(&dir, "idle", "echo '1 0 /sbin/launchd'");
+        assert_eq!(listed_builds(&host, &build), BTreeSet::from([Rust]));
+        assert_eq!(listed_builds(&host, &idle), BTreeSet::new());
+        assert_eq!(listed_builds(&host, &broken), BTreeSet::new());
         // A long process list is read whole.
         let long = tool(&dir, "long", "head -c 3000000 /dev/zero | tr '\\0' a");
         assert_eq!(
@@ -413,6 +617,24 @@ mod tests {
             Some(3_000_000)
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_sources_a_build_may_run_wait_for_builds() {
+        for backend in ["apt", "snap", "brew", "cargo", "npm", "rustup", "fwupd"] {
+            assert!(waits_for_builds(backend), "{backend}");
+        }
+        for backend in [
+            "flatpak",
+            "appimage",
+            "podman",
+            "docker",
+            "oh-my-zsh",
+            "codex",
+            "claude",
+        ] {
+            assert!(!waits_for_builds(backend), "{backend}");
+        }
     }
 
     #[test]

@@ -213,6 +213,17 @@ pub(super) fn cask_needed_password(error: &EngineError, backend: Option<&str>) -
                 && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo")
     )
 }
+/// Why a change didn't finish, as Activity keeps it: [`plain_error`]
+/// without anything a tool printed, which Activity never stores.
+pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
+    use pkgdeck_core::process::ExecutionError as E;
+    let tool = source_display_name(backend);
+    match error {
+        EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
+        EngineError::InvalidResponse { .. } => format!("{tool} reported a problem."),
+        error => plain_error(error, Some(backend), false),
+    }
+}
 /// A plain explanation of an engine error, naming the tool when known.
 pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;

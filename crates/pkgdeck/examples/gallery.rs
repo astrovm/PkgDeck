@@ -708,6 +708,35 @@ fn main() {
             {"id": 1, "operations": [{"clean": {"backend": "projects", "key": "worktrees:/fake/project"}}], "labels": ["Clean project worktrees"], "started_at": model::now() - 120, "finished_at": model::now() - 100, "state": "finished", "outcomes": ["failed"]}
         ])).unwrap();
     });
+    // Automatic cleaning during a build: what waits says why.
+    render("build-wait-activity", [1180.0, 780.0], true, |app| {
+        offline(app, Page::Installed);
+        app.drawer_open = true;
+        app.settings.reduce_motion = true;
+        app.expanded.insert(1);
+        app.activity = serde_json::from_value(json!([
+            {"id": 1, "frontend": "auto", "operations": [
+                {"clean": {"backend": "dev-caches", "key": "bun"}},
+                {"clean": {"backend": "dev-caches", "key": "gradle"}},
+                {"clean": {"backend": "podman", "key": "dangling-images"}}
+            ], "labels": ["Clean Bun cache", "Clean Gradle caches", "Clean Dangling Podman images"],
+            "started_at": model::now() - 300, "finished_at": model::now() - 290, "state": "finished",
+            "outcomes": ["finished", "waiting", "finished"],
+            "reasons": [null, "Waits for a build that uses it to finish, then cleans on its own.", null]}
+        ])).unwrap();
+    });
+    render("build-wait-settings", [1180.0, 1100.0], true, |app| {
+        offline(app, Page::Settings);
+        app.ui.settings_tab = pkgdeck::ui::SettingsTab::Updates;
+        app.settings.background_mode = true;
+        app.settings.auto_update = true;
+        app.c().set_background_state(
+            json!({"last_check": model::now() - 600, "available": 3, "notify": false, "waiting": "build", "waiting_for": ["APT", "Cargo"]})
+                .to_string()
+                .into(),
+        );
+        app.react();
+    });
     // A source that couldn't be checked: one button beside Activity.
     render("source-check", [1180.0, 500.0], true, |app| {
         offline(app, Page::Installed);

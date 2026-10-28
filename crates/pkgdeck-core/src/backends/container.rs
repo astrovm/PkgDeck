@@ -617,8 +617,9 @@ impl<T: Transport> Backend for Container<T> {
     fn id(&self) -> &str {
         self.kind.id()
     }
-    /// A container that started, or an image or volume that came into use,
-    /// while the list was reviewed leaves the rest still safe to remove.
+    /// A container that started, or an image or volume that came into use
+    /// or was removed, while the list was reviewed leaves the rest still
+    /// safe to remove.
     fn cleanup_still_reviewed(&self, reviewed: &CleanupItem, current: &CleanupItem) -> bool {
         if reviewed == current {
             return true;
@@ -634,7 +635,7 @@ impl<T: Transport> Backend for Container<T> {
         }
         matches!(
             current.id.key.as_str(),
-            "stopped-containers" | "unused-images" | "unused-volumes"
+            "dangling-images" | "stopped-containers" | "unused-images" | "unused-volumes"
         ) && said(&reviewed.preview).is_some()
             && said(&reviewed.preview) == said(&current.preview)
             && only_fewer(reviewed, current, listed)
@@ -1796,7 +1797,7 @@ mod tests {
         let other = CleanupItem {
             id: CleanupId {
                 backend: "podman".into(),
-                key: "dangling-images".into(),
+                key: "build-cache".into(),
             },
             ..current.clone()
         };
@@ -1805,6 +1806,19 @@ mod tests {
             ..reviewed.clone()
         };
         assert!(!backend.cleanup_still_reviewed(&other_reviewed, &other));
+        // Dangling images removed by something else leave the rest.
+        let dangling = |preview: &str| CleanupItem {
+            id: CleanupId {
+                backend: "podman".into(),
+                key: "dangling-images".into(),
+            },
+            preview: preview.into(),
+            ..current.clone()
+        };
+        assert!(backend.cleanup_still_reviewed(
+            &dangling("Removes these untagged images.\naaa\nbbb"),
+            &dangling("Removes these untagged images.\nbbb")
+        ));
         // A preview with no list can't be told apart.
         let unlisted = CleanupItem {
             preview: "Removes these images.".into(),

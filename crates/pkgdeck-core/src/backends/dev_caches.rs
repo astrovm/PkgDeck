@@ -2,9 +2,9 @@
 //! own: Cargo's downloaded crates, Go's build and module caches, Gradle,
 //! Maven, Yarn, Bun, sccache, CocoaPods and Xcode's build data. None of
 //! these tools has a command that clears them, so PkgDeck empties the
-//! folders itself, and never while something is being built.
+//! folders itself, and never while a build that uses one is running.
 use super::*;
-use crate::{disk, host::Host};
+use crate::{disk, hold::Toolchain, host::Host};
 use std::path::Path;
 
 const CAPABILITIES: &[Capability] = &[Capability::Clean];
@@ -23,6 +23,8 @@ struct Cache {
     /// What comes back, and how.
     summary: &'static str,
     folders: Vec<PathBuf>,
+    /// The builds that read or write it, so emptying it waits for them.
+    builds: &'static [Toolchain],
 }
 
 impl DevCaches {
@@ -56,6 +58,7 @@ impl DevCaches {
                 kind: CleanupKind::PackageCache,
                 summary: "Cargo downloads crates again when a build needs them",
                 folders: vec![cargo.join("registry"), cargo.join("git")],
+                builds: &[Toolchain::Rust],
             },
             Cache {
                 key: "go-build",
@@ -63,6 +66,7 @@ impl DevCaches {
                 kind: CleanupKind::PackageCache,
                 summary: "Go builds take longer until it fills again",
                 folders: vec![var("GOCACHE").unwrap_or_else(|| caches.join("go-build"))],
+                builds: &[Toolchain::Go],
             },
             Cache {
                 key: "go-modules",
@@ -70,6 +74,7 @@ impl DevCaches {
                 kind: CleanupKind::PackageCache,
                 summary: "Go downloads modules again when a build needs them",
                 folders: vec![var("GOMODCACHE").unwrap_or_else(|| gopath.join("pkg/mod"))],
+                builds: &[Toolchain::Go],
             },
             Cache {
                 key: "gradle",
@@ -77,6 +82,7 @@ impl DevCaches {
                 kind: CleanupKind::PackageCache,
                 summary: "Gradle downloads dependencies and versions of itself again when a build needs them",
                 folders: vec![gradle.join("caches"), gradle.join("wrapper/dists")],
+                builds: &[Toolchain::Gradle],
             },
             Cache {
                 key: "maven",
@@ -84,6 +90,7 @@ impl DevCaches {
                 kind: CleanupKind::PackageCache,
                 summary: "Maven downloads dependencies again. What you put there with mvn install comes back by building it again",
                 folders: vec![home.join(".m2/repository")],
+                builds: &[Toolchain::Maven],
             },
             Cache {
                 key: "yarn",
@@ -95,6 +102,8 @@ impl DevCaches {
                         .unwrap_or_else(|| caches.join(if mac { "Yarn" } else { "yarn" })),
                     home.join(".yarn/berry/cache"),
                 ],
+                // Installs aren't builds, so nothing being built uses it.
+                builds: &[],
             },
             Cache {
                 key: "bun",
@@ -104,6 +113,7 @@ impl DevCaches {
                 folders: vec![var("BUN_INSTALL")
                     .unwrap_or_else(|| home.join(".bun"))
                     .join("install/cache")],
+                builds: &[],
             },
             Cache {
                 key: "sccache",
@@ -113,6 +123,7 @@ impl DevCaches {
                 folders: vec![var("SCCACHE_DIR").unwrap_or_else(|| {
                     caches.join(if mac { "Mozilla.sccache" } else { "sccache" })
                 })],
+                builds: &[Toolchain::Rust, Toolchain::Native],
             },
         ];
         if mac {
@@ -124,6 +135,7 @@ impl DevCaches {
                     kind: CleanupKind::PackageCache,
                     summary: "CocoaPods downloads pods again when an install needs them",
                     folders: vec![caches.join("CocoaPods")],
+                    builds: &[Toolchain::Apple],
                 },
                 Cache {
                     key: "xcode-derived-data",
@@ -131,6 +143,7 @@ impl DevCaches {
                     kind: CleanupKind::BuildFiles,
                     summary: "Xcode builds each project from scratch the next time",
                     folders: vec![xcode.join("DerivedData")],
+                    builds: &[Toolchain::Apple],
                 },
                 Cache {
                     key: "xcode-device-support",
@@ -141,6 +154,7 @@ impl DevCaches {
                         .iter()
                         .map(|os| xcode.join(format!("{os} DeviceSupport")))
                         .collect(),
+                    builds: &[Toolchain::Apple],
                 },
             ]);
         }
@@ -192,12 +206,21 @@ pub(super) fn shown(host: &Host, path: &Path) -> String {
     }
 }
 
-/// Refuse to delete what a running build may be reading or writing.
-pub(super) fn not_while_building(host: &Host) -> Result<(), EngineError> {
-    if crate::hold::building(host) {
-        return Err(EngineError::Execution(ExecutionError::Disabled(
-            "Something is being built. Clean again when it finishes.".into(),
-        )));
+/// Refuse to delete what a running build may be reading or writing: one
+/// with a toolchain in `uses`.
+pub(super) fn not_while_building(
+    host: &Host,
+    backend: &str,
+    uses: &[Toolchain],
+) -> Result<(), EngineError> {
+    if crate::hold::builds(host)
+        .iter()
+        .any(|toolchain| uses.contains(toolchain))
+    {
+        return Err(EngineError::Refused {
+            backend: backend.into(),
+            refusal: Refusal::Building,
+        });
     }
     Ok(())
 }
@@ -259,7 +282,7 @@ impl Backend for DevCaches {
             .into_iter()
             .find(|cache| id.backend == "dev-caches" && cache.key == id.key)
             .ok_or(EngineError::NotFound)?;
-        not_while_building(&self.host)?;
+        not_while_building(&self.host, self.id(), cache.builds)?;
         progress(Progress::Message(format!("Emptying the {}…", cache.title)));
         for folder in &cache.folders {
             if cancel.requested() {
@@ -500,6 +523,49 @@ mod tests {
         assert!(
             root_user || result.is_err_and(|error| error.to_string().contains("~/.m2/repository")),
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_build_holds_only_the_caches_it_uses() {
+        let root = home("building");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        // A Gradle build, and the compiler it started.
+        fs::write(
+            bin.join("ps"),
+            "#!/bin/sh\nprintf '10 1 java org.gradle.launcher.GradleMain build\\n11 10 javac Main.java\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            bin.join("ps"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        fill(&root.join(".gradle/caches"), 2 * 1024 * 1024);
+        fill(&root.join(".bun/install/cache"), 2 * 1024 * 1024);
+        fill(&root.join(".cargo/registry"), 2 * 1024 * 1024);
+        let mut backend = caches_in(&root, &[("PATH", &bin)]);
+        let cancel = Cancellation::default();
+        let clean = |backend: &mut DevCaches, key: &str| {
+            let id = CleanupId {
+                backend: "dev-caches".into(),
+                key: key.into(),
+            };
+            backend.execute(&Operation::Clean(id), &cancel, &mut |_| {})
+        };
+        assert!(matches!(
+            clean(&mut backend, "gradle"),
+            Err(EngineError::Refused {
+                refusal: Refusal::Building,
+                ..
+            })
+        ));
+        assert!(root.join(".gradle/caches/blob").exists());
+        clean(&mut backend, "bun").unwrap();
+        clean(&mut backend, "cargo").unwrap();
+        assert!(!root.join(".bun/install/cache/blob").exists());
+        assert!(!root.join(".cargo/registry/blob").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -910,16 +910,25 @@ fn one_button_refreshes_the_sources_and_checks_for_updates() {
 
 #[test]
 fn settings_say_what_automatic_updates_wait_for() {
-    for (waiting, text) in [
-        ("battery", "Updates wait for the charger"),
-        ("metered", "Updates wait for an unmetered connection"),
-        ("build", "Updates wait for builds to finish"),
+    for (waiting, waiting_for, text) in [
+        ("battery", json!([]), "Updates wait for the charger"),
+        (
+            "metered",
+            json!([]),
+            "Updates wait for an unmetered connection",
+        ),
+        ("build", json!([]), "Updates wait for builds to finish"),
+        (
+            "build",
+            json!(["APT", "Cargo", "npm"]),
+            "APT, Cargo and npm updates wait for builds to finish",
+        ),
     ] {
         let mut app = app();
         app.settings.background_mode = true;
         app.settings.auto_update = true;
         app.c().set_background_state(
-            json!({"last_check": 100, "available": 1, "notify": false, "waiting": waiting})
+            json!({"last_check": 100, "available": 1, "notify": false, "waiting": waiting, "waiting_for": waiting_for})
                 .to_string()
                 .into(),
         );
@@ -1248,6 +1257,35 @@ fn the_progress_card_reads_out_every_running_step() {
         .query_by_label("Updating GNOME 46 and 1 more")
         .is_some());
     assert!(harness.query_by_label("2 of 3").is_some());
+}
+
+#[test]
+fn activity_says_why_a_cleanup_waits_or_was_skipped() {
+    let mut app = app();
+    app.settings.reduce_motion = true;
+    app.activity = serde_json::from_value(json!([{
+        "id": 9, "frontend": "auto", "started_at": 1, "finished_at": 2, "state": "finished",
+        "operations": [
+            {"clean": {"backend": "dev-caches", "key": "cargo"}},
+            {"clean": {"backend": "podman", "key": "dangling-images"}}
+        ],
+        "labels": ["Clean Cargo downloads", "Clean dangling Podman images"],
+        "outcomes": ["waiting", "skipped"],
+        "reasons": ["Waits for a build that uses it to finish, then cleans on its own.", "It changed."]
+    }]))
+    .unwrap();
+    app.drawer_open = true;
+    app.expanded.insert(9);
+    let mut harness = harness(app);
+    harness.run_steps(6);
+    assert!(harness.query_by_label("1 waiting, 1 skipped").is_some());
+    assert!(harness.query_by_label_contains("Automatic").is_some());
+    assert!(harness
+        .query_by_label("Waits for a build that uses it to finish, then cleans on its own.")
+        .is_some());
+    assert!(harness
+        .query_by_label("Clean dangling Podman images: It changed.")
+        .is_some());
 }
 
 #[test]
