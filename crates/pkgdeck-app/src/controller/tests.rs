@@ -13304,6 +13304,13 @@ fn a_retry_settles_only_the_tasks_it_ran() {
         .as_mut()
         .apply(Ok(Payload::RetriedCleans(Batch::default())));
     assert_eq!(controller.rust().waiting_cleans.len(), 2);
+    // A task Clean no longer lists has no review to wait with.
+    controller.as_mut().wait_for_builds(
+        &Job::Write(Operation::Clean(item("gone").id), None),
+        &[(Outcome::Waiting, Some(WAITS_FOR_BUILD.into()))],
+        Some(run),
+    );
+    assert_eq!(controller.rust().waiting_cleans.len(), 2);
     // A failed retry keeps them waiting too.
     controller.as_mut().rust_mut().background = true;
     controller.as_mut().rust_mut().worker = Some(fake_worker(
