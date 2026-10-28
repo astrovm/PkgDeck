@@ -80,6 +80,34 @@ for setting in local CI=true PKGDECK_CONTAINER_CPUS=0 'PKGDECK_CONTAINER_CPUS=3 
     esac
     [[ $(<"$work/limits") == "$expected" ]] || { echo "$setting: got '$(<"$work/limits")', expected '$expected'"; exit 1; }
 done
+# Releases need the pull request that brought a commit to main, directly or
+# as part of a stack, found here through a synthetic GitHub API.
+cat >"$work/bin/gh" <<'EOF'
+#!/bin/bash
+pull() { printf '[{"number":%s,"merged_at":%s,"merge_commit_sha":"%s","base":{"ref":"%s"},"head":{"sha":"head-%s","repo":{"full_name":"o/r"}}}]' "$@" "$3"; }
+below() { printf '[{"merged_at":%s,"base":{"ref":"%s"}}]' "$@"; }
+case "$*" in
+    "api repos/o/r/commits/direct/pulls") pull 1 '"t"' direct main ;;
+    "api repos/o/r/commits/stacked/pulls") pull 2 '"t"' stacked middle ;;
+    "api repos/o/r/commits/stray/pulls") pull 3 '"t"' stray abandoned ;;
+    "api repos/o/r/commits/looped/pulls") pull 4 '"t"' looped loop ;;
+    "api repos/o/r/commits/unmerged/pulls") pull 5 null unmerged main ;;
+    *head=o:middle*) below '"t"' bottom ;;
+    *head=o:bottom*) below '"t"' main ;;
+    *head=o:abandoned*) below null main ;;
+    *head=o:loop*) below '"t"' loop ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$work/bin/gh"
+for sha in direct stacked stray looped unmerged; do
+    expected=1
+    [[ $sha == direct || $sha == stacked ]] && expected=0
+    expect_code "$expected" env PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r scripts/merged-pr.sh "$sha"
+done
+# The stacked pull request is the one named, not the one below it.
+expect_code 0 env PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r scripts/merged-pr.sh stacked
+grep -Fxq $'2\thead-stacked\to/r' "$work/output"
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
 echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'
