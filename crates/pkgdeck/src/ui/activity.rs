@@ -56,6 +56,10 @@ pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
         .constrain(false)
         .show(&ctx, |ui| {
             let (panel, _) = ui.allocate_exact_size(rect.size(), Sense::click());
+            // What's past the window's edge stays out of sight, over the
+            // frame some styles draw too, and it takes the window's corners.
+            ui.set_clip_rect(ui.clip_rect().intersect(window));
+            let seen = panel.intersect(window);
             // Its shadow would reach into the window from out of sight.
             if !warm_up {
                 ui.painter().add(
@@ -65,11 +69,11 @@ pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
                         spread: 0,
                         color: Color32::from_black_alpha(if palette.dark { 120 } else { 40 }),
                     }
-                    .as_shape(panel, CornerRadius::ZERO),
+                    .as_shape(seen, CornerRadius::ZERO),
                 );
             }
             ui.painter()
-                .rect_filled(panel, CornerRadius::ZERO, palette.surface);
+                .rect_filled(seen, super::frame::fit(ui.ctx(), seen), palette.surface);
             ui.painter().line_segment(
                 [panel.left_top(), panel.left_bottom()],
                 Stroke::new(1.0, palette.line),
@@ -493,8 +497,9 @@ mod tests {
         app
     }
 
-    /// The drawer over a 900 × 600 window, at 60 frames a second.
-    fn harness(app: App, reduce_motion: bool) -> Harness<'static, (bool, App)> {
+    /// The drawer at 60 frames a second, in a 900 × 600 surface whose
+    /// window is `inset` in from its edges, as inside a drawn frame.
+    fn harness(app: App, reduce_motion: bool, inset: f32) -> Harness<'static, (bool, App)> {
         let mut harness = Harness::builder()
             .with_size(vec2(900.0, 600.0))
             .with_step_dt(1.0 / 60.0)
@@ -508,7 +513,7 @@ mod tests {
                         *ready = true;
                         return;
                     }
-                    let window = ui.ctx().content_rect();
+                    let window = ui.ctx().content_rect().shrink(inset);
                     drawer(app, ui, window);
                 },
                 (false, app),
@@ -533,7 +538,7 @@ mod tests {
     fn only_the_cards_in_view_are_laid_out() {
         let mut app = app(100);
         app.drawer_open = true;
-        let mut harness = harness(app, true);
+        let mut harness = harness(app, true, 0.0);
         // Newest first: the top of the list, and nothing far below it.
         let shown = laid_out(&harness);
         assert!(shown.contains_key(&100) && !shown.contains_key(&1));
@@ -555,29 +560,49 @@ mod tests {
         assert!(shown.len() < 40, "{} cards laid out", shown.len());
     }
 
+    /// Whether all that `harness` painted last frame is inside `window`.
+    fn painted_inside(harness: &Harness<'_, (bool, App)>, window: Rect) -> bool {
+        harness.output().shapes.iter().all(|clipped| {
+            let seen = clipped
+                .clip_rect
+                .intersect(clipped.shape.visual_bounding_rect());
+            !seen.is_positive() || window.expand(0.5).contains_rect(seen)
+        })
+    }
+
     #[test]
     fn it_is_laid_out_unseen_first_then_slides_in_from_past_the_edge() {
+        // A window inside a 10-point frame, like the older styles draw.
+        let window = Rect::from_min_max(pos2(10.0, 10.0), pos2(890.0, 590.0));
         // Nothing to show yet: nothing is laid out.
-        let mut harness = harness(app(0), false);
+        let mut harness = harness(app(0), false, 10.0);
         assert!(!harness.state().1.ui.activity_warm);
         // Once Activity is read, the closed drawer is laid out out of sight.
         harness.state_mut().1.activity = app(3).activity;
-        harness.run_steps(2);
+        harness.step();
+        assert!(painted_inside(&harness, Rect::NOTHING));
+        harness.step();
         assert!(harness.state().1.ui.activity_warm);
         assert_eq!(laid_out(&harness).len(), 3);
-        assert!(panel(&harness).left() >= 900.0, "{:?}", panel(&harness));
+        assert!(
+            panel(&harness).left() >= window.right(),
+            "{:?}",
+            panel(&harness)
+        );
         // Opening, it comes in from past the window's edge instead of
-        // showing whole at once, and stops against it.
+        // showing whole at once, and nothing of it shows over the frame.
         harness.state_mut().1.drawer_open = true;
         harness.step();
         let left = panel(&harness).left();
-        assert!(left > 420.0 && left < 900.0, "{left}");
+        assert!(left > 410.0 && left < window.right(), "{left}");
+        assert!(painted_inside(&harness, window));
         harness.run_steps(30);
-        assert_eq!(panel(&harness).left(), 420.0);
+        assert_eq!(panel(&harness).left(), 410.0);
         // Closing, it slides back out the same way.
         harness.state_mut().1.drawer_open = false;
         harness.run_steps(2);
         let left = panel(&harness).left();
-        assert!(left > 420.0 && left < 900.0, "{left}");
+        assert!(left > 410.0 && left < window.right(), "{left}");
+        assert!(painted_inside(&harness, window));
     }
 }
