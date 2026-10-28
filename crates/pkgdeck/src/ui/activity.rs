@@ -376,15 +376,11 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                                 .color(palette.ink),
                         );
                     }
-                    if let Some(finished) = entry.finished_at {
+                    if let Some(timing) = entry.timing(model::now()) {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Finished {}, took {}",
-                                model::time_or_date(finished, model::now()),
-                                model::duration(finished - entry.started_at)
-                            ))
-                            .font(theme::font(12.5))
-                            .color(palette.muted),
+                            egui::RichText::new(timing)
+                                .font(theme::font(12.5))
+                                .color(palette.muted),
                         );
                     }
                     let log = entry.log_text();

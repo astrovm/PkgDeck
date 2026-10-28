@@ -148,12 +148,14 @@ impl<'a> Session<'a> {
                     return;
                 }
                 let error = result.as_ref().err().map(presentation::error_message);
+                let skipped = crate::cli::skipped(&result);
                 let deferred = result
                     .as_ref()
                     .is_ok_and(|outcome| outcome.cancellation_deferred);
                 self.live.line(&presentation::result_line(
                     &operation,
                     error.as_deref(),
+                    skipped,
                     deferred,
                     self.color,
                 ));

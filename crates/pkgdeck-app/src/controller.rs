@@ -1682,6 +1682,11 @@ fn read_activity(path: &std::path::Path) -> std::io::Result<Vec<pkgdeck_core::ac
 /// Activity entries as stored, plus "labels": one line per operation in
 /// people's words ("Install Firefox (Flatpak)"), in operation order.
 fn activity_rows(entries: &[pkgdeck_core::activity::Entry], names: &Names) -> QString {
+    // What Activity kept names a task that's gone, like a cleaned folder.
+    let mut names = names.clone();
+    for entry in entries {
+        names.keep(&entry.operations, &entry.names);
+    }
     let rows: Vec<Value> = entries
         .iter()
         .map(|entry| {
@@ -1689,7 +1694,7 @@ fn activity_rows(entries: &[pkgdeck_core::activity::Entry], names: &Names) -> QS
             row["labels"] = json!(entry
                 .operations
                 .iter()
-                .map(|operation| operation_title_named(operation, names))
+                .map(|operation| operation_title_named(operation, &names))
                 .collect::<Vec<_>>());
             row
         })
@@ -2654,6 +2659,36 @@ impl Names {
     fn extend(&mut self, other: Names) {
         self.packages.extend(other.packages);
         self.cleanup.extend(other.cleanup);
+    }
+    /// The name of what each change targets, as Activity keeps them.
+    fn of(&self, operations: &[Operation]) -> Vec<Option<String>> {
+        operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Clean(id) => self.cleanup.get(id).cloned(),
+                operation => {
+                    package_target(operation).and_then(|id| self.packages.get(id).cloned())
+                }
+            })
+            .collect()
+    }
+    /// Learn the names Activity kept, leaving the ones known now.
+    fn keep(&mut self, operations: &[Operation], names: &[Option<String>]) {
+        for (operation, name) in operations.iter().zip(names) {
+            let Some(name) = name.clone() else {
+                continue;
+            };
+            match operation {
+                Operation::Clean(id) => {
+                    self.cleanup.entry(id.clone()).or_insert(name);
+                }
+                operation => {
+                    if let Some(id) = package_target(operation) {
+                        self.packages.entry(id.clone()).or_insert(name);
+                    }
+                }
+            }
+        }
     }
 }
 impl std::ops::Deref for Names {
@@ -4534,15 +4569,19 @@ impl ffi::PackageController {
             .iter()
             .map(|(item, ..)| Operation::Clean(item.id.clone()))
             .collect();
+        let titles = tasks
+            .iter()
+            .map(|(item, ..)| Some(item.title.clone()))
+            .collect();
         let ended = tasks
             .iter()
             .map(|(_, outcome, kept)| (*outcome, kept.clone()))
             .collect();
-        let activity = self
-            .rust()
-            .activity_store
-            .clone()
-            .and_then(|store| store.record("auto", operations, started_at, ended).ok());
+        let activity = self.rust().activity_store.clone().and_then(|store| {
+            store
+                .record("auto", operations, titles, started_at, ended)
+                .ok()
+        });
         let waiting = tasks
             .into_iter()
             .enumerate()
@@ -4772,12 +4811,13 @@ impl ffi::PackageController {
             .collect();
         self.as_mut().rust_mut().cask_versions = versions;
         let names = self.rust().names_for(&operations);
+        let saved = names.of(&operations);
         self.as_mut().rust_mut().names.extend(names);
-        let activity_id = self
-            .rust()
-            .activity_store
-            .clone()
-            .and_then(|store| store.begin("auto", operations.clone(), State::Queued).ok());
+        let activity_id = self.rust().activity_store.clone().and_then(|store| {
+            store
+                .begin("auto", operations.clone(), saved, State::Queued)
+                .ok()
+        });
         self.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
             job: Job::AutoUpgrade(operations, self.rust().allow_removals),
             activity_id,
@@ -5213,6 +5253,7 @@ impl ffi::PackageController {
         }
         let operations = job.operations();
         let names = self.rust().names_for(&operations);
+        let saved = names.of(&operations);
         if self.rust().names.len() > 256 {
             self.as_mut().rust_mut().names.clear();
         }
@@ -5221,7 +5262,7 @@ impl ffi::PackageController {
             .rust()
             .activity_store
             .clone()
-            .and_then(|store| store.begin("gui", operations, State::Queued).ok());
+            .and_then(|store| store.begin("gui", operations, saved, State::Queued).ok());
         let cleanup_preview = if let Job::CleanAll(operations) = &job {
             self.rust()
                 .cleanup

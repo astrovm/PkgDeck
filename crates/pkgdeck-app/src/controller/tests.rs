@@ -2904,7 +2904,7 @@ fn queued_activity_and_mixed_batch_results_use_exact_targets() {
     controller.as_mut().rust_mut().worker = None;
 
     let id = store
-        .begin("gui", operations.clone(), State::Running)
+        .begin("gui", operations.clone(), vec![], State::Running)
         .unwrap();
     let (sender, receiver) = mpsc::channel();
     sender
@@ -2944,7 +2944,7 @@ fn failed_queued_revalidation_records_failure_without_starting_a_write() {
         backend: "fixture".into(),
     };
     let id = store
-        .begin("gui", vec![operation.clone()], State::Queued)
+        .begin("gui", vec![operation.clone()], vec![], State::Queued)
         .unwrap();
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
@@ -2975,7 +2975,7 @@ fn unavailable_confirmed_target_has_a_terminal_activity_result() {
         backend: "missing-fixture".into(),
     };
     let id = store
-        .begin("gui", vec![operation.clone()], State::Queued)
+        .begin("gui", vec![operation.clone()], vec![], State::Queued)
         .unwrap();
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
@@ -6590,9 +6590,12 @@ fn automatic_updates_leave_the_sources_you_picked_for_you() {
         failures: vec![],
         successful_sources: vec!["homebrew".into(), "cargo".into()],
     };
+    let temp = pkgdeck_tools::Temp::new();
+    let store = ActivityStore::at(temp.0.join("activity.json"));
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
     controller.as_mut().rust_mut().prefetch.clear();
+    controller.as_mut().rust_mut().activity_store = Some(store.clone());
     controller.as_mut().set_auto_update(true);
     controller.as_mut().set_manual_sources(vec!["cargo".into()]);
     let both = report(vec![
@@ -6611,6 +6614,18 @@ fn automatic_updates_leave_the_sources_you_picked_for_you() {
         Some(vec![Operation::UpgradeAll {
             backend: "homebrew".into()
         }])
+    );
+    // Activity lists it, queued, as an automatic run.
+    let entry = store.entries().unwrap().pop().unwrap();
+    assert_eq!(
+        (entry.frontend.as_str(), entry.state, entry.operations),
+        (
+            "auto",
+            State::Queued,
+            vec![Operation::UpgradeAll {
+                backend: "homebrew".into()
+            }]
+        )
     );
     // Only sources left for you: nothing runs, and the check tells.
     let mut controller = ffi::create_controller();
@@ -8531,7 +8546,7 @@ fn activity_reads_share_the_lock_and_never_write() {
         backend: "apt".into(),
     };
     let id = store
-        .begin("gui", vec![operation.clone()], State::Finished)
+        .begin("gui", vec![operation.clone()], vec![], State::Finished)
         .unwrap();
     // Another reader holding the lock shared does not block this read.
     let lock = std::fs::File::open(path.join("activity.lock")).unwrap();
@@ -8551,7 +8566,9 @@ fn activity_reads_share_the_lock_and_never_write() {
     );
     drop(lock);
     // An entry whose owner died is marked interrupted once.
-    store.begin("gui", vec![operation], State::Running).unwrap();
+    store
+        .begin("gui", vec![operation], vec![], State::Running)
+        .unwrap();
     let mut raw: Vec<Value> =
         serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
     raw[1]["owner_pid"] = json!(u32::MAX - 1);
@@ -8600,6 +8617,7 @@ fn activity_refreshes_off_the_gui_thread_and_repeats_when_asked_again() {
             vec![Operation::Refresh {
                 backend: "flatpak".into(),
             }],
+            vec![],
             State::Queued,
         )
         .unwrap();
@@ -10450,7 +10468,7 @@ fn finished_reviews_notices_and_activity_follow_the_job() {
     let store = ActivityStore::at(temp.0.join("activity.json"));
     let upgrade = Operation::Upgrade(row.id.clone());
     let id = store
-        .begin("gui", vec![upgrade.clone()], State::Running)
+        .begin("gui", vec![upgrade.clone()], vec![], State::Running)
         .unwrap();
     controller.as_mut().rust_mut().activity_store = Some(store.clone());
     controller.as_mut().rust_mut().active_activity_id = Some(id);
@@ -10462,7 +10480,7 @@ fn finished_reviews_notices_and_activity_follow_the_job() {
     let entry = store.entries().unwrap().pop().unwrap();
     assert_eq!(entry.outcomes, [Outcome::Cancelled]);
     let finished = store
-        .begin("gui", vec![upgrade.clone()], State::Running)
+        .begin("gui", vec![upgrade.clone()], vec![], State::Running)
         .unwrap();
     controller.as_mut().rust_mut().active_activity_id = Some(finished);
     controller.as_mut().rust_mut().worker = Some(fake_worker(
@@ -12181,6 +12199,77 @@ fn open_reference_scope_changes_only_a_pending_flatpak_reference_install() {
     ));
 }
 #[test]
+fn activity_names_a_cleanup_task_after_it_is_gone() {
+    let temp = pkgdeck_tools::Temp::new();
+    let store = ActivityStore::at(temp.0.join("activity.json"));
+    let mut controller = synthetic_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().activity_store = Some(store.clone());
+    let (item, package) = (cleanup_item("orphans"), fixture_row());
+    controller.as_mut().rust_mut().cleanup = vec![item.clone()];
+    controller
+        .as_mut()
+        .rust_mut()
+        .names
+        .insert(package.id.clone(), "Fixture App".into());
+    // Behind a running write, so it only queues.
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        ),
+        vec![],
+    ));
+    let operations = vec![
+        Operation::Clean(item.id.clone()),
+        Operation::Install(package.id.clone()),
+        Operation::Refresh {
+            backend: "fixture".into(),
+        },
+    ];
+    controller
+        .as_mut()
+        .accept_confirmed(Job::CleanAll(operations.clone()));
+    let entry = store.entries().unwrap().pop().unwrap();
+    assert_eq!(
+        entry.names,
+        [
+            Some("Remove orphans".to_owned()),
+            Some("Fixture App".to_owned()),
+            None
+        ]
+    );
+    // Cleaned, the task is gone, and a fresh start knows no names: Activity
+    // still calls it what it was called.
+    let labels = |entries: &[pkgdeck_core::activity::Entry], names: &Names| {
+        let rows: Value = serde_json::from_str(&activity_rows(entries, names).to_string()).unwrap();
+        rows[0]["labels"].clone()
+    };
+    assert_eq!(
+        labels(std::slice::from_ref(&entry), &Names::new()),
+        json!([
+            "Clean Remove orphans",
+            "Install Fixture App (fixture)",
+            "Refresh fixture package lists"
+        ])
+    );
+    // A name known now goes first.
+    let known = Names {
+        cleanup: BTreeMap::from([(item.id.clone(), "Orphans".to_owned())]),
+        ..Names::new()
+    };
+    assert_eq!(
+        labels(std::slice::from_ref(&entry), &known)[0],
+        "Clean Orphans"
+    );
+    // An entry from before names were kept goes by its key.
+    let mut old = entry;
+    old.names.clear();
+    assert_eq!(labels(&[old], &Names::new())[0], "Clean orphans (fixture)");
+}
+#[test]
 fn confirmed_changes_queue_behind_running_work_and_can_be_cancelled() {
     let mut controller = synthetic_controller();
     let mut controller = controller.pin_mut();
@@ -13156,13 +13245,14 @@ fn a_cleanup_a_build_uses_waits_and_cleans_once_the_build_ends() {
     assert_eq!(automatic.state, State::Finished);
     assert_eq!(automatic.outcomes, [Outcome::Waiting]);
     assert_eq!(automatic.reasons, [Some(WAITS_FOR_BUILD.to_owned())]);
+    assert_eq!(automatic.names, [Some("cargo task".to_owned())]);
     assert_eq!(controller.rust().names.cleanup[&item.id], "cargo task");
 
     // Cleaning it by hand meanwhile waits too, without failing its row.
     controller.as_mut().rust_mut().cleanup = vec![item.clone()];
     let clean = Operation::Clean(item.id.clone());
     let by_hand = store
-        .begin("gui", vec![clean.clone()], State::Running)
+        .begin("gui", vec![clean.clone()], vec![], State::Running)
         .unwrap();
     controller.as_mut().rust_mut().active_activity_id = Some(by_hand);
     controller.as_mut().rust_mut().worker = Some(fake_worker(
@@ -13248,6 +13338,7 @@ fn a_retry_settles_only_the_tasks_it_ran() {
                 .iter()
                 .map(|item| Operation::Clean(item.id.clone()))
                 .collect(),
+            vec![],
             1,
             vec![(Outcome::Waiting, Some(WAITS_FOR_BUILD.into())); 3],
         )

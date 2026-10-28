@@ -659,6 +659,22 @@ impl Activity {
             });
         reason(0).into_iter().chain(others).collect()
     }
+    /// The line under the open card: when it finished and how long it
+    /// took. One with a task still waiting for a build isn't done yet.
+    pub fn timing(&self, now: i64) -> Option<String> {
+        let finished = self.finished_at?;
+        if self.outcome_counts()[3] > 0 {
+            return Some(format!(
+                "Waiting since {}",
+                time_or_date(self.started_at, now)
+            ));
+        }
+        Some(format!(
+            "Finished {}, took {}",
+            time_or_date(finished, now),
+            duration(finished - self.started_at)
+        ))
+    }
     /// Whether [`Self::log_text`] has anything, without building it.
     pub fn has_log(&self) -> bool {
         let some = |value: &Value| match value {

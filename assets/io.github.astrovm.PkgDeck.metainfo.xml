@@ -10,6 +10,16 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.6" date="2026-10-28">
+      <description>
+        <p>Skipped cleanups read as skipped everywhere, and Activity keeps their names.</p>
+        <ul>
+          <li>pkd marks a cleanup a build uses as skipped, not failed, and exits with 0</li>
+          <li>Activity names a cleaned task after it's gone, and after a restart</li>
+          <li>A task waiting for a build says since when it waits</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.5" date="2026-10-28">
       <description>
         <p>Cleaning and automatic updates stop calling things failed when nothing went wrong.</p>

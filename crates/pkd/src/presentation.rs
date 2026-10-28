@@ -273,18 +273,32 @@ fn source_check_text(backend: &str, error: &Value) -> String {
         None => format!("Couldn't check {name}: {}", error_text(error)),
     }
 }
-/// One finished change: a check or a cross, then the reason on its own line.
-pub fn result_line(op: &Operation, error: Option<&str>, deferred: bool, color: bool) -> String {
+/// One finished change: a check, a dash when it was skipped, or a cross,
+/// then the reason on its own line.
+pub fn result_line(
+    op: &Operation,
+    error: Option<&str>,
+    skipped: bool,
+    deferred: bool,
+    color: bool,
+) -> String {
     let paint = Paint(color);
     let mut line = match error {
         None => format!("{} {}", paint.green("✓"), operation_line(paint, op)),
+        Some(_) if skipped => format!("{} {}", paint.yellow("–"), operation_line(paint, op)),
         Some(_) => format!("{} {}", paint.red("✗"), operation_line(paint, op)),
     };
     if deferred {
         line.push_str(&paint.dim("  finished after you cancelled; changes were kept"));
     }
     if let Some(error) = error {
-        line.push_str(&format!("\n  {}", paint.red(&clean(error))));
+        let error = clean(error);
+        let error = if skipped {
+            paint.dim(&error)
+        } else {
+            paint.red(&error)
+        };
+        line.push_str(&format!("\n  {error}"));
     }
     line
 }
@@ -353,20 +367,48 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
     }
     output
 }
-/// How a batch of changes went.
+/// How a batch of changes went. A skipped change didn't fail: PkgDeck left
+/// it alone, as its line says.
 fn changes_summary(data: &Value, paint: Paint) -> String {
     let operations = data["operations"].as_array().map_or(&[][..], Vec::as_slice);
     let total = operations.len();
-    let failed = operations
+    let (skipped, failed) = operations
         .iter()
         .filter(|item| item["result"].get("Err").is_some())
-        .count();
+        .fold((0, 0), |(skipped, failed), item| {
+            if item["skipped"] == true {
+                (skipped + 1, failed)
+            } else {
+                (skipped, failed + 1)
+            }
+        });
+    let applied = total - failed - skipped;
     if total == 0 {
         paint.green("Nothing to do. Everything is up to date.")
+    } else if failed == 0 && applied == 0 {
+        paint.yellow(&if total == 1 {
+            "Nothing was changed. The change was skipped.".to_owned()
+        } else {
+            format!("Nothing was changed. All {total} changes were skipped.")
+        })
+    } else if failed == 0 && skipped > 0 {
+        paint.green(&format!(
+            "Done. {applied} change{} applied, {skipped} skipped.",
+            if applied == 1 { "" } else { "s" }
+        ))
     } else if failed == 0 {
         paint.green(&format!(
             "Done. {total} change{} applied.",
             if total == 1 { "" } else { "s" }
+        ))
+    } else if skipped > 0 {
+        paint.yellow(&format!(
+            "{failed} of {total} changes failed, {skipped} skipped.{}",
+            if applied > 0 {
+                " The rest were applied."
+            } else {
+                ""
+            }
         ))
     } else if failed == total {
         paint.red(&format!(
@@ -1110,7 +1152,14 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     .map_or_else(|| error_text(error), str::to_string)
             });
             let deferred = item["result"]["Ok"]["cancellation_deferred"] == true;
-            output.push_str(&result_line(&op, error.as_deref(), deferred, color));
+            let skipped = item["skipped"] == true;
+            output.push_str(&result_line(
+                &op,
+                error.as_deref(),
+                skipped,
+                deferred,
+                color,
+            ));
             output.push('\n');
         }
         if !refreshed.is_empty() || !operations.is_empty() {
@@ -1570,10 +1619,19 @@ mod tests {
             assert!(review.contains("6 changes"), "{review}");
             assert!(review.contains("Update (1): snapd"), "{review}");
             assert!(plan(&operations[..1], &[], color).contains("1 change"));
-            let done = result_line(&operations[0], None, false, color);
+            let done = result_line(&operations[0], None, false, false, color);
             assert!(done.contains("Install tool"));
-            let failed = result_line(&operations[1], Some("busy"), true, color);
+            let failed = result_line(&operations[1], Some("busy"), false, true, color);
             assert!(failed.contains("busy") && failed.contains("after you cancelled"));
+            assert!(failed.contains("✗"), "{failed}");
+            // Left alone isn't failed: a dash, not a cross.
+            let skipped = result_line(&operations[1], Some("A build uses it."), true, false, color);
+            assert!(
+                skipped.contains("–")
+                    && !skipped.contains("✗")
+                    && skipped.contains("A build uses it."),
+                "{skipped}"
+            );
         }
     }
     #[test]
@@ -1856,6 +1914,11 @@ mod tests {
         let op =
             |result: Value| json!({"operation": {"refresh": {"backend": "apt"}}, "result": result});
         let install = |result: Value| json!({"operation": {"install": {"name": "tool", "backend": "apt", "architecture": "all", "scope": "system"}}, "result": result});
+        let skip = || {
+            let mut item = install(json!({"Err": "Building"}));
+            item["skipped"] = json!(true);
+            item
+        };
         for (operations, expected) in [
             (vec![], "Nothing to do"),
             (
@@ -1869,7 +1932,37 @@ mod tests {
             ),
             (
                 vec![install(json!({"Ok": {}})), install(json!({"Err": "y"}))],
-                "1 of 2 changes failed",
+                "1 of 2 changes failed. The rest were applied.",
+            ),
+            // Skipped changes didn't fail.
+            (vec![skip()], "Nothing was changed. The change was skipped."),
+            (
+                vec![skip(), skip()],
+                "Nothing was changed. All 2 changes were skipped.",
+            ),
+            (
+                vec![install(json!({"Ok": {}})), skip()],
+                "Done. 1 change applied, 1 skipped.",
+            ),
+            (
+                vec![
+                    install(json!({"Ok": {}})),
+                    install(json!({"Ok": {}})),
+                    skip(),
+                ],
+                "Done. 2 changes applied, 1 skipped.",
+            ),
+            (
+                vec![install(json!({"Err": "x"})), skip()],
+                "1 of 2 changes failed, 1 skipped.",
+            ),
+            (
+                vec![
+                    install(json!({"Ok": {}})),
+                    install(json!({"Err": "x"})),
+                    skip(),
+                ],
+                "1 of 3 changes failed, 1 skipped. The rest were applied.",
             ),
         ] {
             for color in [false, true] {
@@ -1920,6 +2013,12 @@ mod tests {
         assert!(
             text.starts_with("✓ Refresh APT\n✓ Install tool")
                 && text.ends_with("Done. 1 change applied.\n! macOS Updates: offline"),
+            "{text}"
+        );
+        // A skipped change's line has a dash and its reason, not a cross.
+        let text = human(&json!({"operations": [skip()]}), 80, false);
+        assert!(
+            text.starts_with("– Install tool  APT\n  Building\n") && !text.contains("✗"),
             "{text}"
         );
     }
