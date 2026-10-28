@@ -6590,9 +6590,12 @@ fn automatic_updates_leave_the_sources_you_picked_for_you() {
         failures: vec![],
         successful_sources: vec!["homebrew".into(), "cargo".into()],
     };
+    let temp = pkgdeck_tools::Temp::new();
+    let store = ActivityStore::at(temp.0.join("activity.json"));
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
     controller.as_mut().rust_mut().prefetch.clear();
+    controller.as_mut().rust_mut().activity_store = Some(store.clone());
     controller.as_mut().set_auto_update(true);
     controller.as_mut().set_manual_sources(vec!["cargo".into()]);
     let both = report(vec![
@@ -6611,6 +6614,18 @@ fn automatic_updates_leave_the_sources_you_picked_for_you() {
         Some(vec![Operation::UpgradeAll {
             backend: "homebrew".into()
         }])
+    );
+    // Activity lists it, queued, as an automatic run.
+    let entry = store.entries().unwrap().pop().unwrap();
+    assert_eq!(
+        (entry.frontend.as_str(), entry.state, entry.operations),
+        (
+            "auto",
+            State::Queued,
+            vec![Operation::UpgradeAll {
+                backend: "homebrew".into()
+            }]
+        )
     );
     // Only sources left for you: nothing runs, and the check tells.
     let mut controller = ffi::create_controller();
