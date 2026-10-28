@@ -363,10 +363,14 @@ mod tests {
         );
         let (_, args) = install.waiter(7, false);
         assert_eq!(strings(&args)[3..], ["/usr/bin/open", "-a", bundle]);
-        // The app replaced as a whole is a new program file.
-        fs::remove_dir_all(dir.join("PkgDeck.app")).unwrap();
+        // The app replaced as a whole is a new program file. The new copy is
+        // written while the old one still exists, as an installer unpacks it
+        // first; written after a removal, it can get the old inode back and,
+        // in the same second, look like the same file.
+        fs::rename(dir.join("PkgDeck.app"), dir.join("Old.app")).unwrap();
         fs::create_dir_all(&macos).unwrap();
         fs::write(macos.join("pkgdeck"), "new").unwrap();
+        fs::remove_dir_all(dir.join("Old.app")).unwrap();
         assert!(install.updated());
         fs::remove_dir_all(dir).unwrap();
     }
