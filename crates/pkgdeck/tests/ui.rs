@@ -1281,7 +1281,7 @@ fn activity_says_why_a_cleanup_waits_or_was_skipped() {
     assert!(harness.query_by_label("1 waiting, 1 skipped").is_some());
     assert!(harness.query_by_label_contains("Automatic").is_some());
     assert!(harness
-        .query_by_label("Clean Cargo downloads: Waits for a build that uses it to finish, then cleans on its own.")
+        .query_by_label("Waits for a build that uses it to finish, then cleans on its own.")
         .is_some());
     assert!(harness
         .query_by_label("Clean dangling Podman images: It changed.")

@@ -369,17 +369,10 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
             if open > 0.0 && expanded {
                 ui.scope(|ui| {
                     ui.multiply_opacity(open);
-                    for other in &others {
+                    for line in entry.detail_lines() {
                         ui.label(
-                            egui::RichText::new(other)
+                            egui::RichText::new(line)
                                 .font(theme::font(13.0))
-                                .color(palette.ink),
-                        );
-                    }
-                    for reason in entry.reason_lines() {
-                        ui.label(
-                            egui::RichText::new(reason)
-                                .font(theme::font(12.5))
                                 .color(palette.ink),
                         );
                     }

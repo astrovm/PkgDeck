@@ -644,25 +644,20 @@ impl Activity {
     pub fn running(&self) -> bool {
         matches!(self.state.as_str(), "running" | "authorizing")
     }
-    /// "Clean Cargo: Waits for a build that uses it to finish, then cleans
-    /// on its own.": one line per step PkgDeck said why about.
-    pub fn reason_lines(&self) -> Vec<String> {
-        let steps = if self.labels.is_empty() {
-            self.operations.iter().map(operation_text).collect()
-        } else {
-            self.labels.clone()
-        };
-        self.reasons
-            .iter()
+    /// What the open card lists: why the first change didn't finish, when
+    /// PkgDeck said, then each other change with its reason beside it, as
+    /// in "Clean Gradle caches: Waits for a build…".
+    pub fn detail_lines(&self) -> Vec<String> {
+        let reason = |at: usize| self.reasons.get(at).cloned().flatten();
+        let others = self
+            .others()
+            .into_iter()
             .enumerate()
-            .filter_map(|(at, reason)| {
-                let reason = reason.as_deref()?;
-                Some(match steps.get(at) {
-                    Some(step) if self.reasons.len() > 1 => format!("{step}: {reason}"),
-                    _ => reason.to_owned(),
-                })
-            })
-            .collect()
+            .map(|(at, step)| match reason(at + 1) {
+                Some(reason) => format!("{step}: {reason}"),
+                None => step,
+            });
+        reason(0).into_iter().chain(others).collect()
     }
     /// Whether [`Self::log_text`] has anything, without building it.
     pub fn has_log(&self) -> bool {

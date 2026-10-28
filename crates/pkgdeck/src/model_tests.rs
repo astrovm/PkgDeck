@@ -308,7 +308,7 @@ fn activity_entries_say_what_happened() {
     assert_eq!(waits.result(), "1 completed, 1 waiting, 1 skipped");
     assert_eq!(waits.tone(), Tone::Muted);
     assert_eq!(
-        waits.reason_lines(),
+        waits.detail_lines(),
         [
             "Clean Cargo downloads: Waits for a build.",
             "Clean images: It changed."
@@ -317,28 +317,28 @@ fn activity_entries_say_what_happened() {
     let skipped =
         entry(json!({"state": "finished", "outcomes": ["skipped"], "reasons": ["It changed."]}));
     assert_eq!(skipped.tone(), Tone::Muted);
-    // One change says why on its own, and steps go by their operations
-    // when there are no labels.
+    // The first change's reason stands alone, and steps go by their
+    // operations when there are no labels.
     let failed = entry(json!({
         "state": "failed",
         "outcomes": ["failed"],
         "reasons": ["Disk full."],
         "operations": [install],
     }));
-    assert_eq!(failed.reason_lines(), ["Disk full."]);
+    assert_eq!(failed.detail_lines(), ["Disk full."]);
     let unlabeled = entry(json!({
-        "outcomes": ["failed", "failed"],
-        "reasons": ["Disk full.", "Busy."],
-        "operations": [install],
+        "outcomes": ["finished", "failed", "finished"],
+        "reasons": [null, "Busy."],
+        "operations": [install, {"clean": {"backend": "apt", "key": "cache"}}, install],
     }));
     assert_eq!(
-        unlabeled.reason_lines(),
+        unlabeled.detail_lines(),
         [
-            "Install org.kde.krita (Flatpak, System): Disk full.",
-            "Busy."
+            "Clean cache (APT): Busy.",
+            "Install org.kde.krita (Flatpak, System)"
         ]
     );
-    assert!(entry(json!({})).reason_lines().is_empty());
+    assert!(entry(json!({})).detail_lines().is_empty());
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");
