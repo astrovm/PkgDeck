@@ -60,6 +60,10 @@ pub struct Entry {
     /// Why each change didn't finish, beside its outcome, when one says.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<Option<String>>,
+    /// What each change was called when it ran, when PkgDeck knew: a
+    /// cleanup task's title can't be found again once it's done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<Option<String>>,
     pub owner_pid: u32,
 }
 
@@ -137,6 +141,7 @@ impl History {
         &self,
         frontend: &str,
         operations: Vec<Operation>,
+        names: Vec<Option<String>>,
         state: State,
     ) -> io::Result<u64> {
         self.edit(|entries| {
@@ -150,6 +155,7 @@ impl History {
                 state,
                 outcomes: vec![],
                 reasons: vec![],
+                names: said(names),
                 owner_pid: std::process::id(),
             });
             id
@@ -161,6 +167,7 @@ impl History {
         &self,
         frontend: &str,
         operations: Vec<Operation>,
+        names: Vec<Option<String>>,
         started_at: u64,
         ended: Vec<(Outcome, Option<String>)>,
     ) -> io::Result<u64> {
@@ -176,6 +183,7 @@ impl History {
                 state: ended_as(&outcomes),
                 reasons: said(reasons),
                 outcomes,
+                names: said(names),
                 owner_pid: std::process::id(),
             });
             id
@@ -317,7 +325,7 @@ fn ended_as(outcomes: &[Outcome]) -> State {
         State::Finished
     }
 }
-/// `reasons` as stored: nothing at all when no change says why.
+/// `reasons` or `names` as stored: nothing at all when none is known.
 fn said(reasons: Vec<Option<String>>) -> Vec<Option<String>> {
     if reasons.iter().all(Option::is_none) {
         vec![]
@@ -342,6 +350,7 @@ mod tests {
                     vec![Operation::Refresh {
                         backend: "apt".into(),
                     }],
+                    vec![],
                     State::Queued,
                 )
                 .unwrap();
@@ -350,7 +359,7 @@ mod tests {
         let mut entries = store.entries().unwrap();
         assert_eq!(entries.len(), LIMIT);
         assert_eq!(entries[0].id, 6);
-        let id = store.begin("test", vec![], State::Running).unwrap();
+        let id = store.begin("test", vec![], vec![], State::Running).unwrap();
         store.recover_dead().unwrap();
         assert_eq!(
             store.entries().unwrap().last().unwrap().state,
@@ -373,7 +382,10 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry.get("diagnostics").is_none() && entry.get("message").is_none()));
+            .all(|entry| entry.get("diagnostics").is_none()
+                && entry.get("message").is_none()
+                // No names known, none listed.
+                && entry.get("names").is_none()));
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -399,7 +411,12 @@ mod tests {
             Operation::Remove(id),
         ];
         let activity_id = store
-            .begin("cli", operations.clone(), State::Running)
+            .begin(
+                "cli",
+                operations.clone(),
+                vec![Some("Synthetic".into()), None, None],
+                State::Running,
+            )
             .unwrap();
         store
             .finish(
@@ -414,6 +431,7 @@ mod tests {
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].operations, operations);
+        assert_eq!(entries[0].names, [Some("Synthetic".into()), None, None]);
         assert_eq!(entries[0].state, State::Failed);
         assert_eq!(
             entries[0].outcomes,
@@ -431,7 +449,7 @@ mod tests {
             now()
         ));
         let store = History::new(path.join("activity.json"));
-        let id = store.begin("gui", vec![], State::Queued).unwrap();
+        let id = store.begin("gui", vec![], vec![], State::Queued).unwrap();
         store.state(id, State::Authorizing).unwrap();
         let entry = store.entries().unwrap().remove(0);
         assert_eq!((entry.state, entry.finished_at), (State::Authorizing, None));
@@ -443,7 +461,7 @@ mod tests {
         store
             .finish(id + 1, vec![(Outcome::Finished, None)])
             .unwrap();
-        let second = store.begin("cli", vec![], State::Running).unwrap();
+        let second = store.begin("cli", vec![], vec![], State::Running).unwrap();
         store
             .finish(
                 second,
@@ -486,6 +504,7 @@ mod tests {
             .record(
                 "auto",
                 vec![clean("cargo"), clean("bun"), clean("gradle")],
+                vec![Some("Cargo downloads".into()), None, None],
                 5,
                 vec![
                     (Outcome::Waiting, waits.clone()),
@@ -496,6 +515,7 @@ mod tests {
             .unwrap();
         let entry = store.entries().unwrap().remove(0);
         assert_eq!((entry.frontend.as_str(), entry.started_at), ("auto", 5));
+        assert_eq!(entry.names, [Some("Cargo downloads".into()), None, None]);
         assert_eq!(entry.state, State::Finished);
         assert!(entry.finished_at.is_some());
         assert_eq!(
@@ -529,6 +549,7 @@ mod tests {
             .record(
                 "auto",
                 vec![clean("cargo"), clean("bun")],
+                vec![None, None],
                 6,
                 vec![(Outcome::Waiting, waits), (Outcome::Finished, None)],
             )

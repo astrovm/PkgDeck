@@ -555,7 +555,7 @@ fn refresh_sources(
         .filter(|operation| !(shared && operation.backend() == "homebrew-cask"))
         .cloned()
         .collect();
-    let mut results = execute(engine, history, &run, cancel, events);
+    let mut results = execute(engine, history, &run, vec![], cancel, events);
     if shared {
         let brew = run
             .iter()
@@ -839,6 +839,9 @@ fn dispatch_command(
     let mut missing: Option<(String, Vec<String>)> = None;
     // Registry sources that could also try a name a catalog source matched.
     let mut alternatives: Vec<(Operation, Vec<String>)> = Vec::new();
+    // What each chosen cleanup task is called, for Activity: once it's
+    // done, its title can't be found again.
+    let mut titles = std::collections::BTreeMap::new();
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
             // Reads what the last refresh found; `update` refreshes first.
@@ -943,7 +946,10 @@ fn dispatch_command(
                         (all && item.kind.in_clean_all())
                             || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
                     })
-                    .map(|item| Operation::Clean(item.id))
+                    .map(|item| {
+                        titles.insert(item.id.clone(), item.title);
+                        Operation::Clean(item.id)
+                    })
                     .collect();
                 if !all && operations.len() != requested.len() {
                     return Err(EngineError::NotFound);
@@ -1059,41 +1065,61 @@ fn dispatch_command(
             return failure(error);
         }
     }
-    let results = execute(engine, history, &operations, cancel, events);
+    let names = operations
+        .iter()
+        .map(|operation| match operation {
+            Operation::Clean(id) => titles.get(id).cloned(),
+            _ => None,
+        })
+        .collect();
+    let results = execute(engine, history, &operations, names, cancel, events);
     let code = exit_code(&results);
     (
         json!({ "operations": results_json(operations, results) }),
         code,
     )
 }
-/// Run approved operations, recording them in `history` when there is one.
+/// Run approved operations, recording them in `history` when there is one,
+/// under `names` when known.
 fn execute(
     engine: &mut Engine,
     history: Option<&History>,
     operations: &[Operation],
+    names: Vec<Option<String>>,
     cancel: &Cancellation,
     events: &mut dyn FnMut(Event),
 ) -> Vec<Result<OperationOutcome, EngineError>> {
     // Nothing to run leaves no entry: the drawer would show a bare "Change".
     let activity_id = history
         .filter(|_| !operations.is_empty())
-        .and_then(|store| store.begin("cli", operations.to_vec(), State::Running).ok());
+        .and_then(|store| {
+            store
+                .begin("cli", operations.to_vec(), names, State::Running)
+                .ok()
+        });
     let results = engine.execute_batch(operations, cancel, events);
     if let (Some(store), Some(id)) = (history, activity_id) {
         let _ = store.finish(id, results.iter().map(activity::ended).collect());
     }
     results
 }
-/// 0 when every change worked, 8 when some did, else the first error's code.
+/// 0 when every change worked or was skipped, 8 when some worked and
+/// others failed, else the first failure's code.
 fn exit_code(results: &[Result<OperationOutcome, EngineError>]) -> u8 {
-    let failed = results.iter().filter(|r| r.is_err()).count();
-    if failed == 0 {
-        0
-    } else if failed != results.len() {
-        8
-    } else {
-        error_code(results.iter().find_map(|r| r.as_ref().err()).unwrap())
+    let mut failures = results
+        .iter()
+        .filter(|result| !skipped(result))
+        .filter_map(|result| result.as_ref().err());
+    match failures.next() {
+        None => 0,
+        Some(_) if results.iter().any(Result::is_ok) => 8,
+        Some(first) => error_code(first),
     }
+}
+/// Whether PkgDeck left a change alone, like a cleanup task a build uses.
+/// Nothing went wrong: Activity calls it skipped too.
+pub(crate) fn skipped(result: &Result<OperationOutcome, EngineError>) -> bool {
+    activity::ended(result).0 == activity::Outcome::Skipped
 }
 /// Each change with its result, and a readable message when it failed.
 fn results_json(
@@ -1105,11 +1131,17 @@ fn results_json(
         .zip(results)
         .map(|(operation, result)| match &result {
             Ok(_) => json!({"operation": operation, "result": result}),
-            Err(error) => json!({
-                "operation": operation,
-                "result": result,
-                "message": crate::presentation::error_message(error),
-            }),
+            Err(error) => {
+                let mut item = json!({
+                    "operation": operation,
+                    "result": result,
+                    "message": crate::presentation::error_message(error),
+                });
+                if skipped(&result) {
+                    item["skipped"] = json!(true);
+                }
+                item
+            }
         })
         .collect()
 }
@@ -2301,6 +2333,20 @@ mod tests {
         ] {
             assert_eq!(error_code(&error), code);
         }
+        // Changes PkgDeck left alone don't fail a batch.
+        let building = || -> Result<OperationOutcome, EngineError> {
+            Err(EngineError::Refused {
+                backend: "apt".into(),
+                refusal: Refusal::Building,
+            })
+        };
+        let done = || Ok(OperationOutcome::default());
+        let busy = || Err(ExecutionError::LockBusy.into());
+        assert_eq!(exit_code(&[building()]), 0);
+        assert_eq!(exit_code(&[done(), building()]), 0);
+        assert_eq!(exit_code(&[building(), busy()]), 6);
+        assert_eq!(exit_code(&[done(), building(), busy()]), 8);
+        assert_eq!(exit_code(&[done(), busy()]), 8);
     }
 
     #[test]
@@ -2902,6 +2948,7 @@ mod tests {
             &mut engine(),
             Some(&history),
             &[],
+            vec![],
             &Cancellation::default(),
             &mut ignore,
         );
@@ -2974,6 +3021,36 @@ mod tests {
             let entry = history.entries().unwrap().pop().unwrap();
             assert_eq!((entry.frontend.as_str(), entry.state), ("cli", state));
         }
+        // A cleanup task a build uses is skipped, not failed, and Activity
+        // keeps what it's called: once cleaned, it can't be found again.
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: true,
+                fail: Some(EngineError::Refused {
+                    backend: "apt".into(),
+                    refusal: Refusal::Building,
+                }),
+                read_failure: None,
+                verified: true,
+            })
+            .unwrap();
+        let clean = Args::try_parse_from(["pkd", "--yes", "clean", "apt:orphans"]).unwrap();
+        let (data, code) = dispatch_with(
+            &mut engine,
+            &clean,
+            Some(&history),
+            &Cancellation::default(),
+            &mut decline,
+            &mut |_| Ok(()),
+            &mut ignore,
+        );
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["operations"][0]["skipped"], true, "{data}");
+        let entry = history.entries().unwrap().pop().unwrap();
+        assert_eq!(entry.outcomes, [activity::Outcome::Skipped]);
+        assert_eq!(entry.names, [Some("Synthetic cleanup".to_owned())]);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

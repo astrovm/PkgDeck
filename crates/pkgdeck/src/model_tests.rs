@@ -339,6 +339,24 @@ fn activity_entries_say_what_happened() {
         ]
     );
     assert!(entry(json!({})).detail_lines().is_empty());
+    // A run that's over says when it finished. One still waiting for a
+    // build isn't over: it says since when it waits.
+    let now = 1_800_000_000;
+    let timed = |outcomes: Value| {
+        entry(json!({"started_at": now - 185, "finished_at": now - 120, "outcomes": outcomes}))
+    };
+    assert_eq!(
+        timed(json!(["finished"])).timing(now),
+        Some(format!(
+            "Finished {}, took 1 min 5 s",
+            time_or_date(now - 120, now)
+        ))
+    );
+    assert_eq!(
+        timed(json!(["finished", "waiting"])).timing(now),
+        Some(format!("Waiting since {}", time_or_date(now - 185, now)))
+    );
+    assert_eq!(entry(json!({})).timing(now), None);
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");

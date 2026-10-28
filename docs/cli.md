@@ -249,7 +249,9 @@ Each task has a key like `apt:autoremove` and a preview from the package
 manager itself. The list shows how much space each task frees, biggest
 first, and what `pkd clean --all` frees in total. Running a task uses the
 same confirmation, permission, and cancellation rules as other changes.
-PkgDeck checks the task again right before running it.
+PkgDeck checks the task again right before running it. A task a running
+build uses is skipped, not failed: its line starts with `–` and says why.
+Run it again once the build ends.
 
 | Source | What it cleans |
 | --- | --- |
@@ -745,7 +747,7 @@ to stderr.
 | `info` | Package details |
 | `sources` | `sources` |
 | `clean` | Cleanup `items` and `failures` |
-| Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}` |
+| Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}`, and `"skipped": true` when PkgDeck left it alone |
 | `refresh` | `operations` (the refreshes), `updates` (packages with an update), and `failures` |
 | `update` | Also `refresh`: its `operations`, and `failures` for update information it couldn't fetch |
 | Errors | `error`, and a readable `message` when available |
@@ -766,7 +768,7 @@ to stderr.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Success, including no results or no updates |
+| 0 | Success, including no results, no updates, or changes skipped because a build uses them |
 | 1 | A package manager or other error |
 | 2 | Invalid usage, or `--yes` is required |
 | 3 | No package with that exact name |

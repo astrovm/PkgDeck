@@ -222,7 +222,8 @@ that failed are shown separately.
   for Rust builds, Gradle's for Gradle builds, and a project's build folders
   for builds of that kind of project. Other tasks clean right away. Yarn and
   Bun caches never wait. Activity shows **Waiting for a build**, and PkgDeck
-  cleans it on its own once the build ends, while PkgDeck runs.
+  cleans it on its own once the build ends, while PkgDeck runs. Its card says
+  since when it waits.
 - Something already gone counts as cleaned. If something else removed part of
   it, PkgDeck removes the rest.
 - APT finds unused dependencies and sizes its download cache without a
@@ -246,7 +247,8 @@ tasks that start unchecked until you check them yourself.
 When some tasks fail, **Activity** shows each reason once, with the tasks it
 stopped. The row shows the reason too, and the whole text when you point at it.
 Activity keeps why each task failed, waits or was skipped: open its card to
-read it.
+read it. It keeps each task's name too, so a cleaned folder still shows by
+name after it's gone.
 
 ### Clean settings
 
