@@ -112,6 +112,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, window, controller, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
 | `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |
 | `Test / Homebrew (Linux)` | Renders the tap from the Linux packages and installs and tests the formula; published recipes are checked on macOS too |
+| `Release / Verify reviewed commit` | On `v*` tags: the tag must be on main and be the merge commit of a pull request that reached main, directly or as part of a stack merged bottom first. When that PR's successful CI tested the exact tree, its tests aren't run again |
 | `Prune superseded caches` | On main only: keeps the newest copy of each build cache, whatever lockfile built it, so the 10 GB limit never evicts the ones pull requests restore |
 
 The macOS job's native tests use real `plutil` with XML and binary bundles, system and

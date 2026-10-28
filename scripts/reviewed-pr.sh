@@ -7,16 +7,8 @@ sha=${1:?Usage: scripts/reviewed-pr.sh <commit sha> [workflow filename]}
 workflow=${2:-ci.yml}
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 
-pr=$(gh api "repos/$repo/commits/$sha/pulls" |
-    jq -r --arg sha "$sha" \
-        '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)] | first | if . == null then empty else [.number, .head.sha, .head.repo.full_name] | @tsv end')
-if [[ -z "$pr" ]]; then
-    echo "::notice::$sha has no matching merged pull request."
-    exit 1
-fi
+pr=$("$(dirname "${BASH_SOURCE[0]}")/merged-pr.sh" "$sha") || exit 1
 IFS=$'\t' read -r pr_number head_sha head_repo <<<"$pr"
-test -n "$head_sha"
-test -n "$head_repo"
 tree=$(gh api "repos/$repo/git/commits/$sha" --jq '.tree.sha')
 
 runs=$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
