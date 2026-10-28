@@ -12199,7 +12199,12 @@ fn activity_names_a_cleanup_task_after_it_is_gone() {
         .insert(package.id.clone(), "Fixture App".into());
     // Behind a running write, so it only queues.
     controller.as_mut().rust_mut().worker = Some(fake_worker(
-        Job::Write(Operation::Upgrade(package.id.clone()), None),
+        Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        ),
         vec![],
     ));
     let operations = vec![

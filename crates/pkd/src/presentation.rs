@@ -372,15 +372,16 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
 fn changes_summary(data: &Value, paint: Paint) -> String {
     let operations = data["operations"].as_array().map_or(&[][..], Vec::as_slice);
     let total = operations.len();
-    let skipped = operations
-        .iter()
-        .filter(|item| item["skipped"] == true)
-        .count();
-    let failed = operations
+    let (skipped, failed) = operations
         .iter()
         .filter(|item| item["result"].get("Err").is_some())
-        .count()
-        - skipped;
+        .fold((0, 0), |(skipped, failed), item| {
+            if item["skipped"] == true {
+                (skipped + 1, failed)
+            } else {
+                (skipped, failed + 1)
+            }
+        });
     let applied = total - failed - skipped;
     if total == 0 {
         paint.green("Nothing to do. Everything is up to date.")
@@ -2017,7 +2018,7 @@ mod tests {
         // A skipped change's line has a dash and its reason, not a cross.
         let text = human(&json!({"operations": [skip()]}), 80, false);
         assert!(
-            text.starts_with("– Install tool\n") && !text.contains("✗"),
+            text.starts_with("– Install tool  APT\n  Building\n") && !text.contains("✗"),
             "{text}"
         );
     }
