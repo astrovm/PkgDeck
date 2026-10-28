@@ -10,6 +10,20 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.5" date="2026-10-28">
+      <description>
+        <p>Cleaning and automatic updates stop calling things failed when nothing went wrong.</p>
+        <ul>
+          <li>A cleanup task that a build uses waits for that build, then cleans on its own</li>
+          <li>Only builds that use a cache or project hold it, so the rest clean right away</li>
+          <li>A task whose files are already gone counts as cleaned</li>
+          <li>Activity keeps why each change failed, waits or was skipped</li>
+          <li>Automatic cleaning shows in Activity</li>
+          <li>Apps, container images and coding assistants update during builds</li>
+          <li>Settings names the updates that wait for builds</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.4" date="2026-10-27">
       <description>
         <p>Links in the window open again, and automatic updates and cleaning stop getting stuck.</p>
