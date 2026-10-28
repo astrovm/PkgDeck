@@ -132,6 +132,16 @@ pub mod ffi {
             listeners: Vec::new(),
         })
     }
+    /// [`create_synthetic_controller`] with an Activity log at `path`, for
+    /// a front end's tests of what Activity shows.
+    pub fn create_synthetic_controller_with_activity(
+        engine: super::EngineMaker,
+        path: std::path::PathBuf,
+    ) -> UniquePtr<PackageController> {
+        let mut controller = create_synthetic_controller(engine);
+        controller.pin_mut().rust_mut().activity_store = Some(super::ActivityStore::at(path));
+        controller
+    }
     impl PackageController {
         pub fn rust(&self) -> &Controller {
             &self.rust
@@ -1638,16 +1648,11 @@ impl ActivityStore {
     }
     /// Read the history without writing it: a shared lock lets `pkd` and
     /// other readers go on, and nothing is synced to disk. Only when an
-    /// entry's owner has died is the history rewritten to mark it
-    /// interrupted, and then read again.
+    /// entry's owner has died is the history rewritten to settle it, and
+    /// then read again.
     fn load(&self) -> std::io::Result<Vec<pkgdeck_core::activity::Entry>> {
         let entries = read_activity(&self.path)?;
-        if entries.iter().any(|entry| {
-            !matches!(
-                entry.state,
-                State::Finished | State::Failed | State::Cancelled | State::Interrupted
-            ) && !std::path::Path::new(&format!("/proc/{}", entry.owner_pid)).exists()
-        }) {
+        if entries.iter().any(pkgdeck_core::activity::Entry::orphaned) {
             self.history.recover_dead()?;
             return read_activity(&self.path);
         }
@@ -5211,12 +5216,17 @@ impl ffi::PackageController {
         let Some(worker) = &self.rust().activity_worker else {
             return;
         };
-        if !worker.handle.is_finished() {
+        // The reader wakes the window as it replies, a moment before its
+        // thread ends: the reply counts then, not after the next wake.
+        let reply = worker.receiver.try_recv().ok();
+        if reply.is_none() && !worker.handle.is_finished() {
             return;
         }
         let worker = self.as_mut().rust_mut().activity_worker.take().unwrap();
         let _ = worker.handle.join();
-        if let Ok(Ok(entries)) = worker.receiver.try_recv() {
+        // A reply sent between the look above and the thread ending.
+        let reply = reply.or_else(|| worker.receiver.try_recv().ok());
+        if let Some(Ok(entries)) = reply {
             let rows = activity_rows(&entries, &self.rust().names);
             self.as_mut().set_activity(rows);
         }

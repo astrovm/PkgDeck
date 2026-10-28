@@ -14,28 +14,34 @@ use eframe::egui::{
 pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
     let ctx = ui.ctx().clone();
     let shown = ease(&ctx, Id::unique("drawer"), app.drawer_open, LAYOUT);
-    if shown <= 0.0 {
+    // Once there's something in it, it's laid out a first time out of
+    // sight, so the first open doesn't stop to shape its text and icons.
+    let warm_up = shown <= 0.0 && !app.ui.activity_warm && !app.activity.is_empty();
+    if shown <= 0.0 && !warm_up {
         return;
     }
+    app.ui.activity_warm = true;
     let palette = Palette::current(&ctx);
     // The page dims behind it; a click there closes it.
-    let scrim = egui::Area::new(Id::unique("drawer-scrim"))
-        .order(egui::Order::Middle)
-        .fixed_pos(window.min)
-        .show(&ctx, |ui| {
-            let (rect, response) = ui.allocate_exact_size(window.size(), Sense::click());
-            // Inside the window's rounded corners, not over them.
-            ui.painter().rect_filled(
-                rect,
-                super::frame::fit(ui.ctx(), rect),
-                Color32::from_black_alpha(
-                    ((if palette.dark { 115.0 } else { 56.0 }) * shown) as u8,
-                ),
-            );
-            response
-        });
-    if scrim.inner.clicked() {
-        app.drawer_open = false;
+    if !warm_up {
+        let scrim = egui::Area::new(Id::unique("drawer-scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(window.min)
+            .show(&ctx, |ui| {
+                let (rect, response) = ui.allocate_exact_size(window.size(), Sense::click());
+                // Inside the window's rounded corners, not over them.
+                ui.painter().rect_filled(
+                    rect,
+                    super::frame::fit(ui.ctx(), rect),
+                    Color32::from_black_alpha(
+                        ((if palette.dark { 115.0 } else { 56.0 }) * shown) as u8,
+                    ),
+                );
+                response
+            });
+        if scrim.inner.clicked() {
+            app.drawer_open = false;
+        }
     }
     let width = 480.0f32.min(window.width() - if window.width() < 520.0 { 0.0 } else { 48.0 });
     let rect = Rect::from_min_size(
@@ -45,19 +51,29 @@ pub fn drawer(app: &mut App, ui: &mut Ui, window: Rect) {
     egui::Area::new(Id::unique("drawer-panel"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
+        // It slides in from past the window's edge, so egui mustn't pull
+        // it back inside.
+        .constrain(false)
         .show(&ctx, |ui| {
             let (panel, _) = ui.allocate_exact_size(rect.size(), Sense::click());
-            ui.painter().add(
-                egui::epaint::Shadow {
-                    offset: [-6, 0],
-                    blur: 30,
-                    spread: 0,
-                    color: Color32::from_black_alpha(if palette.dark { 120 } else { 40 }),
-                }
-                .as_shape(panel, CornerRadius::ZERO),
-            );
+            // What's past the window's edge stays out of sight, over the
+            // frame some styles draw too, and it takes the window's corners.
+            ui.set_clip_rect(ui.clip_rect().intersect(window));
+            let seen = panel.intersect(window);
+            // Its shadow would reach into the window from out of sight.
+            if !warm_up {
+                ui.painter().add(
+                    egui::epaint::Shadow {
+                        offset: [-6, 0],
+                        blur: 30,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if palette.dark { 120 } else { 40 }),
+                    }
+                    .as_shape(seen, CornerRadius::ZERO),
+                );
+            }
             ui.painter()
-                .rect_filled(panel, CornerRadius::ZERO, palette.surface);
+                .rect_filled(seen, super::frame::fit(ui.ctx(), seen), palette.surface);
             ui.painter().line_segment(
                 [panel.left_top(), panel.left_bottom()],
                 Stroke::new(1.0, palette.line),
@@ -119,19 +135,30 @@ fn content(app: &mut App, ui: &mut Ui) {
     }
     super::scrollbar::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = 8.0;
             // Borrowed out, not copied: logs can be long. A card that
             // cancels may read a newer list, which then stays.
             let entries = std::mem::take(&mut app.activity);
-            for entry in entries.iter().rev() {
-                entry_card(app, ui, entry);
-            }
+            let mut heights = std::mem::take(&mut app.ui.activity_heights);
+            super::scrollbar::in_view(
+                ui,
+                viewport,
+                entries.iter().rev(),
+                &mut heights,
+                |entry| entry.id,
+                |_| CARD_HEIGHT,
+                |ui, entry| entry_card(app, ui, entry),
+            );
+            app.ui.activity_heights = heights;
             if app.activity.is_empty() {
                 app.activity = entries;
             }
         });
 }
+
+/// A card's height before it was ever shown: one line, collapsed.
+const CARD_HEIGHT: f32 = 58.0;
 
 /// The last change that failed: why, with Retry and what it printed. It
 /// stays until dismissed, retried, or a later look shows it fixed.
@@ -433,5 +460,149 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                 app.expanded.insert(entry.id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app::Launch, platform::Platform, settings::Store};
+    use egui_kittest::Harness;
+    use pkgdeck_app::controller::ffi::create_synthetic_controller;
+    use std::collections::HashMap;
+
+    /// An app whose Activity holds `count` finished installs, oldest first.
+    fn app(count: u64) -> App {
+        let (store, settings) = Store::open(None, None);
+        let mut platform = Platform::start(|| {});
+        platform.record_notifications();
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            platform,
+            Launch::default(),
+        );
+        app.activity = (1..=count)
+            .map(|id| Activity {
+                id,
+                frontend: "gui".into(),
+                started_at: 1_700_000_000 + id as i64,
+                finished_at: Some(1_700_000_010 + id as i64),
+                state: "done".into(),
+                labels: vec![format!("Install fixture {id}")],
+                ..Activity::default()
+            })
+            .collect();
+        app
+    }
+
+    /// The drawer at 60 frames a second, in a 900 × 600 surface whose
+    /// window is `inset` in from its edges, as inside a drawn frame.
+    fn harness(app: App, reduce_motion: bool, inset: f32) -> Harness<'static, (bool, App)> {
+        let mut harness = Harness::builder()
+            .with_size(vec2(900.0, 600.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                move |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ui.ctx(), &root, None);
+                        set_reduce_motion(ui.ctx(), reduce_motion);
+                        *ready = true;
+                        return;
+                    }
+                    let window = ui.ctx().content_rect().shrink(inset);
+                    drawer(app, ui, window);
+                },
+                (false, app),
+            );
+        harness.run_steps(4);
+        harness
+    }
+
+    fn laid_out(harness: &Harness<'_, (bool, App)>) -> HashMap<u64, f32> {
+        harness.state().1.ui.activity_heights.clone()
+    }
+
+    fn panel(harness: &Harness<'_, (bool, App)>) -> Rect {
+        let id = Id::unique("drawer-panel");
+        harness
+            .ctx
+            .memory(|m| m.area_rect(id))
+            .expect("the panel was never laid out")
+    }
+
+    #[test]
+    fn only_the_cards_in_view_are_laid_out() {
+        let mut app = app(100);
+        app.drawer_open = true;
+        let mut harness = harness(app, true, 0.0);
+        // Newest first: the top of the list, and nothing far below it.
+        let shown = laid_out(&harness);
+        assert!(shown.contains_key(&100) && !shown.contains_key(&1));
+        assert!(shown.len() < 15, "{} cards laid out", shown.len());
+        // A card never shown holds the room one line takes.
+        assert_eq!(shown[&100], CARD_HEIGHT);
+        // Scrolled to the end, the oldest shows too.
+        harness.hover_at(pos2(700.0, 300.0));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Wheel,
+            delta: vec2(0.0, -100_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        harness.run_steps(60);
+        let shown = laid_out(&harness);
+        assert!(shown.contains_key(&1));
+        assert!(shown.len() < 40, "{} cards laid out", shown.len());
+    }
+
+    /// Whether all that `harness` painted last frame is inside `window`.
+    fn painted_inside(harness: &Harness<'_, (bool, App)>, window: Rect) -> bool {
+        harness.output().shapes.iter().all(|clipped| {
+            let seen = clipped
+                .clip_rect
+                .intersect(clipped.shape.visual_bounding_rect());
+            !seen.is_positive() || window.expand(0.5).contains_rect(seen)
+        })
+    }
+
+    #[test]
+    fn it_is_laid_out_unseen_first_then_slides_in_from_past_the_edge() {
+        // A window inside a 10-point frame, like the older styles draw.
+        let window = Rect::from_min_max(pos2(10.0, 10.0), pos2(890.0, 590.0));
+        // Nothing to show yet: nothing is laid out.
+        let mut harness = harness(app(0), false, 10.0);
+        assert!(!harness.state().1.ui.activity_warm);
+        // Once Activity is read, the closed drawer is laid out out of sight.
+        harness.state_mut().1.activity = app(3).activity;
+        harness.step();
+        assert!(painted_inside(&harness, Rect::NOTHING));
+        harness.step();
+        assert!(harness.state().1.ui.activity_warm);
+        assert_eq!(laid_out(&harness).len(), 3);
+        assert!(
+            panel(&harness).left() >= window.right(),
+            "{:?}",
+            panel(&harness)
+        );
+        // Opening, it comes in from past the window's edge instead of
+        // showing whole at once, and nothing of it shows over the frame.
+        harness.state_mut().1.drawer_open = true;
+        harness.step();
+        let left = panel(&harness).left();
+        assert!(left > 410.0 && left < window.right(), "{left}");
+        assert!(painted_inside(&harness, window));
+        harness.run_steps(30);
+        assert_eq!(panel(&harness).left(), 410.0);
+        // Closing, it slides back out the same way.
+        harness.state_mut().1.drawer_open = false;
+        harness.run_steps(2);
+        let left = panel(&harness).left();
+        assert!(left > 410.0 && left < window.right(), "{left}");
+        assert!(painted_inside(&harness, window));
     }
 }

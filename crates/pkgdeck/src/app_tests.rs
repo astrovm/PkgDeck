@@ -1086,6 +1086,49 @@ fn ticks_run_what_is_due() {
 }
 
 #[test]
+fn activity_is_read_once_the_window_shows_and_is_ready_when_the_drawer_opens() {
+    use pkgdeck_core::{activity::History, package::Operation};
+    let dir = std::env::temp_dir().join(format!("pkgdeck-activity-ready-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("activity.json");
+    let refresh = Operation::Refresh {
+        backend: "flatpak".into(),
+    };
+    let state = pkgdeck_core::activity::State::Queued;
+    History::new(path.clone())
+        .begin("gui", vec![refresh], vec![], state)
+        .unwrap();
+    let (store, settings) = Store::open(None, None);
+    let mut platform = Platform::start(|| {});
+    platform.record_notifications();
+    let mut app = App::with_controller(
+        pkgdeck_app::controller::ffi::create_synthetic_controller_with_activity(empty, path),
+        settings,
+        store,
+        platform,
+        Launch::default(),
+    );
+    app.window_shown();
+    // The reply shows the frame its reader wakes the window, however soon
+    // after the last poll that is.
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(10);
+    while app.activity.is_empty() {
+        assert!(Instant::now() < deadline, "Activity was never read");
+        std::thread::sleep(Duration::from_millis(1));
+        app.last_poll = now;
+        app.tick(now + Duration::from_millis(1));
+    }
+    assert!(!app.drawer_open);
+    // Opening the drawer reads it again for runs from elsewhere, and slides
+    // in with what it already has meanwhile.
+    app.toggle_activity();
+    assert_eq!(app.activity.len(), 1);
+    assert_eq!(app.activity[0].title(), "Refresh Flatpak package lists");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn activity_and_repositories_are_read() {
     let mut app = app();
     app.c()
@@ -1308,24 +1351,30 @@ fn the_window_sleeps_until_something_is_due() {
     assert_eq!(app.tick(now), Duration::from_secs(3));
     app.next_check = now + Duration::from_secs(2);
     assert_eq!(app.tick(now), Duration::from_secs(2));
-    // While reading, a poll too soon after the last waits for its turn;
-    // right after one, the next wake is a worker's reply.
+    // While reading, a worker's reply is picked up the frame it wakes the
+    // window, however soon after the last poll.
     app.toast = None;
     app.restart_at = None;
     app.next_check = now + Duration::from_secs(60);
     app.c().set_needs_poll(true);
     app.last_poll = now;
-    let soon = now + Duration::from_millis(50);
-    assert_eq!(app.tick(soon), POLL_IDLE - Duration::from_millis(50));
-    assert_eq!(app.last_poll, now);
-    let later = now + POLL_IDLE;
-    app.c().set_needs_poll(true);
-    let wait = app.tick(later);
-    assert_eq!(app.last_poll, later);
+    let soon = now + Duration::from_millis(10);
+    let wait = app.tick(soon);
+    assert_eq!(app.last_poll, soon);
     // Still reading, and nothing is due: it looks again in a second in case
     // a worker stops without a reply.
     assert!(*app.ctl.needs_poll());
     assert_eq!(wait, Duration::from_secs(1));
+    // While a change runs, its output is read in batches: a poll too soon
+    // after the last waits for its turn.
+    app.c().set_busy(true);
+    app.react();
+    let sooner = soon + Duration::from_millis(10);
+    assert_eq!(app.tick(sooner), POLL_BUSY - Duration::from_millis(10));
+    assert_eq!(app.last_poll, soon);
+    let later = soon + POLL_BUSY;
+    app.tick(later);
+    assert_eq!(app.last_poll, later);
 }
 
 #[test]

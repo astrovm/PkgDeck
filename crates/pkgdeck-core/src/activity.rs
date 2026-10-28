@@ -66,6 +66,24 @@ pub struct Entry {
     pub names: Vec<Option<String>>,
     pub owner_pid: u32,
 }
+impl Entry {
+    /// Whether the process that ran it is still there. A signal-0 probe
+    /// works on both Linux and macOS, which has no /proc. Permission errors
+    /// still mean the process may be alive.
+    fn owner_alive(&self) -> bool {
+        i32::try_from(self.owner_pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .is_some_and(|pid| {
+                rustix::process::test_kill_process(pid) != Err(rustix::io::Errno::SRCH)
+            })
+    }
+    /// Whether the process that ran it died and left it running or with a
+    /// change waiting: what [`History::recover_dead`] settles.
+    pub fn orphaned(&self) -> bool {
+        (!self.state.terminal() || self.outcomes.contains(&Outcome::Waiting)) && !self.owner_alive()
+    }
+}
 
 pub fn default_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
@@ -238,15 +256,7 @@ impl History {
     pub fn recover_dead(&self) -> io::Result<()> {
         self.edit(|entries| {
             for entry in entries {
-                // A signal-0 probe works on both Linux and macOS, which has no
-                // /proc. Permission errors still mean the process may be alive.
-                let alive = i32::try_from(entry.owner_pid)
-                    .ok()
-                    .and_then(rustix::process::Pid::from_raw)
-                    .is_some_and(|pid| {
-                        rustix::process::test_kill_process(pid) != Err(rustix::io::Errno::SRCH)
-                    });
-                if alive {
+                if !entry.orphaned() {
                     continue;
                 }
                 if !entry.state.terminal() {

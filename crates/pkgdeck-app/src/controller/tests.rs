@@ -8578,6 +8578,33 @@ fn activity_reads_share_the_lock_and_never_write() {
     )
     .unwrap();
     assert_eq!(store.load().unwrap()[1].state, State::Interrupted);
+    // A change its dead owner left waiting for a build won't run any more,
+    // though the run it's in already ended.
+    let waiting = store
+        .record(
+            "auto",
+            vec![Operation::Refresh {
+                backend: "apt".into(),
+            }],
+            vec![],
+            1,
+            vec![(Outcome::Waiting, None)],
+        )
+        .unwrap();
+    assert_eq!(store.load().unwrap()[2].outcomes, [Outcome::Waiting]);
+    let mut raw: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
+    raw[2]["owner_pid"] = json!(u32::MAX - 1);
+    std::fs::write(
+        path.join("activity.json"),
+        serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    let entry = store.load().unwrap().remove(2);
+    assert_eq!(
+        (entry.id, entry.outcomes),
+        (waiting, vec![Outcome::Skipped])
+    );
     // A broken file reads as no history rather than failing.
     std::fs::write(path.join("activity.json"), b"not json").unwrap();
     assert!(read_activity(&path.join("activity.json"))
@@ -8631,6 +8658,37 @@ fn activity_refreshes_off_the_gui_thread_and_repeats_when_asked_again() {
             && controller.rust().activity_worker.is_none()
     });
     assert!(!controller.rust().activity_again);
+    assert!(!*controller.needs_poll());
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[test]
+fn activity_shows_once_its_reader_replies_even_before_its_thread_ends() {
+    let path = std::env::temp_dir().join(format!("pkgdeck-activity-reply-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    let store = ActivityStore::at(path.join("activity.json"));
+    store
+        .begin(
+            "gui",
+            vec![Operation::Refresh {
+                backend: "flatpak".into(),
+            }],
+            vec![],
+            State::Queued,
+        )
+        .unwrap();
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    // The reader replied and woke the window; its thread ends a moment later.
+    let (sender, receiver) = mpsc::channel();
+    sender.send(store.load()).unwrap();
+    let handle = thread::spawn(|| thread::sleep(Duration::from_millis(300)));
+    controller.as_mut().rust_mut().activity_worker = Some(ActivityWorker { handle, receiver });
+    controller.as_mut().poll();
+    assert!(controller
+        .activity()
+        .to_string()
+        .contains("Refresh Flatpak package lists"));
+    assert!(controller.rust().activity_worker.is_none());
     assert!(!*controller.needs_poll());
     std::fs::remove_dir_all(path).unwrap();
 }
