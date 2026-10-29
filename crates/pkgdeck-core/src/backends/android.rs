@@ -248,7 +248,9 @@ pub(super) fn remove(host: &Host, key: &str) -> Result<(), EngineError> {
         )))
     };
     if let Some(image) = key.strip_prefix("android-image:") {
-        let root = sdk(host).ok_or(EngineError::NotFound)?.join("system-images");
+        let root = sdk(host)
+            .ok_or(EngineError::NotFound)?
+            .join("system-images");
         let folder = root.join(image);
         disk::remove(&folder).map_err(|error| failed(&folder, error))?;
         // The API and tag folders, once they hold nothing else.
@@ -259,7 +261,9 @@ pub(super) fn remove(host: &Host, key: &str) -> Result<(), EngineError> {
         }
         return Ok(());
     }
-    let name = key.strip_prefix("android-avd:").ok_or(EngineError::NotFound)?;
+    let name = key
+        .strip_prefix("android-avd:")
+        .ok_or(EngineError::NotFound)?;
     let found = broken(host, name).ok_or(EngineError::NotFound)?;
     for path in [found.entry, found.folder].into_iter().flatten() {
         disk::remove(&path).map_err(|error| failed(&path, error))?;
@@ -302,7 +306,10 @@ mod tests {
     fn avd(avds: &Path, name: &str, image: &str) {
         write(
             &avds.join(format!("{name}.ini")),
-            &format!("avd.ini.encoding=UTF-8\npath={}\ntarget=android-36\n", avds.join(format!("{name}.avd")).display()),
+            &format!(
+                "avd.ini.encoding=UTF-8\npath={}\ntarget=android-36\n",
+                avds.join(format!("{name}.avd")).display()
+            ),
         );
         write(
             &avds.join(format!("{name}.avd/config.ini")),
@@ -319,9 +326,24 @@ mod tests {
             "Android/Sdk"
         });
         let avds = home.join(".android/avd");
-        image(&sdk, "android-36/google_apis/x86_64", "Google APIs Intel x86_64 Atom System Image", "36");
-        image(&sdk, "android-36/google-tv/x86_64", "Google TV Intel x86_64 Atom System Image", "36");
-        image(&sdk, "android-37.0/google_apis/x86_64", "Google APIs", "37.0");
+        image(
+            &sdk,
+            "android-36/google_apis/x86_64",
+            "Google APIs Intel x86_64 Atom System Image",
+            "36",
+        );
+        image(
+            &sdk,
+            "android-36/google-tv/x86_64",
+            "Google TV Intel x86_64 Atom System Image",
+            "36",
+        );
+        image(
+            &sdk,
+            "android-37.0/google_apis/x86_64",
+            "Google APIs",
+            "37.0",
+        );
         image(&sdk, "android-35/default/arm64-v8a", "", "");
         avd(&avds, "tv", "android-36/google-tv/x86_64");
         // Gradle's own emulators use images too.
@@ -331,12 +353,21 @@ mod tests {
         );
         // Left behind: a folder with no settings, and an entry for a
         // folder that's gone.
-        write(&avds.join("ambient.avd/emulator-user.ini"), "window.x = 100\n");
-        write(&avds.join("gone.ini"), &format!("path={}\n", avds.join("gone.avd").display()));
+        write(
+            &avds.join("ambient.avd/emulator-user.ini"),
+            "window.x = 100\n",
+        );
+        write(
+            &avds.join("gone.ini"),
+            &format!("path={}\n", avds.join("gone.avd").display()),
+        );
         // An entry that points elsewhere: only the entry goes.
         let elsewhere = home.join("elsewhere.avd");
         fs::create_dir_all(&elsewhere).unwrap();
-        write(&avds.join("moved.ini"), &format!("path={}\n", elsewhere.display()));
+        write(
+            &avds.join("moved.ini"),
+            &format!("path={}\n", elsewhere.display()),
+        );
         let host = host(&home, &[]);
         let cancel = Cancellation::default();
         let found = items(&host, &cancel);
@@ -351,30 +382,54 @@ mod tests {
                 "android-avd:moved",
             ]
         );
-        assert_eq!(found[0].title, "Android system image android-35 default arm64-v8a");
+        assert_eq!(
+            found[0].title,
+            "Android system image android-35 default arm64-v8a"
+        );
         assert_eq!(
             found[1].title,
             "Google APIs Intel x86_64 Atom System Image for Android 36"
         );
         assert!(found[1].bytes.unwrap() >= 8192);
-        assert!(found[1].preview.ends_with("/system-images/android-36/google_apis/x86_64"));
+        assert!(found[1]
+            .preview
+            .ends_with("/system-images/android-36/google_apis/x86_64"));
         assert_eq!(found[2].title, "Broken emulator ambient");
-        assert_eq!(found[2].preview, "Deletes what is left of it.\n~/.android/avd/ambient.avd");
-        assert_eq!(found[3].preview, "Deletes what is left of it.\n~/.android/avd/gone.ini");
-        assert_eq!(found[4].preview, "Deletes what is left of it.\n~/.android/avd/moved.ini");
+        assert_eq!(
+            found[2].preview,
+            "Deletes what is left of it.\n~/.android/avd/ambient.avd"
+        );
+        assert_eq!(
+            found[3].preview,
+            "Deletes what is left of it.\n~/.android/avd/gone.ini"
+        );
+        assert_eq!(
+            found[4].preview,
+            "Deletes what is left of it.\n~/.android/avd/moved.ini"
+        );
         for item in &found {
             remove(&host, &item.id.key).unwrap();
         }
         assert!(!sdk.join("system-images/android-36/google_apis").exists());
         assert!(!sdk.join("system-images/android-35").exists());
-        assert!(sdk.join("system-images/android-36/google-tv/x86_64").exists());
+        assert!(sdk
+            .join("system-images/android-36/google-tv/x86_64")
+            .exists());
         assert!(!avds.join("ambient.avd").exists() && !avds.join("gone.ini").exists());
         assert!(elsewhere.exists() && !avds.join("moved.ini").exists());
         assert!(avds.join("tv.avd/config.ini").exists());
         assert!(items(&host, &cancel).is_empty());
         // Gone, or never there, there's nothing to do.
-        for key in ["android-avd:tv", "android-avd:../x", "android-avd:", "other"] {
-            assert!(matches!(remove(&host, key), Err(EngineError::NotFound)), "{key}");
+        for key in [
+            "android-avd:tv",
+            "android-avd:../x",
+            "android-avd:",
+            "other",
+        ] {
+            assert!(
+                matches!(remove(&host, key), Err(EngineError::NotFound)),
+                "{key}"
+            );
         }
         for image in ["android-36/google-tv/x86_64", "a/b", "a/../b", "a/b/.c"] {
             assert!(image_item(&host, image, &cancel).is_none(), "{image}");
@@ -396,7 +451,10 @@ mod tests {
         };
         assert_eq!(
             places(&[]),
-            (Some(default_sdk.into()), Some("/home/me/.android/avd".into()))
+            (
+                Some(default_sdk.into()),
+                Some("/home/me/.android/avd".into())
+            )
         );
         assert_eq!(
             places(&[

@@ -143,7 +143,11 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
         Operation::Clean(id) if id.backend == "system-files" => {
             let args = crate::backends::system_file_delete_args(&id.key)
                 .ok_or_else(|| invalid("unknown system file cleanup task"))?;
-            let program = if id.key == "journal" { "journalctl" } else { "find" };
+            let program = if id.key == "journal" {
+                "journalctl"
+            } else {
+                "find"
+            };
             ProtectedCommand::new(program, args)
         }
         Operation::Clean(id) if id.backend == "snap" => {

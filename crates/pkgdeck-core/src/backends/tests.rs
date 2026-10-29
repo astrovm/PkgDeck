@@ -2378,7 +2378,8 @@ fn linux_casks_wait_for_homebrew_6() {
 
 #[test]
 fn old_snap_revisions_are_listed_and_removed_by_the_approved_commands() {
-    const LISTING: &str = "Name                 Version     Rev    Tracking         Publisher     Notes
+    const LISTING: &str =
+        "Name                 Version     Rev    Tracking         Publisher     Notes
 core22               20260824    2955   latest/stable    canonical**   base,disabled
 core22               20260901    3001   latest/stable    canonical**   base
 firefox              158.0.1-1   9113   latest/stable    mozilla**     disabled
@@ -2422,10 +2423,21 @@ adventure-mods       1.3.0       x2     -                -             disabled
     assert_eq!(ran[0], "root snap remove adventure-mods --revision=x2");
     // Nothing disabled, or a name Snap wouldn't make, is no task.
     let current = Kit::new(Ok(false), "Name Version Rev Tracking Publisher Notes\nfirefox 159.0-1 9200 latest/stable mozilla** -\n");
-    assert!(SystemManager::snap(current).cleanup(&cancel).unwrap().is_empty());
-    let odd = Kit::new(Ok(false), "Name Version Rev Tracking Publisher Notes\nBad;Name 1 2 - - disabled\n");
-    assert!(SystemManager::snap(odd).cleanup(&cancel).unwrap().is_empty());
-    assert!(SystemManager::dnf(Kit::new(Ok(false), "")).cleanup(&cancel).is_err());
+    assert!(SystemManager::snap(current)
+        .cleanup(&cancel)
+        .unwrap()
+        .is_empty());
+    let odd = Kit::new(
+        Ok(false),
+        "Name Version Rev Tracking Publisher Notes\nBad;Name 1 2 - - disabled\n",
+    );
+    assert!(SystemManager::snap(odd)
+        .cleanup(&cancel)
+        .unwrap()
+        .is_empty());
+    assert!(SystemManager::dnf(Kit::new(Ok(false), ""))
+        .cleanup(&cancel)
+        .is_err());
     for key in [
         "disabled-revisions:",
         "disabled-revisions:a=1;rm",
@@ -2435,11 +2447,13 @@ adventure-mods       1.3.0       x2     -                -             disabled
         "other",
     ] {
         assert_eq!(snap_revisions(key), None, "{key}");
-        assert!(crate::batch::protected_commands(&Operation::Clean(CleanupId {
-            backend: "snap".into(),
-            key: key.into(),
-        }))
-        .is_err());
+        assert!(
+            crate::batch::protected_commands(&Operation::Clean(CleanupId {
+                backend: "snap".into(),
+                key: key.into(),
+            }))
+            .is_err()
+        );
         assert!(matches!(
             SystemManager::snap(Kit::new(Ok(false), "")).execute(
                 &Operation::Clean(CleanupId {
@@ -2480,11 +2494,13 @@ fn system_file_tasks_have_fixed_root_commands() {
         assert_eq!(commands[0].program, program);
         assert_eq!(commands[0].args.last().map(String::as_str), Some(last));
     }
-    assert!(crate::batch::protected_commands(&Operation::Clean(CleanupId {
-        backend: "system-files".into(),
-        key: "everything".into(),
-    }))
-    .is_err());
+    assert!(
+        crate::batch::protected_commands(&Operation::Clean(CleanupId {
+            backend: "system-files".into(),
+            key: "everything".into(),
+        }))
+        .is_err()
+    );
     assert_eq!(display_name("system-files"), "System files");
     assert_eq!(display_name("steam"), "Steam");
     assert_eq!(

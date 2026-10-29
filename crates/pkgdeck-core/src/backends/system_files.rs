@@ -189,10 +189,19 @@ impl<T: Transport> Backend for SystemFiles<T> {
             .filter(|_| id.backend == "system-files")
             .ok_or(EngineError::NotFound)?;
         let plan = self.cleanup_plan(id, cancel)?;
-        progress(Progress::Message(format!("Deleting {}…", plan.title.to_lowercase())));
-        let program = if id.key == "journal" { "journalctl" } else { "find" };
+        progress(Progress::Message(format!(
+            "Deleting {}…",
+            plan.title.to_lowercase()
+        )));
+        let program = if id.key == "journal" {
+            "journalctl"
+        } else {
+            "find"
+        };
         let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
-        let result = self.transport.system_manager(program, &args, cancel, true)?;
+        let result = self
+            .transport
+            .system_manager(program, &args, cancel, true)?;
         bytes("system-files", result.clone())?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -278,16 +287,18 @@ mod tests {
         assert_eq!(backend.cleanup_plan(&logs.id, &cancel).unwrap(), *logs);
         let mut said = vec![];
         backend
-            .execute(&Operation::Clean(logs.id.clone()), &cancel, &mut |progress| {
-                said.push(progress)
-            })
+            .execute(
+                &Operation::Clean(logs.id.clone()),
+                &cancel,
+                &mut |progress| said.push(progress),
+            )
             .unwrap();
-        assert_eq!(said, [Progress::Message("Deleting old system logs…".into())]);
-        let ran = disk.ran.lock().unwrap().clone();
         assert_eq!(
-            ran.last().unwrap(),
-            "root journalctl --vacuum-time=1week"
+            said,
+            [Progress::Message("Deleting old system logs…".into())]
         );
+        let ran = disk.ran.lock().unwrap().clone();
+        assert_eq!(ran.last().unwrap(), "root journalctl --vacuum-time=1week");
         assert!(ran[0].starts_with("find /var/log/journal -mindepth 2 -maxdepth 2 -type f -name *@*.journal* -mtime +7 -printf"));
         // Too little, or nothing there, is no task.
         for key in ["coredumps", "crash-reports", "other"] {
@@ -295,7 +306,10 @@ mod tests {
                 backend: "system-files".into(),
                 key: key.into(),
             };
-            assert!(matches!(backend.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)));
+            assert!(matches!(
+                backend.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
             assert!(matches!(
                 backend.execute(&Operation::Clean(id), &cancel, &mut |_| {}),
                 Err(EngineError::NotFound)
@@ -328,7 +342,10 @@ mod tests {
         let items = backend.cleanup(&cancel).unwrap();
         let keys: Vec<_> = items.iter().map(|item| item.id.key.as_str()).collect();
         assert_eq!(keys, ["coredumps", "crash-reports"]);
-        assert_eq!(items[0].preview, "Deletes every crash dump systemd kept. 1 file.");
+        assert_eq!(
+            items[0].preview,
+            "Deletes every crash dump systemd kept. 1 file."
+        );
         for item in &items {
             backend
                 .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {})
@@ -339,7 +356,9 @@ mod tests {
                 format!("root find {}", delete_args(&item.id.key).unwrap().join(" "))
             );
         }
-        assert!(delete_args("coredumps").unwrap().ends_with(&["-delete".into()]));
+        assert!(delete_args("coredumps")
+            .unwrap()
+            .ends_with(&["-delete".into()]));
         assert_eq!(delete_args("other"), None);
         let broken = Disk {
             listed: vec![("/var/log/journal", Err(()))],

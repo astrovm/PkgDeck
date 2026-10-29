@@ -263,10 +263,13 @@ fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
             let [name, version, revision, .., notes] = fields.as_slice() else {
                 return None;
             };
-            notes
-                .split(',')
-                .any(|note| note == "disabled")
-                .then(|| ((*name).to_owned(), (*revision).to_owned(), (*version).to_owned()))
+            notes.split(',').any(|note| note == "disabled").then(|| {
+                (
+                    (*name).to_owned(),
+                    (*revision).to_owned(),
+                    (*version).to_owned(),
+                )
+            })
         })
         .collect()
 }
@@ -1080,7 +1083,11 @@ impl<T: Transport> Backend for SystemManager<T> {
                 if cancel.requested() {
                     return Err(EngineError::Cancelled);
                 }
-                let args = vec!["remove".into(), name.into(), format!("--revision={revision}").into()];
+                let args = vec![
+                    "remove".into(),
+                    name.into(),
+                    format!("--revision={revision}").into(),
+                ];
                 let result = self.call(args, cancel, true)?;
                 deferred |= result.cancellation_deferred;
                 bytes("snap", result)?;

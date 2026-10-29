@@ -316,7 +316,15 @@ fn layout(app: &mut App, ui: &mut Ui) {
                 _ => format!("{}%", step * 25),
             };
             setting_row(ui, "Roundness", &hint, vec2(240.0, 28.0), |ui| {
-                if steps(ui, Id::unique("roundness"), 9, &mut step, true, 240.0) {
+                if steps(
+                    ui,
+                    Id::unique("roundness"),
+                    9,
+                    &mut step,
+                    true,
+                    240.0,
+                    "Roundness",
+                ) {
                     app.settings.roundness = step as f32 / 4.0;
                 }
             });
@@ -1069,23 +1077,26 @@ fn checks(app: &mut App, ui: &mut Ui) {
         if app.platform.tray_available() {
             tray_row(app, ui);
         }
-        let interval = model::nearest_interval(app.settings.check_interval);
+        let mut minutes = u32::try_from(app.settings.check_interval)
+            .unwrap_or(0)
+            .clamp(*model::INTERVAL_RANGE.start(), *model::INTERVAL_RANGE.end());
         setting_row(
             ui,
             "Check every",
-            model::INTERVALS[interval].1,
-            vec2(240.0, 28.0),
+            &model::minutes_text(minutes),
+            DURATION,
             |ui| {
-                let mut index = interval;
-                if steps(
+                if duration(
                     ui,
                     Id::unique("interval"),
-                    model::INTERVALS.len(),
-                    &mut index,
+                    &mut minutes,
+                    &model::INTERVALS,
+                    &MINUTE_UNITS,
+                    model::INTERVAL_RANGE,
                     background,
-                    240.0,
+                    "Check every",
                 ) {
-                    let minutes = model::INTERVALS[index].0;
+                    let minutes = i32::try_from(minutes).unwrap_or(i32::MAX);
                     app.settings.check_interval = minutes;
                     app.c().set_check_interval(minutes);
                 }
@@ -1193,25 +1204,143 @@ fn notifications(app: &mut App, ui: &mut Ui) {
     });
 }
 
-/// How long a project stays untouched before Clean offers its build files.
-const PROJECT_DAYS: [u32; 9] = [1, 3, 7, 14, 30, 60, 90, 180, 365];
+/// How long a project stays untouched before Clean offers its build
+/// files, in hours: the slider's stops. Every day up to a week, every week
+/// up to a month, then months. Any number in between can be typed.
+const PROJECT_HOURS: [u32; 19] = [
+    6, 12, 24, 48, 72, 96, 120, 144, 168, 336, 504, 720, 1440, 2160, 2880, 3600, 4320, 6480, 8760,
+];
+/// The shortest and longest Old after, in hours: five years at most.
+const PROJECT_RANGE: std::ops::RangeInclusive<u32> = 1..=43_800;
+/// The units a time can be typed in, and how many of the smallest each is.
+const HOUR_UNITS: [(&str, u32); 3] = [("Hours", 1), ("Days", 24), ("Weeks", 168)];
+const MINUTE_UNITS: [(&str, u32); 4] = [
+    ("Minutes", 1),
+    ("Hours", 60),
+    ("Days", 1440),
+    ("Weeks", 10_080),
+];
+/// How wide and tall a time control is: the slider, and under it the
+/// number with its unit.
+const DURATION: Vec2 = vec2(240.0, 68.0);
 
-/// The step for `days`, or the next longer one.
-fn project_step(days: u32) -> usize {
-    PROJECT_DAYS
-        .iter()
-        .position(|step| *step >= days)
-        .unwrap_or(PROJECT_DAYS.len() - 1)
+/// The unit `value` reads in: the one picked, while `value` is a whole
+/// number of it, or else the largest it is a whole number of.
+fn duration_unit(units: &[(&str, u32)], value: u32, picked: Option<usize>) -> usize {
+    picked
+        .filter(|&unit| units.get(unit).is_some_and(|(_, size)| value % size == 0))
+        .unwrap_or_else(|| {
+            units
+                .iter()
+                .rposition(|(_, size)| value % size == 0)
+                .unwrap_or(0)
+        })
 }
 
-fn days_text(days: u32) -> String {
-    match days {
-        1 => "1 day".into(),
-        7 => "1 week".into(),
-        14 => "2 weeks".into(),
-        365 => "1 year".into(),
-        days => format!("{days} days"),
-    }
+/// A time picked on a slider with `stops`, or typed as a number of a unit
+/// for any value in `range`. `value` counts the smallest unit. Returns true
+/// when it changed.
+#[allow(clippy::too_many_arguments)]
+fn duration(
+    ui: &mut Ui,
+    id: Id,
+    value: &mut u32,
+    stops: &[u32],
+    units: &[(&str, u32)],
+    range: std::ops::RangeInclusive<u32>,
+    enabled: bool,
+    label: &str,
+) -> bool {
+    let before = *value;
+    let unit_id = id.with("unit");
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let width = ui.available_width();
+        let mut index = model::nearest(stops, *value);
+        if steps(
+            ui,
+            id.with("slider"),
+            stops.len(),
+            &mut index,
+            enabled,
+            width,
+            label,
+        ) {
+            *value = stops[index];
+            ui.data_mut(|data| data.remove::<usize>(unit_id));
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let picked = ui.data(|data| data.get_temp::<usize>(unit_id));
+            let unit = duration_unit(units, *value, picked);
+            let size = units[unit].1;
+            let most = range.end() / size;
+            let typed = number_field(ui, id.with("number"), *value / size, most, enabled, label);
+            if let Some(count) = typed {
+                *value = (count * size).clamp(*range.start(), *range.end());
+            }
+            let labels: Vec<&str> = units.iter().map(|(name, _)| *name).collect();
+            let widths = label_widths(ui, &labels, ui.available_width());
+            let chosen =
+                segmented_sized(ui, id.with("units"), &labels, unit, &widths).filter(|_| enabled);
+            if let Some(chosen) = chosen {
+                // The same number, counted in the new unit.
+                let count = *value / size;
+                *value = (count * units[chosen].1).clamp(*range.start(), *range.end());
+                ui.data_mut(|data| data.insert_temp(unit_id, chosen));
+            }
+        });
+    });
+    *value != before
+}
+
+/// A box a whole number from 1 to `most` is typed in. Returns the number
+/// once what's typed is one.
+fn number_field(
+    ui: &mut Ui,
+    id: Id,
+    number: u32,
+    most: u32,
+    enabled: bool,
+    label: &str,
+) -> Option<u32> {
+    let palette = Palette::current(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(vec2(64.0, 34.0), Sense::hover());
+    let text_id = id.with("text");
+    let focused = ui.memory(|memory| memory.has_focus(id));
+    let focus = ease(ui.ctx(), id.with("focus"), focused, REVEAL);
+    skin::paint_field(
+        ui.painter(),
+        rect,
+        theme::round(theme::CONTROL_RADIUS),
+        &palette,
+        focus,
+    );
+    // While typing, what's typed shows, even when it isn't a number yet.
+    let mut text = ui
+        .data(|data| data.get_temp::<String>(text_id))
+        .filter(|_| focused)
+        .unwrap_or_else(|| number.to_string());
+    let edit = egui::TextEdit::singleline(&mut text)
+        .id(id)
+        .font(theme::font(14.5))
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::symmetric(0, 0))
+        .align(egui::Align2::CENTER_CENTER)
+        .char_limit(5)
+        .interactive(enabled)
+        .desired_width(rect.width() - 16.0);
+    let response = ui.put(rect.shrink2(vec2(8.0, 0.0)), edit);
+    let name = format!("{label}, number");
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_label(name));
+    text.retain(|c| c.is_ascii_digit());
+    ui.data_mut(|data| data.insert_temp(text_id, text.clone()));
+    response
+        .changed()
+        .then(|| text.parse::<u32>().ok())
+        .flatten()
+        .filter(|count| (1..=most).contains(count))
 }
 
 /// `path` with the home folder written as `~`.
@@ -1364,24 +1493,25 @@ fn clean(app: &mut App, ui: &mut Ui) {
     });
     ui.add_space(8.0);
     section(ui, "Old projects", |ui| {
-        let step = project_step(projects.days);
         setting_row(
             ui,
             "Old after",
-            &format!("{} without changes", days_text(projects.days)),
-            vec2(240.0, 28.0),
+            &format!(
+                "{} without changes",
+                model::minutes_text(projects.hours.saturating_mul(60))
+            ),
+            DURATION,
             |ui| {
-                let mut index = step;
-                if steps(
+                duration(
                     ui,
-                    Id::unique("project-days"),
-                    PROJECT_DAYS.len(),
-                    &mut index,
+                    Id::unique("project-hours"),
+                    &mut projects.hours,
+                    &PROJECT_HOURS,
+                    &HOUR_UNITS,
+                    PROJECT_RANGE,
                     true,
-                    240.0,
-                ) {
-                    projects.days = PROJECT_DAYS[index];
-                }
+                    "Old after",
+                );
             },
         );
         worktree_protection(ui, &mut projects);
@@ -1711,21 +1841,122 @@ mod tests {
     }
 
     #[test]
-    fn project_waits_snap_to_steps_and_read_naturally() {
-        assert_eq!(PROJECT_DAYS[project_step(7)], 7);
-        // A hand-edited wait shows on the next longer step.
-        assert_eq!(PROJECT_DAYS[project_step(10)], 14);
-        assert_eq!(PROJECT_DAYS[project_step(0)], 1);
-        assert_eq!(PROJECT_DAYS[project_step(9999)], 365);
-        let said: Vec<_> = PROJECT_DAYS.iter().map(|days| days_text(*days)).collect();
+    fn project_waits_have_fine_stops_and_read_naturally() {
+        assert_eq!(PROJECT_HOURS[model::nearest(&PROJECT_HOURS, 168)], 168);
+        // A typed wait shows on the nearest stop.
+        assert_eq!(PROJECT_HOURS[model::nearest(&PROJECT_HOURS, 200)], 168);
+        assert_eq!(PROJECT_HOURS[model::nearest(&PROJECT_HOURS, 0)], 6);
+        assert_eq!(PROJECT_HOURS[model::nearest(&PROJECT_HOURS, 99_999)], 8760);
+        assert!(PROJECT_HOURS.windows(2).all(|pair| pair[0] < pair[1]));
+        let said: Vec<_> = PROJECT_HOURS
+            .iter()
+            .map(|hours| model::minutes_text(hours * 60))
+            .collect();
         assert_eq!(
             said,
             [
-                "1 day", "3 days", "1 week", "2 weeks", "30 days", "60 days", "90 days",
-                "180 days", "1 year"
+                "6 hours", "12 hours", "1 day", "2 days", "3 days", "4 days", "5 days", "6 days",
+                "1 week", "2 weeks", "3 weeks", "1 month", "2 months", "3 months", "4 months",
+                "5 months", "6 months", "9 months", "1 year"
             ]
         );
-        assert_eq!(days_text(10), "10 days");
+        assert!(PROJECT_RANGE.contains(&PROJECT_HOURS[0]));
+        assert!(PROJECT_RANGE.contains(&PROJECT_HOURS[PROJECT_HOURS.len() - 1]));
+        // The unit follows the value, unless one was picked that fits it.
+        assert_eq!(duration_unit(&HOUR_UNITS, 36, None), 0);
+        assert_eq!(duration_unit(&HOUR_UNITS, 48, None), 1);
+        assert_eq!(duration_unit(&HOUR_UNITS, 336, None), 2);
+        assert_eq!(duration_unit(&HOUR_UNITS, 336, Some(1)), 1);
+        assert_eq!(duration_unit(&HOUR_UNITS, 36, Some(1)), 0);
+        assert_eq!(duration_unit(&HOUR_UNITS, 36, Some(9)), 0);
+        assert_eq!(duration_unit(&MINUTE_UNITS, 90, None), 0);
+    }
+
+    /// The Old after control on its own, with the hours it holds.
+    fn old_after(hours: u32) -> egui_kittest::Harness<'static, (bool, u32)> {
+        egui_kittest::Harness::builder()
+            .with_size(vec2(320.0, 120.0))
+            .build_ui_state(
+                |ui, (ready, hours): &mut (bool, u32)| {
+                    if !*ready {
+                        crate::setup(ui.ctx(), Path::new("/"), None);
+                        *ready = true;
+                        return;
+                    }
+                    duration(
+                        ui,
+                        Id::unique("old-after"),
+                        hours,
+                        &PROJECT_HOURS,
+                        &HOUR_UNITS,
+                        PROJECT_RANGE,
+                        true,
+                        "Old after",
+                    );
+                },
+                (false, hours),
+            )
+    }
+
+    #[test]
+    fn a_time_can_be_typed_counted_in_another_unit_or_picked_on_the_slider() {
+        use egui::Key;
+        use egui_kittest::kittest::Queryable;
+        let mut harness = old_after(168);
+        harness.run_steps(4);
+        // A week reads as 1 of Weeks.
+        let field = harness.get_by_label("Old after, number");
+        assert_eq!(field.value().as_deref(), Some("1"));
+        // 1 in Days is a day.
+        harness.get_by_label("Days").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 24);
+        // Typed: 36 Hours.
+        harness.get_by_label("Hours").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 1);
+        harness.get_by_label("Old after, number").focus();
+        harness.run();
+        harness.key_press(Key::Backspace);
+        harness.get_by_label("Old after, number").type_text("36");
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 36);
+        // Each digit counts as it's typed; nothing, or zero, doesn't.
+        harness.key_press(Key::Backspace);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 3);
+        harness.key_press(Key::Backspace);
+        harness.run_steps(2);
+        harness.get_by_label("Old after, number").type_text("0");
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 3);
+        // The number stays, counted in the new unit: 3 weeks.
+        harness.get_by_label("Weeks").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 504);
+        // More than five years isn't taken.
+        harness.get_by_label("Old after, number").focus();
+        harness.run();
+        harness.key_press(Key::Backspace);
+        harness.get_by_label("Old after, number").type_text("999");
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 504);
+        // The slider moves by its stops, from the one nearest.
+        let slider = harness.get_by_label("Old after");
+        slider.focus();
+        harness.run();
+        harness.key_press(Key::ArrowRight);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 720);
+        harness.key_press(Key::End);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 8760);
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 6);
+        harness.key_press(Key::ArrowLeft);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, 6);
     }
 
     #[test]

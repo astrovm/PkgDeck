@@ -104,7 +104,10 @@ impl Steam {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with("appmanifest_") && name.ends_with(".acf") {
-                names.extend(values(&fs::read_to_string(entry.path()).ok()?, "installdir"));
+                names.extend(values(
+                    &fs::read_to_string(entry.path()).ok()?,
+                    "installdir",
+                ));
             }
         }
         Some(names)
@@ -235,7 +238,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("pkgdeck-steam-{name}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-steam-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
@@ -253,9 +257,17 @@ mod tests {
     fn game(library: &Path, id: u32, folder: &str) {
         write(
             &library.join(format!("steamapps/appmanifest_{id}.acf")),
-            &format!("\"AppState\"\n{{\n\t\"appid\"\t\t\"{id}\"\n\t\"installdir\"\t\t\"{folder}\"\n}}\n"),
+            &format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\t\"{id}\"\n\t\"installdir\"\t\t\"{folder}\"\n}}\n"
+            ),
         );
-        write(&library.join("steamapps/common").join(folder).join("game.bin"), "x");
+        write(
+            &library
+                .join("steamapps/common")
+                .join(folder)
+                .join("game.bin"),
+            "x",
+        );
     }
     fn settle(path: &Path) {
         let when = SystemTime::now() - Duration::from_secs(3 * 86_400);
@@ -287,7 +299,10 @@ mod tests {
         write(&elsewhere.join("shader.cache"), "x");
         // Steam's own folder, a file, a game that names its folder in
         // another case, and one that showed up just now.
-        write(&root.join("steamapps/common/Steam Controller Configs/x.vdf"), "x");
+        write(
+            &root.join("steamapps/common/Steam Controller Configs/x.vdf"),
+            "x",
+        );
         write(&root.join("steamapps/common/Steam.dll"), "x");
         game(&other, 12110, "grand theft auto vice city");
         fs::rename(
@@ -323,14 +338,29 @@ mod tests {
             .unwrap();
         assert_eq!(item.kind, CleanupKind::Data);
         assert!(item.opt_in() && !item.kind.in_clean_all());
-        assert!(item.preview.ends_with("/steamapps/common/RESIDENT EVIL 2  BIOHAZARD RE2"));
+        assert!(item
+            .preview
+            .ends_with("/steamapps/common/RESIDENT EVIL 2  BIOHAZARD RE2"));
         assert_eq!(backend.cleanup_plan(&item.id, &cancel).unwrap(), *item);
         // Only a game folder in a known library can be named.
         for key in [
-            format!("leftover:{}", root.join("steamapps/common/Steam Controller Configs").display()),
-            format!("leftover:{}", root.join("steamapps/common/Steamworks Shared").display()),
-            format!("leftover:{}", home.join("elsewhere/steamapps/common/x").display()),
-            format!("leftover:{}/../common/x", root.join("steamapps/common").display()),
+            format!(
+                "leftover:{}",
+                root.join("steamapps/common/Steam Controller Configs")
+                    .display()
+            ),
+            format!(
+                "leftover:{}",
+                root.join("steamapps/common/Steamworks Shared").display()
+            ),
+            format!(
+                "leftover:{}",
+                home.join("elsewhere/steamapps/common/x").display()
+            ),
+            format!(
+                "leftover:{}/../common/x",
+                root.join("steamapps/common").display()
+            ),
             "leftover:relative/steamapps/common/x".into(),
             "other".into(),
         ] {
@@ -338,15 +368,24 @@ mod tests {
                 backend: "steam".into(),
                 key,
             };
-            assert!(matches!(backend.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)));
+            assert!(matches!(
+                backend.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
         }
         let mut said = vec![];
         backend
-            .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |progress| said.push(progress))
+            .execute(
+                &Operation::Clean(item.id.clone()),
+                &cancel,
+                &mut |progress| said.push(progress),
+            )
             .unwrap();
         assert_eq!(
             said,
-            [Progress::Message("Deleting RESIDENT EVIL 2  BIOHAZARD RE2 leftovers…".into())]
+            [Progress::Message(
+                "Deleting RESIDENT EVIL 2  BIOHAZARD RE2 leftovers…".into()
+            )]
         );
         assert!(!left.exists() && elsewhere.exists());
         // A game installed into the folder since keeps it.
@@ -364,7 +403,10 @@ mod tests {
         ));
         let cancelled = Cancellation::default();
         cancelled.cancel();
-        assert!(matches!(backend.cleanup(&cancelled), Err(EngineError::Cancelled)));
+        assert!(matches!(
+            backend.cleanup(&cancelled),
+            Err(EngineError::Cancelled)
+        ));
         fs::remove_dir_all(&home).unwrap();
     }
 
@@ -379,7 +421,10 @@ mod tests {
         let mut homeless = Steam::new(Host::new(Runtime::Native, BTreeMap::new()));
         assert!(homeless.roots().is_empty());
         assert!(homeless.cleanup(&cancel).unwrap().is_empty());
-        assert_eq!(values("\"path\"\t\t\"C:\\\\Games\"\n\"label\" \"\"", "path"), ["C:\\Games"]);
+        assert_eq!(
+            values("\"path\"\t\t\"C:\\\\Games\"\n\"label\" \"\"", "path"),
+            ["C:\\Games"]
+        );
         fs::remove_dir_all(&home).unwrap();
     }
 }

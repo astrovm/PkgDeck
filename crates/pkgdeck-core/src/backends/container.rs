@@ -1759,7 +1759,10 @@ mod tests {
         let calls = backend.transport.calls.lock().unwrap().clone();
         let listing = calls
             .iter()
-            .find(|call| call.1.starts_with(&["image".into(), "ls".into(), "--no-trunc".into()]))
+            .find(|call| {
+                call.1
+                    .starts_with(&["image".into(), "ls".into(), "--no-trunc".into()])
+            })
             .unwrap();
         assert_eq!(listing.1.last(), Some(&OsString::from("--digests")));
         assert_eq!(

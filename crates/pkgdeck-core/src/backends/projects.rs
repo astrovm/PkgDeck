@@ -1417,7 +1417,10 @@ mod tests {
         // Built in lately, inside another tool's cache, or too deep to look.
         let fresh = cache.join("fresh/target");
         output(&fresh);
-        write(&cache.join("huggingface/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n# created by huggingface_hub.\n");
+        write(
+            &cache.join("huggingface/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n# created by huggingface_hub.\n",
+        );
         output(&cache.join("huggingface/target"));
         output(&cache.join("a/b/c/d/e/f/target"));
         age_all(&cache, 30);
@@ -1456,7 +1459,10 @@ mod tests {
                 key: format!("cache-build:{}", elsewhere.display()),
             };
             assert!(
-                matches!(backend.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)),
+                matches!(
+                    backend.cleanup_plan(&id, &cancel),
+                    Err(EngineError::NotFound)
+                ),
                 "{elsewhere:?}"
             );
         }
@@ -1477,13 +1483,17 @@ mod tests {
         let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
         let mut said = vec![];
         backend
-            .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |progress| {
-                said.push(progress)
-            })
+            .execute(
+                &Operation::Clean(item.id.clone()),
+                &cancel,
+                &mut |progress| said.push(progress),
+            )
             .unwrap();
         assert_eq!(
             said,
-            [Progress::Message("Cleaning cd34-x86_64 build output…".into())]
+            [Progress::Message(
+                "Cleaning cd34-x86_64 build output…".into()
+            )]
         );
         assert!(!old.exists() && old.parent().unwrap().exists() && fresh.exists());
         assert!(backend.cleanup_gone(item));

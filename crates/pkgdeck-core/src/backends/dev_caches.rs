@@ -665,7 +665,11 @@ mod tests {
         let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 86_400);
         fs::File::open(model.join("blobs/blob"))
             .unwrap()
-            .set_times(fs::FileTimes::new().set_accessed(long_ago).set_modified(long_ago))
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(long_ago)
+                    .set_modified(long_ago),
+            )
             .unwrap();
         let mut backend = caches_in(&root, &[]);
         let cancel = Cancellation::default();
@@ -677,7 +681,10 @@ mod tests {
             "android-image:android-36/default/x86_64".to_owned(),
         ];
         // Only a disk that records reads can tell a model is unused.
-        if items.iter().any(|item| item.id.key == "hugging-face:models--org--m") {
+        if items
+            .iter()
+            .any(|item| item.id.key == "hugging-face:models--org--m")
+        {
             expected.push("hugging-face:models--org--m".into());
         }
         expected.sort();
@@ -686,11 +693,16 @@ mod tests {
             assert_eq!(backend.cleanup_plan(&item.id, &cancel).unwrap(), *item);
             let mut said = vec![];
             backend
-                .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |progress| {
-                    said.push(progress)
-                })
+                .execute(
+                    &Operation::Clean(item.id.clone()),
+                    &cancel,
+                    &mut |progress| said.push(progress),
+                )
                 .unwrap();
-            assert_eq!(said, [Progress::Message(format!("Deleting {}…", item.title))]);
+            assert_eq!(
+                said,
+                [Progress::Message(format!("Deleting {}…", item.title))]
+            );
             // Gone, it can't be planned or cleaned again.
             assert!(matches!(
                 backend.cleanup_plan(&item.id, &cancel),

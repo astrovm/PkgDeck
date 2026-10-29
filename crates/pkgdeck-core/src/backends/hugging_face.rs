@@ -32,7 +32,8 @@ pub(super) fn hub(host: &Host) -> Option<PathBuf> {
     var("HF_HUB_CACHE")
         .or_else(|| var("HF_HOME").map(|home| home.join("hub")))
         .or_else(|| {
-            let cache = var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|home| home.join(".cache")))?;
+            let cache =
+                var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|home| home.join(".cache")))?;
             Some(cache.join("huggingface/hub"))
         })
 }
@@ -42,11 +43,8 @@ pub(super) fn hub(host: &Host) -> Option<PathBuf> {
 fn records_reads(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        rustix::fs::statvfs(path).is_ok_and(|disk| {
-            !disk
-                .f_flag
-                .contains(rustix::fs::StatVfsMountFlags::NOATIME)
-        })
+        rustix::fs::statvfs(path)
+            .is_ok_and(|disk| !disk.f_flag.contains(rustix::fs::StatVfsMountFlags::NOATIME))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -57,9 +55,7 @@ fn records_reads(path: &Path) -> bool {
 /// A repository folder's name as people know the repository:
 /// `models--Systran--faster-whisper-small` is `Systran/faster-whisper-small`.
 fn repository(folder: &str) -> Option<String> {
-    let rest = KINDS
-        .iter()
-        .find_map(|kind| folder.strip_prefix(kind))?;
+    let rest = KINDS.iter().find_map(|kind| folder.strip_prefix(kind))?;
     (!rest.is_empty() && !rest.contains('/')).then(|| rest.replace("--", "/"))
 }
 
@@ -106,17 +102,28 @@ fn look(hub: &Path, folder: &str, cancel: &Cancellation) -> Repository {
         used: SystemTime::UNIX_EPOCH,
     };
     let note = |used: &mut SystemTime, metadata: &fs::Metadata| {
-        for time in [metadata.accessed(), metadata.modified()].into_iter().flatten() {
+        for time in [metadata.accessed(), metadata.modified()]
+            .into_iter()
+            .flatten()
+        {
             *used = (*used).max(time);
         }
     };
     // A check for a newer revision writes its ref.
-    for entry in fs::read_dir(root.join("refs")).into_iter().flatten().flatten() {
+    for entry in fs::read_dir(root.join("refs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         if let Ok(metadata) = fs::metadata(entry.path()) {
             note(&mut found.used, &metadata);
         }
     }
-    for entry in fs::read_dir(root.join("blobs")).into_iter().flatten().flatten() {
+    for entry in fs::read_dir(root.join("blobs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let link = entry.path();
         let Some(store) = shared(hub, &link) else {
             if let Ok(metadata) = fs::metadata(&link) {
@@ -291,14 +298,30 @@ mod tests {
         let both = "bb".repeat(32);
         cached(&hub, "models--org--old", &only, &["models--org--old"], 30);
         // A shared file both use counts for neither and stays.
-        cached(&hub, "datasets--org--data", &both, &["datasets--org--data", "models--org--fresh"], 30);
-        cached(&hub, "models--org--fresh", &both, &["datasets--org--data", "models--org--fresh"], 0);
+        cached(
+            &hub,
+            "datasets--org--data",
+            &both,
+            &["datasets--org--data", "models--org--fresh"],
+            30,
+        );
+        cached(
+            &hub,
+            "models--org--fresh",
+            &both,
+            &["datasets--org--data", "models--org--fresh"],
+            0,
+        );
         // Read lately, though written long ago.
         let fresh_read = hub.join("models--org--fresh/blobs/config");
         let long_ago = SystemTime::now() - Duration::from_secs(30 * 86_400);
         fs::File::open(&fresh_read)
             .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(long_ago).set_accessed(SystemTime::now()))
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(long_ago)
+                    .set_accessed(SystemTime::now()),
+            )
             .unwrap();
         fs::create_dir_all(hub.join("not-a-repository")).unwrap();
         let host = host(&home, &[]);
@@ -308,7 +331,10 @@ mod tests {
         let keys: Vec<_> = found.iter().map(|item| item.id.key.as_str()).collect();
         assert_eq!(
             keys,
-            ["hugging-face:datasets--org--data", "hugging-face:models--org--old"]
+            [
+                "hugging-face:datasets--org--data",
+                "hugging-face:models--org--old"
+            ]
         );
         let (data, old) = (&found[0], &found[1]);
         assert_eq!(data.title, "Hugging Face dataset org/data");
@@ -371,7 +397,10 @@ mod tests {
         assert_eq!(
             hub(&host(
                 home,
-                &[("HF_HOME", Path::new("/hf")), ("HF_HUB_CACHE", Path::new("/h"))]
+                &[
+                    ("HF_HOME", Path::new("/hf")),
+                    ("HF_HUB_CACHE", Path::new("/h"))
+                ]
             )),
             Some(PathBuf::from("/h"))
         );

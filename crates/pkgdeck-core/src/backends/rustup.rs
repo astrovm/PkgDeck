@@ -138,7 +138,10 @@ fn pins(dir: &Path, depth: usize, device: u64, found: &mut Vec<String>, cancel: 
         return;
     }
     for name in ["rust-toolchain.toml", "rust-toolchain"] {
-        if let Some(pin) = fs::read_to_string(dir.join(name)).ok().and_then(|text| pinned(&text)) {
+        if let Some(pin) = fs::read_to_string(dir.join(name))
+            .ok()
+            .and_then(|text| pinned(&text))
+        {
             found.push(pin);
         }
     }
@@ -149,7 +152,10 @@ fn pins(dir: &Path, depth: usize, device: u64, found: &mut Vec<String>, cancel: 
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let skipped = name.starts_with('.')
-            || matches!(name.as_ref(), "target" | "node_modules" | "Library" | "build");
+            || matches!(
+                name.as_ref(),
+                "target" | "node_modules" | "Library" | "build"
+            );
         let path = entry.path();
         if !skipped
             && entry.file_type().is_ok_and(|kind| kind.is_dir())
@@ -217,9 +223,10 @@ impl<T: Transport> Rustup<T> {
         else {
             return Ok(vec![]);
         };
-        let folders = self.folders.clone().unwrap_or_else(|| {
-            super::ProjectSettings::load(&crate::host::Host::current()).folders
-        });
+        let folders = self
+            .folders
+            .clone()
+            .unwrap_or_else(|| super::ProjectSettings::load(&crate::host::Host::current()).folders);
         let mut pinned = vec![];
         for folder in folders {
             if let Ok(metadata) = fs::metadata(&folder) {
@@ -450,7 +457,11 @@ impl<T: Transport> Backend for Rustup<T> {
             .strip_prefix("toolchain:")
             .filter(|_| id.backend == ID)
             .ok_or(EngineError::NotFound)?;
-        if !self.unpinned(cancel)?.iter().any(|unpinned| unpinned == name) {
+        if !self
+            .unpinned(cancel)?
+            .iter()
+            .any(|unpinned| unpinned == name)
+        {
             return Err(EngineError::NotFound);
         }
         Ok(self.cleanup_item(name, cancel))
@@ -633,12 +644,27 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         };
-        write(&root.join("code/app/rust-toolchain.toml"), "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n");
-        write(&root.join("code/old/rust-toolchain"), "nightly-2026-05-01\n");
+        write(
+            &root.join("code/app/rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n",
+        );
+        write(
+            &root.join("code/old/rust-toolchain"),
+            "nightly-2026-05-01\n",
+        );
         // Pins that don't count: in build output, hidden, or not a pin.
-        write(&root.join("code/app/target/x/rust-toolchain.toml"), "channel = \"1.97.0\"");
-        write(&root.join("code/.hidden/rust-toolchain.toml"), "channel = \"1.96.0\"");
-        write(&root.join("code/odd/rust-toolchain.toml"), "[toolchain]\nprofile = \"minimal\"\n");
+        write(
+            &root.join("code/app/target/x/rust-toolchain.toml"),
+            "channel = \"1.97.0\"",
+        );
+        write(
+            &root.join("code/.hidden/rust-toolchain.toml"),
+            "channel = \"1.96.0\"",
+        );
+        write(
+            &root.join("code/odd/rust-toolchain.toml"),
+            "[toolchain]\nprofile = \"minimal\"\n",
+        );
         let fake = fake();
         *fake.list.lock().unwrap() = [
             "stable-aarch64-apple-darwin (default)",
@@ -690,16 +716,23 @@ mod tests {
         assert_eq!(items[0].title, "Rust 1.97.0-aarch64-apple-darwin");
         assert!(items[0].bytes.unwrap() >= 4096);
         assert_eq!(items[1].bytes, None);
-        assert_eq!(rustup.cleanup_plan(&items[0].id, &cancel).unwrap(), items[0]);
+        assert_eq!(
+            rustup.cleanup_plan(&items[0].id, &cancel).unwrap(),
+            items[0]
+        );
         let mut said = vec![];
         rustup
-            .execute(&Operation::Clean(items[0].id.clone()), &cancel, &mut |progress| {
-                said.push(progress)
-            })
+            .execute(
+                &Operation::Clean(items[0].id.clone()),
+                &cancel,
+                &mut |progress| said.push(progress),
+            )
             .unwrap();
         assert_eq!(
             said,
-            [Progress::Message("Uninstalling Rust 1.97.0-aarch64-apple-darwin…".into())]
+            [Progress::Message(
+                "Uninstalling Rust 1.97.0-aarch64-apple-darwin…".into()
+            )]
         );
         assert!(fake
             .calls
@@ -716,7 +749,10 @@ mod tests {
                 backend: ID.into(),
                 key: key.into(),
             };
-            assert!(matches!(rustup.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)));
+            assert!(matches!(
+                rustup.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
         }
         // Without a default there's no telling which host is this one.
         *fake.list.lock().unwrap() = "1.97.0-aarch64-apple-darwin\n".into();
@@ -724,8 +760,14 @@ mod tests {
         let cancelled = Cancellation::default();
         cancelled.cancel();
         *fake.list.lock().unwrap() = "stable-aarch64-apple-darwin (default)\n".into();
-        assert!(matches!(rustup.cleanup(&cancelled), Err(EngineError::Cancelled)));
-        assert_eq!(split_version("1.99-x86_64-unknown-linux-gnu"), Some(("1.99", "x86_64-unknown-linux-gnu")));
+        assert!(matches!(
+            rustup.cleanup(&cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(
+            split_version("1.99-x86_64-unknown-linux-gnu"),
+            Some(("1.99", "x86_64-unknown-linux-gnu"))
+        );
         assert_eq!(split_version("custom"), None);
         assert_eq!(split_version("1.x-host"), None);
         assert_eq!(pinned("1.80.0"), Some("1.80.0".into()));

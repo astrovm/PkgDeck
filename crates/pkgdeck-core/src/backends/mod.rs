@@ -1,7 +1,7 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
 mod adopt;
-mod android;
 mod ai_catalog;
+mod android;
 mod appimage;
 mod appimage_contents;
 mod appimage_github;
@@ -11,8 +11,8 @@ mod cleanup;
 mod conda;
 mod dev_tool;
 mod flatpak;
-mod hugging_face;
 mod homebrew;
+mod hugging_face;
 mod icons;
 mod native;
 mod system;
