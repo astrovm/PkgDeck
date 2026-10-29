@@ -14,6 +14,14 @@
       <description>
         <p>Clean finds much more to free up, and the time sliders take exact values.</p>
         <ul>
+          <li>Old snap revisions, system logs older than a week, crash dumps and crash reports can be cleaned, with your password</li>
+          <li>Unused Android system images, broken emulators and Rust toolchains no project pins show in Clean</li>
+          <li>Hugging Face models nobody read in a while, the pip cache and thumbnails show in Clean</li>
+          <li>Old Rust build output in the cache folder counts as an old project</li>
+          <li>Steam games that left their files behind show as leftovers, unchecked</li>
+          <li>Container images that lost their tag to a newer pull are found and deleted</li>
+          <li>Check every and Old after take a typed value in minutes, hours, days or weeks</li>
+          <li>Old after can be as short as a few hours</li>
           <li>Container caches from older recipes no longer pile up</li>
         </ul>
       </description>
