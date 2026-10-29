@@ -56,7 +56,7 @@ pub fn unattended(backend: &str) -> Unattended {
             Unattended::Approved
         }
         "fwupd" | "mas" | "macos-apps" | "system-image" | "apk" | "xbps" | "aur" | "toolbox"
-        | "distrobox" => Unattended::Never,
+        | "distrobox" | "system-files" => Unattended::Never,
         _ => Unattended::User,
     }
 }

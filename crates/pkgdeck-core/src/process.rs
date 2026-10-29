@@ -244,22 +244,8 @@ pub(crate) fn run_observed(
     if !write {
         command.retry_lost_start();
     }
-    // A program written just before it runs can briefly report "text file
-    // busy" while another thread's fork still holds its write descriptor.
-    // Nothing ran yet, so trying again is safe, even for writes.
-    let mut busy_retries = 0;
-    let mut child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            Err(error)
-                if error.kind() == io::ErrorKind::ExecutableFileBusy && busy_retries < 20 =>
-            {
-                busy_retries += 1;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => return Err(ExecutionError::Io(format!("spawn {program}: {error}"))),
-        }
-    };
+    let mut child = start_written(|| command.spawn())
+        .map_err(|error| ExecutionError::Io(format!("spawn {program}: {error}")))?;
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
     let start = Instant::now();
@@ -337,6 +323,25 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 /// Its output keeps being read and dropped until it exits: a command that
 /// prints while it stops would otherwise die from a broken pipe, which is
 /// how grok crashed.
+/// Start a program with `spawn`. One written just before it runs can
+/// briefly report "text file busy" while another thread's fork still holds
+/// its write descriptor. Nothing ran yet, so trying again is safe, even for
+/// writes.
+pub(crate) fn start_written<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut busy_retries = 0;
+    loop {
+        match spawn() {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy && busy_retries < 20 =>
+            {
+                busy_retries += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+}
+
 fn stop_group(child: &mut Child, mut stdout: impl Read, mut stderr: impl Read, grace: Duration) {
     // The child is not reaped until the end, so its process-group ID
     // cannot be reused while it is signalled.

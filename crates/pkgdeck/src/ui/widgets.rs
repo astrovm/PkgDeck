@@ -892,7 +892,8 @@ pub fn right<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
-/// A slider that snaps to `count` steps. Returns true when it moved.
+/// A slider that snaps to `count` steps, read out as `label` and moved
+/// with the arrow keys too. Returns true when it moved.
 pub fn steps(
     ui: &mut Ui,
     id: Id,
@@ -900,6 +901,7 @@ pub fn steps(
     index: &mut usize,
     enabled: bool,
     width: f32,
+    label: &str,
 ) -> bool {
     let palette = Palette::current(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(
@@ -917,6 +919,27 @@ pub fn steps(
         let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
         *index = (t * (count - 1) as f32).round() as usize;
     }
+    if enabled && response.has_focus() {
+        let last = count.saturating_sub(1);
+        ui.input(|input| {
+            use egui::Key;
+            if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::ArrowDown) {
+                *index = index.saturating_sub(1);
+            }
+            if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::ArrowUp) {
+                *index = (*index + 1).min(last);
+            }
+            if input.key_pressed(Key::Home) {
+                *index = 0;
+            }
+            if input.key_pressed(Key::End) {
+                *index = last;
+            }
+        });
+    }
+    let value = *index as f64;
+    let text = label.to_owned();
+    response.widget_info(|| WidgetInfo::slider(enabled, value, &text));
     let opacity = if enabled { 1.0 } else { 0.42 };
     let x = glide(ui.ctx(), id, at(*index), REVEAL);
     let hover = ease(

@@ -210,11 +210,15 @@ that failed are shown separately.
 | --- | --- |
 | APT | Unused dependencies and the download cache |
 | Homebrew | Unused dependencies and old downloads |
-| Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
+| Snap | Older versions each snap keeps after an update |
+| Docker, Podman | Untagged images, unused images (an older pull that lost its tag included), stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
-| Developer caches | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
-| Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while |
+| rustup | Toolchains of a pinned version that no project pins, no folder overrides and that aren't the default |
+| Caches | Cargo, Go, Gradle, Maven, Yarn, Bun, sccache and pip caches, and file thumbnails on Linux; on macOS also CocoaPods and Xcode build data. Hugging Face models nobody used for your **Old after** time, Android system images no emulator uses, and emulators left without their settings |
+| Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while, and Cargo build output in the cache folder no build used for that long |
+| Steam | Game folders no installed game names as its own |
+| System files | On Linux, system logs older than a week, crash dumps and crash reports |
 
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and its local files meet your chosen protection rule. Removing it keeps the branch.
@@ -226,6 +230,11 @@ that failed are shown separately.
   since when it waits.
 - Something already gone counts as cleaned. If something else removed part of
   it, PkgDeck removes the rest.
+- Hugging Face models count as used when their files were last read. A disk
+  mounted with `noatime` doesn't record that, so models there are never
+  offered.
+- System files, old Snap versions and APT tasks are found and sized without
+  a password, and ask for it when they run. Automatic cleaning skips them.
 - APT finds unused dependencies and sizes its download cache without a
   password. Cleaning the cache deletes every cached download, so a package
   you reinstall downloads again. Both ask for your password when they run.
@@ -236,8 +245,8 @@ automatic cleaning use them too. A task that shows up for the first time
 starts checked, except:
 
 - Tasks that may hold your work or data: unused volumes, stopped containers,
-  unused dependencies and extra copies of apps. Check them once, and they're
-  cleaned like the rest from then on.
+  unused dependencies, extra copies of apps and Steam game leftovers. Check
+  them once, and they're cleaned like the rest from then on.
 - sccache, because it manages its own size limit.
 
 Its button shows the space those tasks free. **Select all** leaves out the

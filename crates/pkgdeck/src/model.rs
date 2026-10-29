@@ -1811,26 +1811,44 @@ pub fn duration(seconds: i64) -> String {
 
 pub use pkgdeck_core::disk::size;
 
-/// How often background checks run, and how each is said.
-pub const INTERVALS: [(i32, &str); 10] = [
-    (15, "15 minutes"),
-    (30, "30 minutes"),
-    (60, "1 hour"),
-    (180, "3 hours"),
-    (360, "6 hours"),
-    (720, "12 hours"),
-    (1440, "1 day"),
-    (2880, "2 days"),
-    (4320, "3 days"),
-    (10080, "1 week"),
+/// How often background checks can run, in minutes: the slider's stops.
+/// Any number of minutes in between can be typed.
+pub const INTERVALS: [u32; 16] = [
+    15, 30, 60, 120, 180, 240, 360, 480, 720, 1440, 2880, 4320, 5760, 7200, 8640, 10080,
 ];
+/// The shortest and longest time between background checks.
+pub const INTERVAL_RANGE: std::ops::RangeInclusive<u32> = 15..=10080;
 pub fn nearest_interval(minutes: i32) -> usize {
-    INTERVALS
+    nearest(&INTERVALS, u32::try_from(minutes).unwrap_or(0))
+}
+/// The stop in `stops` nearest to `value`.
+pub fn nearest(stops: &[u32], value: u32) -> usize {
+    stops
         .iter()
         .enumerate()
-        .min_by_key(|(_, (step, _))| (step - minutes).abs())
-        .map(|(index, _)| index)
-        .unwrap_or(1)
+        .min_by_key(|(_, step)| step.abs_diff(value))
+        .map_or(0, |(index, _)| index)
+}
+
+/// A time in the largest unit it's a whole number of: "15 minutes",
+/// "36 hours", "1 week", "9 months" (of 30 days), "1 year".
+pub fn minutes_text(minutes: u32) -> String {
+    const UNITS: [(u32, &str); 6] = [
+        (525_600, "year"),
+        (43_200, "month"),
+        (10_080, "week"),
+        (1440, "day"),
+        (60, "hour"),
+        (1, "minute"),
+    ];
+    let minutes = minutes.max(1);
+    let (size, unit) = UNITS
+        .iter()
+        .find(|(size, _)| minutes.is_multiple_of(*size))
+        .copied()
+        .unwrap_or((1, "minute"));
+    let count = minutes / size;
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
 #[cfg(test)]

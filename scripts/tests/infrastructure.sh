@@ -66,6 +66,28 @@ grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
+# Without a chosen cache, a run deletes the caches nobody uses any more: an
+# older recipe's after a day, another checkout's once it's gone or after two
+# weeks. What is in use, or was used lately, stays.
+caches="$work/xdg/pkgdeck/containers"
+workspace_key=$(printf '%s' "$PWD" | sha256sum | cut -c1-12)
+mkdir -p "$caches/$workspace_key/old-recipe/target" "$caches/$workspace_key/recent-recipe/target" \
+    "$caches/gone/x/target" "$caches/idle/x/target" "$caches/elsewhere/x/target" "$caches/unmarked/x"
+touch -d '3 days ago' "$caches/$workspace_key/old-recipe/.last-used"
+touch "$caches/$workspace_key/recent-recipe/.last-used"
+printf '%s\n' "$work/no-such-checkout" >"$caches/gone/workspace"
+printf '%s\n' "$work" >"$caches/idle/workspace" "$caches/elsewhere/workspace"
+touch -d '20 days ago' "$caches/idle/x/.last-used"
+touch "$caches/elsewhere/x/.last-used"
+touch -d '20 days ago' "$caches/unmarked/x" "$caches/unmarked"
+expect_code 0 env -u PKGDECK_CONTAINER_CACHE PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" XDG_CACHE_HOME="$work/xdg" \
+    scripts/container.sh development --exec true
+current=$(ls "$caches/$workspace_key" | grep -v -e recent-recipe -e workspace)
+[[ -f $caches/$workspace_key/$current/.last-used && -d $caches/$workspace_key/$current/target ]]
+[[ $(<"$caches/$workspace_key/workspace") == "$PWD" ]]
+[[ ! -e $caches/$workspace_key/old-recipe && -d $caches/$workspace_key/recent-recipe ]]
+[[ ! -e $caches/gone && ! -e $caches/idle && ! -e $caches/unmarked && -d $caches/elsewhere ]]
+grep -q "Deleting an old container cache: $caches/$workspace_key/old-recipe" "$work/output"
 # A local run gets half the engine's CPUs and memory unless told otherwise.
 for setting in local CI=true PKGDECK_CONTAINER_CPUS=0 'PKGDECK_CONTAINER_CPUS=3 PKGDECK_CONTAINER_MEMORY=4g'; do
     read -ra overrides <<<"${setting/local/}"

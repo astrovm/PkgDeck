@@ -384,6 +384,8 @@ pub fn monogram(id: &str) -> &str {
         "solana" => "So",
         "anchor" => "An",
         "foundry" => "Fo",
+        "steam" => "St",
+        "system-files" => "Sf",
         other => other.get(..1).unwrap_or(""),
     }
 }

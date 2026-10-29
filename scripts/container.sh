@@ -61,8 +61,12 @@ run_container() {
 }
 if [[ "$kind" == development ]]; then
     workspace_key=$(printf '%s' "$PWD" | sha256sum | cut -c1-12)
-    cache="${PKGDECK_CONTAINER_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/containers/$workspace_key/$key-$(uname -m)}"
+    caches="${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/containers"
+    cache="${PKGDECK_CONTAINER_CACHE:-$caches/$workspace_key/$key-$(uname -m)}"
     mkdir -p "$cache/cargo" "$cache/target"
+    if [[ -z ${PKGDECK_CONTAINER_CACHE:-} ]]; then
+        scripts/prune-container-caches.sh "$caches" "$workspace_key" "$key-$(uname -m)" "$PWD"
+    fi
     if [[ "${1:-}" == --binary-dir ]]; then printf '%s/target/debug\n' "$cache"; exit 0; fi
     command=(scripts/verify.sh "$@")
     interactive=()

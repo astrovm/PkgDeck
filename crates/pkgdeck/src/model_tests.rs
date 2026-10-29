@@ -1062,10 +1062,30 @@ fn times_sizes_and_intervals_read_naturally() {
     assert_eq!(size(4_200_000), "4.2 MB");
     assert_eq!(size(31_000_000), "31 MB");
     assert_eq!(size(2_000_000_000_000_000), "2000 TB");
-    assert_eq!(INTERVALS[nearest_interval(30)].0, 30);
-    assert_eq!(INTERVALS[nearest_interval(100)].0, 60);
-    assert_eq!(INTERVALS[nearest_interval(99_999)].0, 10080);
-    assert_eq!(INTERVALS[nearest_interval(-4)].0, 15);
+    assert_eq!(INTERVALS[nearest_interval(30)], 30);
+    assert_eq!(INTERVALS[nearest_interval(100)], 120);
+    assert_eq!(INTERVALS[nearest_interval(99_999)], 10080);
+    assert_eq!(INTERVALS[nearest_interval(-4)], 15);
+    assert_eq!(nearest(&[], 5), 0);
+    // Every stop up to a day is a few hours, then every day up to a week.
+    assert!(INTERVALS.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(INTERVALS.len() >= 15);
+    for (minutes, text) in [
+        (0, "1 minute"),
+        (15, "15 minutes"),
+        (60, "1 hour"),
+        (90, "90 minutes"),
+        (36 * 60, "36 hours"),
+        (1440, "1 day"),
+        (10 * 1440, "10 days"),
+        (10080, "1 week"),
+        (4 * 10080, "4 weeks"),
+        (43_200, "1 month"),
+        (9 * 43_200, "9 months"),
+        (525_600, "1 year"),
+    ] {
+        assert_eq!(minutes_text(minutes), text, "{minutes}");
+    }
 }
 
 #[test]

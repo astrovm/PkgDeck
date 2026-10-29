@@ -408,6 +408,15 @@ impl Host {
             "GRADLE_USER_HOME",
             "YARN_CACHE_FOLDER",
             "SCCACHE_DIR",
+            "PIP_CACHE_DIR",
+            // Where Hugging Face keeps models, and Android its SDK and
+            // emulators, for the cleanup tasks that look there.
+            "HF_HOME",
+            "HF_HUB_CACHE",
+            "ANDROID_HOME",
+            "ANDROID_SDK_ROOT",
+            "ANDROID_USER_HOME",
+            "ANDROID_AVD_HOME",
             // A custom Homebrew location (command ownership) and cache
             // (when cached Homebrew listings expire).
             "HOMEBREW_PREFIX",

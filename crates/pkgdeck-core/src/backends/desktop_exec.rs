@@ -136,9 +136,8 @@ pub(super) fn spawn(command: &Command, bridge: Option<&std::path::Path>) -> std:
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map(drop)
+        .process_group(0);
+    crate::process::start_written(|| process.spawn()).map(drop)
 }
 
 impl Command {
@@ -202,6 +201,30 @@ pub(super) fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_still_open_for_writing_starts_once_it_is_closed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pkgdeck-busy-app-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"#!/bin/sh\n").unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // The open write descriptor makes exec fail with "text file busy"
+        // until it closes.
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(file);
+        });
+        let command = Command::parse(&path.display().to_string()).unwrap();
+        let started = spawn(&command, None);
+        holder.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        started.unwrap();
+    }
 
     #[test]
     fn splits_quoted_and_plain_arguments() {

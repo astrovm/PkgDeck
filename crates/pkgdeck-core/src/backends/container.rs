@@ -316,20 +316,32 @@ impl<T: Transport> Container<T> {
                 "ls",
                 "--no-trunc",
                 "--format",
-                "{{.ID}}\t{{.Repository}}:{{.Tag}}",
+                "{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.Digest}}",
+                "--digests",
             ],
             cancel,
         )?;
         let mut images = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let (id, reference) = line.split_once('\t').unwrap_or((line, ""));
-            let (id, reference) = (id.trim(), reference.trim());
+            let mut fields = line.split('\t').map(str::trim);
+            let (id, reference) = (
+                fields.next().unwrap_or_default(),
+                fields.next().unwrap_or_default(),
+            );
             if !safe_id(id) {
                 return Err(EngineError::InvalidResponse {
                     backend: self.kind.id().into(),
                     reason: "invalid image ID".into(),
                 });
             }
+            // A newer pull takes the tag from the image before it, which
+            // keeps its name and digest: it goes by those.
+            let digest = fields.next().unwrap_or_default();
+            let untagged = reference
+                .strip_suffix(":<none>")
+                .filter(|name| *name != "<none>" && digest.starts_with("sha256:"))
+                .map(|name| format!("{name}@{digest}"));
+            let reference = untagged.as_deref().unwrap_or(reference);
             if reference.contains("<none>")
                 || !safe_reference(reference)
                 || used.iter().any(|used| used == bare_id(id))
@@ -1713,6 +1725,50 @@ mod tests {
                 Err(EngineError::NotFound)
             ));
         }
+    }
+
+    #[test]
+    fn an_older_pull_that_lost_its_tag_goes_by_its_digest() {
+        let cancel = Cancellation::default();
+        let digest = format!("sha256:{SPARE}");
+        let mut backend = Container::podman(
+            Fixture::new("")
+                .answer("container ls --all --no-trunc --quiet", "")
+                .answer(
+                    "image ls --no-trunc --format",
+                    &format!("sha256:{USED}\trust:<none>\t{digest}\nsha256:{SPARE}\tlocal:<none>\t<none>\nsha256:{STOPPED}\t<none>:<none>\t{digest}\n"),
+                )
+                .answer("image inspect --format", "1000000\n"),
+        );
+        let plans = backend.cleanup(&cancel).unwrap();
+        let images = plans
+            .iter()
+            .find(|plan| plan.id.key == "unused-images")
+            .unwrap();
+        // One without a digest has nothing to go by, and one without a
+        // name is a dangling image.
+        assert!(
+            images.preview.ends_with(&format!("\nrust@{digest}")),
+            "{}",
+            images.preview
+        );
+        assert_eq!(images.summary, "1 images no container uses");
+        backend
+            .execute(&Operation::Clean(images.id.clone()), &cancel, &mut ignore)
+            .unwrap();
+        let calls = backend.transport.calls.lock().unwrap().clone();
+        let listing = calls
+            .iter()
+            .find(|call| {
+                call.1
+                    .starts_with(&["image".into(), "ls".into(), "--no-trunc".into()])
+            })
+            .unwrap();
+        assert_eq!(listing.1.last(), Some(&OsString::from("--digests")));
+        assert_eq!(
+            calls.last().unwrap().1,
+            ["image", "rm", &format!("rust@{digest}")].map(OsString::from)
+        );
     }
 
     #[test]

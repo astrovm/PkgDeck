@@ -1,8 +1,8 @@
-//! Caches developer tools keep in the home folder and fill again on their
-//! own: Cargo's downloaded crates, Go's build and module caches, Gradle,
-//! Maven, Yarn, Bun, sccache, CocoaPods and Xcode's build data. None of
-//! these tools has a command that clears them, so PkgDeck empties the
-//! folders itself, and never while a build that uses one is running.
+//! Caches kept in the home folder that fill again on their own: Cargo's
+//! downloaded crates, Go's build and module caches, Gradle, Maven, Yarn,
+//! Bun, sccache, pip, CocoaPods, Xcode's build data and file thumbnails.
+//! PkgDeck empties the folders itself, and never while a build that uses
+//! one is running.
 use super::*;
 use crate::{disk, hold::Toolchain, host::Host};
 use std::path::Path;
@@ -125,7 +125,25 @@ impl DevCaches {
                 })],
                 builds: &[Toolchain::Rust, Toolchain::Native],
             },
+            Cache {
+                key: "pip",
+                title: "pip cache",
+                kind: CleanupKind::PackageCache,
+                summary: "pip downloads packages again when an install needs them",
+                folders: vec![var("PIP_CACHE_DIR").unwrap_or_else(|| caches.join("pip"))],
+                builds: &[],
+            },
         ];
+        if !mac {
+            all.push(Cache {
+                key: "thumbnails",
+                title: "Thumbnail cache",
+                kind: CleanupKind::PackageCache,
+                summary: "File managers make previews again as you browse",
+                folders: vec![caches.join("thumbnails")],
+                builds: &[],
+            });
+        }
         if mac {
             let xcode = home.join("Library/Developer/Xcode");
             all.extend([
@@ -194,6 +212,48 @@ impl DevCaches {
     }
 }
 
+/// Tasks beyond emptying a folder: one per thing to delete.
+impl DevCaches {
+    /// How long unused makes something old, as the Old projects setting says.
+    fn cutoff(&self) -> std::time::SystemTime {
+        super::ProjectSettings::load(&self.host).cutoff()
+    }
+    fn extras(&self, cancel: &Cancellation) -> Vec<CleanupItem> {
+        let mut items = hugging_face::items(&self.host, self.cutoff(), cancel);
+        items.extend(android::items(&self.host, cancel));
+        items
+    }
+    /// The task `key` names, when it's one of these: `Some(None)` when it's
+    /// gone.
+    fn extra(&self, key: &str, cancel: &Cancellation) -> Option<Option<CleanupItem>> {
+        let host = &self.host;
+        if let Some(folder) = key.strip_prefix("hugging-face:") {
+            Some(hugging_face::item(host, folder, self.cutoff(), cancel))
+        } else if let Some(image) = key.strip_prefix("android-image:") {
+            Some(android::image_item(host, image, cancel))
+        } else {
+            let name = key.strip_prefix("android-avd:")?;
+            Some(android::avd_item(host, name, cancel))
+        }
+    }
+    fn clean_extra(
+        &self,
+        key: &str,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<(), EngineError>> {
+        let plan = self.extra(key, cancel)?;
+        Some((|| {
+            let plan = plan.ok_or(EngineError::NotFound)?;
+            progress(Progress::Message(format!("Deleting {}…", plan.title)));
+            match key.strip_prefix("hugging-face:") {
+                Some(folder) => hugging_face::remove(&self.host, folder, cancel),
+                None => android::remove(&self.host, key),
+            }
+        })())
+    }
+}
+
 /// `path` with the home folder written as `~`.
 pub(super) fn shown(host: &Host, path: &Path) -> String {
     match host
@@ -204,6 +264,16 @@ pub(super) fn shown(host: &Host, path: &Path) -> String {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
+}
+
+/// Delete `path`, naming it when it can't go.
+pub(super) fn remove_shown(host: &Host, path: &Path) -> Result<(), EngineError> {
+    disk::remove(path).map_err(|error| {
+        EngineError::Execution(ExecutionError::Io(format!(
+            "Couldn't remove {}: {error}",
+            shown(host, path)
+        )))
+    })
 }
 
 /// Refuse to delete what a running build may be reading or writing: one
@@ -242,7 +312,7 @@ impl Backend for DevCaches {
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
         // Measuring walks every file, so the caches are measured side by side.
         let caches = self.caches();
-        let items = std::thread::scope(|scope| {
+        let mut items: Vec<_> = std::thread::scope(|scope| {
             let workers: Vec<_> = caches
                 .iter()
                 .map(|cache| scope.spawn(|| self.item(cache, cancel)))
@@ -252,6 +322,7 @@ impl Backend for DevCaches {
                 .filter_map(|worker| worker.join().expect("cache measuring panicked"))
                 .collect()
         });
+        items.extend(self.extras(cancel));
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -262,6 +333,11 @@ impl Backend for DevCaches {
         id: &CleanupId,
         cancel: &Cancellation,
     ) -> Result<CleanupItem, EngineError> {
+        if id.backend == "dev-caches" {
+            if let Some(found) = self.extra(&id.key, cancel) {
+                return found.ok_or(EngineError::NotFound);
+            }
+        }
         self.caches()
             .iter()
             .filter(|cache| id.backend == "dev-caches" && cache.key == id.key)
@@ -277,6 +353,13 @@ impl Backend for DevCaches {
         let Operation::Clean(id) = operation else {
             return Err(self.unsupported(operation.capability()));
         };
+        if id.backend == "dev-caches" {
+            if let Some(done) = self.clean_extra(&id.key, cancel, progress) {
+                return done.map(|()| OperationOutcome {
+                    cancellation_deferred: false,
+                });
+            }
+        }
         let cache = self
             .caches()
             .into_iter()
@@ -333,6 +416,35 @@ mod tests {
     fn fill(dir: &Path, bytes: usize) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("blob"), vec![7; bytes]).unwrap();
+    }
+
+    #[test]
+    fn a_folder_that_cant_go_is_named() {
+        let root = home("stuck");
+        let locked = root.join("models");
+        fs::create_dir_all(locked.join("old")).unwrap();
+        let host = Host::new(
+            Runtime::Native,
+            BTreeMap::from([("HOME".into(), root.as_os_str().to_owned())]),
+        );
+        // Root may change anything, so this only shows for everyone else.
+        let mode = |mode| {
+            fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(mode))
+                .unwrap()
+        };
+        mode(0o555);
+        let result = remove_shown(&host, &locked.join("old"));
+        mode(0o755);
+        let root_user = rustix::process::geteuid().is_root();
+        assert!(
+            root_user
+                || result.is_err_and(|error| error
+                    .to_string()
+                    .starts_with("Couldn't remove ~/models/old: "))
+        );
+        remove_shown(&host, &locked).unwrap();
+        assert!(!locked.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -417,6 +529,12 @@ mod tests {
         );
         assert_eq!(folders["maven"], ["~/.m2/repository"]);
         assert_eq!(folders["bun"], ["~/.bun/install/cache"]);
+        assert_eq!(folders["pip"], [format!("{caches}/pip")]);
+        if cfg!(target_os = "macos") {
+            assert!(!folders.contains_key("thumbnails"));
+        } else {
+            assert_eq!(folders["thumbnails"], ["~/.cache/thumbnails"]);
+        }
         assert_eq!(folders["yarn"][1], "~/.yarn/berry/cache");
         assert!(folders["sccache"][0].starts_with(caches));
         assert_eq!(
@@ -430,6 +548,7 @@ mod tests {
                 ("GOCACHE", Path::new("/tmp/gocache")),
                 ("GOMODCACHE", Path::new("relative")),
                 ("SCCACHE_DIR", Path::new("/tmp/sccache")),
+                ("PIP_CACHE_DIR", Path::new("/tmp/pip")),
             ],
         );
         let caches = moved.caches();
@@ -444,6 +563,7 @@ mod tests {
         assert_eq!(folder("go-build"), Path::new("/tmp/gocache"));
         assert_eq!(folder("go-modules"), root.join("go/pkg/mod"));
         assert_eq!(folder("sccache"), Path::new("/tmp/sccache"));
+        assert_eq!(folder("pip"), Path::new("/tmp/pip"));
         // Without a home there is nothing to look at.
         let mut homeless = DevCaches::new(Host::new(Runtime::Native, BTreeMap::new()));
         assert!(homeless.caches().is_empty());
@@ -566,6 +686,73 @@ mod tests {
         clean(&mut backend, "cargo").unwrap();
         assert!(!root.join(".bun/install/cache/blob").exists());
         assert!(!root.join(".cargo/registry/blob").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn models_images_and_emulators_are_planned_and_deleted_one_by_one() {
+        let root = home("extras");
+        let image = root.join(if cfg!(target_os = "macos") {
+            "Library/Android/sdk/system-images/android-36/default/x86_64"
+        } else {
+            "Android/Sdk/system-images/android-36/default/x86_64"
+        });
+        fill(&image, 4096);
+        fill(&root.join(".android/avd/left.avd"), 10);
+        let model = root.join(".cache/huggingface/hub/models--org--m");
+        fill(&model.join("blobs"), 4096);
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 86_400);
+        fs::File::open(model.join("blobs/blob"))
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(long_ago)
+                    .set_modified(long_ago),
+            )
+            .unwrap();
+        let mut backend = caches_in(&root, &[]);
+        let cancel = Cancellation::default();
+        let items = backend.cleanup(&cancel).unwrap();
+        let mut keys: Vec<_> = items.iter().map(|item| item.id.key.clone()).collect();
+        keys.sort();
+        let mut expected = vec![
+            "android-avd:left".to_owned(),
+            "android-image:android-36/default/x86_64".to_owned(),
+        ];
+        // Only a disk that records reads can tell a model is unused.
+        if items
+            .iter()
+            .any(|item| item.id.key == "hugging-face:models--org--m")
+        {
+            expected.push("hugging-face:models--org--m".into());
+        }
+        expected.sort();
+        assert_eq!(keys, expected);
+        for item in &items {
+            assert_eq!(backend.cleanup_plan(&item.id, &cancel).unwrap(), *item);
+            let mut said = vec![];
+            backend
+                .execute(
+                    &Operation::Clean(item.id.clone()),
+                    &cancel,
+                    &mut |progress| said.push(progress),
+                )
+                .unwrap();
+            assert_eq!(
+                said,
+                [Progress::Message(format!("Deleting {}…", item.title))]
+            );
+            // Gone, it can't be planned or cleaned again.
+            assert!(matches!(
+                backend.cleanup_plan(&item.id, &cancel),
+                Err(EngineError::NotFound)
+            ));
+            assert!(matches!(
+                backend.execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {}),
+                Err(EngineError::NotFound)
+            ));
+        }
+        assert!(!image.exists() && !root.join(".android/avd/left.avd").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
