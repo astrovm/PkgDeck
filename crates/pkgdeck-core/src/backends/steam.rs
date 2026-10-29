@@ -5,7 +5,7 @@
 //! be checked once.
 use super::*;
 use crate::{disk, host::Host};
-use dev_caches::shown;
+use dev_caches::{remove_shown, shown};
 use std::{
     fs,
     path::Path,
@@ -219,12 +219,7 @@ impl Backend for Steam {
         let plan = self.cleanup_plan(id, cancel)?;
         let folder = Path::new(id.key.strip_prefix("leftover:").unwrap_or_default());
         progress(Progress::Message(format!("Deleting {}…", plan.title)));
-        disk::remove(folder).map_err(|error| {
-            EngineError::Execution(ExecutionError::Io(format!(
-                "Couldn't remove {}: {error}",
-                shown(&self.host, folder)
-            )))
-        })?;
+        remove_shown(&self.host, folder)?;
         Ok(OperationOutcome {
             cancellation_deferred: false,
         })
@@ -237,6 +232,7 @@ mod tests {
     use crate::host::Runtime;
     use std::collections::BTreeMap;
 
+    fn ignore(_: Progress) {}
     fn scratch(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("pkgdeck-steam-{name}-{}", std::process::id()));
@@ -397,7 +393,7 @@ mod tests {
                     backend: "steam".into()
                 },
                 &cancel,
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::Unsupported { .. })
         ));

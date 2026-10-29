@@ -652,9 +652,14 @@ mod tests {
             &root.join("code/old/rust-toolchain"),
             "nightly-2026-05-01\n",
         );
-        // Pins that don't count: in build output, hidden, or not a pin.
+        // Pins that don't count: in build output, hidden, too deep, or not
+        // a pin.
         write(
             &root.join("code/app/target/x/rust-toolchain.toml"),
+            "channel = \"1.97.0\"",
+        );
+        write(
+            &root.join("code/deep/1/2/3/4/5/6/7/8/rust-toolchain.toml"),
             "channel = \"1.97.0\"",
         );
         write(

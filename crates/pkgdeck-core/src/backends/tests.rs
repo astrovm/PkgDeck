@@ -2385,6 +2385,7 @@ core22               20260901    3001   latest/stable    canonical**   base
 firefox              158.0.1-1   9113   latest/stable    mozilla**     disabled
 firefox              159.0-1     9200   latest/stable    mozilla**     -
 adventure-mods       1.3.0       x2     -                -             disabled
+cut-short            1.0
 ";
     let cancel = Cancellation::default();
     let kit = Kit::new(Ok(false), LISTING);
@@ -2476,6 +2477,21 @@ adventure-mods       1.3.0       x2     -                -             disabled
         ),
         Err(EngineError::Cancelled)
     ));
+    // Snap that can't list its revisions says so.
+    #[derive(Clone)]
+    struct Broken;
+    impl Transport for Broken {
+        fn system_manager(
+            &self,
+            _: &str,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Err(ExecutionError::Disabled("snap not found".into()))
+        }
+    }
+    assert!(SystemManager::snap(Broken).cleanup(&cancel).is_err());
 }
 
 #[test]

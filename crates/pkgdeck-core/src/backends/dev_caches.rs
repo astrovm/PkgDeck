@@ -266,6 +266,16 @@ pub(super) fn shown(host: &Host, path: &Path) -> String {
     }
 }
 
+/// Delete `path`, naming it when it can't go.
+pub(super) fn remove_shown(host: &Host, path: &Path) -> Result<(), EngineError> {
+    disk::remove(path).map_err(|error| {
+        EngineError::Execution(ExecutionError::Io(format!(
+            "Couldn't remove {}: {error}",
+            shown(host, path)
+        )))
+    })
+}
+
 /// Refuse to delete what a running build may be reading or writing: one
 /// with a toolchain in `uses`.
 pub(super) fn not_while_building(
@@ -406,6 +416,35 @@ mod tests {
     fn fill(dir: &Path, bytes: usize) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("blob"), vec![7; bytes]).unwrap();
+    }
+
+    #[test]
+    fn a_folder_that_cant_go_is_named() {
+        let root = home("stuck");
+        let locked = root.join("models");
+        fs::create_dir_all(locked.join("old")).unwrap();
+        let host = Host::new(
+            Runtime::Native,
+            BTreeMap::from([("HOME".into(), root.as_os_str().to_owned())]),
+        );
+        // Root may change anything, so this only shows for everyone else.
+        let mode = |mode| {
+            fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(mode))
+                .unwrap()
+        };
+        mode(0o555);
+        let result = remove_shown(&host, &locked.join("old"));
+        mode(0o755);
+        let root_user = rustix::process::geteuid().is_root();
+        assert!(
+            root_user
+                || result.is_err_and(|error| error
+                    .to_string()
+                    .starts_with("Couldn't remove ~/models/old: "))
+        );
+        remove_shown(&host, &locked).unwrap();
+        assert!(!locked.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

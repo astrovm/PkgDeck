@@ -247,6 +247,7 @@ mod tests {
             }
         }
     }
+    fn ignore(_: Progress) {}
     fn completion(code: i32, stdout: &str) -> Completion {
         Completion {
             code: Some(code),
@@ -311,7 +312,7 @@ mod tests {
                 Err(EngineError::NotFound)
             ));
             assert!(matches!(
-                backend.execute(&Operation::Clean(id), &cancel, &mut |_| {}),
+                backend.execute(&Operation::Clean(id), &cancel, &mut ignore),
                 Err(EngineError::NotFound)
             ));
         }
@@ -321,7 +322,7 @@ mod tests {
                     backend: "system-files".into()
                 },
                 &cancel,
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::Unsupported { .. })
         ));
@@ -348,7 +349,7 @@ mod tests {
         );
         for item in &items {
             backend
-                .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {})
+                .execute(&Operation::Clean(item.id.clone()), &cancel, &mut ignore)
                 .unwrap();
             let ran = disk.ran.lock().unwrap().last().unwrap().clone();
             assert_eq!(

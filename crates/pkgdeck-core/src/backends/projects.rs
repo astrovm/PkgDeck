@@ -499,10 +499,9 @@ fn cargo_outputs(dir: &Path, depth: usize, device: u64, cancel: &Cancellation) -
     if depth >= CACHE_DEPTH {
         return vec![];
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return vec![];
-    };
-    entries
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| entry.path())
@@ -518,13 +517,15 @@ fn last_build(output: &Path) -> SystemTime {
     let mut newest = SystemTime::UNIX_EPOCH;
     let mut pending = vec![(output.to_owned(), 0)];
     while let Some((path, depth)) = pending.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if let Ok(changed) = metadata.modified() {
+        // A file may go while it's read.
+        let metadata = fs::symlink_metadata(&path).ok();
+        if let Some(changed) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+        {
             newest = newest.max(changed);
         }
-        if metadata.is_dir() && depth < 3 {
+        if metadata.is_some_and(|metadata| metadata.is_dir()) && depth < 3 {
             pending.extend(
                 fs::read_dir(&path)
                     .into_iter()
@@ -1458,14 +1459,16 @@ mod tests {
                 backend: "projects".into(),
                 key: format!("cache-build:{}", elsewhere.display()),
             };
-            assert!(
-                matches!(
-                    backend.cleanup_plan(&id, &cancel),
-                    Err(EngineError::NotFound)
-                ),
-                "{elsewhere:?}"
-            );
+            assert!(matches!(
+                backend.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ));
         }
+        // Stopped, it looks no further.
+        let stopped = Cancellation::default();
+        stopped.cancel();
+        let device = fs::metadata(&cache).unwrap().dev();
+        assert!(cargo_outputs(&cache, 0, device, &stopped).is_empty());
         // A newer setting, or a fresh build, keeps it.
         let mut stricter = projects(&home, &bin, vec![home.join("code")], 60);
         assert!(stricter.cleanup(&cancel).unwrap().is_empty());

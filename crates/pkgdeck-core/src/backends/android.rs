@@ -3,7 +3,7 @@
 //! their settings are gone. Emulators made by Gradle count as users too.
 use super::*;
 use crate::{disk, host::Host};
-use dev_caches::shown;
+use dev_caches::{remove_shown, shown};
 use std::{fs, path::Path};
 
 /// How deep emulator settings are looked for: Gradle keeps its own
@@ -241,18 +241,12 @@ pub(super) fn items(host: &Host, cancel: &Cancellation) -> Vec<CleanupItem> {
 
 /// Delete what the task `key` names, as a fresh look finds it.
 pub(super) fn remove(host: &Host, key: &str) -> Result<(), EngineError> {
-    let failed = |path: &Path, error: std::io::Error| {
-        EngineError::Execution(ExecutionError::Io(format!(
-            "Couldn't remove {}: {error}",
-            shown(host, path)
-        )))
-    };
     if let Some(image) = key.strip_prefix("android-image:") {
         let root = sdk(host)
             .ok_or(EngineError::NotFound)?
             .join("system-images");
         let folder = root.join(image);
-        disk::remove(&folder).map_err(|error| failed(&folder, error))?;
+        remove_shown(host, &folder)?;
         // The API and tag folders, once they hold nothing else.
         for parent in folder.ancestors().skip(1).take(2) {
             if parent != root {
@@ -266,7 +260,7 @@ pub(super) fn remove(host: &Host, key: &str) -> Result<(), EngineError> {
         .ok_or(EngineError::NotFound)?;
     let found = broken(host, name).ok_or(EngineError::NotFound)?;
     for path in [found.entry, found.folder].into_iter().flatten() {
-        disk::remove(&path).map_err(|error| failed(&path, error))?;
+        remove_shown(host, &path)?;
     }
     Ok(())
 }
@@ -475,6 +469,7 @@ mod tests {
         assert_eq!((sdk(&homeless), avds(&homeless)), (None, None));
         let cancel = Cancellation::default();
         assert!(items(&homeless, &cancel).is_empty());
+        assert!(images_in_use(&homeless).is_empty());
         assert!(matches!(
             remove(&homeless, "android-image:a/b/c"),
             Err(EngineError::NotFound)

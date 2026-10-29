@@ -6,7 +6,7 @@
 //! it, and one with no list stays.
 use super::*;
 use crate::{disk, host::Host};
-use dev_caches::shown;
+use dev_caches::{remove_shown, shown};
 use projects::how_long;
 use std::{
     fs,
@@ -210,26 +210,19 @@ pub(super) fn items(host: &Host, cutoff: SystemTime, cancel: &Cancellation) -> V
 pub(super) fn remove(host: &Host, folder: &str, cancel: &Cancellation) -> Result<(), EngineError> {
     let hub = hub(host).ok_or(EngineError::NotFound)?;
     let found = look(&hub, folder, cancel);
-    let failed = |path: &Path, error: std::io::Error| {
-        EngineError::Execution(ExecutionError::Io(format!(
-            "Couldn't remove {}: {error}",
-            shown(host, path)
-        )))
-    };
-    let root = hub.join(folder);
-    disk::remove(&root).map_err(|error| failed(&root, error))?;
+    remove_shown(host, &hub.join(folder))?;
     let _ = disk::remove(&hub.join(".locks").join(folder));
-    for store in found.shared {
-        if cancel.requested() {
-            return Err(EngineError::Cancelled);
-        }
-        // Something may have started using it since.
-        if users(&hub, &store).is_some_and(|users| users.is_empty()) {
-            fs::remove_file(&store).map_err(|error| failed(&store, error))?;
-            let mut list = store.into_os_string();
-            list.push(".refs");
-            let _ = fs::remove_file(PathBuf::from(list));
-        }
+    // With the repository gone, its shared files go too, so none is left
+    // with nobody to delete it. Something may have started using one since.
+    let unused = found
+        .shared
+        .into_iter()
+        .filter(|store| users(&hub, store).is_some_and(|users| users.is_empty()));
+    for store in unused {
+        remove_shown(host, &store)?;
+        let mut list = store.into_os_string();
+        list.push(".refs");
+        let _ = fs::remove_file(PathBuf::from(list));
     }
     Ok(())
 }
@@ -290,10 +283,11 @@ mod tests {
     fn models_nobody_used_go_with_the_shared_files_only_they_use() {
         let home = scratch("unused");
         let hub = home.join(".cache/huggingface/hub");
-        if !records_reads(&home) {
-            // Nothing can be told on a disk that doesn't record reads.
-            return;
-        }
+        // Nothing can be told on a disk that doesn't record reads.
+        assert!(
+            records_reads(&home),
+            "the temporary folder must record reads"
+        );
         let only = "aa".repeat(32);
         let both = "bb".repeat(32);
         cached(&hub, "models--org--old", &only, &["models--org--old"], 30);
@@ -371,9 +365,9 @@ mod tests {
         fs::remove_file(hub.join(format!("blobs/cc/{store}.refs"))).unwrap();
         let host = host(&home, &[("HF_HUB_CACHE", &hub)]);
         let cancel = Cancellation::default();
-        if let Some(found) = item(&host, "models--org--x", SystemTime::now(), &cancel) {
-            assert_eq!(found.preview.lines().count(), 2, "{}", found.preview);
-        }
+        // Counted as nobody's, it isn't listed either.
+        let found = item(&host, "models--org--x", SystemTime::now(), &cancel).unwrap();
+        assert_eq!(found.preview.lines().count(), 2, "{}", found.preview);
         remove(&host, "models--org--x", &cancel).unwrap();
         assert!(hub.join(format!("blobs/cc/{store}")).exists());
         fs::remove_dir_all(&home).unwrap();
