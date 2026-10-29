@@ -10,6 +10,19 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.7" date="2026-10-28">
+      <description>
+        <p>Activity opens smoothly with its list ready.</p>
+        <ul>
+          <li>The Activity panel slides in and out smoothly and stays inside the window frame</li>
+          <li>Activity loads after the window first appears, so its list is ready when opened</li>
+          <li>Long Activity lists and review details scroll with less work per frame</li>
+          <li>Background replies appear promptly while the app is idle</li>
+          <li>Reading Activity on macOS avoids unnecessary history writes</li>
+          <li>Changes left waiting when PkgDeck closed are settled when Activity is read</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.6" date="2026-10-28">
       <description>
         <p>Skipped cleanups read as skipped everywhere, and Activity keeps their names.</p>
