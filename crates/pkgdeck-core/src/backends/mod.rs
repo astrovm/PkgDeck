@@ -1,5 +1,6 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
 mod adopt;
+mod android;
 mod ai_catalog;
 mod appimage;
 mod appimage_contents;

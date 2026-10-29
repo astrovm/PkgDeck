@@ -219,13 +219,22 @@ impl DevCaches {
         super::ProjectSettings::load(&self.host).cutoff()
     }
     fn extras(&self, cancel: &Cancellation) -> Vec<CleanupItem> {
-        hugging_face::items(&self.host, self.cutoff(), cancel)
+        let mut items = hugging_face::items(&self.host, self.cutoff(), cancel);
+        items.extend(android::items(&self.host, cancel));
+        items
     }
     /// The task `key` names, when it's one of these: `Some(None)` when it's
     /// gone.
     fn extra(&self, key: &str, cancel: &Cancellation) -> Option<Option<CleanupItem>> {
-        let folder = key.strip_prefix("hugging-face:")?;
-        Some(hugging_face::item(&self.host, folder, self.cutoff(), cancel))
+        let host = &self.host;
+        if let Some(folder) = key.strip_prefix("hugging-face:") {
+            Some(hugging_face::item(host, folder, self.cutoff(), cancel))
+        } else if let Some(image) = key.strip_prefix("android-image:") {
+            Some(android::image_item(host, image, cancel))
+        } else {
+            let name = key.strip_prefix("android-avd:")?;
+            Some(android::avd_item(host, name, cancel))
+        }
     }
     fn clean_extra(
         &self,
@@ -237,8 +246,10 @@ impl DevCaches {
         Some((|| {
             let plan = plan.ok_or(EngineError::NotFound)?;
             progress(Progress::Message(format!("Deleting {}…", plan.title)));
-            let folder = key.strip_prefix("hugging-face:").unwrap_or_default();
-            hugging_face::remove(&self.host, folder, cancel)
+            match key.strip_prefix("hugging-face:") {
+                Some(folder) => hugging_face::remove(&self.host, folder, cancel),
+                None => android::remove(&self.host, key),
+            }
         })())
     }
 }
@@ -636,6 +647,61 @@ mod tests {
         clean(&mut backend, "cargo").unwrap();
         assert!(!root.join(".bun/install/cache/blob").exists());
         assert!(!root.join(".cargo/registry/blob").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn models_images_and_emulators_are_planned_and_deleted_one_by_one() {
+        let root = home("extras");
+        let image = root.join(if cfg!(target_os = "macos") {
+            "Library/Android/sdk/system-images/android-36/default/x86_64"
+        } else {
+            "Android/Sdk/system-images/android-36/default/x86_64"
+        });
+        fill(&image, 4096);
+        fill(&root.join(".android/avd/left.avd"), 10);
+        let model = root.join(".cache/huggingface/hub/models--org--m");
+        fill(&model.join("blobs"), 4096);
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 86_400);
+        fs::File::open(model.join("blobs/blob"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_accessed(long_ago).set_modified(long_ago))
+            .unwrap();
+        let mut backend = caches_in(&root, &[]);
+        let cancel = Cancellation::default();
+        let items = backend.cleanup(&cancel).unwrap();
+        let mut keys: Vec<_> = items.iter().map(|item| item.id.key.clone()).collect();
+        keys.sort();
+        let mut expected = vec![
+            "android-avd:left".to_owned(),
+            "android-image:android-36/default/x86_64".to_owned(),
+        ];
+        // Only a disk that records reads can tell a model is unused.
+        if items.iter().any(|item| item.id.key == "hugging-face:models--org--m") {
+            expected.push("hugging-face:models--org--m".into());
+        }
+        expected.sort();
+        assert_eq!(keys, expected);
+        for item in &items {
+            assert_eq!(backend.cleanup_plan(&item.id, &cancel).unwrap(), *item);
+            let mut said = vec![];
+            backend
+                .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |progress| {
+                    said.push(progress)
+                })
+                .unwrap();
+            assert_eq!(said, [Progress::Message(format!("Deleting {}…", item.title))]);
+            // Gone, it can't be planned or cleaned again.
+            assert!(matches!(
+                backend.cleanup_plan(&item.id, &cancel),
+                Err(EngineError::NotFound)
+            ));
+            assert!(matches!(
+                backend.execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {}),
+                Err(EngineError::NotFound)
+            ));
+        }
+        assert!(!image.exists() && !root.join(".android/avd/left.avd").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
