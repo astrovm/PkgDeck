@@ -10,6 +10,14 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.12.8" date="2026-10-29">
+      <description>
+        <p>Clean finds much more to free up, and the time sliders take exact values.</p>
+        <ul>
+          <li>Container caches from older recipes no longer pile up</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.7" date="2026-10-28">
       <description>
         <p>Activity opens smoothly with its list ready.</p>
