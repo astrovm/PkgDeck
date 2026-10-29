@@ -105,13 +105,40 @@ impl WorktreeProtection {
     }
 }
 
+/// A week, the time without changes that makes a project old by default.
+pub const DEFAULT_HOURS: u32 = 7 * 24;
+
 /// Where to look for old projects and which worktrees to keep.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(from = "SavedSettings")]
 pub struct ProjectSettings {
     pub folders: Vec<PathBuf>,
-    pub days: u32,
+    /// How long without changes makes a project, or a model nobody used,
+    /// old.
+    pub hours: u32,
     pub worktree_protection: WorktreeProtection,
+}
+
+/// Settings as saved, by this version or one that counted in days.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct SavedSettings {
+    folders: Vec<PathBuf>,
+    hours: Option<u32>,
+    days: Option<u32>,
+    worktree_protection: WorktreeProtection,
+}
+impl From<SavedSettings> for ProjectSettings {
+    fn from(saved: SavedSettings) -> Self {
+        Self {
+            folders: saved.folders,
+            hours: saved
+                .hours
+                .or_else(|| saved.days.map(|days| days.saturating_mul(24)))
+                .unwrap_or(DEFAULT_HOURS),
+            worktree_protection: saved.worktree_protection,
+        }
+    }
 }
 
 impl ProjectSettings {
@@ -119,9 +146,13 @@ impl ProjectSettings {
     pub fn defaults(host: &Host) -> Self {
         Self {
             folders: home(host).into_iter().collect(),
-            days: 7,
+            hours: DEFAULT_HOURS,
             worktree_protection: WorktreeProtection::default(),
         }
+    }
+    /// How long ago is too long ago.
+    pub fn cutoff(&self) -> SystemTime {
+        SystemTime::now() - Duration::from_secs(u64::from(self.hours) * 3600)
     }
     /// `~/.config/pkgdeck/clean.json`, or under `XDG_CONFIG_HOME`.
     pub fn path(host: &Host) -> Option<PathBuf> {
@@ -165,7 +196,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             folders: vec![],
-            days: 7,
+            hours: DEFAULT_HOURS,
             worktree_protection: WorktreeProtection::default(),
         }
     }
@@ -402,9 +433,15 @@ fn projects_in(folder: &Path, home: Option<PathBuf>, cancel: &Cancellation) -> V
 
 /// How long ago `newest` was, in words that stay the same for a while.
 fn age(newest: SystemTime, now: SystemTime) -> String {
-    let days = now.duration_since(newest).unwrap_or_default().as_secs() / 86_400;
+    format!("Unchanged for {}", how_long(newest, now))
+}
+
+/// The time since `then`, in rough steps: "a few hours", "3 weeks".
+pub(super) fn how_long(then: SystemTime, now: SystemTime) -> String {
+    let days = now.duration_since(then).unwrap_or_default().as_secs() / 86_400;
     let (count, unit) = match days {
-        0..=6 => return "Unchanged for a few days".into(),
+        0 => return "a few hours".into(),
+        1..=6 => return "a few days".into(),
         7..=59 => (days / 7, "week"),
         60..=729 => (days / 30, "month"),
         _ => (days / 365, "year"),
@@ -415,7 +452,89 @@ fn age(newest: SystemTime, now: SystemTime) -> String {
     } else {
         count.to_string()
     };
-    format!("Unchanged for {count} {unit}{plural}")
+    format!("{count} {unit}{plural}")
+}
+
+/// How deep in the cache folder Cargo's build output is looked for.
+const CACHE_DEPTH: usize = 6;
+
+/// The folder programs keep their caches in.
+fn cache_root(host: &Host) -> Option<PathBuf> {
+    let home = home(host)?;
+    if cfg!(target_os = "macos") {
+        return Some(home.join("Library/Caches"));
+    }
+    Some(
+        host.var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".cache")),
+    )
+}
+
+/// The cache tag in `dir`, which says which tool made it.
+fn cache_tag(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join("CACHEDIR.TAG")).ok()
+}
+
+/// Whether Cargo made `dir` to build in.
+fn cargo_output(dir: &Path) -> bool {
+    cache_tag(dir).is_some_and(|tag| tag.contains("created by cargo"))
+}
+
+/// Folders Cargo builds in under `dir`, such as the build output a
+/// container keeps between runs. A folder another tool tagged as its cache
+/// isn't looked into.
+fn cargo_outputs(dir: &Path, depth: usize, device: u64, cancel: &Cancellation) -> Vec<PathBuf> {
+    if cancel.requested() {
+        return vec![];
+    }
+    if depth > 0 {
+        match cache_tag(dir) {
+            Some(tag) if tag.contains("created by cargo") => return vec![dir.to_owned()],
+            Some(_) => return vec![],
+            None => {}
+        }
+    }
+    if depth >= CACHE_DEPTH {
+        return vec![];
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .filter(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.dev() == device))
+        .flat_map(|path| cargo_outputs(&path, depth + 1, device, cancel))
+        .collect()
+}
+
+/// When Cargo last built in `output`. A build replaces files in the
+/// profile folders and the folders right under them, so those are enough
+/// without reading every file.
+fn last_build(output: &Path) -> SystemTime {
+    let mut newest = SystemTime::UNIX_EPOCH;
+    let mut pending = vec![(output.to_owned(), 0)];
+    while let Some((path, depth)) = pending.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if let Ok(changed) = metadata.modified() {
+            newest = newest.max(changed);
+        }
+        if metadata.is_dir() && depth < 3 {
+            pending.extend(
+                fs::read_dir(&path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| (entry.path(), depth + 1)),
+            );
+        }
+    }
+    newest
 }
 
 impl Projects {
@@ -437,7 +556,7 @@ impl Projects {
             .unwrap_or_else(|| ProjectSettings::load(&self.host))
     }
     fn cutoff(&self) -> SystemTime {
-        SystemTime::now() - Duration::from_secs(u64::from(self.settings().days) * 86_400)
+        self.settings().cutoff()
     }
     /// Whether `path` is in one of the folders projects are looked for in.
     fn looked_at(&self, path: &Path) -> bool {
@@ -839,6 +958,70 @@ impl Projects {
         })
     }
 
+    /// Whether `path` is Cargo's build output in the cache folder.
+    fn cached_output(&self, path: &Path) -> bool {
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            && cache_root(&self.host).is_some_and(|root| path.starts_with(&root) && path != root)
+            && cargo_output(path)
+    }
+
+    /// The task for Cargo's build output at `output` in the cache folder,
+    /// when no build used it for long enough.
+    fn cached_output_item(
+        &self,
+        output: &Path,
+        cutoff: SystemTime,
+        cancel: &Cancellation,
+    ) -> Option<CleanupItem> {
+        let built = last_build(output);
+        if built > cutoff {
+            return None;
+        }
+        let name = output
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(CleanupItem {
+            id: CleanupId {
+                backend: "projects".into(),
+                key: format!("cache-build:{}", output.display()),
+            },
+            kind: CleanupKind::BuildFiles,
+            title: format!("{name} build output"),
+            summary: format!("Not built in for {}", how_long(built, SystemTime::now())),
+            preview: format!(
+                "Deletes this folder Cargo builds in. The next build makes it again.\n{}",
+                shown(&self.host, output)
+            ),
+            bytes: Some(disk::usage(output, cancel)),
+        })
+    }
+
+    /// Tasks for Cargo's build output in the cache folder.
+    fn cached_output_items(&self, cutoff: SystemTime, cancel: &Cancellation) -> Vec<CleanupItem> {
+        let Some(root) = cache_root(&self.host) else {
+            return vec![];
+        };
+        let Ok(metadata) = fs::metadata(&root) else {
+            return vec![];
+        };
+        let outputs = cargo_outputs(&root, 0, metadata.dev(), cancel);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = outputs
+                .iter()
+                .map(|output| scope.spawn(move || self.cached_output_item(output, cutoff, cancel)))
+                .collect();
+            workers
+                .into_iter()
+                .filter_map(|worker| worker.join().expect("build output measuring panicked"))
+                .collect()
+        })
+    }
+
     /// Every task for the projects under `folders`, measured side by side.
     fn items(&self, folders: &[PathBuf], cancel: &Cancellation) -> Vec<CleanupItem> {
         let home = home(&self.host);
@@ -889,7 +1072,8 @@ impl Backend for Projects {
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
         // Read saved settings again so a choice applies to the next scan.
-        let items = self.items(&self.settings().folders, cancel);
+        let mut items = self.items(&self.settings().folders, cancel);
+        items.extend(self.cached_output_items(self.cutoff(), cancel));
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -901,6 +1085,12 @@ impl Backend for Projects {
         id: &CleanupId,
         cancel: &Cancellation,
     ) -> Result<CleanupItem, EngineError> {
+        if let Some(output) = id.key.strip_prefix("cache-build:").map(Path::new) {
+            return Some(output)
+                .filter(|output| id.backend == "projects" && self.cached_output(output))
+                .and_then(|output| self.cached_output_item(output, self.cutoff(), cancel))
+                .ok_or(EngineError::NotFound);
+        }
         let root = id
             .key
             .strip_prefix("build:")
@@ -959,7 +1149,11 @@ impl Backend for Projects {
                 shown(&self.host, what)
             )))
         };
-        if let Some(root) = id.key.strip_prefix("build:").map(Path::new) {
+        if let Some(output) = id.key.strip_prefix("cache-build:").map(Path::new) {
+            not_while_building(&self.host, self.id(), &[Toolchain::Rust])?;
+            progress(Progress::Message(format!("Cleaning {}…", plan.title)));
+            disk::remove(output).map_err(|error| failed(output, error.to_string()))?;
+        } else if let Some(root) = id.key.strip_prefix("build:").map(Path::new) {
             let project = projects_in(root, None, cancel)
                 .into_iter()
                 .find(|project| project.root == root)
@@ -1180,12 +1374,120 @@ mod tests {
     fn projects(home: &Path, bin: &Path, folders: Vec<PathBuf>, days: u32) -> Projects {
         Projects::new(host(home, bin, &[])).with_settings(ProjectSettings {
             folders,
-            days,
+            hours: days * 24,
             ..ProjectSettings::default()
         })
     }
     fn keys(items: &[CleanupItem]) -> Vec<String> {
         items.iter().map(|item| item.id.key.clone()).collect()
+    }
+
+    /// Every file and folder under `dir` last changed `days` ago.
+    fn age_all(dir: &Path, days: u64) {
+        let when = SystemTime::now() - Duration::from_secs(days * 86_400);
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                age_all(&entry.path(), days);
+            } else {
+                fs::File::open(entry.path())
+                    .and_then(|file| file.set_modified(when))
+                    .unwrap();
+            }
+        }
+        fs::File::open(dir)
+            .and_then(|file| file.set_modified(when))
+            .unwrap();
+    }
+
+    #[test]
+    fn old_cargo_output_in_the_cache_folder_is_offered_and_deleted() {
+        let home = scratch("cached-output");
+        let cache = if cfg!(target_os = "macos") {
+            home.join("Library/Caches")
+        } else {
+            home.join(".cache")
+        };
+        let cargo_tag = "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n";
+        let output = |path: &Path| {
+            write(&path.join("CACHEDIR.TAG"), cargo_tag);
+            write(&path.join("debug/deps/libapp.rlib"), &"x".repeat(64 * 1024));
+        };
+        let old = cache.join("tool/containers/ab12/cd34-x86_64/target");
+        output(&old);
+        // Built in lately, inside another tool's cache, or too deep to look.
+        let fresh = cache.join("fresh/target");
+        output(&fresh);
+        write(&cache.join("huggingface/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n# created by huggingface_hub.\n");
+        output(&cache.join("huggingface/target"));
+        output(&cache.join("a/b/c/d/e/f/target"));
+        age_all(&cache, 30);
+        age_all(&fresh, 0);
+        let bin = tools(&home, "");
+        let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
+        let cancel = Cancellation::default();
+        let items = backend.cleanup(&cancel).unwrap();
+        let key = format!("cache-build:{}", old.display());
+        assert_eq!(keys(&items), [key.clone()]);
+        let item = &items[0];
+        assert_eq!(item.kind, CleanupKind::BuildFiles);
+        assert_eq!(item.title, "cd34-x86_64 build output");
+        assert_eq!(item.summary, "Not built in for 4 weeks");
+        let shown_cache = if cfg!(target_os = "macos") {
+            "~/Library/Caches"
+        } else {
+            "~/.cache"
+        };
+        assert_eq!(
+            item.preview,
+            format!("Deletes this folder Cargo builds in. The next build makes it again.\n{shown_cache}/tool/containers/ab12/cd34-x86_64/target")
+        );
+        assert!(item.bytes.unwrap() >= 64 * 1024);
+        assert_eq!(backend.cleanup_plan(&item.id, &cancel).unwrap(), *item);
+        // Only Cargo's output in the cache folder can be named.
+        for elsewhere in [
+            home.join("code/target"),
+            cache.join("huggingface"),
+            cache.join("tool/../tool/containers/ab12/cd34-x86_64/target"),
+            cache.clone(),
+            PathBuf::from("relative/target"),
+        ] {
+            let id = CleanupId {
+                backend: "projects".into(),
+                key: format!("cache-build:{}", elsewhere.display()),
+            };
+            assert!(
+                matches!(backend.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)),
+                "{elsewhere:?}"
+            );
+        }
+        // A newer setting, or a fresh build, keeps it.
+        let mut stricter = projects(&home, &bin, vec![home.join("code")], 60);
+        assert!(stricter.cleanup(&cancel).unwrap().is_empty());
+        // A Rust build may be using it.
+        let building = tools(&home, "10 1 cargo build\n");
+        let mut waiting = projects(&home, &building, vec![home.join("code")], 7);
+        assert!(matches!(
+            waiting.execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {}),
+            Err(EngineError::Refused {
+                refusal: Refusal::Building,
+                ..
+            })
+        ));
+        let bin = tools(&home, "");
+        let mut backend = projects(&home, &bin, vec![home.join("code")], 7);
+        let mut said = vec![];
+        backend
+            .execute(&Operation::Clean(item.id.clone()), &cancel, &mut |progress| {
+                said.push(progress)
+            })
+            .unwrap();
+        assert_eq!(
+            said,
+            [Progress::Message("Cleaning cd34-x86_64 build output…".into())]
+        );
+        assert!(!old.exists() && old.parent().unwrap().exists() && fresh.exists());
+        assert!(backend.cleanup_gone(item));
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
@@ -2146,7 +2448,7 @@ mod tests {
             let mut backend =
                 Projects::new(Host::new(Runtime::Native, env)).with_settings(ProjectSettings {
                     folders: vec![code.clone()],
-                    days: 7,
+                    hours: DEFAULT_HOURS,
                     ..ProjectSettings::default()
                 });
             let items = backend.cleanup(&cancel).unwrap();
@@ -2221,7 +2523,7 @@ mod tests {
             ProjectSettings::load(&host),
             ProjectSettings {
                 folders: vec![home.clone()],
-                days: 7,
+                hours: DEFAULT_HOURS,
                 ..ProjectSettings::default()
             }
         );
@@ -2229,7 +2531,7 @@ mod tests {
         assert_eq!(path, home.join(".config/pkgdeck/clean.json"));
         let saved = ProjectSettings {
             folders: vec![home.join("code"), PathBuf::from("/srv/projects")],
-            days: 30,
+            hours: 6,
             worktree_protection: WorktreeProtection::UncommittedChanges,
         };
         saved.save(&host).unwrap();
@@ -2240,12 +2542,20 @@ mod tests {
             ProjectSettings::load(&host),
             ProjectSettings {
                 folders: vec![PathBuf::from("/abs")],
-                days: 7,
+                hours: DEFAULT_HOURS,
                 ..ProjectSettings::default()
             }
         );
+        // Settings saved in days keep their time.
+        fs::write(&path, r#"{"folders": ["/abs"], "days": 3}"#).unwrap();
+        assert_eq!(ProjectSettings::load(&host).hours, 72);
+        fs::write(&path, r#"{"days": 3, "hours": 5}"#).unwrap();
+        assert_eq!(ProjectSettings::load(&host).hours, 5);
+        assert!(!String::from_utf8(serde_json::to_vec(&saved).unwrap())
+            .unwrap()
+            .contains("days"));
         fs::write(&path, "{").unwrap();
-        assert_eq!(ProjectSettings::load(&host).days, 7);
+        assert_eq!(ProjectSettings::load(&host).hours, DEFAULT_HOURS);
         // XDG_CONFIG_HOME wins when it's a real path.
         let config = home.join("xdg");
         let xdg = super::tests::host(&home, &bin, &[("XDG_CONFIG_HOME", &config)]);
@@ -2294,7 +2604,8 @@ mod tests {
     fn ages_read_in_rough_steps() {
         let now = SystemTime::now();
         let ago = |days: u64| age(now - Duration::from_secs(days * 86_400 + 60), now);
-        assert_eq!(ago(0), "Unchanged for a few days");
+        assert_eq!(ago(0), "Unchanged for a few hours");
+        assert_eq!(ago(1), "Unchanged for a few days");
         assert_eq!(ago(6), "Unchanged for a few days");
         assert_eq!(ago(7), "Unchanged for a week");
         assert_eq!(ago(21), "Unchanged for 3 weeks");
@@ -2305,7 +2616,7 @@ mod tests {
         assert_eq!(ago(400 * 3), "Unchanged for 3 years");
         assert_eq!(
             age(now + Duration::from_secs(60), now),
-            "Unchanged for a few days"
+            "Unchanged for a few hours"
         );
     }
 

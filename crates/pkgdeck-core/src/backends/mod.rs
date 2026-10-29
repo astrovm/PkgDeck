@@ -366,7 +366,7 @@ pub fn display_name(id: &str) -> &str {
         "solana" => "Solana CLI (Agave)",
         "anchor" => "Anchor (AVM)",
         "foundry" => "Foundry",
-        "dev-caches" => "Developer caches",
+        "dev-caches" => "Caches",
         "projects" => "Old projects",
         // npm, pnpm, pip, pipx, uv, mise, pixi, apk, and rustup are written in lower case.
         other => other,

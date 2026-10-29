@@ -8045,7 +8045,7 @@ fn source_and_scope_names_read_as_people_know_them() {
         ("solana", "Solana CLI (Agave)"),
         ("anchor", "Anchor (AVM)"),
         ("foundry", "Foundry (standalone)"),
-        ("dev-caches", "Developer caches"),
+        ("dev-caches", "Caches"),
         ("projects", "Old projects"),
         ("fixture", "fixture"),
     ] {
@@ -11609,7 +11609,7 @@ fn cleanup_shows_what_it_frees_and_clean_all_waits_for_data_to_be_checked() {
         "Clean 3 tasks\nFrees about 2.5 GB.\nFinished tasks cannot be undone."
     );
     let body = data["body"].as_str().unwrap();
-    assert!(body.starts_with("cargo task (Developer caches), about 2.0 GB\nEmpties cargo"));
+    assert!(body.starts_with("cargo task (Caches), about 2.0 GB\nEmpties cargo"));
     assert!(body.contains("clean task (APT)\nEmpties clean"));
     assert!(!body.contains("unused-volumes"));
     controller.as_mut().confirm(false);
@@ -11665,7 +11665,7 @@ fn cleanup_shows_what_it_frees_and_clean_all_waits_for_data_to_be_checked() {
     let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
     assert_eq!(
         data["body"],
-        "cargo task (Developer caches), about 2.0 GB\nEmpties more"
+        "cargo task (Caches), about 2.0 GB\nEmpties more"
     );
     assert_eq!(controller.confirmation().to_string(), data["body"]);
 }

@@ -1,8 +1,8 @@
-//! Caches developer tools keep in the home folder and fill again on their
-//! own: Cargo's downloaded crates, Go's build and module caches, Gradle,
-//! Maven, Yarn, Bun, sccache, CocoaPods and Xcode's build data. None of
-//! these tools has a command that clears them, so PkgDeck empties the
-//! folders itself, and never while a build that uses one is running.
+//! Caches kept in the home folder that fill again on their own: Cargo's
+//! downloaded crates, Go's build and module caches, Gradle, Maven, Yarn,
+//! Bun, sccache, pip, CocoaPods, Xcode's build data and file thumbnails.
+//! PkgDeck empties the folders itself, and never while a build that uses
+//! one is running.
 use super::*;
 use crate::{disk, hold::Toolchain, host::Host};
 use std::path::Path;
@@ -125,7 +125,25 @@ impl DevCaches {
                 })],
                 builds: &[Toolchain::Rust, Toolchain::Native],
             },
+            Cache {
+                key: "pip",
+                title: "pip cache",
+                kind: CleanupKind::PackageCache,
+                summary: "pip downloads packages again when an install needs them",
+                folders: vec![var("PIP_CACHE_DIR").unwrap_or_else(|| caches.join("pip"))],
+                builds: &[],
+            },
         ];
+        if !mac {
+            all.push(Cache {
+                key: "thumbnails",
+                title: "Thumbnail cache",
+                kind: CleanupKind::PackageCache,
+                summary: "File managers make previews again as you browse",
+                folders: vec![caches.join("thumbnails")],
+                builds: &[],
+            });
+        }
         if mac {
             let xcode = home.join("Library/Developer/Xcode");
             all.extend([
@@ -417,6 +435,12 @@ mod tests {
         );
         assert_eq!(folders["maven"], ["~/.m2/repository"]);
         assert_eq!(folders["bun"], ["~/.bun/install/cache"]);
+        assert_eq!(folders["pip"], [format!("{caches}/pip")]);
+        if cfg!(target_os = "macos") {
+            assert!(!folders.contains_key("thumbnails"));
+        } else {
+            assert_eq!(folders["thumbnails"], ["~/.cache/thumbnails"]);
+        }
         assert_eq!(folders["yarn"][1], "~/.yarn/berry/cache");
         assert!(folders["sccache"][0].starts_with(caches));
         assert_eq!(
@@ -430,6 +454,7 @@ mod tests {
                 ("GOCACHE", Path::new("/tmp/gocache")),
                 ("GOMODCACHE", Path::new("relative")),
                 ("SCCACHE_DIR", Path::new("/tmp/sccache")),
+                ("PIP_CACHE_DIR", Path::new("/tmp/pip")),
             ],
         );
         let caches = moved.caches();
@@ -444,6 +469,7 @@ mod tests {
         assert_eq!(folder("go-build"), Path::new("/tmp/gocache"));
         assert_eq!(folder("go-modules"), root.join("go/pkg/mod"));
         assert_eq!(folder("sccache"), Path::new("/tmp/sccache"));
+        assert_eq!(folder("pip"), Path::new("/tmp/pip"));
         // Without a home there is nothing to look at.
         let mut homeless = DevCaches::new(Host::new(Runtime::Native, BTreeMap::new()));
         assert!(homeless.caches().is_empty());
