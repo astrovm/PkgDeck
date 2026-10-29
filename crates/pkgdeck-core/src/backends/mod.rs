@@ -35,6 +35,8 @@ mod pixi;
 mod projects;
 mod rustup;
 mod standalone;
+mod steam;
+mod system_files;
 mod system_image;
 use crate::{
     engine::*,
@@ -203,7 +205,15 @@ pub const BACKEND_IDS: &[&str] = &[
     "foundry",
     "dev-caches",
     "projects",
+    "steam",
+    "system-files",
 ];
+
+/// The `find` or `journalctl` arguments that delete what the system file
+/// task `key` lists, for the batch helper.
+pub fn system_file_delete_args(key: &str) -> Option<Vec<String>> {
+    system_files::delete_args(key)
+}
 
 /// PkgDeck never installs from these sources: it updates what is already
 /// there, and removes it only when the backend reports
@@ -370,6 +380,8 @@ pub fn display_name(id: &str) -> &str {
         "foundry" => "Foundry",
         "dev-caches" => "Caches",
         "projects" => "Old projects",
+        "steam" => "Steam",
+        "system-files" => "System files",
         // npm, pnpm, pip, pipx, uv, mise, pixi, apk, and rustup are written in lower case.
         other => other,
     }
@@ -806,6 +818,12 @@ fn native_engine_on(
     }
     if allowed("projects") {
         candidates.push((Box::new(projects::Projects::new(host.clone())), true));
+    }
+    if allowed("steam") {
+        candidates.push((Box::new(steam::Steam::new(host.clone())), true));
+    }
+    if allowed("system-files") {
+        candidates.push((Box::new(system_files::SystemFiles::new(transport())), true));
     }
     if allowed("appimage") {
         // Detection only checks the OS, so probing is free and keeps a

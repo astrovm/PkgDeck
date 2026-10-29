@@ -140,6 +140,25 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             "clean" => apt_command(AptAction::Clean)?,
             _ => return Err(invalid("unknown APT cleanup task")),
         },
+        Operation::Clean(id) if id.backend == "system-files" => {
+            let args = crate::backends::system_file_delete_args(&id.key)
+                .ok_or_else(|| invalid("unknown system file cleanup task"))?;
+            let program = if id.key == "journal" { "journalctl" } else { "find" };
+            ProtectedCommand::new(program, args)
+        }
+        Operation::Clean(id) if id.backend == "snap" => {
+            let revisions = crate::backends::snap_revisions(&id.key)
+                .ok_or_else(|| invalid("unknown Snap cleanup task"))?;
+            return Ok(revisions
+                .into_iter()
+                .map(|(name, revision)| {
+                    ProtectedCommand::new(
+                        "snap",
+                        ["remove".into(), name, format!("--revision={revision}")],
+                    )
+                })
+                .collect());
+        }
         Operation::UpgradeAll { backend } if backend == "flatpak" => ProtectedCommand::new(
             "flatpak",
             ["--system", "update", "--noninteractive", "--assumeyes"].map(str::to_owned),

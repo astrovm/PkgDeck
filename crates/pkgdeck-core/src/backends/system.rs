@@ -1,7 +1,7 @@
 //! DNF, pacman, zypper, Snap, apk and XBPS: system managers that share one adapter.
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ManagerKind {
     Dnf,
     Pacman,
@@ -224,6 +224,51 @@ fn apk_pkgver(pkgver: &str) -> Option<(&str, String)> {
 fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
     let (name, version) = pkgver.rsplit_once('-')?;
     (version.contains('_') && !name.is_empty()).then(|| (name, version.to_owned()))
+}
+
+/// The snaps and revisions an old-revisions task removes, from its key:
+/// `disabled-revisions:firefox=9113,core22=2955`. `None` for any other key,
+/// or one with a name or revision Snap wouldn't make.
+pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
+    let listed = key.strip_prefix("disabled-revisions:")?;
+    let name = |name: &str| {
+        !name.is_empty()
+            && !name.starts_with('-')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    let revision = |revision: &str| {
+        let digits = revision.strip_prefix('x').unwrap_or(revision);
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    listed
+        .split(',')
+        .map(|pair| {
+            let (snap, number) = pair.split_once('=')?;
+            (name(snap) && revision(number)).then(|| (snap.to_owned(), number.to_owned()))
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|revisions| !revisions.is_empty())
+}
+
+/// Revisions `snap list --all` marks disabled, with their versions: what
+/// Snap keeps to go back to after an update.
+fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
+    listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let [name, version, revision, .., notes] = fields.as_slice() else {
+                return None;
+            };
+            notes
+                .split(',')
+                .any(|note| note == "disabled")
+                .then(|| ((*name).to_owned(), (*revision).to_owned(), (*version).to_owned()))
+        })
+        .collect()
 }
 
 pub struct SystemManager<T = NativeTransport> {
@@ -795,10 +840,67 @@ impl<T: Transport> Backend for SystemManager<T> {
         Ok(refreshed)
     }
     fn capabilities(&self) -> &[Capability] {
-        CAPABILITIES
+        if self.kind == ManagerKind::Snap {
+            CLEAN_CAPABILITIES
+        } else {
+            CAPABILITIES
+        }
     }
     fn may_have(&self, name: &str) -> bool {
         self.valid_name(name)
+    }
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        if self.kind != ManagerKind::Snap {
+            return Err(self.unsupported(Capability::Clean));
+        }
+        let listing = String::from_utf8(bytes(
+            "snap",
+            self.call(vec!["list".into(), "--all".into()], cancel, false)?,
+        )?)
+        .map_err(|error| invalid("snap", error))?;
+        let mut revisions = disabled_revisions(&listing);
+        revisions.sort();
+        let key = format!(
+            "disabled-revisions:{}",
+            revisions
+                .iter()
+                .map(|(name, revision, _)| format!("{name}={revision}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        // Only what Snap would name goes in the key the runner reads.
+        if revisions.is_empty() || snap_revisions(&key).is_none() {
+            return Ok(vec![]);
+        }
+        let sizes: Vec<u64> = revisions
+            .iter()
+            .filter_map(|(name, revision, _)| {
+                std::fs::metadata(format!("/var/lib/snapd/snaps/{name}_{revision}.snap")).ok()
+            })
+            .map(|metadata| metadata.len())
+            .collect();
+        let count = revisions.len();
+        Ok(vec![CleanupItem {
+            id: CleanupId {
+                backend: "snap".into(),
+                key,
+            },
+            kind: CleanupKind::Unused,
+            title: "Old Snap revisions".into(),
+            summary: format!(
+                "{count} older version{} kept after updates",
+                if count == 1 { "" } else { "s" }
+            ),
+            preview: format!(
+                "Removes these older versions. Each snap keeps the one it runs, and can't go back to these after.\n{}",
+                revisions
+                    .iter()
+                    .map(|(name, revision, version)| format!("{name} {version} (revision {revision})"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            bytes: (!sizes.is_empty()).then(|| sizes.iter().sum()),
+        }])
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         match self.query(true, "", cancel) {
@@ -969,6 +1071,23 @@ impl<T: Transport> Backend for SystemManager<T> {
                 )?,
             )?;
             return Ok(OperationOutcome::default());
+        }
+        if let (ManagerKind::Snap, Operation::Clean(id)) = (self.kind, operation) {
+            let revisions = snap_revisions(&id.key).ok_or(EngineError::NotFound)?;
+            progress(Progress::Message("Removing older Snap versions…".into()));
+            let mut deferred = false;
+            for (name, revision) in revisions {
+                if cancel.requested() {
+                    return Err(EngineError::Cancelled);
+                }
+                let args = vec!["remove".into(), name.into(), format!("--revision={revision}").into()];
+                let result = self.call(args, cancel, true)?;
+                deferred |= result.cancellation_deferred;
+                bytes("snap", result)?;
+            }
+            return Ok(OperationOutcome {
+                cancellation_deferred: deferred,
+            });
         }
         let Some(fixed) = self.kind.write_args(operation) else {
             return Err(self.unsupported(Capability::Clean));

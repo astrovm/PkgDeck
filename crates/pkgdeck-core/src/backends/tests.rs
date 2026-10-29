@@ -2375,3 +2375,120 @@ fn linux_casks_wait_for_homebrew_6() {
         );
     }
 }
+
+#[test]
+fn old_snap_revisions_are_listed_and_removed_by_the_approved_commands() {
+    const LISTING: &str = "Name                 Version     Rev    Tracking         Publisher     Notes
+core22               20260824    2955   latest/stable    canonical**   base,disabled
+core22               20260901    3001   latest/stable    canonical**   base
+firefox              158.0.1-1   9113   latest/stable    mozilla**     disabled
+firefox              159.0-1     9200   latest/stable    mozilla**     -
+adventure-mods       1.3.0       x2     -                -             disabled
+";
+    let cancel = Cancellation::default();
+    let kit = Kit::new(Ok(false), LISTING);
+    let mut snap = SystemManager::snap(kit.clone());
+    assert!(snap.capabilities().contains(&Capability::Clean));
+    assert!(!SystemManager::dnf(Kit::new(Ok(false), ""))
+        .capabilities()
+        .contains(&Capability::Clean));
+    let items = snap.cleanup(&cancel).unwrap();
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(
+        item.id.key,
+        "disabled-revisions:adventure-mods=x2,core22=2955,firefox=9113"
+    );
+    assert_eq!(item.kind, CleanupKind::Unused);
+    assert_eq!(item.summary, "3 older versions kept after updates");
+    assert!(item
+        .preview
+        .ends_with("\nadventure-mods 1.3.0 (revision x2)\ncore22 20260824 (revision 2955)\nfirefox 158.0.1-1 (revision 9113)"));
+    assert!(!item.automatic(), "it needs a password");
+    snap.execute(&Operation::Clean(item.id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    let ran: Vec<String> = kit
+        .ran()
+        .into_iter()
+        .filter(|line| line.starts_with("root "))
+        .collect();
+    let approved: Vec<String> =
+        crate::batch::protected_commands(&Operation::Clean(item.id.clone()))
+            .unwrap()
+            .iter()
+            .map(|command| format!("root snap {}", command.args.join(" ")))
+            .collect();
+    assert_eq!(ran, approved);
+    assert_eq!(ran[0], "root snap remove adventure-mods --revision=x2");
+    // Nothing disabled, or a name Snap wouldn't make, is no task.
+    let current = Kit::new(Ok(false), "Name Version Rev Tracking Publisher Notes\nfirefox 159.0-1 9200 latest/stable mozilla** -\n");
+    assert!(SystemManager::snap(current).cleanup(&cancel).unwrap().is_empty());
+    let odd = Kit::new(Ok(false), "Name Version Rev Tracking Publisher Notes\nBad;Name 1 2 - - disabled\n");
+    assert!(SystemManager::snap(odd).cleanup(&cancel).unwrap().is_empty());
+    assert!(SystemManager::dnf(Kit::new(Ok(false), "")).cleanup(&cancel).is_err());
+    for key in [
+        "disabled-revisions:",
+        "disabled-revisions:a=1;rm",
+        "disabled-revisions:-a=1",
+        "disabled-revisions:a=x",
+        "disabled-revisions:a",
+        "other",
+    ] {
+        assert_eq!(snap_revisions(key), None, "{key}");
+        assert!(crate::batch::protected_commands(&Operation::Clean(CleanupId {
+            backend: "snap".into(),
+            key: key.into(),
+        }))
+        .is_err());
+        assert!(matches!(
+            SystemManager::snap(Kit::new(Ok(false), "")).execute(
+                &Operation::Clean(CleanupId {
+                    backend: "snap".into(),
+                    key: key.into(),
+                }),
+                &cancel,
+                &mut |_| {}
+            ),
+            Err(EngineError::NotFound)
+        ));
+    }
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert!(matches!(
+        SystemManager::snap(Kit::new(Ok(false), "")).execute(
+            &Operation::Clean(item.id.clone()),
+            &cancelled,
+            &mut |_| {}
+        ),
+        Err(EngineError::Cancelled)
+    ));
+}
+
+#[test]
+fn system_file_tasks_have_fixed_root_commands() {
+    for (key, program, last) in [
+        ("journal", "/usr/bin/journalctl", "--vacuum-time=1week"),
+        ("coredumps", "/usr/bin/find", "-delete"),
+        ("crash-reports", "/usr/bin/find", "-delete"),
+    ] {
+        let commands = crate::batch::protected_commands(&Operation::Clean(CleanupId {
+            backend: "system-files".into(),
+            key: key.into(),
+        }))
+        .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, program);
+        assert_eq!(commands[0].args.last().map(String::as_str), Some(last));
+    }
+    assert!(crate::batch::protected_commands(&Operation::Clean(CleanupId {
+        backend: "system-files".into(),
+        key: "everything".into(),
+    }))
+    .is_err());
+    assert_eq!(display_name("system-files"), "System files");
+    assert_eq!(display_name("steam"), "Steam");
+    assert_eq!(
+        crate::unattended::unattended("system-files"),
+        crate::unattended::Unattended::Never
+    );
+}
