@@ -212,6 +212,37 @@ impl DevCaches {
     }
 }
 
+/// Tasks beyond emptying a folder: one per thing to delete.
+impl DevCaches {
+    /// How long unused makes something old, as the Old projects setting says.
+    fn cutoff(&self) -> std::time::SystemTime {
+        super::ProjectSettings::load(&self.host).cutoff()
+    }
+    fn extras(&self, cancel: &Cancellation) -> Vec<CleanupItem> {
+        hugging_face::items(&self.host, self.cutoff(), cancel)
+    }
+    /// The task `key` names, when it's one of these: `Some(None)` when it's
+    /// gone.
+    fn extra(&self, key: &str, cancel: &Cancellation) -> Option<Option<CleanupItem>> {
+        let folder = key.strip_prefix("hugging-face:")?;
+        Some(hugging_face::item(&self.host, folder, self.cutoff(), cancel))
+    }
+    fn clean_extra(
+        &self,
+        key: &str,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<(), EngineError>> {
+        let plan = self.extra(key, cancel)?;
+        Some((|| {
+            let plan = plan.ok_or(EngineError::NotFound)?;
+            progress(Progress::Message(format!("Deleting {}…", plan.title)));
+            let folder = key.strip_prefix("hugging-face:").unwrap_or_default();
+            hugging_face::remove(&self.host, folder, cancel)
+        })())
+    }
+}
+
 /// `path` with the home folder written as `~`.
 pub(super) fn shown(host: &Host, path: &Path) -> String {
     match host
@@ -260,7 +291,7 @@ impl Backend for DevCaches {
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
         // Measuring walks every file, so the caches are measured side by side.
         let caches = self.caches();
-        let items = std::thread::scope(|scope| {
+        let mut items: Vec<_> = std::thread::scope(|scope| {
             let workers: Vec<_> = caches
                 .iter()
                 .map(|cache| scope.spawn(|| self.item(cache, cancel)))
@@ -270,6 +301,7 @@ impl Backend for DevCaches {
                 .filter_map(|worker| worker.join().expect("cache measuring panicked"))
                 .collect()
         });
+        items.extend(self.extras(cancel));
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -280,6 +312,11 @@ impl Backend for DevCaches {
         id: &CleanupId,
         cancel: &Cancellation,
     ) -> Result<CleanupItem, EngineError> {
+        if id.backend == "dev-caches" {
+            if let Some(found) = self.extra(&id.key, cancel) {
+                return found.ok_or(EngineError::NotFound);
+            }
+        }
         self.caches()
             .iter()
             .filter(|cache| id.backend == "dev-caches" && cache.key == id.key)
@@ -295,6 +332,13 @@ impl Backend for DevCaches {
         let Operation::Clean(id) = operation else {
             return Err(self.unsupported(operation.capability()));
         };
+        if id.backend == "dev-caches" {
+            if let Some(done) = self.clean_extra(&id.key, cancel, progress) {
+                return done.map(|()| OperationOutcome {
+                    cancellation_deferred: false,
+                });
+            }
+        }
         let cache = self
             .caches()
             .into_iter()

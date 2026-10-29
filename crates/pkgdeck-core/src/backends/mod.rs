@@ -10,6 +10,7 @@ mod cleanup;
 mod conda;
 mod dev_tool;
 mod flatpak;
+mod hugging_face;
 mod homebrew;
 mod icons;
 mod native;
