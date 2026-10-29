@@ -323,7 +323,7 @@ fn layout(app: &mut App, ui: &mut Ui) {
                     &mut step,
                     true,
                     240.0,
-                    "Roundness",
+                    "Roundness, slider",
                 ) {
                     app.settings.roundness = step as f32 / 4.0;
                 }
@@ -1268,7 +1268,7 @@ fn duration(
             &mut index,
             enabled,
             width,
-            label,
+            &format!("{label}, slider"),
         ) {
             *value = stops[index];
             ui.data_mut(|data| data.remove::<usize>(unit_id));
@@ -1946,7 +1946,7 @@ mod tests {
         harness.run_steps(2);
         assert_eq!(harness.state().1, 504);
         // The slider moves by its stops, from the one nearest.
-        let slider = harness.get_by_label("Old after");
+        let slider = harness.get_by_label("Old after, slider");
         slider.focus();
         harness.run();
         harness.key_press(Key::ArrowRight);
