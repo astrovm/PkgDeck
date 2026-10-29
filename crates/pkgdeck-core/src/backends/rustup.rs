@@ -5,7 +5,13 @@
 //! `--no-self-update`; rustup's own update is a separate row.
 use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, package::*, process::*};
-use std::{collections::BTreeMap, ffi::OsString};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
 const ID: &str = "rustup";
 const CAPABILITIES: &[Capability] = &[
@@ -15,12 +21,17 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Install,
     Capability::Remove,
     Capability::Upgrade,
+    Capability::Clean,
 ];
+/// How deep project folders are searched for toolchain pins.
+const PIN_DEPTH: usize = 8;
 /// The row for rustup itself.
 const SELF: &str = "rustup";
 
 pub struct Rustup<T = NativeTransport> {
     transport: T,
+    /// Where projects are looked for, instead of the saved setting.
+    folders: Option<Vec<PathBuf>>,
 }
 
 struct Toolchain {
@@ -79,9 +90,88 @@ fn parse_check(text: &str) -> BTreeMap<String, Check> {
         .collect()
 }
 
+/// A toolchain name split into its version and the host it runs on:
+/// `1.98.1-x86_64-unknown-linux-gnu` and `nightly-2026-05-01-…` are pinned
+/// versions, `stable-…` a channel. `None` for a linked toolchain, which has
+/// no version of its own.
+fn split_version(name: &str) -> Option<(&str, &str)> {
+    let dashes: Vec<_> = name.match_indices('-').map(|(at, _)| at).collect();
+    let numbered = |part: &str| {
+        let parts: Vec<_> = part.split('.').collect();
+        (2..=3).contains(&parts.len())
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let first = *dashes.first()?;
+    let channel = &name[..first];
+    let end = if matches!(channel, "stable" | "beta" | "nightly") {
+        // A dated one: `nightly-2026-05-01-…`.
+        let dated = dashes.get(3).filter(|&&end| {
+            let date = &name[first + 1..end];
+            date.len() == 10 && date.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        });
+        dated.copied().unwrap_or(first)
+    } else if numbered(channel) {
+        first
+    } else {
+        return None;
+    };
+    Some((&name[..end], &name[end + 1..]))
+}
+
+/// The toolchain a `rust-toolchain.toml` or `rust-toolchain` file pins.
+fn pinned(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("channel"))
+        .and_then(|line| line.split_once('='))
+        .map(|(_, value)| value.trim().trim_matches(|c| c == '"' || c == '\''));
+    let channel = line.unwrap_or_else(|| text.trim());
+    valid_name(channel).then(|| channel.to_owned())
+}
+
+/// Every toolchain the projects under `dir` pin.
+fn pins(dir: &Path, depth: usize, device: u64, found: &mut Vec<String>, cancel: &Cancellation) {
+    if cancel.requested() {
+        return;
+    }
+    for name in ["rust-toolchain.toml", "rust-toolchain"] {
+        if let Some(pin) = fs::read_to_string(dir.join(name)).ok().and_then(|text| pinned(&text)) {
+            found.push(pin);
+        }
+    }
+    if depth >= PIN_DEPTH {
+        return;
+    }
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let skipped = name.starts_with('.')
+            || matches!(name.as_ref(), "target" | "node_modules" | "Library" | "build");
+        let path = entry.path();
+        if !skipped
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.dev() == device)
+        {
+            pins(&path, depth + 1, device, found, cancel);
+        }
+    }
+}
+
 impl<T: Transport> Rustup<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            folders: None,
+        }
+    }
+    /// Look for pins in these folders rather than the saved ones.
+    #[cfg(test)]
+    fn with_folders(mut self, folders: Vec<PathBuf>) -> Self {
+        self.folders = Some(folders);
+        self
     }
 
     fn run(
@@ -113,6 +203,82 @@ impl<T: Transport> Rustup<T> {
                 })
             })
             .collect())
+    }
+
+    /// Toolchains of a pinned version no project pins, no folder
+    /// overrides and that aren't the default.
+    fn unpinned(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+        let toolchains = self.toolchains(cancel)?;
+        let Some(host) = toolchains
+            .iter()
+            .find(|toolchain| toolchain.default)
+            .and_then(|toolchain| split_version(&toolchain.name))
+            .map(|(_, host)| host.to_owned())
+        else {
+            return Ok(vec![]);
+        };
+        let folders = self.folders.clone().unwrap_or_else(|| {
+            super::ProjectSettings::load(&crate::host::Host::current()).folders
+        });
+        let mut pinned = vec![];
+        for folder in folders {
+            if let Ok(metadata) = fs::metadata(&folder) {
+                pins(&folder, 0, metadata.dev(), &mut pinned, cancel);
+            }
+        }
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        // "/code/app\t1.80.0-x86_64-unknown-linux-gnu"
+        let overrides = self.run(&["override", "list"], cancel, false)?;
+        Ok(toolchains
+            .into_iter()
+            .filter(|toolchain| !toolchain.default)
+            .map(|toolchain| toolchain.name)
+            .filter(|name| {
+                split_version(name).is_some_and(|(version, on)| {
+                    on == host
+                        && !matches!(version, "stable" | "beta" | "nightly")
+                        && !pinned.iter().any(|pin| pin == version || pin == name)
+                })
+            })
+            .filter(|name| {
+                !overrides
+                    .lines()
+                    .any(|line| line.split_whitespace().last() == Some(name.as_str()))
+            })
+            .collect())
+    }
+
+    /// Where `name` is installed, to measure it.
+    fn folder(&self, name: &str) -> Option<PathBuf> {
+        let home = self
+            .transport
+            .env("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from(self.transport.env("HOME")?).join(".rustup")))
+            .filter(|home| home.is_absolute())?;
+        Some(home.join("toolchains").join(name))
+    }
+
+    fn cleanup_item(&self, name: &str, cancel: &Cancellation) -> CleanupItem {
+        let bytes = self
+            .folder(name)
+            .filter(|folder| fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()))
+            .map(|folder| crate::disk::usage(&folder, cancel));
+        CleanupItem {
+            id: CleanupId {
+                backend: ID.into(),
+                key: format!("toolchain:{name}"),
+            },
+            kind: CleanupKind::Unused,
+            title: format!("Rust {name}"),
+            summary: "No project pins this version".into(),
+            preview: format!(
+                "Uninstalls this toolchain. rustup installs it again when a project asks for it.\n{name}"
+            ),
+            bytes,
+        }
     }
 
     fn package(name: &str, summary: String, check: Option<&Check>) -> Package {
@@ -267,12 +433,46 @@ impl<T: Transport> Backend for Rustup<T> {
             dependencies: vec![],
         })
     }
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(self
+            .unpinned(cancel)?
+            .iter()
+            .map(|name| self.cleanup_item(name, cancel))
+            .collect())
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        cancel: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        let name = id
+            .key
+            .strip_prefix("toolchain:")
+            .filter(|_| id.backend == ID)
+            .ok_or(EngineError::NotFound)?;
+        if !self.unpinned(cancel)?.iter().any(|unpinned| unpinned == name) {
+            return Err(EngineError::NotFound);
+        }
+        Ok(self.cleanup_item(name, cancel))
+    }
     fn execute(
         &mut self,
         operation: &Operation,
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        if let Operation::Clean(id) = operation {
+            let plan = self.cleanup_plan(id, cancel)?;
+            let name = id.key.trim_start_matches("toolchain:");
+            progress(Progress::Message(format!("Uninstalling {}…", plan.title)));
+            let args = ["toolchain", "uninstall", "--", name].map(OsString::from);
+            let completion = self.transport.dev_tool(ID, &args, cancel, true)?;
+            let deferred = completion.cancellation_deferred;
+            bytes(ID, completion)?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: deferred,
+            });
+        }
         let (id, args): (&PackageId, Vec<&str>) = match operation {
             Operation::Upgrade(id) if id.name == SELF => (id, vec!["self", "update"]),
             Operation::Upgrade(id) => (id, vec!["update", "--no-self-update", "--", &id.name]),
@@ -383,6 +583,10 @@ mod tests {
                     .missing
                     .map_or_else(|| Ok(done("rustup 1.29.1", 0)), |error| Err(error())),
                 "toolchain" if args[1] == "list" => Ok(done(&list, 0)),
+                "override" => Ok(done(
+                    "/code/app\t1.81.0-aarch64-apple-darwin\n",
+                    0,
+                )),
                 // Newer rustup exits 100 when something can be updated.
                 "check" => Err(ExecutionError::Failed(done(
                     "stable-aarch64-apple-darwin - Update available : 1.89.0 (29483883e 2025-08-04) -> 1.98.1 (48a229cea 2026-09-01)\n\
@@ -396,7 +600,12 @@ mod tests {
                     Ok(done("", 0))
                 }
                 "toolchain" if args[1] == "uninstall" => {
-                    *list = list.replace("beta-aarch64-apple-darwin\n", "");
+                    let name = args.last().unwrap();
+                    *list = list
+                        .lines()
+                        .filter(|line| !line.starts_with(name.as_str()))
+                        .map(|line| format!("{line}\n"))
+                        .collect();
                     Ok(done("", 0))
                 }
                 other => {
@@ -414,6 +623,113 @@ mod tests {
             calls: Arc::default(),
             missing: None,
         }
+    }
+
+    #[test]
+    fn versions_no_project_pins_are_offered_and_uninstalled() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-rustup-pins-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |path: &Path, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(&root.join("code/app/rust-toolchain.toml"), "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n");
+        write(&root.join("code/old/rust-toolchain"), "nightly-2026-05-01\n");
+        // Pins that don't count: in build output, hidden, or not a pin.
+        write(&root.join("code/app/target/x/rust-toolchain.toml"), "channel = \"1.97.0\"");
+        write(&root.join("code/.hidden/rust-toolchain.toml"), "channel = \"1.96.0\"");
+        write(&root.join("code/odd/rust-toolchain.toml"), "[toolchain]\nprofile = \"minimal\"\n");
+        let fake = fake();
+        *fake.list.lock().unwrap() = [
+            "stable-aarch64-apple-darwin (default)",
+            "beta-aarch64-apple-darwin",
+            "nightly-aarch64-apple-darwin",
+            "1.98.1-aarch64-apple-darwin",
+            "1.97.0-aarch64-apple-darwin",
+            "1.96.0-aarch64-apple-darwin",
+            "1.81.0-aarch64-apple-darwin",
+            "nightly-2026-05-01-aarch64-apple-darwin",
+            "nightly-2026-04-01-aarch64-apple-darwin",
+            "1.95.0-sbpf-solana-v1.57",
+            "1.90.0-x86_64-apple-darwin",
+            "",
+        ]
+        .join("\n");
+        let installed = root.join("rustup/toolchains/1.97.0-aarch64-apple-darwin");
+        write(&installed.join("bin/rustc"), &"x".repeat(4096));
+        #[derive(Clone)]
+        struct Homed(Fake, PathBuf);
+        impl Transport for Homed {
+            fn dev_tool(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                cancel: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.dev_tool(executable, args, cancel, write)
+            }
+            fn env(&self, name: &str) -> Option<OsString> {
+                (name == "RUSTUP_HOME").then(|| self.1.clone().into_os_string())
+            }
+        }
+        let mut rustup = Rustup::new(Homed(fake.clone(), root.join("rustup")))
+            .with_folders(vec![root.join("code"), root.join("missing")]);
+        let cancel = Cancellation::default();
+        let items = rustup.cleanup(&cancel).unwrap();
+        let keys: Vec<_> = items.iter().map(|item| item.id.key.as_str()).collect();
+        // The other host's, the linked one, channels, pins and overrides stay.
+        assert_eq!(
+            keys,
+            [
+                "toolchain:1.97.0-aarch64-apple-darwin",
+                "toolchain:1.96.0-aarch64-apple-darwin",
+                "toolchain:nightly-2026-04-01-aarch64-apple-darwin",
+            ]
+        );
+        assert_eq!(items[0].title, "Rust 1.97.0-aarch64-apple-darwin");
+        assert!(items[0].bytes.unwrap() >= 4096);
+        assert_eq!(items[1].bytes, None);
+        assert_eq!(rustup.cleanup_plan(&items[0].id, &cancel).unwrap(), items[0]);
+        let mut said = vec![];
+        rustup
+            .execute(&Operation::Clean(items[0].id.clone()), &cancel, &mut |progress| {
+                said.push(progress)
+            })
+            .unwrap();
+        assert_eq!(
+            said,
+            [Progress::Message("Uninstalling Rust 1.97.0-aarch64-apple-darwin…".into())]
+        );
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"toolchain uninstall -- 1.97.0-aarch64-apple-darwin".to_owned()));
+        for key in [
+            "toolchain:1.97.0-aarch64-apple-darwin",
+            "toolchain:1.98.1-aarch64-apple-darwin",
+            "toolchain:stable-aarch64-apple-darwin",
+            "other",
+        ] {
+            let id = CleanupId {
+                backend: ID.into(),
+                key: key.into(),
+            };
+            assert!(matches!(rustup.cleanup_plan(&id, &cancel), Err(EngineError::NotFound)));
+        }
+        // Without a default there's no telling which host is this one.
+        *fake.list.lock().unwrap() = "1.97.0-aarch64-apple-darwin\n".into();
+        assert!(rustup.cleanup(&cancel).unwrap().is_empty());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        *fake.list.lock().unwrap() = "stable-aarch64-apple-darwin (default)\n".into();
+        assert!(matches!(rustup.cleanup(&cancelled), Err(EngineError::Cancelled)));
+        assert_eq!(split_version("1.99-x86_64-unknown-linux-gnu"), Some(("1.99", "x86_64-unknown-linux-gnu")));
+        assert_eq!(split_version("custom"), None);
+        assert_eq!(split_version("1.x-host"), None);
+        assert_eq!(pinned("1.80.0"), Some("1.80.0".into()));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
