@@ -1844,7 +1844,7 @@ pub fn minutes_text(minutes: u32) -> String {
     let minutes = minutes.max(1);
     let (size, unit) = UNITS
         .iter()
-        .find(|(size, _)| minutes % size == 0)
+        .find(|(size, _)| minutes.is_multiple_of(*size))
         .copied()
         .unwrap_or((1, "minute"));
     let count = minutes / size;

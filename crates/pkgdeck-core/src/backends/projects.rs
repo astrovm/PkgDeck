@@ -1430,7 +1430,7 @@ mod tests {
         let cancel = Cancellation::default();
         let items = backend.cleanup(&cancel).unwrap();
         let key = format!("cache-build:{}", old.display());
-        assert_eq!(keys(&items), [key.clone()]);
+        assert_eq!(keys(&items), std::slice::from_ref(&key));
         let item = &items[0];
         assert_eq!(item.kind, CleanupKind::BuildFiles);
         assert_eq!(item.title, "cd34-x86_64 build output");

@@ -1228,11 +1228,15 @@ const DURATION: Vec2 = vec2(240.0, 68.0);
 /// number of it, or else the largest it is a whole number of.
 fn duration_unit(units: &[(&str, u32)], value: u32, picked: Option<usize>) -> usize {
     picked
-        .filter(|&unit| units.get(unit).is_some_and(|(_, size)| value % size == 0))
+        .filter(|&unit| {
+            units
+                .get(unit)
+                .is_some_and(|(_, size)| value.is_multiple_of(*size))
+        })
         .unwrap_or_else(|| {
             units
                 .iter()
-                .rposition(|(_, size)| value % size == 0)
+                .rposition(|(_, size)| value.is_multiple_of(*size))
                 .unwrap_or(0)
         })
 }
