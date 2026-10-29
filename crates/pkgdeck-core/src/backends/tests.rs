@@ -2477,7 +2477,7 @@ cut-short            1.0
         ),
         Err(EngineError::Cancelled)
     ));
-    // Snap that can't list its revisions says so.
+    // Snap that fails to list its revisions says so.
     #[derive(Clone)]
     struct Broken;
     impl Transport for Broken {
@@ -2488,7 +2488,7 @@ cut-short            1.0
             _: &Cancellation,
             _: bool,
         ) -> Result<Completion, ExecutionError> {
-            Err(ExecutionError::Disabled("snap not found".into()))
+            Ok(completion(1, ""))
         }
     }
     assert!(SystemManager::snap(Broken).cleanup(&cancel).is_err());

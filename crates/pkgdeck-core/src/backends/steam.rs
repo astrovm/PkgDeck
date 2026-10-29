@@ -232,7 +232,6 @@ mod tests {
     use crate::host::Runtime;
     use std::collections::BTreeMap;
 
-    fn ignore(_: Progress) {}
     fn scratch(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("pkgdeck-steam-{name}-{}", std::process::id()));
@@ -370,13 +369,20 @@ mod tests {
             ));
         }
         let mut said = vec![];
+        let mut record = |progress| said.push(progress);
         backend
-            .execute(
-                &Operation::Clean(item.id.clone()),
-                &cancel,
-                &mut |progress| said.push(progress),
-            )
+            .execute(&Operation::Clean(item.id.clone()), &cancel, &mut record)
             .unwrap();
+        assert!(matches!(
+            backend.execute(
+                &Operation::Refresh {
+                    backend: "steam".into()
+                },
+                &cancel,
+                &mut record
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
         assert_eq!(
             said,
             [Progress::Message(
@@ -387,16 +393,6 @@ mod tests {
         // A game installed into the folder since keeps it.
         game(&other, 99, "Old Game");
         assert!(backend.cleanup(&cancel).unwrap().is_empty());
-        assert!(matches!(
-            backend.execute(
-                &Operation::Refresh {
-                    backend: "steam".into()
-                },
-                &cancel,
-                &mut ignore
-            ),
-            Err(EngineError::Unsupported { .. })
-        ));
         let cancelled = Cancellation::default();
         cancelled.cancel();
         assert!(matches!(
