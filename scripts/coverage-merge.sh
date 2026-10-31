@@ -53,6 +53,10 @@ table=$(records | awk -F'\t' -v fail_under="$fail_under" '
         printf "| Combined | %d | %d | %.2f%% |\n", total, total_hit, pct(total_hit, total)
         if (fail_under != "" && pct(total_hit, total) < fail_under + 0) {
             printf "Combined line coverage %.2f%% is under %s%%\n", pct(total_hit, total), fail_under > "/dev/stderr"
+            # Rounding can print 100.00% for one missed line: name them.
+            shown = 0
+            for (line in all) if (!(line in any) && shown++ < 50) print "Not covered: " line > "/dev/stderr"
+            if (shown > 50) printf "...and %d more\n", shown - 50 > "/dev/stderr"
             exit 1
         }
     }') || status=$?

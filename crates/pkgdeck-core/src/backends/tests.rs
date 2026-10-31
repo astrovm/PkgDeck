@@ -2386,6 +2386,31 @@ fn exact_cask_names_are_looked_up_directly() {
 }
 
 #[test]
+fn only_a_real_tap_name_becomes_a_trust_step() {
+    let refusal = |stderr: &str| {
+        untrusted_tap(
+            "homebrew-cask",
+            &Completion {
+                stderr: stderr.as_bytes().to_vec(),
+                ..completion(1, "")
+            },
+        )
+    };
+    assert!(refusal("Error: Refusing to load cask a/b/c from untrusted tap a/b.\n").is_some());
+    // Anything else is left to the plain failure, never echoed as a command.
+    for stderr in [
+        "Error: No available cask with the name \"c\".\n",
+        "Error: Refusing to load cask x from untrusted tap a.\n",
+        "Error: Refusing to load cask x from untrusted tap a/b/c.\n",
+        "Error: Refusing to load cask x from untrusted tap a/`rm`.\n",
+        "Error: Refusing to load cask x from untrusted tap /b.\n",
+        "Error: Refusing to load cask x from untrusted tap \n",
+    ] {
+        assert!(refusal(stderr).is_none(), "{stderr}");
+    }
+}
+
+#[test]
 fn linux_casks_wait_for_homebrew_6() {
     let mut casks = HomebrewCask::new(CaskBrew {
         version: "5.1.2",
