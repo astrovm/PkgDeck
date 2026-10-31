@@ -65,6 +65,36 @@ pub(super) fn brew_update_locked(result: &Completion) -> bool {
     String::from_utf8_lossy(&result.stderr)
         .contains("Another `brew update` process is already running")
 }
+/// Homebrew (7.0.11 on) won't load a package from a tap no one trusted yet,
+/// and exits 1 as for a name that isn't there. The package is there: say
+/// how to trust its tap instead of calling it missing.
+pub(super) fn untrusted_tap(backend: &str, result: &Completion) -> Option<EngineError> {
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let tap = stderr
+        .split(" from untrusted tap ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .trim_end_matches('.');
+    let mut parts = tap.split('/');
+    let valid = |part: Option<&str>| {
+        part.is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+    };
+    if !(valid(parts.next()) && valid(parts.next()) && parts.next().is_none()) {
+        return None;
+    }
+    Some(EngineError::Refused {
+        backend: backend.into(),
+        refusal: Refusal::Explained(format!(
+            "Homebrew doesn't trust the tap {tap} yet. If you trust it, run `brew trust --tap {tap}`, then try again."
+        )),
+    })
+}
 impl<T: Transport> Homebrew<T> {
     pub fn new(transport: T) -> Self {
         Self {
@@ -901,11 +931,12 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                 .into_iter()
                 .map(|details| details.package)
                 .collect()),
-            // brew exits 1 for a name that is no cask.
+            // brew exits 1 for a name that is no cask, and for one it
+            // won't read from an untrusted tap.
             Err(EngineError::Execution(ExecutionError::Failed(result)))
                 if result.code == Some(1) =>
             {
-                Ok(vec![])
+                untrusted_tap("homebrew-cask", &result).map_or(Ok(vec![]), Err)
             }
             Err(error) => Err(error),
         }

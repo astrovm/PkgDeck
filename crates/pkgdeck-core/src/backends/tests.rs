@@ -1825,6 +1825,17 @@ impl Transport for CaskBrew {
                 *self.installed.lock().unwrap() = true;
                 String::new()
             }
+            // Homebrew 7.0.11 refuses a cask from a tap no one trusted yet.
+            "info --json=v2 --cask -- acme/tools/widget" => {
+                return Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"Error: Refusing to load cask acme/tools/widget from untrusted tap acme/tools.\nRun `brew trust --cask acme/tools/widget` or `brew trust acme/tools` to trust it.\n".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                }))
+            }
             _ => {
                 return Err(ExecutionError::Failed(Completion {
                     code: Some(1),
@@ -2340,6 +2351,21 @@ fn exact_cask_names_are_looked_up_directly() {
     }
     // Not a cask, or not a cask name at all: nothing, without an error.
     assert!(casks.lookup("no-such-cask", &cancel).unwrap().is_empty());
+    // A cask from an untrusted tap is there, but Homebrew won't read it:
+    // say how to trust the tap instead of calling it missing.
+    match casks.lookup("acme/tools/widget", &cancel) {
+        Err(EngineError::Refused {
+            backend,
+            refusal: Refusal::Explained(reason),
+        }) => {
+            assert_eq!(backend, "homebrew-cask");
+            assert_eq!(
+                reason,
+                "Homebrew doesn't trust the tap acme/tools yet. If you trust it, run `brew trust --tap acme/tools`, then try again."
+            );
+        }
+        other => panic!("expected an untrusted tap refusal, got {other:?}"),
+    }
     let calls = brew.calls.lock().unwrap().len();
     assert!(casks.lookup("--help", &cancel).unwrap().is_empty());
     assert_eq!(brew.calls.lock().unwrap().len(), calls);
@@ -2357,6 +2383,31 @@ fn exact_cask_names_are_looked_up_directly() {
         .lock()
         .unwrap()
         .contains(&"upgrade --cask".into()));
+}
+
+#[test]
+fn only_a_real_tap_name_becomes_a_trust_step() {
+    let refusal = |stderr: &str| {
+        untrusted_tap(
+            "homebrew-cask",
+            &Completion {
+                stderr: stderr.as_bytes().to_vec(),
+                ..completion(1, "")
+            },
+        )
+    };
+    assert!(refusal("Error: Refusing to load cask a/b/c from untrusted tap a/b.\n").is_some());
+    // Anything else is left to the plain failure, never echoed as a command.
+    for stderr in [
+        "Error: No available cask with the name \"c\".\n",
+        "Error: Refusing to load cask x from untrusted tap a.\n",
+        "Error: Refusing to load cask x from untrusted tap a/b/c.\n",
+        "Error: Refusing to load cask x from untrusted tap a/`rm`.\n",
+        "Error: Refusing to load cask x from untrusted tap /b.\n",
+        "Error: Refusing to load cask x from untrusted tap \n",
+    ] {
+        assert!(refusal(stderr).is_none(), "{stderr}");
+    }
 }
 
 #[test]

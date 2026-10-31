@@ -30,6 +30,7 @@ cleanup() {
     set +e
     brew uninstall --cask "$cask"
     brew uninstall --cask "$failing"
+    brew untrust --tap "$tap" 2>/dev/null
     brew untap "$tap"
     rm -rf "$app" "$work"
     if [[ -L $command_link || -f $command_link ]]; then rm -f "$command_link"; fi
@@ -83,6 +84,17 @@ installed() {
     brew info --json=v2 --cask "${1:-$cask}" 2>/dev/null |
         jq -e '.casks[0].installed // "" | length > 0' >/dev/null
 }
+
+# 0. Newer Homebrew (7.0.11 does, the August 2026 Intel image doesn't) won't
+# read a cask from a tap no one trusted yet. pkd says how to trust it
+# instead of calling the cask missing, and nothing changes.
+if [[ $(brew info --cask "$cask" 2>&1 >/dev/null) == *'from untrusted tap'* ]]; then
+    output=$(install) || true
+    grep -qF "brew trust --tap $tap" <<<"$output" || { echo "Expected the trust step: $output" >&2; exit 1; }
+    if installed; then echo "The untrusted cask was installed" >&2; exit 1; fi
+    [[ $(/usr/bin/stat -f %i "$app") == "$inode" ]]
+    brew trust --tap "$tap"
+fi
 
 # 1. A command link that belongs to something else: refused, nothing changes.
 printf '#!/bin/sh\n' > "$command_link"
