@@ -26,13 +26,11 @@ work=$(mktemp -d "$RUNNER_TEMP/pkgdeck-adopt.XXXXXX")
 for path in "$app" "$command_link"; do
     [[ ! -e $path && ! -L $path ]] || { echo "Fixture already exists: $path" >&2; exit 1; }
 done
-# Homebrew 7.0.11 and later only load a tap someone trusted.
-trust() { brew trust --help >/dev/null 2>&1; }
 cleanup() {
     set +e
     brew uninstall --cask "$cask"
     brew uninstall --cask "$failing"
-    if trust; then brew untrust --tap "$tap"; fi
+    brew untrust --tap "$tap" 2>/dev/null
     brew untap "$tap"
     rm -rf "$app" "$work"
     if [[ -L $command_link || -f $command_link ]]; then rm -f "$command_link"; fi
@@ -87,9 +85,10 @@ installed() {
         jq -e '.casks[0].installed // "" | length > 0' >/dev/null
 }
 
-# 0. Until the tap is trusted, Homebrew won't read the cask: pkd says how to
-# trust it instead of calling the cask missing, and nothing changes.
-if trust; then
+# 0. Newer Homebrew (7.0.11 does, the August 2026 Intel image doesn't) won't
+# read a cask from a tap no one trusted yet. pkd says how to trust it
+# instead of calling the cask missing, and nothing changes.
+if [[ $(brew info --cask "$cask" 2>&1 >/dev/null) == *'from untrusted tap'* ]]; then
     output=$(install) || true
     grep -qF "brew trust --tap $tap" <<<"$output" || { echo "Expected the trust step: $output" >&2; exit 1; }
     if installed; then echo "The untrusted cask was installed" >&2; exit 1; fi
