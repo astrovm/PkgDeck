@@ -26,10 +26,13 @@ work=$(mktemp -d "$RUNNER_TEMP/pkgdeck-adopt.XXXXXX")
 for path in "$app" "$command_link"; do
     [[ ! -e $path && ! -L $path ]] || { echo "Fixture already exists: $path" >&2; exit 1; }
 done
+# Homebrew 7.0.11 and later only load a tap someone trusted.
+trust() { brew trust --help >/dev/null 2>&1; }
 cleanup() {
     set +e
     brew uninstall --cask "$cask"
     brew uninstall --cask "$failing"
+    if trust; then brew untrust --tap "$tap"; fi
     brew untap "$tap"
     rm -rf "$app" "$work"
     if [[ -L $command_link || -f $command_link ]]; then rm -f "$command_link"; fi
@@ -83,6 +86,16 @@ installed() {
     brew info --json=v2 --cask "${1:-$cask}" 2>/dev/null |
         jq -e '.casks[0].installed // "" | length > 0' >/dev/null
 }
+
+# 0. Until the tap is trusted, Homebrew won't read the cask: pkd says how to
+# trust it instead of calling the cask missing, and nothing changes.
+if trust; then
+    output=$(install) || true
+    grep -qF "brew trust --tap $tap" <<<"$output" || { echo "Expected the trust step: $output" >&2; exit 1; }
+    if installed; then echo "The untrusted cask was installed" >&2; exit 1; fi
+    [[ $(/usr/bin/stat -f %i "$app") == "$inode" ]]
+    brew trust --tap "$tap"
+fi
 
 # 1. A command link that belongs to something else: refused, nothing changes.
 printf '#!/bin/sh\n' > "$command_link"
