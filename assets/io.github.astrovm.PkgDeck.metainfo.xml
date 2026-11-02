@@ -10,6 +10,17 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.13.0" date="2026-11-02">
+      <description>
+        <p>See and clean the data apps keep in your home folder.</p>
+        <ul>
+          <li>Clean lists the folders removed Flatpaks and snaps left in your home, unchecked</li>
+          <li>An installed Flatpak's or snap's page shows how much data it keeps, with Open data folder and Move data to Trash</li>
+          <li>App data goes to the Trash, so it can be restored</li>
+          <li>pkd info shows an app's data folder and size</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.12.9" date="2026-11-01">
       <description>
         <p>Updates shows only real updates again.</p>

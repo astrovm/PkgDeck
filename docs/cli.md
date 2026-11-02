@@ -276,7 +276,8 @@ so do worktrees whose submodules have unpushed commits or stashes.
   data. Clean them by their key.
 - An installed app's data isn't listed, but goes to the Trash by its key:
   `pkd clean flatpak:data:org.example.App` or `pkd clean snap:data:firefox`.
-  Data of removed apps goes to the Trash too.
+  `pkd info` shows its folder and size as **Data**. Data of removed apps goes
+  to the Trash too.
 - `projects` uses the folders and age set in the app's Clean settings
   (`clean.json` in PkgDeck's config folder). By default: your home folder and
   a week. On macOS, broad scans skip Desktop, Documents and Downloads;
