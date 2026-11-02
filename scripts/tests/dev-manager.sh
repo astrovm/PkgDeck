@@ -163,6 +163,14 @@ setup_nix() {
         fi
     else
         nix_bin=$HOME/.nix-profile/bin/nix
+        # Ubuntu's AppArmor keeps unprivileged user namespaces from the
+        # runners, so Nix can't sandbox builds there. Say so, instead of
+        # having every build fall back with a warning.
+        if ! unshare --user --map-root-user true 2>/dev/null; then
+            mkdir -p "$HOME/.config/nix"
+            grep -qx 'sandbox = false' "$HOME/.config/nix/nix.conf" 2>/dev/null ||
+                echo 'sandbox = false' >> "$HOME/.config/nix/nix.conf"
+        fi
         if [[ ! -x $nix_bin ]]; then
             fetch https://nixos.org/nix/install "$HOME/nix-install"
             sh "$HOME/nix-install" --no-daemon --no-modify-profile
@@ -239,7 +247,9 @@ oh-my-zsh)
     ;;
 cargo)
     success sources
-    cargo install cowsay
+    # From outside this checkout, as a person would and as pkd runs cargo:
+    # here the toolchain file would pick the toolchain.
+    (cd / && cargo install cowsay)
     have cowsay
     success info cowsay
     success upgrade cowsay

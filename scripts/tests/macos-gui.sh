@@ -15,30 +15,19 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT
-# AppKit asks IconServices for the generic app icon when a window first becomes
-# key, synchronously on the main thread. Some runners start iconservicesd
-# lazily or leave it unresponsive; probe it from a separate process so a
-# stalled daemon is reported as such instead of as a PkgDeck startup hang.
-/usr/bin/osascript -l JavaScript \
-    -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.iconForFile("/Applications"); "ok"' \
-    >"$logs/iconservices.log" 2>&1 &
-probe=$!
-for ((second=0; second<20; second++)); do
-    kill -0 "$probe" 2>/dev/null || break
-    sleep 1
-done
-if kill -0 "$probe" 2>/dev/null; then
-    /usr/bin/sample "$probe" 2 -file "$logs/iconservices.sample.txt" || true
-    kill -KILL "$probe" 2>/dev/null || true
-    wait "$probe" 2>/dev/null || true
-    echo '::warning::IconServices did not answer within 20 seconds; skipping the Cocoa startup check on this runner'
-    exit 0
-fi
-wait "$probe" || { cat "$logs/iconservices.log"; echo 'IconServices probe failed' >&2; exit 1; }
+# A stalled IconServices would hang AppKit, not PkgDeck: wait for the daemon
+# first. CI wakes it when the job starts, so it has had the whole build.
+probe=0
+bash "$(dirname "${BASH_SOURCE[0]}")/macos-iconservices.sh" wait 20 || probe=$?
+case $probe in
+    0) ;;
+    2) exit 0 ;;
+    *) exit 1 ;;
+esac
 # Print the crashed thread of the report macOS writes for a run that died
 # from a signal; ReportCrash can take a few seconds to write it.
 crash_report() {
-    local run=$1 report= second
+    local run=$1 report='' second
     for ((second=0; second<30; second++)); do
         report=$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -iname 'pkgdeck*.ips' \
             -newer "$logs/cocoa-$run.log" 2>/dev/null | head -n 1)

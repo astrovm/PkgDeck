@@ -68,7 +68,7 @@ const RULES: &[Rule] = &[
         team: None,
         also: &[],
     },
-    // The same fixture app, whose cask fails in a postflight step after the
+    // The same fixture app, whose cask fails in its postflight steps after the
     // app was adopted: Homebrew's rollback then deletes it, and the CI test
     // checks that PkgDeck puts it back.
     #[cfg(debug_assertions)]
@@ -76,7 +76,7 @@ const RULES: &[Rule] = &[
         token: "pkgdeck/fixtures/pkgdeck-adopt-failure",
         bundle_id: "io.github.astrovm.pkgdeck.adopt-fixture",
         team: None,
-        also: &["postflight"],
+        also: &["postflight_steps"],
     },
 ];
 
@@ -669,17 +669,27 @@ mod tests {
 
     #[test]
     fn only_the_recovery_fixture_may_fail_after_the_app_step() {
-        let mut vscode = cask();
-        vscode["artifacts"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({"postflight": null}));
-        let reason = reason(plan(&fake(), &vscode, &Cancellation::default()));
-        assert!(reason.contains("also installs a postflight"), "{reason}");
+        // A postflight block, and the steps that replace it, as Homebrew
+        // lists them.
+        for (step, kind) in [
+            (serde_json::json!({"postflight": null}), "postflight"),
+            (
+                serde_json::json!({"postflight_steps": [{"type": "run", "command": "/usr/bin/false"}]}),
+                "postflight_steps",
+            ),
+        ] {
+            let mut vscode = cask();
+            vscode["artifacts"].as_array_mut().unwrap().push(step);
+            let reason = reason(plan(&fake(), &vscode, &Cancellation::default()));
+            assert!(
+                reason.contains(&format!("also installs a {kind},")),
+                "{reason}"
+            );
+        }
         #[cfg(debug_assertions)]
         assert_eq!(
             rule("pkgdeck/fixtures/pkgdeck-adopt-failure").unwrap().also,
-            ["postflight"]
+            ["postflight_steps"]
         );
         assert!(rule("visual-studio-code").unwrap().also.is_empty());
     }

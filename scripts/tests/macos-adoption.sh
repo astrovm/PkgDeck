@@ -145,8 +145,9 @@ cask "pkgdeck-adopt-failure" do
   homepage "https://github.com/astrovm/PkgDeck"
   auto_updates true
   app "PkgDeck Adopt Fixture.app"
-  postflight do
-    raise "PkgDeck recovery test: failing after the app was adopted"
+  # Fails after Homebrew took the app.
+  postflight_steps do
+    run "/usr/bin/false"
   end
 end
 EOF

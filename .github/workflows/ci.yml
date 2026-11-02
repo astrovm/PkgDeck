@@ -236,7 +236,11 @@ jobs:
           scope: macos-native
       - name: Install coverage tool
         if: matrix.arch == 'aarch64' && needs.reviewed.outputs.tested != 'true'
-        run: command -v cargo-llvm-cov >/dev/null || cargo install cargo-llvm-cov --version 0.9.1 --locked
+        # Name the pinned toolchain: cargo install warns when the toolchain
+        # file picks it.
+        run: |
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          command -v cargo-llvm-cov >/dev/null || cargo "+$toolchain" install cargo-llvm-cov --version 0.9.1 --locked
       # Apple Silicon measures coverage while testing: macOS-only code runs
       # only here, and Coverage / Combined adds it to the Linux report.
       - name: Run all core and CLI tests
@@ -465,6 +469,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A fresh runner's IconServices can take minutes to answer; the startup
+      # checks wait for it, so ask it now.
+      - name: Wake IconServices for the startup checks
+        run: bash scripts/tests/macos-iconservices.sh start
       - name: Install build dependencies
         run: |
           brew install librsvg coreutils jq pkgconf openssl@3
@@ -633,6 +641,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A fresh runner's IconServices can take minutes to answer; the startup
+      # check waits for it, so ask it now.
+      - name: Wake IconServices for the startup check
+        if: runner.os == 'macOS'
+        run: bash scripts/tests/macos-iconservices.sh start
       - name: Configure Homebrew
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
