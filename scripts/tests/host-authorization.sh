@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Mutates APT, sudoers, and polkit only on a disposable GitHub-hosted runner.
 set -euo pipefail
-trap 'echo "host-authorization FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "host-authorization FAILED at $failed" >&2' ERR
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 [[ $EUID == 0 && ${GITHUB_ACTIONS:-} == true &&

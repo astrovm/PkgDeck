@@ -12,7 +12,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
     exit 1
 }
 pkd="$PWD/target/debug/pkd"
-trap 'echo "macos-adoption FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "macos-adoption FAILED at $failed" >&2' ERR
 [[ -x $pkd ]]
 # The macOS jobs put GNU coreutils first on PATH; BSD stat reads inodes.
 # Only debug builds know this fixture's cask (see backends/adopt.rs).
@@ -28,8 +29,11 @@ for path in "$app" "$command_link"; do
 done
 cleanup() {
     set +e
-    brew uninstall --cask "$cask"
-    brew uninstall --cask "$failing"
+    trap - ERR
+    # Only what's still installed: Homebrew reports the rest as CI errors.
+    for name in "$cask" "$failing"; do
+        if installed "$name"; then brew uninstall --cask "$name"; fi
+    done
     brew untrust --tap "$tap" 2>/dev/null
     brew untap "$tap"
     rm -rf "$app" "$work"
@@ -145,8 +149,9 @@ cask "pkgdeck-adopt-failure" do
   homepage "https://github.com/astrovm/PkgDeck"
   auto_updates true
   app "PkgDeck Adopt Fixture.app"
-  postflight do
-    raise "PkgDeck recovery test: failing after the app was adopted"
+  # Fails after Homebrew took the app.
+  postflight_steps do
+    run "/usr/bin/false"
   end
 end
 EOF

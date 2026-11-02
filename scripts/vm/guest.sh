@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "guest FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "guest FAILED at $failed" >&2' ERR
 [[ ${1:-} == --container && $EUID == 0 && -f /etc/pkgdeck-prepared &&
     -f /run/.containerenv && -f /etc/pkgdeck-disposable-container ]]
 # Build the helper against this guest's APT ABI; frontends remain the host-built binaries.

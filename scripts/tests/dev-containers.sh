@@ -8,7 +8,8 @@
 # Usage: scripts/tests/dev-containers.sh toolbox|distrobox <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
-trap 'echo "dev-containers FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "dev-containers FAILED at $failed" >&2' ERR
 usage="Usage: scripts/tests/dev-containers.sh toolbox|distrobox <pkd>"
 backend=${1:?$usage}
 pkd=${2:?$usage}

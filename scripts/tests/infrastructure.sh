@@ -15,6 +15,15 @@ release=$(grep -o '<release version="[^"]*"' assets/io.github.astrovm.PkgDeck.me
     echo "The newest AppStream release must be $version, found ${release:-none}"
     exit 1
 }
+# cargo install inside this checkout names the pinned toolchain or runs from
+# elsewhere: otherwise rust-toolchain.toml picks it and cargo warns.
+bare=$(grep -rnE 'cargo install( |$)' scripts containers .github \
+    | grep -vE ':[0-9]+:[[:space:]]*#|cargo "\+[$]toolchain" install|cd / && cargo install|install --list' || true)
+[[ -z $bare ]] || { printf 'Name the pinned toolchain (cargo +TOOLCHAIN install) or install from outside the checkout:\n%s\n' "$bare"; exit 1; }
+# A failure report from an ERR trap skips subshells: bash 3.2, the macOS one,
+# runs it for every expected failure inside $(...) || true.
+unguarded=$(grep -rnE "trap [^-].* ERR" scripts | grep -v BASH_SUBSHELL || true)
+[[ -z $unguarded ]] || { printf 'Guard ERR traps with (( BASH_SUBSHELL )):\n%s\n' "$unguarded"; exit 1; }
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 expect_code() {
@@ -82,7 +91,10 @@ touch "$caches/elsewhere/x/.last-used"
 touch -d '20 days ago' "$caches/unmarked/x" "$caches/unmarked"
 expect_code 0 env -u PKGDECK_CONTAINER_CACHE PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" XDG_CACHE_HOME="$work/xdg" \
     scripts/container.sh development --exec true
-current=$(ls "$caches/$workspace_key" | grep -v -e recent-recipe -e workspace)
+# The one recipe folder the run kept besides the recent one.
+for entry in "$caches/$workspace_key"/*; do
+    case ${entry##*/} in recent-recipe | workspace) ;; *) current=${entry##*/} ;; esac
+done
 [[ -f $caches/$workspace_key/$current/.last-used && -d $caches/$workspace_key/$current/target ]]
 [[ $(<"$caches/$workspace_key/workspace") == "$PWD" ]]
 [[ ! -e $caches/$workspace_key/old-recipe && -d $caches/$workspace_key/recent-recipe ]]

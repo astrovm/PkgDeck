@@ -2,7 +2,8 @@
 # Real install/remove lifecycle through a distro package manager in a container.
 # apk (musl) and xbps need a static musl pkd; the others take the glibc build.
 set -euo pipefail
-trap 'echo "native-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "native-manager FAILED at $failed" >&2' ERR
 
 backend=${1:?Expected dnf, pacman, zypper, apk, or xbps}
 binary=${2:?Expected absolute pkd binary path}
@@ -28,7 +29,7 @@ esac
 
 script="
     set -Eeuo pipefail
-    trap 'echo \"real $backend lifecycle FAILED at line \$LINENO: \$BASH_COMMAND\" >&2' ERR
+    trap 'failed=\"line \$LINENO: \$BASH_COMMAND\"; (( BASH_SUBSHELL )) || echo \"real $backend lifecycle FAILED at \$failed\" >&2' ERR
     $adduser
     printf 'pkgdeck-test ALL=(root) NOPASSWD: $writers\\n' >/etc/sudoers.d/pkgdeck
     pkd() { sudo -u pkgdeck-test /opt/pkd --json --yes --auth sudo --from $backend \"\$@\"; }

@@ -39,10 +39,15 @@ class Pkd < Formula
     updater = lib/"pkgdeck/appimageupdatetool.AppImage"
     assert_predicate updater, :executable?
     assert_match "appimageupdatetool version", shell_output("#{updater} --appimage-extract-and-run --version 2>&1")
-    # Host package managers can fail detection inside the test sandbox,
-    # which exits 1; any other status means the command itself failed.
-    sources = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")
-    opoo sources unless sources.end_with?("exit=0\n")
-    assert_match(/exit=[01]\n\z/, sources)
+    # Host package managers can fail detection inside the test sandbox, such
+    # as Cargo, whose rustup has no default toolchain under the sandbox's HOME.
+    # pkd exits 1 exactly when a source failed and names it in the report.
+    output = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")
+    report, status = output.match(/\A(.*)exit=(\d+)\n\z/m).captures
+    sources = JSON.parse(report).fetch("data").fetch("sources")
+    refute_empty sources
+    failed = sources.select { |source| source.fetch("availability").key?("Err") }.map { |source| source["backend"] }
+    assert_equal failed.empty? ? "0" : "1", status
+    ohai "Not checked in the test sandbox: #{failed.join(", ")}" unless failed.empty?
   end
 end
