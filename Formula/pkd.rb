@@ -1,7 +1,7 @@
 class Pkd < Formula
   desc "Command-line tool to manage packages across native package managers"
   homepage "https://github.com/astrovm/PkgDeck"
-  version "0.12.9"
+  version "0.13.0"
   license "MIT"
 
   # macOS gets pkd with the app: brew install astrovm/pkgdeck/pkgdeck
@@ -9,10 +9,10 @@ class Pkd < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/astrovm/PkgDeck/releases/download/v#{version}/PkgDeck-v#{version}-linux-aarch64-cli.tar.gz"
-    sha256 "d2850efaecedc4a1b7397aea2644deadd368be8e266ca21c6d73a930eb9b8faa"
+    sha256 "cfbf4c5a2c091e4763c0a6f8ea7ecf89ebfe57e09b1e77086176fb3f0527b452"
   else
     url "https://github.com/astrovm/PkgDeck/releases/download/v#{version}/PkgDeck-v#{version}-linux-x86_64-cli.tar.gz"
-    sha256 "fdca5efe763f2d4a796a59acc69fd2ccfb262f5396e521900c36ab61421d3919"
+    sha256 "42a0b2d6eb9022c523733dd6a160152a7693d41b7f11c681ab5ac5f665289f49"
   end
 
   def install
@@ -39,10 +39,15 @@ class Pkd < Formula
     updater = lib/"pkgdeck/appimageupdatetool.AppImage"
     assert_predicate updater, :executable?
     assert_match "appimageupdatetool version", shell_output("#{updater} --appimage-extract-and-run --version 2>&1")
-    # Host package managers can fail detection inside the test sandbox,
-    # which exits 1; any other status means the command itself failed.
-    sources = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")
-    opoo sources unless sources.end_with?("exit=0\n")
-    assert_match(/exit=[01]\n\z/, sources)
+    # Host package managers can fail detection inside the test sandbox, such
+    # as Cargo, whose rustup has no default toolchain under the sandbox's HOME.
+    # pkd exits 1 exactly when a source failed and names it in the report.
+    output = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")
+    report, status = output.match(/\A(.*)exit=(\d+)\n\z/m).captures
+    sources = JSON.parse(report).fetch("data").fetch("sources")
+    refute_empty sources
+    failed = sources.select { |source| source.fetch("availability").key?("Err") }.map { |source| source["backend"] }
+    assert_equal failed.empty? ? "0" : "1", status
+    ohai "Not checked in the test sandbox: #{failed.join(", ")}" unless failed.empty?
   end
 end
