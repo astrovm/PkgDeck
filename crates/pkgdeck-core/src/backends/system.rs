@@ -254,6 +254,16 @@ pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
 
 /// Revisions `snap list --all` marks disabled, with their versions: what
 /// Snap keeps to go back to after an update.
+/// Every installed snap by name, from `snap list --all`.
+fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
+    listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| (name.to_owned(), name.to_owned()))
+        .collect()
+}
+
 fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
     listing
         .lines()
@@ -739,6 +749,67 @@ impl<T: Transport> SystemManager<T> {
     /// Local snap icons resolve straight from the filesystem, which doubles
     /// as the installed check: remote rows only match a file when an
     /// installed snap shares the name, which is the same application.
+    fn snap_listing(&self, cancel: &Cancellation) -> Result<String, EngineError> {
+        String::from_utf8(bytes(
+            "snap",
+            self.call(vec!["list".into(), "--all".into()], cancel, false)?,
+        )?)
+        .map_err(|error| invalid("snap", error))
+    }
+    /// Where snaps keep their data: `~/snap`, once the home is known.
+    fn data_folders(&self) -> Option<app_data::DataFolders> {
+        (self.kind == ManagerKind::Snap)
+            .then(|| app_data::home(&self.transport))
+            .flatten()
+            .map(|home| app_data::DataFolders::snap(&home))
+    }
+    /// The revisions Snap keeps to go back to, as one task.
+    fn old_revisions(&self, listing: &str) -> Option<CleanupItem> {
+        let mut revisions = disabled_revisions(listing);
+        revisions.sort();
+        let key = format!(
+            "disabled-revisions:{}",
+            revisions
+                .iter()
+                .map(|(name, revision, _)| format!("{name}={revision}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        // Only what Snap would name goes in the key the runner reads.
+        if revisions.is_empty() || snap_revisions(&key).is_none() {
+            return None;
+        }
+        let sizes: Vec<u64> = revisions
+            .iter()
+            .filter_map(|(name, revision, _)| {
+                std::fs::metadata(format!("/var/lib/snapd/snaps/{name}_{revision}.snap")).ok()
+            })
+            .map(|metadata| metadata.len())
+            .collect();
+        let count = revisions.len();
+        Some(CleanupItem {
+            id: CleanupId {
+                backend: "snap".into(),
+                key,
+            },
+            kind: CleanupKind::Unused,
+            title: "Old Snap revisions".into(),
+            summary: format!(
+                "{count} older version{} kept after updates",
+                if count == 1 { "" } else { "s" }
+            ),
+            preview: format!(
+                "Removes these older versions. Each snap keeps the one it runs, and can't go back to these after.\n{}",
+                revisions
+                    .iter()
+                    .map(|(name, revision, version)| format!("{name} {version} (revision {revision})"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            bytes: (!sizes.is_empty()).then(|| sizes.iter().sum()),
+            restorable: false,
+        })
+    }
     fn snap_icon(&self, package: &mut Package) {
         if matches!(self.kind, ManagerKind::Snap) {
             package.icon = snap_icon(std::path::Path::new("/"), &package.id.name);
@@ -856,54 +927,27 @@ impl<T: Transport> Backend for SystemManager<T> {
         if self.kind != ManagerKind::Snap {
             return Err(self.unsupported(Capability::Clean));
         }
-        let listing = String::from_utf8(bytes(
-            "snap",
-            self.call(vec!["list".into(), "--all".into()], cancel, false)?,
-        )?)
-        .map_err(|error| invalid("snap", error))?;
-        let mut revisions = disabled_revisions(&listing);
-        revisions.sort();
-        let key = format!(
-            "disabled-revisions:{}",
-            revisions
-                .iter()
-                .map(|(name, revision, _)| format!("{name}={revision}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        // Only what Snap would name goes in the key the runner reads.
-        if revisions.is_empty() || snap_revisions(&key).is_none() {
-            return Ok(vec![]);
+        let listing = self.snap_listing(cancel)?;
+        let mut items = self.old_revisions(&listing).into_iter().collect::<Vec<_>>();
+        if let Some(folders) = self.data_folders() {
+            items.extend(folders.leftovers(&snap_names(&listing), cancel)?);
         }
-        let sizes: Vec<u64> = revisions
-            .iter()
-            .filter_map(|(name, revision, _)| {
-                std::fs::metadata(format!("/var/lib/snapd/snaps/{name}_{revision}.snap")).ok()
-            })
-            .map(|metadata| metadata.len())
-            .collect();
-        let count = revisions.len();
-        Ok(vec![CleanupItem {
-            id: CleanupId {
-                backend: "snap".into(),
-                key,
-            },
-            kind: CleanupKind::Unused,
-            title: "Old Snap revisions".into(),
-            summary: format!(
-                "{count} older version{} kept after updates",
-                if count == 1 { "" } else { "s" }
-            ),
-            preview: format!(
-                "Removes these older versions. Each snap keeps the one it runs, and can't go back to these after.\n{}",
-                revisions
-                    .iter()
-                    .map(|(name, revision, version)| format!("{name} {version} (revision {revision})"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            bytes: (!sizes.is_empty()).then(|| sizes.iter().sum()),
-        }])
+        Ok(items)
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        cancel: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        if self.kind == ManagerKind::Snap && id.backend == "snap" && is_data_key(&id.key) {
+            let folders = self.data_folders().ok_or(EngineError::NotFound)?;
+            let listing = self.snap_listing(cancel)?;
+            return folders.plan(&id.key, &snap_names(&listing), cancel);
+        }
+        self.cleanup(cancel)?
+            .into_iter()
+            .find(|item| item.id == *id)
+            .ok_or(EngineError::NotFound)
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         match self.query(true, "", cancel) {
@@ -981,11 +1025,18 @@ impl<T: Transport> Backend for SystemManager<T> {
         };
         self.snap_icon(&mut package);
         self.snap_components(&mut package);
+        let data = package
+            .installed_version
+            .is_some()
+            .then(|| self.data_folders())
+            .flatten()
+            .and_then(|folders| folders.data(&name, cancel));
         Ok(PackageDetails {
             description: package.summary.clone(),
             homepage: None,
             dependencies: vec![],
             package,
+            data,
         })
     }
     fn execute(
@@ -1076,6 +1127,17 @@ impl<T: Transport> Backend for SystemManager<T> {
             return Ok(OperationOutcome::default());
         }
         if let (ManagerKind::Snap, Operation::Clean(id)) = (self.kind, operation) {
+            if is_data_key(&id.key) {
+                let folders = self.data_folders().ok_or(EngineError::NotFound)?;
+                let installed = snap_names(&self.snap_listing(cancel)?);
+                return folders.trash(
+                    &id.key,
+                    &installed,
+                    app_data::trash(&self.transport),
+                    cancel,
+                    progress,
+                );
+            }
             let revisions = snap_revisions(&id.key).ok_or(EngineError::NotFound)?;
             progress(Progress::Message("Removing older Snap versions…".into()));
             let mut deferred = false;

@@ -863,6 +863,9 @@ fn body(
         };
         facts.push((label, file));
     }
+    if let Some(data) = &details.data {
+        facts.push(("Data", format!("{} ({})", data.shown, data.size)));
+    }
     if appimage {
         if let Some(bytes) = app.app_file.bytes {
             facts.push(("Size", model::size(bytes)));
@@ -930,6 +933,36 @@ fn body(
             }
             ui.add_space(8.0);
         }
+    }
+    if let Some(data) = details.data.clone() {
+        ui.horizontal_wrapped(|ui| {
+            if Button::new(Look::Secondary, "Open data folder")
+                .icon("external")
+                .small()
+                .show(ui)
+                .clicked()
+            {
+                let url = format!(
+                    "file://{}",
+                    data.folder
+                        .split('/')
+                        .map(percent)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                );
+                app.platform.open(&url);
+            }
+            if Button::new(Look::Soft(Tone::Danger), "Move data to Trash")
+                .icon("remove")
+                .small()
+                .enabled(app.can_act() && app.retained.is_none())
+                .show(ui)
+                .clicked()
+            {
+                app.propose("trash-data");
+            }
+        });
+        ui.add_space(8.0);
     }
     // Dependencies.
     if !details.dependencies.is_empty() {

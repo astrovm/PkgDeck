@@ -183,6 +183,7 @@ pub(super) fn item(
             listed.join("\n")
         ),
         bytes: Some(found.bytes),
+        restorable: false,
     })
 }
 

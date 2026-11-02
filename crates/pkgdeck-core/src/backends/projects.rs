@@ -630,6 +630,7 @@ impl Projects {
                     .join("\n")
             ),
             bytes: Some(bytes),
+            restorable: false,
         })
     }
 
@@ -956,6 +957,7 @@ impl Projects {
                     .map(|worktree| disk::usage(&worktree.path, cancel))
                     .sum(),
             ),
+            restorable: false,
         })
     }
 
@@ -999,6 +1001,7 @@ impl Projects {
                 shown(&self.host, output)
             ),
             bytes: Some(disk::usage(output, cancel)),
+            restorable: false,
         })
     }
 
@@ -2679,6 +2682,7 @@ mod tests {
             summary: String::new(),
             preview: format!("Deletes these folders.\n{}", lines.join("\n")),
             bytes: None,
+            restorable: false,
         };
         write(&home.join("code/app/target/x"), "built");
         let elsewhere = home.join("elsewhere/out");

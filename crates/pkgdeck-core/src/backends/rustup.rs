@@ -285,6 +285,7 @@ impl<T: Transport> Rustup<T> {
                 "Uninstalls this toolchain. rustup installs it again when a project asks for it.\n{name}"
             ),
             bytes,
+            restorable: false,
         }
     }
 
@@ -438,6 +439,7 @@ impl<T: Transport> Backend for Rustup<T> {
             description,
             homepage: Some("https://rust-lang.github.io/rustup/".into()),
             dependencies: vec![],
+            data: None,
         })
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {

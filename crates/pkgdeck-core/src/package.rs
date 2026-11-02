@@ -96,6 +96,19 @@ pub struct PackageDetails {
     pub description: String,
     pub homepage: Option<String>,
     pub dependencies: Vec<String>,
+    /// The folder the app keeps its settings and files in, when it has one.
+    #[serde(default)]
+    pub data: Option<AppData>,
+}
+
+/// An app's own folder of settings and files, such as `~/.var/app/<id>`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct AppData {
+    pub folder: std::path::PathBuf,
+    /// The folder with the home folder written as `~`.
+    pub shown: String,
+    /// How much it takes on disk.
+    pub bytes: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,6 +241,9 @@ pub struct CleanupItem {
     /// About how much disk space the task frees, when it can be told.
     #[serde(default)]
     pub bytes: Option<u64>,
+    /// What it removes goes to the Trash, where it can be restored from.
+    #[serde(default)]
+    pub restorable: bool,
 }
 
 /// The same plan, whatever it frees: a cache grows while it is reviewed,
@@ -835,6 +851,7 @@ mod tests {
             summary: String::new(),
             preview: String::new(),
             bytes: Some(1),
+            restorable: false,
         };
         let volumes = item("docker", "unused-volumes", CleanupKind::Data);
         let containers = item("docker", "stopped-containers", CleanupKind::Unused);

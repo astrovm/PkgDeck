@@ -941,6 +941,7 @@ impl MacApps {
             description: description.join("\n\n"),
             homepage: candidate.map(|token| format!("https://formulae.brew.sh/cask/{token}")),
             dependencies: vec![],
+            data: None,
         };
         Ok(Listed {
             details,

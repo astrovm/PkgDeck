@@ -108,6 +108,11 @@ These controls work on every package page:
 - While a filter is on, the **×** at the end of its button clears it.
 - **Refresh** in the page header gets fresh package data. **Ctrl+R** does the same.
 
+An installed Flatpak or snap's page shows its **Data** folder and how much it
+takes. **Open data folder** opens it. **Move data to Trash** moves it to the
+Trash after you confirm, so the app starts over the next time it opens. You
+can restore the folder from the Trash.
+
 Docker and Podman images are shown as separate sources. Each row shows
 tags, size, age, and image ID. You can pull a tagged image again or remove it.
 Untagged ("dangling") images can only be removed. To pull a new image, select
@@ -210,7 +215,8 @@ that failed are shown separately.
 | --- | --- |
 | APT | Unused dependencies and the download cache |
 | Homebrew | Unused dependencies and old downloads |
-| Snap | Older versions each snap keeps after an update |
+| Snap | Older versions each snap keeps after an update, and the data of snaps you removed (`~/snap`) |
+| Flatpak | The data of apps you removed (`~/.var/app`) |
 | Docker, Podman | Untagged images, unused images (an older pull that lost its tag included), stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
@@ -228,6 +234,10 @@ that failed are shown separately.
   Bun caches never wait. Activity shows **Waiting for a build**, and PkgDeck
   cleans it on its own once the build ends, while PkgDeck runs. Its card says
   since when it waits.
+- Data of removed apps goes to the Trash, so you can restore it. A folder
+  counts as removed only when no Flatpak installation lists its app, or
+  `snap list` doesn't list its snap. If that list can't be read, none are
+  offered.
 - Something already gone counts as cleaned. If something else removed part of
   it, PkgDeck removes the rest.
 - Hugging Face models count as used when their files were last read. A disk
@@ -245,7 +255,8 @@ automatic cleaning use them too. A task that shows up for the first time
 starts checked, except:
 
 - Tasks that may hold your work or data: unused volumes, stopped containers,
-  unused dependencies, extra copies of apps and Steam game leftovers. Check
+  unused dependencies, extra copies of apps, data of removed apps and Steam
+  game leftovers. Check
   them once, and they're cleaned like the rest from then on.
 - sccache, because it manages its own size limit.
 

@@ -338,6 +338,7 @@ impl<T: Transport> Backend for OhMyZsh<T> {
             description,
             homepage: remote.or_else(|| (checkout.kind == Kind::Core).then(|| HOMEPAGE.into())),
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

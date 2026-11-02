@@ -1494,6 +1494,7 @@ fn a_failed_cleanup_keeps_its_retry_after_loading_another_source() {
             summary: "Finished worktrees".into(),
             preview: "Remove the fixture worktree".into(),
             bytes: Some(1000),
+            restorable: false,
         }]
     }
     fn settle(app: &mut App) {

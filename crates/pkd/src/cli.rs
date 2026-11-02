@@ -938,7 +938,7 @@ fn dispatch_command(
                     return Err(EngineError::Incomplete(hard_failures));
                 }
                 let requested: std::collections::BTreeSet<_> = targets.iter().cloned().collect();
-                let operations: Vec<_> = report
+                let mut items: Vec<_> = report
                     .items
                     .into_iter()
                     // Data, such as container volumes, only goes by name.
@@ -946,6 +946,25 @@ fn dispatch_command(
                         (all && item.kind.in_clean_all())
                             || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
                     })
+                    .collect();
+                // An installed app's own data isn't listed, only named:
+                // `flatpak:data:org.example.App`.
+                for target in &requested {
+                    let Some((backend, key)) = target.split_once(':') else {
+                        continue;
+                    };
+                    let id = CleanupId {
+                        backend: backend.into(),
+                        key: key.into(),
+                    };
+                    if pkgdeck_core::backends::is_data_key(key)
+                        && !items.iter().any(|item| item.id == id)
+                    {
+                        items.push(engine.cleanup_plan(&id, cancel)?);
+                    }
+                }
+                let operations: Vec<_> = items
+                    .into_iter()
                     .map(|item| {
                         titles.insert(item.id.clone(), item.title);
                         Operation::Clean(item.id)
@@ -1776,6 +1795,7 @@ mod tests {
                 description: "Synthetic".into(),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             })
         }
         fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
@@ -1793,6 +1813,7 @@ mod tests {
                     summary: "One synthetic dependency".into(),
                     preview: "synthetic-runtime".into(),
                     bytes: None,
+                    restorable: false,
                 },
                 CleanupItem {
                     id: CleanupId {
@@ -1804,8 +1825,32 @@ mod tests {
                     summary: "Data nothing uses".into(),
                     preview: "synthetic-volume".into(),
                     bytes: Some(1),
+                    restorable: false,
                 },
             ])
+        }
+        // An installed app's own data: planned by name, never listed.
+        fn cleanup_plan(
+            &mut self,
+            id: &CleanupId,
+            cancel: &Cancellation,
+        ) -> Result<CleanupItem, EngineError> {
+            if id.key != "data:fixture" {
+                return self
+                    .cleanup(cancel)?
+                    .into_iter()
+                    .find(|item| item.id == *id)
+                    .ok_or(EngineError::NotFound);
+            }
+            Ok(CleanupItem {
+                id: id.clone(),
+                kind: CleanupKind::Data,
+                title: "Fixture data".into(),
+                summary: "Fixture starts over without it".into(),
+                preview: "~/.var/app/fixture".into(),
+                bytes: Some(1),
+                restorable: true,
+            })
         }
         fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
             Ok(AptUpgradePlan {
@@ -2166,6 +2211,16 @@ mod tests {
             volumes.0["operations"][0]["operation"],
             json!({"clean":{"backend":"apt","key":"volumes"}})
         );
+        // An installed app's data isn't listed, but goes by its key.
+        let data = call(&mut engine, &["clean", "apt:data:fixture"], true);
+        assert_eq!(data.1, 0);
+        assert_eq!(
+            data.0["operations"][0]["operation"],
+            json!({"clean":{"backend":"apt","key":"data:fixture"}})
+        );
+        assert_eq!(call(&mut engine, &["clean", "apt:data:missing"], true).1, 3);
+        // A task is always named with its source.
+        assert_eq!(call(&mut engine, &["clean", "fixture"], true).1, 3);
         assert_eq!(call(&mut engine, &["--scope", "user", "clean"], true).1, 2);
         assert_eq!(
             call(&mut engine, &["--yes", "install", "fixture"], false).1,

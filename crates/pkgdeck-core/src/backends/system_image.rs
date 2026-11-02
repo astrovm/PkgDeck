@@ -423,6 +423,7 @@ impl<T: Transport> Backend for SystemImage<T> {
                 description: "Layered on top of the system image with rpm-ostree. It updates along with the system image. Removing it runs `rpm-ostree uninstall`, which makes a new deployment without it that applies on the next restart; PkgDeck never restarts the computer.".into(),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             });
         }
         let (tool, status) = self.status(cancel)?.ok_or(EngineError::NotFound)?;
@@ -460,6 +461,7 @@ impl<T: Transport> Backend for SystemImage<T> {
             description: description.join("\n\n"),
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

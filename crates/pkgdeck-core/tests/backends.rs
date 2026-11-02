@@ -62,6 +62,7 @@ impl Fixture {
             description: "Synthetic package description".into(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         }
     }
     fn check(&self, cancel: &Cancellation) -> Result<(), ExecutionError> {
@@ -5869,7 +5870,7 @@ fn flatpak_cleanup_is_scope_specific_and_revalidated() {
 }
 
 #[test]
-fn native_flatpak_cleanup_is_unavailable_without_an_authoritative_preview() {
+fn native_flatpak_unused_runtimes_are_unavailable_without_an_authoritative_preview() {
     let mut backend = Flatpak::new(NativeTransport {
         host: pkgdeck_core::host::Host::new(
             pkgdeck_core::host::Runtime::Native,
@@ -5877,11 +5878,10 @@ fn native_flatpak_cleanup_is_unavailable_without_an_authoritative_preview() {
         ),
         authorization: Authorization::Polkit,
     });
-    assert!(!backend.capabilities().contains(&Capability::Clean));
-    assert!(matches!(
-        backend.cleanup(&Cancellation::default()),
-        Err(EngineError::Unsupported { .. })
-    ));
+    // Leftover app data is still offered, but no unused runtime ever is,
+    // and with no home there is no app data to look at either.
+    assert!(backend.capabilities().contains(&Capability::Clean));
+    assert_eq!(backend.cleanup(&Cancellation::default()).unwrap(), vec![]);
     assert!(matches!(
         backend.execute(
             &Operation::Clean(CleanupId {

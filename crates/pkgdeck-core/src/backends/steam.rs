@@ -153,6 +153,7 @@ impl Steam {
                 shown(&self.host, folder)
             ),
             bytes: Some(disk::usage(folder, cancel)),
+            restorable: false,
         })
     }
 }

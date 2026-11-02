@@ -438,6 +438,7 @@ impl Backend for Standalone {
             package,
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

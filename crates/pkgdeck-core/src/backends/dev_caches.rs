@@ -208,6 +208,7 @@ impl DevCaches {
                     .join("\n")
             ),
             bytes: Some(bytes),
+            restorable: false,
         })
     }
 }

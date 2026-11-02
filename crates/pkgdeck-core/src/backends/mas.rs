@@ -402,6 +402,7 @@ impl<T: Transport> Backend for MacAppStore<T> {
             description: description.join("\n\n"),
             homepage: Some(format!("https://apps.apple.com/app/id{}", app.adam_id)),
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

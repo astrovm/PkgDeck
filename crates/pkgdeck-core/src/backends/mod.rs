@@ -2,6 +2,7 @@
 mod adopt;
 mod ai_catalog;
 mod android;
+mod app_data;
 mod appimage;
 mod appimage_contents;
 mod appimage_github;
@@ -44,6 +45,7 @@ use crate::{
     package::*,
     process::*,
 };
+pub use app_data::{app_data_task, is_data_key};
 pub use appimage::AppImage;
 pub use apt::*;
 pub use aur::Aur;

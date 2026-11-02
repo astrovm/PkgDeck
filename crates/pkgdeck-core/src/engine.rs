@@ -1011,6 +1011,20 @@ impl Engine {
         report
     }
 
+    /// One cleanup task as it stands now, such as an app's own data from
+    /// its page, remembered as the plan a confirmation shows.
+    pub fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        cancel: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        let item = self
+            .ready(&id.backend, Capability::Clean, cancel)?
+            .cleanup_plan(id, cancel)?;
+        self.remember_cleanup_plan(item.clone());
+        Ok(item)
+    }
+
     /// Preserve the preview a frontend showed for confirmation. Execution
     /// checks it against a fresh native preview before allowing a cleanup write.
     pub fn remember_cleanup_plan(&mut self, item: CleanupItem) {

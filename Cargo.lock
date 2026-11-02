@@ -3147,6 +3147,7 @@ name = "pkgdeck-core"
 version = "0.12.9"
 dependencies = [
  "backhand",
+ "chrono",
  "dwarfs",
  "flate2",
  "futures-lite",

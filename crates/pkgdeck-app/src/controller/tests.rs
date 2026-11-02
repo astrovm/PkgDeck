@@ -1046,6 +1046,7 @@ fn opened_files_show_a_page_until_back_and_installed_after_their_install() {
         homepage: Some("https://example.invalid/demo".into()),
         dependencies: vec!["libc6".into()],
         package: package.clone(),
+        data: None,
     };
     controller
         .as_mut()
@@ -1105,6 +1106,7 @@ fn opened_files_show_a_page_until_back_and_installed_after_their_install() {
                 homepage: None,
                 dependencies: vec![],
                 package: link.clone(),
+                data: None,
             },
             "Install",
         )
@@ -1475,6 +1477,7 @@ fn retry_cleanup_and_sources_replace_only_failed_source() {
         summary: "Synthetic".into(),
         preview: "No changes".into(),
         bytes: None,
+        restorable: false,
     };
     let source = |name: &str, available| Source {
         backend: name.into(),
@@ -2639,6 +2642,7 @@ fn queued_cleanup_requires_new_consent_when_its_native_preview_changes() {
         summary: "Fixture".into(),
         preview: "Remove one cached file".into(),
         bytes: None,
+        restorable: false,
     };
     let operations = vec![Operation::Clean(item.id.clone())];
     let queued = || Confirmed {
@@ -3766,6 +3770,7 @@ fn selecting_during_a_search_loads_details_alongside_it() {
             description: "Full Grok details".into(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         }))));
     assert_eq!(controller.details().to_string(), "{}");
     assert!(controller
@@ -3804,6 +3809,7 @@ fn cancel_stops_the_parallel_details_lookup() {
             description: "should not land".into(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         })))
         .unwrap();
     controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
@@ -3827,6 +3833,7 @@ fn cancel_stops_the_parallel_details_lookup() {
                 description: "still should not land".into(),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             }
         )))))
         .is_err());
@@ -4208,6 +4215,7 @@ fn a_better_name_from_details_updates_cached_sections_too() {
             description: String::new(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         }))));
     assert!(controller.rows().to_string().contains("Example App"));
     let cached = controller
@@ -4685,6 +4693,7 @@ fn cleanup_rows_show_preview_and_require_confirmation() {
         summary: "One package".into(),
         preview: "Remv synthetic-runtime [1.0]".into(),
         bytes: None,
+        restorable: false,
     };
     controller
         .as_mut()
@@ -5149,6 +5158,7 @@ fn streamed_details_preserve_progress_and_finish_cleanly() {
         description: "Synthetic firmware details".into(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     };
     details.package.display_name = "Synthetic BIOS".into();
     let (sender, receiver) = mpsc::channel();
@@ -5931,6 +5941,7 @@ fn a_failed_step_marks_its_row_until_a_later_look_shows_it_done() {
         summary: String::new(),
         preview: String::new(),
         bytes: None,
+        restorable: false,
     };
     let look =
         |controller: &mut Pin<&mut ffi::PackageController>, items: Vec<CleanupItem>, failures| {
@@ -6166,6 +6177,7 @@ fn a_failed_cleanup_is_named_by_its_row_not_its_key() {
         summary: "3 finished worktrees".into(),
         preview: "Removes these worktrees.".into(),
         bytes: None,
+        restorable: false,
     };
     let clean = Operation::Clean(item.id.clone());
     let mut controller = synthetic_controller();
@@ -7591,6 +7603,7 @@ fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {
         summary: String::new(),
         preview: format!("Would empty {title}"),
         bytes,
+        restorable: false,
     };
     let (cache, logs) = (item("cache", Some(2_000_000_000)), item("logs", None));
     let data = clean_confirmation(&[&cache, &logs]);
@@ -7685,6 +7698,7 @@ fn stale_details_replies_never_take_the_panel() {
         description: String::new(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     };
     assert!(details_fresh(Some(&id), &details));
     assert!(!details_fresh(None, &details));
@@ -9405,6 +9419,7 @@ fn opened_repositories_and_cleanups_confirm_in_plain_words() {
         preview: "Removes 2 packages".into(),
         kind: CleanupKind::OrphanDependencies,
         bytes: None,
+        restorable: false,
     }];
     propose_every_cleanup(&mut controller);
     assert!(controller
@@ -10256,6 +10271,7 @@ impl Backend for Described {
             description: "Described by the warm engine".into(),
             homepage: None,
             dependencies: vec!["libsynthetic".into()],
+            data: None,
         })
     }
 }
@@ -10340,6 +10356,7 @@ fn fixture_details(description: &str) -> Box<PackageDetails> {
         description: description.into(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     })
 }
 #[test]
@@ -10678,6 +10695,7 @@ fn sized(backend: &str, key: &str, kind: CleanupKind, bytes: Option<u64>) -> Cle
         summary: "Synthetic cleanup".into(),
         preview: format!("Empties {key}"),
         bytes,
+        restorable: false,
     }
 }
 struct UpdateCheckFixture {
@@ -12226,6 +12244,7 @@ fn cleanup_item(key: &str) -> CleanupItem {
         summary: "Synthetic cleanup".into(),
         preview: format!("would remove {key}"),
         bytes: None,
+        restorable: false,
     }
 }
 #[test]
@@ -13640,4 +13659,228 @@ fn automatic_updates_during_a_build_hold_only_what_a_build_may_run() {
         .finish_background_check(report(vec![package("homebrew", "wget")]));
     assert!(controller.rust().validated_confirmed.is_none());
     assert_eq!(state(&controller)["waiting_for"], json!(["Homebrew"]));
+}
+
+/// An app's own data folder, planned as its source plans it.
+struct DataSource {
+    item: CleanupItem,
+    ran: std::sync::Arc<std::sync::Mutex<Vec<CleanupId>>>,
+}
+impl Backend for DataSource {
+    fn id(&self) -> &str {
+        "flatpak"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    // The Clean page never lists an installed app's data.
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(vec![])
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        _: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        (*id == self.item.id)
+            .then(|| self.item.clone())
+            .ok_or(EngineError::NotFound)
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if let Operation::Clean(id) = operation {
+            self.ran.lock().unwrap().push(id.clone());
+        }
+        Ok(OperationOutcome::default())
+    }
+}
+fn app_data_item() -> CleanupItem {
+    CleanupItem {
+        id: CleanupId {
+            backend: "flatpak".into(),
+            key: "data:org.example.App".into(),
+        },
+        kind: CleanupKind::Data,
+        title: "Example data".into(),
+        summary: "Example starts over without it".into(),
+        preview: "Moves this folder to the Trash, with the settings and files the app kept in it.\n~/.var/app/org.example.App".into(),
+        bytes: Some(2_000_000),
+        restorable: true,
+    }
+}
+
+#[test]
+fn an_apps_page_moves_its_data_to_the_trash_after_review() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let mut app = synthetic_package("org.example.App", "Example");
+    app.id.backend = "flatpak".into();
+    let mut gone = app.clone();
+    gone.id.name = "org.example.Gone".into();
+    gone.installed_version = None;
+    let mut apt = synthetic_package("example", "Example");
+    apt.installed_version = Some("1".into());
+    controller.as_mut().rust_mut().packages = vec![app.clone(), gone, apt];
+    // Its page shows where the data is and how much it takes.
+    controller
+        .as_mut()
+        .apply(Ok(Payload::Details(Box::new(PackageDetails {
+            package: app.clone(),
+            description: String::new(),
+            homepage: None,
+            dependencies: vec![],
+            data: Some(pkgdeck_core::package::AppData {
+                folder: "/home/user/.var/app/org.example.App".into(),
+                shown: "~/.var/app/org.example.App".into(),
+                bytes: 2_000_000,
+            }),
+        }))));
+    let page: Value =
+        serde_json::from_str(&controller.rust().detail_cache[&app.id].to_string()).unwrap();
+    assert_eq!(
+        page["data"],
+        json!({
+            "folder": "/home/user/.var/app/org.example.App",
+            "shown": "~/.var/app/org.example.App",
+            "size": pkgdeck_core::disk::size(2_000_000),
+        })
+    );
+    // Only an installed app from a source that keeps such folders.
+    for index in [1, 2, 9] {
+        controller.as_mut().propose("trash-data".into(), index);
+        assert!(controller.rust().worker.is_none(), "{index}");
+        assert!(controller.rust().pending.is_none(), "{index}");
+    }
+    // The installed Flatpak's own folder is planned first.
+    controller.as_mut().propose("trash-data".into(), 0);
+    assert!(matches!(
+        controller.rust().worker.as_ref().map(|worker| &worker.job),
+        Some(Job::PlanCleanup(id)) if id.backend == "flatpak" && id.key == "data:org.example.App"
+    ));
+    wait_until(&mut controller, |c| c.rust().worker.is_none());
+    // The review names the folder and says it can come back.
+    let item = app_data_item();
+    controller
+        .as_mut()
+        .apply(Ok(Payload::CleanupPlan(item.clone())));
+    let operations = vec![Operation::Clean(item.id.clone())];
+    assert_eq!(
+        controller.rust().pending.as_ref().map(Job::operations),
+        Some(operations.clone())
+    );
+    let text = controller.confirmation().to_string();
+    assert!(text.starts_with("Move to Trash?\n\nExample data"), "{text}");
+    assert!(
+        text.ends_with("Moved folders can be restored from the Trash."),
+        "{text}"
+    );
+    let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+    assert_eq!(data["action"], "Move to Trash");
+    // Confirmed, it runs as it was reviewed, and still is.
+    let job = Job::CleanAll(operations.clone());
+    let preview = controller
+        .rust()
+        .cleanup
+        .iter()
+        .chain(&controller.rust().page_cleanup)
+        .filter(|candidate| operations.contains(&Operation::Clean(candidate.id.clone())))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(preview, std::slice::from_ref(&item));
+    let leftover = sized("flatpak", "leftover:org.old.App", CleanupKind::Data, None);
+    controller.as_mut().rust_mut().revalidating = Some(Confirmed {
+        job,
+        activity_id: None,
+        cleanup_preview: preview,
+    });
+    controller.as_mut().apply(Ok(Payload::CleanPreview(
+        operations,
+        vec![leftover.clone(), item.clone()],
+    )));
+    assert!(controller.rust().validated_confirmed.is_some());
+    // The Clean page keeps listing only its own tasks.
+    assert_eq!(controller.rust().cleanup, [leftover]);
+}
+
+#[test]
+fn app_data_plans_and_runs_through_the_engine() {
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let item = app_data_item();
+    let mut engine = Engine::default();
+    engine
+        .register(DataSource {
+            item: item.clone(),
+            ran: ran.clone(),
+        })
+        .unwrap();
+    let cancel = Cancellation::default();
+    let replies = run_job(&mut engine, Job::PlanCleanup(item.id.clone()), &cancel);
+    assert!(
+        matches!(replies.last(), Some(Reply::Done(Ok(Payload::CleanupPlan(plan)))) if *plan == item)
+    );
+    let missing = CleanupId {
+        backend: "flatpak".into(),
+        key: "data:org.example.Other".into(),
+    };
+    let replies = run_job(&mut engine, Job::PlanCleanup(missing), &cancel);
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Err(EngineError::NotFound)))
+    ));
+    // A queued one is checked again, though the Clean page doesn't list it.
+    // Other operations are left to the engine's own check.
+    let operations = vec![Operation::Clean(item.id.clone())];
+    let mixed = vec![
+        Operation::Refresh {
+            backend: "flatpak".into(),
+        },
+        operations[0].clone(),
+    ];
+    let replies = run_job(&mut engine, Job::PlanCleanAll(mixed), &cancel);
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Ok(Payload::CleanPreview(_, fresh)))) if *fresh == [item.clone()]
+    ));
+    run_job(&mut engine, Job::CleanAll(operations), &cancel);
+    assert_eq!(*ran.lock().unwrap(), std::slice::from_ref(&item.id));
+}
+
+#[test]
+fn confirmations_say_what_the_trash_can_bring_back() {
+    let folder = app_data_item();
+    let cache = sized(
+        "dev-caches",
+        "cargo",
+        CleanupKind::PackageCache,
+        Some(1_000),
+    );
+    let summary = |items: &[&CleanupItem]| clean_confirmation(items)["summary"].clone();
+    assert_eq!(
+        clean_confirmation(&[&folder])["body"],
+        format!(
+            "{}\n\nTasks run in order. Moved folders can be restored from the Trash.",
+            cleanup_label(&folder)
+        )
+    );
+    assert_eq!(
+        summary(&[&cache]),
+        format!(
+            "Clean 1 task\nFrees about {}.\nFinished tasks cannot be undone.",
+            pkgdeck_core::disk::size(1_000)
+        )
+    );
+    assert_eq!(
+        summary(&[&cache, &folder]),
+        format!(
+            "Clean 2 tasks\nFrees about {}.\nFolders go to the Trash. Other finished tasks cannot be undone.",
+            pkgdeck_core::disk::size(2_001_000)
+        )
+    );
 }
