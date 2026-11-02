@@ -7,7 +7,9 @@ set -euo pipefail
 results=${1:?Usage: scripts/mutants-comment.sh RESULTS}
 marker='<!-- mutants -->'
 lived=$(cat "$results/missed.txt" "$results/timeout.txt" 2>/dev/null | sort -u || true)
-caught=$(cat "$results/caught.txt" 2>/dev/null | wc -l)
+# No results (nothing to mutate) counts as every mutant caught.
+caught=$(grep -c . "$results/caught.txt" 2>/dev/null || true)
+caught=${caught:-0}
 total=$((caught + $(grep -c . <<<"$lived" || true)))
 body="$marker
 **Mutation testing:** $caught of $total changes caught by a test.

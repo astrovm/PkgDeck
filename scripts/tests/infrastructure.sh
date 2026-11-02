@@ -172,6 +172,10 @@ comment '' true
 rm "$results/missed.txt"
 comment 99
 grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
+# Nothing to mutate leaves no results at all, which is the same as all caught.
+rm -r "$results"
+comment 99
+grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
 echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'
