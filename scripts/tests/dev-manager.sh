@@ -6,7 +6,8 @@
 # Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
-trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "dev-manager FAILED at $failed" >&2' ERR
 backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>}
 pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"

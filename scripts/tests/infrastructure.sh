@@ -20,6 +20,10 @@ release=$(grep -o '<release version="[^"]*"' assets/io.github.astrovm.PkgDeck.me
 bare=$(grep -rnE 'cargo install( |$)' scripts containers .github \
     | grep -vE ':[0-9]+:[[:space:]]*#|cargo "\+[$]toolchain" install|cd / && cargo install|install --list' || true)
 [[ -z $bare ]] || { printf 'Name the pinned toolchain (cargo +TOOLCHAIN install) or install from outside the checkout:\n%s\n' "$bare"; exit 1; }
+# A failure report from an ERR trap skips subshells: bash 3.2, the macOS one,
+# runs it for every expected failure inside $(...) || true.
+unguarded=$(grep -rnE "trap [^-].* ERR" scripts | grep -v BASH_SUBSHELL || true)
+[[ -z $unguarded ]] || { printf 'Guard ERR traps with (( BASH_SUBSHELL )):\n%s\n' "$unguarded"; exit 1; }
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 expect_code() {
