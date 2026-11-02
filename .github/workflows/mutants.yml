@@ -1,9 +1,20 @@
 name: Mutants
-# Every mutant of the workspace (scripts/mutants.sh), split into 64 parts.
-# All of them take days of runner time, so each week runs a quarter of the
-# parts and four weeks cover everything. What survives is listed in the
-# open "Missed mutants" issue.
+# Mutation testing (scripts/mutants.sh). It never blocks a merge: none of
+# this is in CI / Required.
+# - A pull request mutates the Rust lines it changed, and one comment lists
+#   the changes no test noticed, for a follow-up.
+# - Every week, a quarter of all mutants, split into 64 parts, so four weeks
+#   cover everything. What survives is listed in the open "Missed mutants"
+#   issue.
 on:
+  pull_request:
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/mutants.toml
+      - scripts/mutants.sh
+      - .github/workflows/mutants.yml
   schedule:
     - cron: '0 5 * * 6'
   workflow_dispatch:
@@ -16,8 +27,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
+  # A newer push replaces a pull request's run; full runs never cancel.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'full' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: '0'
@@ -25,8 +37,55 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  changed:
+    name: Mutants / Changed code
+    if: github.event_name == 'pull_request'
+    # Arm restores Test / Linux (aarch64)'s plain debug builds.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent, the base branch.
+          fetch-depth: 2
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
+        with:
+          arch: aarch64
+          scope: linux
+          save: 'false'
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+      - name: Mutate the changed code
+        # Missed mutants (2) and timeouts (3) are findings for the comment.
+        # Anything else is a broken run.
+        run: |
+          status=0
+          scripts/mutants.sh diff HEAD^1 || status=$?
+          [[ $status == 0 || $status == 2 || $status == 3 ]] || exit "$status"
+      - name: Comment what lived
+        # A fork's token can't comment; its run page has the summary.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/mutants-comment.sh build/mutants/mutants.out
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-changed-code
+          path: build/mutants/mutants.out
+          if-no-files-found: ignore
+
   plan:
     name: Mutants / Plan
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:

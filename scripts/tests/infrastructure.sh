@@ -142,6 +142,36 @@ done
 # The stacked pull request is the one named, not the one below it.
 expect_code 0 env PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r scripts/merged-pr.sh stacked
 grep -Fxq $'2\thead-stacked\to/r' "$work/output"
+# Mutation results keep one comment on the pull request, gone once every
+# mutant is caught, through a synthetic GitHub API.
+cat >"$work/bin/gh" <<'GH'
+#!/bin/bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+[[ $* == *--paginate* ]] && cat "$GH_OLD"
+exit 0
+GH
+chmod +x "$work/bin/gh"
+results="$work/mutants"
+mkdir -p "$results"
+printf 'a.rs:1:1: replace f with g\n' >"$results/missed.txt"
+printf 'a.rs:2:1: one\na.rs:3:1: two\n' >"$results/caught.txt"
+comment() {
+    : >"$work/calls"
+    printf '%s' "$1" >"$work/old"
+    env PATH="$work/bin:$PATH" GH_CALLS="$work/calls" GH_OLD="$work/old" GITHUB_REPOSITORY=o/r PR=7 RUN=https://run \
+        FORK="${2:-false}" GITHUB_STEP_SUMMARY="$work/summary" scripts/mutants-comment.sh "$results"
+}
+comment ''
+grep -q '^api repos/o/r/issues/7/comments -f body=<!-- mutants -->' "$work/calls"
+grep -q '2 of 3 changes caught by a test' "$work/calls"
+grep -q 'a.rs:1:1: replace f with g' "$work/calls"
+comment 99
+grep -q '^api -X PATCH repos/o/r/issues/comments/99 -f body=' "$work/calls"
+comment '' true
+[[ ! -s $work/calls ]]
+rm "$results/missed.txt"
+comment 99
+grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
 echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'

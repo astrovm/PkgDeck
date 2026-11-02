@@ -49,6 +49,13 @@ scripts/container.sh development --exec scripts/mutants.sh shard 3/64        # o
 Results land in `build/mutants/mutants.out` (`missed.txt`, `caught.txt` and a
 log per mutant). Settings live in `.cargo/mutants.toml`.
 
+It never blocks a merge. On a pull request that changes Rust, the `Mutants`
+workflow mutates the changed lines and keeps one comment listing what no test
+caught; the comment goes away once everything is. Each one is a lead for a
+follow-up PR, unless the change doesn't alter behavior. Every week it runs a
+quarter of all mutants and lists what survived in the open "Missed mutants"
+issue.
+
 ### GUI tests
 
 - `crates/pkgdeck/tests/app.rs` runs the window's logic against a fake
@@ -118,7 +125,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | --- | --- |
 | `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, and all workspace tests. x86_64 measures them for coverage, the slowest build, so aarch64 also runs clippy and the real sudo/polkit and APT lock tests |
 | `Test / macOS (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption, then real lifecycle tests for every development manager and MacPorts (prebuilt archives only). Pull requests run the lifecycle tests on Apple Silicon only; the Intel runner takes over half an hour for them, and Linux covers the same managers. Release tags without PR proof run them on both. One job per Mac, since only 5 macOS runners run at once |
-| `Mutants / Changed code` | Mutation testing on the Rust lines the pull request changed. Fails when a change to them goes unnoticed by every test. The weekly `Mutants` workflow runs every mutant in 64 parts, a quarter of them each week, and lists what survived in the open "Missed mutants" issue |
+| `Mutants / Changed code` | Separate `Mutants` workflow, not required. Mutation testing on the Rust lines the pull request changed, with one PR comment listing what no test caught. The weekly run covers every mutant in 64 parts, a quarter each week, and reports in the open "Missed mutants" issue |
 | `Coverage / Combined` | The 100% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
 | `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64. On main it only builds the CLI, to save the cache both backend groups restore |
