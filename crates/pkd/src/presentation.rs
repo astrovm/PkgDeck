@@ -2053,14 +2053,12 @@ mod tests {
         assert!(installed.contains("Installed  1.0"));
         // An app's own folder, and how much it takes, like its page in the app.
         let data = json!({"package":{"id":id,"installed_version":"1.0"},"data":{"folder":"/home/user/.var/app/synthetic","shown":"~/.var/app/synthetic","bytes":49152}});
-        assert!(
-            human(&data, 80, false).contains(&format!(
-                "        Data  ~/.var/app/synthetic ({})",
-                pkgdeck_core::disk::size(49152)
-            )),
-            "{}",
-            human(&data, 80, false)
+        let shown = human(&data, 80, false);
+        let row = format!(
+            "        Data  ~/.var/app/synthetic ({})",
+            pkgdeck_core::disk::size(49152)
         );
+        assert!(shown.contains(&row), "{shown}");
         assert!(!installed.contains("Data"));
         assert!(human(&json!({"sources":[{"backend":"fixture","availability":{"Ok":"available"},"capabilities":["search"]}]}), 100, false).contains("available"));
         assert!(human(
