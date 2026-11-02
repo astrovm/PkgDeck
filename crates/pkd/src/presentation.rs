@@ -1029,6 +1029,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ("Available", &p["candidate_version"]),
             ("Update", &p["update"]),
             ("Homepage", &data["homepage"]),
+            ("Data", &data["data"]),
             ("Dependencies", &data["dependencies"]),
         ] {
             // A missing installed version means not installed; other empty
@@ -1042,6 +1043,13 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 continue;
             } else if label == "Scope" {
                 scope_text(field)
+            } else if label == "Data" {
+                // The folder an installed app keeps its settings and files in.
+                let size = field["bytes"]
+                    .as_u64()
+                    .map(|bytes| format!(" ({})", pkgdeck_core::disk::size(bytes)))
+                    .unwrap_or_default();
+                format!("{}{size}", value(&field["shown"]))
             } else if label == "Update" && field == "current" {
                 "up to date".into()
             } else if label == "Update" && field == "available" {
@@ -2043,6 +2051,17 @@ mod tests {
             false,
         );
         assert!(installed.contains("Installed  1.0"));
+        // An app's own folder, and how much it takes, like its page in the app.
+        let data = json!({"package":{"id":id,"installed_version":"1.0"},"data":{"folder":"/home/user/.var/app/synthetic","shown":"~/.var/app/synthetic","bytes":49152}});
+        assert!(
+            human(&data, 80, false).contains(&format!(
+                "        Data  ~/.var/app/synthetic ({})",
+                pkgdeck_core::disk::size(49152)
+            )),
+            "{}",
+            human(&data, 80, false)
+        );
+        assert!(!installed.contains("Data"));
         assert!(human(&json!({"sources":[{"backend":"fixture","availability":{"Ok":"available"},"capabilities":["search"]}]}), 100, false).contains("available"));
         assert!(human(
             &json!({"packages":[],"failures":[{"backend":"fixture","error":"offline"}]}),
