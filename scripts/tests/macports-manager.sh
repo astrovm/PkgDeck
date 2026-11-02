@@ -16,7 +16,8 @@ pkd=${1:-$PWD/target/debug/pkd}
 logs="$PWD/build/macports"
 mkdir -p "$logs"
 exec > >(tee "$logs/lifecycle.log") 2>&1
-trap 'echo "macports-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "macports-manager FAILED at $failed" >&2' ERR
 [[ -x $pkd ]]
 command -v jq
 sudo -n true

@@ -8,14 +8,15 @@
 # The container script is single-quoted on purpose: it expands inside it.
 # shellcheck disable=SC2016
 set -euo pipefail
-trap 'echo "aur-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "aur-manager FAILED at $failed" >&2' ERR
 
 binary=${1:?Expected absolute pkd binary path}
 engine=${PKGDECK_CONTAINER_ENGINE:-podman}
 
 script='
     set -Eeuo pipefail
-    trap '\''echo "real aur lifecycle FAILED at line $LINENO: $BASH_COMMAND" >&2'\'' ERR
+    trap '\''failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "real aur lifecycle FAILED at $failed" >&2'\'' ERR
     useradd -m pkgdeck-test
     # makepkg refuses root, so the fixtures are built as the test user.
     # Empty packages: fixture is in no repository and not in the AUR; yay

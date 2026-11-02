@@ -2023,3 +2023,22 @@ fn row_buttons_on_kept_rows_wait_for_the_reload() {
     app.run_adopt(1);
     assert!(app.active_rows.is_empty());
 }
+
+/// However the window came to hold another section's rows, a section it
+/// opens never shows them, even when the controller's rows don't change.
+#[test]
+fn a_section_drops_rows_it_holds_for_another_one() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    // A reload keeps them on screen while the controller has none.
+    app.retained = Some(app.rows.clone());
+    app.c().set_busy(true);
+    app.react();
+    rows(&mut app, json!([]));
+    assert_eq!(app.rows.len(), 2);
+    app.open_page(Page::Updates);
+    app.refresh_items();
+    assert!(app.shown_rows().is_empty());
+    assert!(app.items.is_empty());
+}

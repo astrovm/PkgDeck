@@ -11,7 +11,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
     exit 1
 }
 dist=$(cd "${1:?Usage: homebrew-cask.sh <package folder>}" && pwd)
-trap 'echo "homebrew-cask FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "homebrew-cask FAILED at $failed" >&2' ERR
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
 brew tap-new --no-git astrovm/pkgdeck
 # As the install docs say: Homebrew 6+ only loads trusted third-party taps.

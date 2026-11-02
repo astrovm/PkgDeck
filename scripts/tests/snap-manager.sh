@@ -5,7 +5,8 @@
 # Lifecycle state is confirmed through snap itself, never only PkgDeck output.
 # Usage: scripts/tests/snap-manager.sh <pkd>
 set -euo pipefail
-trap 'echo "snap-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "snap-manager FAILED at $failed" >&2' ERR
 pkd=${1:?Usage: scripts/tests/snap-manager.sh <pkd>}
 command -v snap >/dev/null || { echo 'snapd is required' >&2; exit 1; }
 echo "snap-manager: pkd=$pkd user=$(whoami)"

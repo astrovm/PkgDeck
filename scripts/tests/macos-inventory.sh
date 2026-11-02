@@ -14,7 +14,8 @@ pkd="$PWD/target/debug/pkd"
 logs="$PWD/build/macos-native"
 mkdir -p "$logs"
 exec > >(tee "$logs/lifecycle.log") 2>&1
-trap 'echo "macos-inventory FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+failed=''
+trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "macos-inventory FAILED at $failed" >&2' ERR
 [[ -x $pkd ]]
 command -v jq
 brew --version
@@ -43,9 +44,14 @@ if brew tap | grep -Fxq "$tap"; then
 fi
 cleanup() {
     set +e
+    trap - ERR
     chmod 755 "$system_root/Restricted" 2>/dev/null
     [[ -z ${sleeper:-} ]] || kill "$sleeper" 2>/dev/null
-    brew uninstall --cask "$cask"
+    # Only while it's installed: Homebrew reports the rest as CI errors.
+    if brew info --json=v2 --cask "$cask" 2>/dev/null |
+        jq -e '.casks[0].installed // "" | length > 0' >/dev/null; then
+        brew uninstall --cask "$cask"
+    fi
     brew untap "$tap"
     sudo rm -rf "$system_root" "${in_trash[@]}"
     rm -rf "$user_root" "$owned" "$work"
