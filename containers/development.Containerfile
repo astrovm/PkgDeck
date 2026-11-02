@@ -13,7 +13,9 @@ ENV RUSTUP_HOME=/opt/rustup PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/b
 WORKDIR /opt/bootstrap
 COPY rust-toolchain.toml ./
 COPY scripts/setup-dev.sh scripts/dev-env.sh ./scripts/
-RUN cargo install --root /usr/local cargo-llvm-cov --version 0.9.1 --locked \
+# Name the pinned toolchain: cargo install warns when the toolchain file picks it.
+RUN toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml) \
+    && cargo "+$toolchain" install --root /usr/local cargo-llvm-cov --version 0.9.1 --locked \
     && scripts/setup-dev.sh \
     && dpkg-query -W > /opt/pkgdeck-os-packages.txt
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb xdotool fonts-dejavu-core && rm -rf /var/lib/apt/lists/*

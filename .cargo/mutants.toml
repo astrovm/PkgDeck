@@ -1,0 +1,3 @@
+# cargo-mutants settings, used by scripts/mutants.sh.
+# Screenshot tooling and build scripts aren't app behavior.
+exclude_globs = ["crates/*/examples/**", "crates/*/build.rs"]

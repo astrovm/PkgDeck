@@ -200,6 +200,40 @@ jobs:
             RUNNER_ARCH="$RUNNER_ARCH" \
             scripts/tests/host-authorization.sh
 
+  mutants:
+    # Changes the Rust lines this pull request changed in small ways and
+    # fails if no test notices one (scripts/mutants.sh). Every mutant runs
+    # weekly in mutants.yml.
+    name: Mutants / Changed code
+    needs: [changes]
+    if: "!cancelled() && github.event_name == 'pull_request' && needs.changes.outputs.builds != 'false'"
+    # Arm restores Test / Linux (aarch64)'s plain debug builds.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent, the base branch.
+          fetch-depth: 2
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
+        with:
+          arch: aarch64
+          scope: linux
+          save: 'false'
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+      - name: Mutate the changed code
+        run: scripts/mutants.sh diff HEAD^1
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-changed-code
+          path: build/mutants/mutants.out
+          if-no-files-found: ignore
+
   test-macos:
     # One job per Mac runs every macOS test: native inventory and adoption,
     # then the development manager lifecycles. The account gets 5 concurrent
@@ -1064,6 +1098,7 @@ jobs:
     needs:
       - changes
       - test-linux
+      - mutants
       - test-macos
       - test-podman
       - test-backends
