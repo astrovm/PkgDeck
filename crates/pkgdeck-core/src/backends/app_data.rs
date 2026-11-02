@@ -46,8 +46,9 @@ pub(super) fn trash<T: Transport + ?Sized>(transport: &T) -> Option<Trash> {
 pub(super) struct DataFolders {
     backend: &'static str,
     manager: &'static str,
-    home: PathBuf,
     root: PathBuf,
+    /// `root` as people know it: `~/.var/app`.
+    shown: String,
 }
 
 impl DataFolders {
@@ -63,8 +64,8 @@ impl DataFolders {
         Self {
             backend,
             manager,
-            home: home.to_owned(),
             root: home.join(root),
+            shown: format!("~/{root}"),
         }
     }
 
@@ -76,18 +77,16 @@ impl DataFolders {
             .then_some(folder)
     }
 
-    fn shown(&self, path: &Path) -> String {
-        match path.strip_prefix(&self.home) {
-            Ok(rest) => format!("~/{}", rest.display()),
-            Err(_) => path.display().to_string(),
-        }
+    /// The folder `name` keeps, as people know it: `~/.var/app/org.example.App`.
+    fn shown(&self, name: &str) -> String {
+        format!("{}/{name}", self.shown)
     }
 
     /// The folder an installed app keeps, and how much it takes.
     pub(super) fn data(&self, name: &str, cancel: &Cancellation) -> Option<AppData> {
         let folder = self.folder(name)?;
         Some(AppData {
-            shown: self.shown(&folder),
+            shown: self.shown(name),
             bytes: disk::usage(&folder, cancel),
             folder,
         })
@@ -103,12 +102,7 @@ impl DataFolders {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(error) => {
-                return Err(failed(
-                    format!("Couldn't read {}", self.shown(&self.root)),
-                    &error,
-                ))
-            }
+            Err(error) => return Err(failed(format!("Couldn't read {}", self.shown), &error)),
         };
         let mut names: Vec<String> = entries
             .flatten()
@@ -172,7 +166,7 @@ impl DataFolders {
             summary,
             preview: format!(
                 "Moves this folder to the Trash, with the settings and files the app kept in it.\n{}",
-                self.shown(&folder)
+                self.shown(name)
             ),
             bytes: Some(disk::usage(&folder, cancel)),
             restorable: true,
@@ -206,7 +200,7 @@ impl DataFolders {
         )));
         trash.put(&folder).map_err(|error| {
             failed(
-                format!("Couldn't move {} to the Trash", self.shown(&folder)),
+                format!("Couldn't move {} to the Trash", self.shown(name)),
                 &error,
             )
         })?;
@@ -363,6 +357,33 @@ mod tests {
             .leftovers(&none, &cancel)
             .unwrap()
             .is_empty());
+        // One it can't read says which, rather than offering nothing.
+        fs::write(empty.join("snap"), "").unwrap();
+        let error = DataFolders::snap(&empty)
+            .leftovers(&none, &cancel)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Couldn't read ~/snap: "),
+            "{error}"
+        );
+        // Only Flatpak and Snap keep a folder per app.
+        for (backend, task) in [
+            ("flatpak", Some("data:org.real.App")),
+            ("snap", Some("data:org.real.App")),
+            ("apt", None),
+        ] {
+            let id = PackageId {
+                backend: backend.into(),
+                name: "org.real.App".into(),
+                architecture: String::new(),
+                scope: crate::package::Scope::System,
+                remote: None,
+                reference: None,
+            };
+            let found = app_data_task(&id);
+            assert_eq!(found.as_ref().map(|id| id.key.as_str()), task, "{backend}");
+            assert!(found.is_none_or(|id| id.backend == backend));
+        }
         fs::remove_dir_all(&home).unwrap();
         fs::remove_dir_all(&empty).unwrap();
     }

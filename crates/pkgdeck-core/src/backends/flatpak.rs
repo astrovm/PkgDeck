@@ -60,14 +60,10 @@ impl<T: Transport + Sync> Flatpak<T> {
         &self,
         cancel: &Cancellation,
     ) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
-        let output = bytes(
-            "flatpak",
-            self.call(
-                &["list", "--app", "--columns=application,name"],
-                cancel,
-                false,
-                false,
-            )?,
+        let output = self.read(
+            &["list", "--app", "--columns=application,name"],
+            cancel,
+            false,
         )?;
         let text = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
         Ok(text
@@ -100,6 +96,15 @@ impl<T: Transport + Sync> Flatpak<T> {
             bytes("flatpak", result.clone())?;
         }
         Ok(result)
+    }
+    /// What a read-only command printed, once it succeeded.
+    fn read(
+        &self,
+        args: &[&str],
+        cancel: &Cancellation,
+        system: bool,
+    ) -> Result<Vec<u8>, EngineError> {
+        bytes("flatpak", self.call(args, cancel, false, system)?)
     }
     /// Remotes Flatpak made for one bundle or local build: disabled, or
     /// never listed. An unreadable list leaves none out.
@@ -145,18 +150,14 @@ impl<T: Transport + Sync> Flatpak<T> {
             }
         };
         let prefix = if system { "--system" } else { "--user" };
-        let output = bytes(
-            "flatpak",
-            self.call(
-                &[
-                    prefix,
-                    "list",
-                    "--columns=application,arch,branch,version,description,origin,options,name",
-                ],
-                cancel,
-                false,
-                system,
-            )?,
+        let output = self.read(
+            &[
+                prefix,
+                "list",
+                "--columns=application,arch,branch,version,description,origin,options,name",
+            ],
+            cancel,
+            system,
         )?;
         let text = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
         let mut packages = Vec::new();
@@ -235,7 +236,7 @@ impl<T: Transport + Sync> Flatpak<T> {
                     args.push("--cached");
                 }
                 args.extend(remote);
-                let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
+                let output = self.read(&args, cancel, system)?;
                 String::from_utf8(output).map_err(|e| invalid("flatpak", e))
             };
             // Outside an update check, use the summaries Flatpak already has.
@@ -327,19 +328,15 @@ impl<T: Transport + Sync> Flatpak<T> {
             }
         };
         let prefix = if system { "--system" } else { "--user" };
-        let output = bytes(
-            "flatpak",
-            self.call(
-                &[
-                    prefix,
-                    "search",
-                    "--columns=name,description,application,version,branch,remotes",
-                    query,
-                ],
-                cancel,
-                false,
-                system,
-            )?,
+        let output = self.read(
+            &[
+                prefix,
+                "search",
+                "--columns=name,description,application,version,branch,remotes",
+                query,
+            ],
+            cancel,
+            system,
         )?;
         let output = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
         // Without matches flatpak prints a translated notice such as

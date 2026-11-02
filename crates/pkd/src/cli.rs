@@ -2219,6 +2219,8 @@ mod tests {
             json!({"clean":{"backend":"apt","key":"data:fixture"}})
         );
         assert_eq!(call(&mut engine, &["clean", "apt:data:missing"], true).1, 3);
+        // A task is always named with its source.
+        assert_eq!(call(&mut engine, &["clean", "fixture"], true).1, 3);
         assert_eq!(call(&mut engine, &["--scope", "user", "clean"], true).1, 2);
         assert_eq!(
             call(&mut engine, &["--yes", "install", "fixture"], false).1,

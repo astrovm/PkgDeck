@@ -13758,6 +13758,13 @@ fn an_apps_page_moves_its_data_to_the_trash_after_review() {
         assert!(controller.rust().worker.is_none(), "{index}");
         assert!(controller.rust().pending.is_none(), "{index}");
     }
+    // The installed Flatpak's own folder is planned first.
+    controller.as_mut().propose("trash-data".into(), 0);
+    assert!(matches!(
+        controller.rust().worker.as_ref().map(|worker| &worker.job),
+        Some(Job::PlanCleanup(id)) if id.backend == "flatpak" && id.key == "data:org.example.App"
+    ));
+    wait_until(&mut controller, |c| c.rust().worker.is_none());
     // The review names the folder and says it can come back.
     let item = app_data_item();
     controller
@@ -13828,8 +13835,15 @@ fn app_data_plans_and_runs_through_the_engine() {
         Some(Reply::Done(Err(EngineError::NotFound)))
     ));
     // A queued one is checked again, though the Clean page doesn't list it.
+    // Other operations are left to the engine's own check.
     let operations = vec![Operation::Clean(item.id.clone())];
-    let replies = run_job(&mut engine, Job::PlanCleanAll(operations.clone()), &cancel);
+    let mixed = vec![
+        Operation::Refresh {
+            backend: "flatpak".into(),
+        },
+        operations[0].clone(),
+    ];
+    let replies = run_job(&mut engine, Job::PlanCleanAll(mixed), &cancel);
     assert!(matches!(
         replies.last(),
         Some(Reply::Done(Ok(Payload::CleanPreview(_, fresh)))) if *fresh == [item.clone()]

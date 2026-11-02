@@ -56,7 +56,9 @@ impl Trash {
             escaped(path),
             chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
         );
-        for attempt in 1.. {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
             let mut chosen = name.to_owned();
             if attempt > 1 {
                 chosen.push(format!(".{attempt}"));
@@ -90,7 +92,6 @@ impl Trash {
                 }
             }
         }
-        unreachable!("names run out only past u32::MAX tries")
     }
 }
 
@@ -219,19 +220,18 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(trash.put(Path::new("relative")).is_err());
         assert!(trash.put(Path::new("/")).is_err());
-        // The move itself fails: the claimed name is given back.
-        fs::create_dir_all(root.join("locked/app")).unwrap();
-        let mut permissions = fs::metadata(root.join("locked")).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o500);
-        fs::set_permissions(root.join("locked"), permissions.clone()).unwrap();
-        let moved = trash.put(&root.join("locked/app"));
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-        fs::set_permissions(root.join("locked"), permissions).unwrap();
-        assert!(moved.is_err() || rustix::process::geteuid().is_root());
-        if moved.is_err() {
-            assert!(!root.join("Trash/info/app.trashinfo").exists());
-            assert!(root.join("locked/app").exists());
-        }
+        // The move itself fails, even as root: a folder can't go inside
+        // itself. The claimed name is given back.
+        fs::create_dir_all(root.join("app")).unwrap();
+        let inside = Trash::at(root.join("app/Trash"));
+        assert!(inside.put(&root.join("app")).is_err());
+        assert!(!root.join("app/Trash/info/app.trashinfo").exists());
+        assert!(root.join("app").is_dir());
+        // A name too long to record can't go either, and nothing moves.
+        let long = root.join("a".repeat(250));
+        fs::create_dir_all(&long).unwrap();
+        assert!(trash.put(&long).is_err());
+        assert!(long.is_dir());
         fs::remove_dir_all(&root).unwrap();
     }
 }

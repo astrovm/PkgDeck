@@ -211,6 +211,23 @@ fn flatpak_leftovers_are_folders_no_installation_lists() {
     assert!(broken.cleanup_plan(&items[0].id, &cancel).is_err());
     assert!(clean(&mut broken, "flatpak", "leftover:org.gone.App").is_err());
     assert!(home.join(".var/app/org.gone.App").is_dir());
+    // Other tasks are only the ones listed, and only Flatpak's own.
+    for (backend, key) in [
+        ("flatpak", "unused-user"),
+        ("snap", "leftover:org.gone.App"),
+    ] {
+        let id = CleanupId {
+            backend: backend.into(),
+            key: key.into(),
+        };
+        assert!(
+            matches!(
+                flatpak.cleanup_plan(&id, &cancel),
+                Err(EngineError::NotFound)
+            ),
+            "{backend}:{key}"
+        );
+    }
     // The reviewed task moves the folder to the Trash in the data home.
     let data_home = home.join("data");
     let mut flatpak = Flatpak::new(Home {
@@ -342,6 +359,8 @@ fn snap_leftovers_sit_beside_old_revisions_and_run_as_the_person() {
     assert_eq!(data.shown, "~/snap/firefox");
     assert!(snap.details(&chromium.id, &cancel).unwrap().data.is_none());
     assert_eq!(snap.cleanup_plan(&items[1].id, &cancel).unwrap(), items[1]);
+    // Old revisions are planned from the list, as before.
+    assert_eq!(snap.cleanup_plan(&items[0].id, &cancel).unwrap(), items[0]);
     clean(&mut snap, "snap", "leftover:chromium").unwrap();
     assert!(!home.join("snap/chromium").exists());
     assert!(home
