@@ -1836,3 +1836,136 @@ fn settings_tell_the_controller_which_sources_to_leave_for_you() {
     app.apply_settings();
     assert!(!app.ctl.waits().battery && app.ctl.waits().metered);
 }
+
+/// Installed packages from a real worker, none of them upgradable; a list
+/// slow enough that switching pages lands while it still reads.
+mod slow_inventory {
+    use pkgdeck_core::{
+        engine::{Backend, Engine, EngineError},
+        package::*,
+        process::Cancellation,
+    };
+    use serde_json::json;
+
+    pub const INSTALLED: usize = 50;
+
+    struct SlowInventory;
+    impl Backend for SlowInventory {
+        fn id(&self) -> &str {
+            "flatpak"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok((0..INSTALLED)
+                .map(|n| {
+                    serde_json::from_value(json!({
+                        "id": {"backend": "flatpak", "name": format!("app{n}"), "architecture": "all", "scope": "system"},
+                        "display_name": format!("App {n}"), "summary": "", "installed_version": "1", "update": "current"
+                    }))
+                    .unwrap()
+                })
+                .collect())
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            unreachable!("nothing is changed")
+        }
+    }
+
+    pub fn engine(
+        _: &[String],
+        _: bool,
+        _: pkgdeck_core::host::Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = Engine::default();
+        engine.register(SlowInventory)?;
+        Ok(engine)
+    }
+}
+
+#[test]
+fn updates_never_shows_the_installed_rows_it_left_mid_refresh() {
+    let (store, mut settings) = Store::open(None, None);
+    settings.source_list = "flatpak".into();
+    settings.background_mode = false;
+    let mut app = App::with_controller(
+        create_synthetic_controller(slow_inventory::engine),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    app.c().set_window_open(true);
+    let run = |app: &mut App, until_idle: bool, check: &dyn Fn(&App)| {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.tick(Instant::now());
+            app.refresh_items();
+            check(app);
+            if (until_idle && app.idle()) || Instant::now() >= until {
+                break;
+            }
+            if !until_idle && app.busy {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    app.open_page(Page::Installed);
+    run(&mut app, true, &|_| {});
+    assert_eq!(app.items.len(), slow_inventory::INSTALLED);
+    // Refresh, then go to Updates while the refresh still reads.
+    app.refresh_page();
+    run(&mut app, false, &|_| {});
+    assert!(app.busy, "the refresh must still run when the page changes");
+    app.open_page(Page::Updates);
+    let no_installed_rows = |app: &App| {
+        let shown: Vec<_> = app
+            .shown_rows()
+            .iter()
+            .filter(|row| row.is_package())
+            .map(|row| row.name.clone())
+            .collect();
+        assert!(
+            shown.is_empty(),
+            "Updates shows {} rows that have no update",
+            shown.len()
+        );
+        assert!(
+            app.items.is_empty(),
+            "Updates lists {} items",
+            app.items.len()
+        );
+    };
+    app.refresh_items();
+    no_installed_rows(&app);
+    run(&mut app, true, &no_installed_rows);
+    assert!(app.idle());
+}
+
+#[test]
+fn row_buttons_on_kept_rows_wait_for_the_reload() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    // A reload streams fewer rows than the list it keeps on screen.
+    app.retained = Some(app.rows.clone());
+    app.c().set_busy(true);
+    app.react();
+    rows(&mut app, json!([row("a", json!({}))]));
+    assert_eq!(app.items.len(), 2);
+    app.run_row_action(1);
+    app.run_adopt(1);
+    assert!(app.active_rows.is_empty());
+}
