@@ -150,6 +150,8 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             };
             ProtectedCommand::new(program, args)
         }
+        // App data goes to the person's own Trash, as the person.
+        Operation::Clean(id) if crate::backends::is_data_key(&id.key) => return Ok(vec![]),
         Operation::Clean(id) if id.backend == "snap" => {
             let revisions = crate::backends::snap_revisions(&id.key)
                 .ok_or_else(|| invalid("unknown Snap cleanup task"))?;

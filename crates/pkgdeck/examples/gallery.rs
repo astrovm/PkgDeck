@@ -562,6 +562,34 @@ fn main() {
         app.selected = Some(app.rows[app.items[0].raw].identity());
         app.page_open = true;
     });
+    // An installed Flatpak's page with its own data folder, and without.
+    for (name, data) in [("details-data", true), ("details-no-data", false)] {
+        render(name, [1280.0, 800.0], true, move |app| {
+            offline(app, Page::Installed);
+            app.refresh_items();
+            let firefox = app
+                .rows
+                .iter()
+                .find(|row| row.name == "org.mozilla.firefox")
+                .cloned()
+                .unwrap();
+            app.selected = Some(firefox.identity());
+            app.page_open = true;
+            let mut details: model::Details = serde_json::from_value(json!({
+                "description": "Fast, private and safe web browser",
+                "publisher": "Mozilla",
+                "license": "MPL-2.0",
+                "data": data.then(|| json!({
+                    "folder": "/home/fixture/.var/app/org.mozilla.firefox",
+                    "shown": "~/.var/app/org.mozilla.firefox",
+                    "size": "1.2 GB",
+                })),
+            }))
+            .unwrap();
+            details.package = Some(firefox);
+            app.details = details;
+        });
+    }
     render("updates", [1180.0, 780.0], false, |app| {
         offline(app, Page::Updates);
         let rows: Vec<model::Row> = app
@@ -652,6 +680,12 @@ fn main() {
             "confirm-refresh",
             json!({"action": "Refresh", "summary": "Refresh 3 sources", "items": [
                 {"icon_name": "apt", "title": "APT"}, {"icon_name": "flatpak", "title": "Flatpak"}, {"icon_name": "fwupd", "title": "Firmware"}
+            ]}),
+        ),
+        (
+            "confirm-trash-data",
+            json!({"action": "Move to Trash", "summary": "Move to Trash\nFrees about 1.2 GB.\nMoved folders can be restored from the Trash.", "items": [
+                {"group": "Flatpak", "icon_name": "flatpak", "title": "Firefox data", "size": "1.2 GB", "preview": "Moves this folder to the Trash, with the settings and files the app kept in it.\n~/.var/app/org.mozilla.firefox"}
             ]}),
         ),
         (

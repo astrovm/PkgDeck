@@ -140,6 +140,7 @@ impl<T: Transport> SystemFiles<T> {
                 if blocks.len() == 1 { "" } else { "s" }
             ),
             bytes: Some(total),
+            restorable: false,
         }))
     }
 }

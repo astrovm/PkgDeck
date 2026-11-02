@@ -302,6 +302,7 @@ impl<T: Transport> Backend for MacUpdates<T> {
             package,
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

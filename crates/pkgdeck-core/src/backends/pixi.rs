@@ -535,6 +535,7 @@ impl<T: Transport> Backend for Pixi<T> {
                 .iter()
                 .map(|dependency| dependency.name.clone())
                 .collect(),
+            data: None,
         })
     }
     fn execute(

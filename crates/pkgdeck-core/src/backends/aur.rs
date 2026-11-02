@@ -460,6 +460,7 @@ impl<T: Transport> Backend for Aur<T> {
             description: description.join("\n\n"),
             homepage: Some(format!("https://aur.archlinux.org/packages/{}", id.name)),
             dependencies: vec![],
+            data: None,
         })
     }
     fn operation_plan(

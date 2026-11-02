@@ -593,6 +593,7 @@ impl<T: Transport> Backend for DotnetTools<T> {
             homepage: Some(format!("https://www.nuget.org/packages/{}", tool.id)),
             package: Self::package(&tool, candidate),
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

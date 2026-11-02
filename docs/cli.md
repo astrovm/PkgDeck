@@ -257,6 +257,8 @@ Run it again once the build ends.
 | --- | --- |
 | APT | Unused dependencies and the download cache |
 | Homebrew | Unused dependencies and old downloads |
+| Snap | Older versions each snap keeps, and data of removed snaps |
+| Flatpak | Data of removed apps |
 | Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
@@ -270,8 +272,11 @@ allows ignored files to be deleted, and `edited_tracked_files` also allows
 untracked files to be deleted. Tracked edits and locked worktrees stay, and
 so do worktrees whose submodules have unpushed commits or stashes.
 
-- `--all` skips unused volumes, because they hold data. Clean them by their
-  key.
+- `--all` skips unused volumes and data of removed apps, because they hold
+  data. Clean them by their key.
+- An installed app's data isn't listed, but goes to the Trash by its key:
+  `pkd clean flatpak:data:org.example.App` or `pkd clean snap:data:firefox`.
+  Data of removed apps goes to the Trash too.
 - `projects` uses the folders and age set in the app's Clean settings
   (`clean.json` in PkgDeck's config folder). By default: your home folder and
   a week. On macOS, broad scans skip Desktop, Documents and Downloads;

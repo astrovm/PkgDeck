@@ -574,6 +574,7 @@ impl<T: Transport> Backend for GoBinaries<T> {
             description,
             homepage: binary.path.as_deref().map(pkg_go_dev),
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

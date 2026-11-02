@@ -787,6 +787,7 @@ impl<T: Transport> Backend for DevContainers<T> {
             description: lines.join(" "),
             homepage: Some(self.kind.homepage().into()),
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

@@ -1727,6 +1727,7 @@ impl Backend for AppImage {
             homepage: None,
             dependencies: vec![],
             package,
+            data: None,
         })
     }
     /// Installing an AppImage that's already installed some other way moves
@@ -1847,6 +1848,7 @@ impl Backend for AppImage {
                     ),
                     preview: format!("Removes {} and its menu entry.", Self::shown_path(&path)),
                     bytes: Some(crate::disk::usage(&path, cancel)),
+                    restorable: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -1872,6 +1874,7 @@ impl Backend for AppImage {
                     ),
                     preview: format!("Removes {path} and its menu entries."),
                     bytes: Some(crate::disk::usage(Path::new(&package.id.name), cancel)),
+                    restorable: false,
                 }
             })
             .chain(older)

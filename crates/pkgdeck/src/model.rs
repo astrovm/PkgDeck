@@ -324,6 +324,16 @@ pub struct Cleanup {
     pub preview: String,
 }
 
+/// An installed app's own folder of settings and files.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AppData {
+    pub folder: String,
+    /// The folder with the home folder written as `~`.
+    pub shown: String,
+    pub size: String,
+}
+
 /// `details`, and the `opened` page, which has the same fields.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
@@ -343,6 +353,8 @@ pub struct Details {
     /// An opened AppImage file that isn't installed, which can start where
     /// it is.
     pub runnable: bool,
+    /// The app's own folder, for sources that keep one per app.
+    pub data: Option<AppData>,
     pub cleanup: Option<Cleanup>,
     pub failure: Option<Value>,
     pub hint: String,

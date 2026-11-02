@@ -118,6 +118,7 @@ mod tests {
             summary: String::new(),
             preview: String::new(),
             bytes: None,
+            restorable: false,
         };
         let mut fake = Fake::new("fake", &[Capability::Search])
             .listing(vec![package.clone()])

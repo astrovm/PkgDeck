@@ -82,6 +82,7 @@ impl Backend for Fixture {
             summary: "Cached downloads".into(),
             preview: self.preview(),
             bytes: None,
+            restorable: false,
         }])
     }
     fn execute_group(

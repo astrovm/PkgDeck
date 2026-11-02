@@ -34,6 +34,7 @@ pub mod manifest;
 pub mod needs_password;
 pub mod package;
 pub mod relaunch;
+pub mod trash;
 pub mod unattended;
 
 pub mod backends;

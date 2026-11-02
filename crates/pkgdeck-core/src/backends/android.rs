@@ -159,6 +159,7 @@ pub(super) fn image_item(host: &Host, image: &str, cancel: &Cancellation) -> Opt
             shown(host, &folder)
         ),
         bytes: Some(disk::usage(&folder, cancel)),
+        restorable: false,
     })
 }
 
@@ -214,6 +215,7 @@ pub(super) fn avd_item(host: &Host, name: &str, cancel: &Cancellation) -> Option
                 .map(|path| disk::usage(path, cancel))
                 .sum(),
         ),
+        restorable: false,
     })
 }
 

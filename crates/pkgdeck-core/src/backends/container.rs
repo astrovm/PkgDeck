@@ -746,6 +746,7 @@ impl<T: Transport> Backend for Container<T> {
                 summary,
                 preview,
                 bytes,
+                restorable: false,
             };
         self.cleanup_images = None;
         let images = self.dangling_images(cancel)?;
@@ -878,6 +879,7 @@ impl<T: Transport> Backend for Container<T> {
                 ),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             });
         }
         self.validate_local(id)?;
@@ -897,6 +899,7 @@ impl<T: Transport> Backend for Container<T> {
             homepage: None,
             dependencies: vec![],
             package,
+            data: None,
         })
     }
     fn execute(

@@ -55,6 +55,7 @@ impl<T: Transport + Sync> Flatpak<T> {
                     summary: format!("{} unused runtimes and extensions", entries.len()),
                     preview,
                     bytes: Some(entries.iter().map(|entry| entry.bytes).sum()),
+                    restorable: false,
                 })
             })
             .collect())
@@ -181,6 +182,7 @@ impl<T: Transport> DevTool<T> {
                 summary: "Clear cached downloads".into(),
                 preview,
                 bytes: size,
+                restorable: false,
             }]
         } else {
             vec![]
@@ -290,6 +292,7 @@ impl<T: Transport> Apt<T> {
             summary: format!("{} removable entries", actionable.len()),
             bytes: self.installed_size(&actionable, cancel),
             preview: actionable.join("\n"),
+            restorable: false,
         }))
     }
 
@@ -393,6 +396,7 @@ impl<T: Transport> Apt<T> {
             preview: "Deletes every cached download. A package you reinstall downloads again."
                 .into(),
             bytes: Some(sizes.iter().sum()),
+            restorable: false,
         }))
     }
 }

@@ -238,6 +238,7 @@ impl<T: Transport> Backend for Nix<T> {
             description: description.join("\n\n"),
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

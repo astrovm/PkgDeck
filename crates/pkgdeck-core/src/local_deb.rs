@@ -180,6 +180,7 @@ fn inspect_with(
         homepage,
         dependencies,
         package,
+        data: None,
     })
 }
 

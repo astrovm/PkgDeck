@@ -18,6 +18,8 @@ sha2.workspace = true
 hex.workspace = true
 rustix.workspace = true
 flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
+# Local time for Trash records.
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 
 # Reads AppImage contents (name, icon, version) without running them.
 [target.'cfg(target_os = "linux")'.dependencies]

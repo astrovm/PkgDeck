@@ -773,6 +773,7 @@ impl<T: Transport> DevTool<T> {
             description: summary,
             homepage,
             dependencies: vec![],
+            data: None,
         })
     }
     /// Split one `cargo install --list` header (`name vversion [(source)]:`)
@@ -2246,6 +2247,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 homepage: package.homepages.first().cloned(),
                 dependencies: vec![],
                 package,
+                data: None,
             })
             .ok_or(EngineError::NotFound)
     }

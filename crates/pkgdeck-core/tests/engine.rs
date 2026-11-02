@@ -159,6 +159,7 @@ impl Backend for Synthetic {
             description: "Synthetic package details".into(),
             homepage: Some("https://example.invalid/fixture".into()),
             dependencies: vec!["fixture-runtime".into()],
+            data: None,
         })
     }
     fn execute(
@@ -239,6 +240,7 @@ impl Backend for Cleaner {
             summary: "One synthetic dependency".into(),
             preview: "synthetic-runtime".into(),
             bytes: None,
+            restorable: false,
         }])
     }
     fn execute(
@@ -286,6 +288,7 @@ fn cleanup_item(backend: &str, key: &str, title: &str) -> CleanupItem {
         summary: "Synthetic cache".into(),
         preview: "/tmp/synthetic-cache".into(),
         bytes: None,
+        restorable: false,
     }
 }
 
@@ -1775,6 +1778,7 @@ impl Backend for Maybe {
             description: String::new(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {

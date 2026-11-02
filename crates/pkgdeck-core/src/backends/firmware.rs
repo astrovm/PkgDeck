@@ -123,6 +123,7 @@ impl<T: Transport> Firmware<T> {
                     description,
                     homepage: None,
                     dependencies: vec![],
+                    data: None,
                 })
             })
             .collect()
