@@ -1682,11 +1682,9 @@ impl App {
         let Some(item) = self.items.get(index).cloned() else {
             return;
         };
-        // While a reload runs the list shows the rows it kept, which the
-        // indexes point into; the controller's rows may be fewer.
-        let Some(row) = self.shown_rows().get(item.raw).cloned() else {
-            return;
-        };
+        // Items point into the rows on screen: while a reload runs, those
+        // are the kept ones, and the controller's may be fewer.
+        let row = self.shown_rows()[item.raw].clone();
         let identity = row.identity();
         self.review_here(&identity);
         let Some(action) = row_action(&row, self.page, &self.catalog) else {
@@ -1705,11 +1703,9 @@ impl App {
         let Some(item) = self.items.get(index).cloned() else {
             return;
         };
-        // While a reload runs the list shows the rows it kept, which the
-        // indexes point into; the controller's rows may be fewer.
-        let Some(row) = self.shown_rows().get(item.raw).cloned() else {
-            return;
-        };
+        // Items point into the rows on screen: while a reload runs, those
+        // are the kept ones, and the controller's may be fewer.
+        let row = self.shown_rows()[item.raw].clone();
         self.review_here(&row.identity());
         if !can_adopt(&row, &self.catalog) || self.retained.is_some() || !self.can_act() {
             return;
