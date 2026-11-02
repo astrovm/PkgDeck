@@ -4,6 +4,7 @@
 set -euo pipefail
 failed=''
 trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "native-manager FAILED at $failed" >&2' ERR
+pull_image="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pull-image.sh"
 
 backend=${1:?Expected dnf, pacman, zypper, apk, or xbps}
 binary=${2:?Expected absolute pkd binary path}
@@ -60,6 +61,7 @@ script="
 "
 # Alpine and Void ship without bash, so the bootstrap runs in POSIX sh; it is
 # single-quoted on purpose so it expands inside the container.
+"$pull_image" "$engine" "$image"
 # shellcheck disable=SC2016
 "$engine" run --rm -v "$binary:/opt/pkd:ro" "$image" sh -c '
     # Distro mirrors time out now and then; setup is not what this tests.
