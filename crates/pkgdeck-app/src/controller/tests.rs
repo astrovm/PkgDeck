@@ -13786,7 +13786,7 @@ fn an_apps_page_moves_its_data_to_the_trash_after_review() {
         .filter(|candidate| operations.contains(&Operation::Clean(candidate.id.clone())))
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(preview, [item.clone()]);
+    assert_eq!(preview, std::slice::from_ref(&item));
     let leftover = sized("flatpak", "leftover:org.old.App", CleanupKind::Data, None);
     controller.as_mut().rust_mut().revalidating = Some(Confirmed {
         job,
@@ -13835,7 +13835,7 @@ fn app_data_plans_and_runs_through_the_engine() {
         Some(Reply::Done(Ok(Payload::CleanPreview(_, fresh)))) if *fresh == [item.clone()]
     ));
     run_job(&mut engine, Job::CleanAll(operations), &cancel);
-    assert_eq!(*ran.lock().unwrap(), [item.id.clone()]);
+    assert_eq!(*ran.lock().unwrap(), std::slice::from_ref(&item.id));
 }
 
 #[test]
