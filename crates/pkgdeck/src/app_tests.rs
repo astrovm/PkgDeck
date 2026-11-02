@@ -1836,3 +1836,190 @@ fn settings_tell_the_controller_which_sources_to_leave_for_you() {
     app.apply_settings();
     assert!(!app.ctl.waits().battery && app.ctl.waits().metered);
 }
+
+/// A real worker over one source whose reads are slow enough that a page
+/// switch lands while they still run. Nothing has an update and nothing
+/// needs cleaning, so Updates and Clean are empty, like most days.
+mod slow_source {
+    use pkgdeck_core::{
+        engine::{Backend, Engine, EngineError},
+        package::*,
+        process::Cancellation,
+    };
+    use serde_json::json;
+
+    pub const INSTALLED: usize = 50;
+
+    fn slow() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    fn installed() -> Vec<Package> {
+        (0..INSTALLED)
+            .map(|n| {
+                serde_json::from_value(json!({
+                    "id": {"backend": "flatpak", "name": format!("app{n}"), "architecture": "all", "scope": "system"},
+                    "display_name": format!("App {n}"), "summary": "", "installed_version": "1", "update": "current"
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    struct SlowSource;
+    impl Backend for SlowSource {
+        fn id(&self) -> &str {
+            "flatpak"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Search, Capability::Installed, Capability::Clean]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn search(&mut self, query: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            slow();
+            Ok(installed()
+                .into_iter()
+                .filter(|package| package.id.name.contains(query))
+                .collect())
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            slow();
+            Ok(installed())
+        }
+        fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+            slow();
+            Ok(vec![])
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            unreachable!("nothing is changed")
+        }
+    }
+
+    pub fn engine(
+        _: &[String],
+        _: bool,
+        _: pkgdeck_core::host::Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = Engine::default();
+        engine.register(SlowSource)?;
+        Ok(engine)
+    }
+}
+
+/// Leaving a section while it reloads, for every pair of sections, straight
+/// or by way of Settings. Once the old rows are let go, the window shows
+/// exactly the controller's rows, never the section it left. Updates once
+/// listed every installed package as an update this way.
+#[test]
+fn every_section_shows_its_own_rows_after_leaving_one_mid_reload() {
+    let sections = [Page::Search, Page::Installed, Page::Updates, Page::Clean];
+    let identities = |rows: &[Row]| rows.iter().map(Row::identity).collect::<Vec<_>>();
+    // Every case runs; the ones that went wrong are listed at the end.
+    let wrong = std::cell::RefCell::new(std::collections::BTreeMap::<String, String>::new());
+    let mirrors_controller = |app: &App, case: &str| {
+        if app.retained.is_some() || wrong.borrow().contains_key(case) {
+            return;
+        }
+        let held: Vec<Row> = model::parse(app.ctl.rows().as_str());
+        let not_updates = app
+            .items
+            .iter()
+            .filter(|item| app.page == Page::Updates && app.rows[item.raw].update != "available")
+            .count();
+        if identities(&app.rows) != identities(&held) || not_updates > 0 {
+            wrong.borrow_mut().insert(
+                case.to_owned(),
+                format!(
+                    "shows {} rows ({not_updates} with no update on Updates), the controller holds {}",
+                    app.rows.len(),
+                    held.len()
+                ),
+            );
+        }
+    };
+    for from in sections {
+        for to in sections.into_iter().filter(|&to| to != from) {
+            for by_settings in [false, true] {
+                let case = format!("{from:?} -> {to:?}, by Settings: {by_settings}");
+                let (store, mut settings) = Store::open(None, None);
+                settings.source_list = "flatpak".into();
+                settings.background_mode = false;
+                let mut app = App::with_controller(
+                    create_synthetic_controller(slow_source::engine),
+                    settings,
+                    store,
+                    Platform::start(|| {}),
+                    Launch::default(),
+                );
+                app.c().set_window_open(true);
+                let run = |app: &mut App, check: &dyn Fn(&App)| {
+                    let until = Instant::now() + Duration::from_secs(10);
+                    loop {
+                        app.tick(Instant::now());
+                        app.refresh_items();
+                        check(app);
+                        if app.idle() || Instant::now() >= until {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    assert!(app.idle(), "{case}: still loading");
+                };
+                app.query = "app".into();
+                app.open_page(from);
+                // The window starts on Search, so going there reads nothing.
+                app.submit_search();
+                run(&mut app, &|_| {});
+                assert!(!app.rows.is_empty() || matches!(from, Page::Updates | Page::Clean));
+                // Reload the section on screen, as Refresh or a finished
+                // change does, and leave it while that still reads.
+                app.reload(true, true);
+                assert!(app.busy, "{case}: the reload must still run");
+                if by_settings {
+                    app.open_page(Page::Settings);
+                    app.tick(Instant::now());
+                }
+                app.open_page(to);
+                app.refresh_items();
+                mirrors_controller(&app, &case);
+                run(&mut app, &|app| mirrors_controller(app, &case));
+                mirrors_controller(&app, &case);
+            }
+        }
+    }
+    let wrong = wrong.into_inner();
+    assert!(
+        wrong.is_empty(),
+        "{} of 24 cases showed another section's rows:\n{}",
+        wrong.len(),
+        wrong
+            .iter()
+            .map(|(case, what)| format!("{case}: {what}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn row_buttons_on_kept_rows_wait_for_the_reload() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("a", json!({})), row("b", json!({}))]));
+    // A reload streams fewer rows than the list it keeps on screen.
+    app.retained = Some(app.rows.clone());
+    app.c().set_busy(true);
+    app.react();
+    rows(&mut app, json!([row("a", json!({}))]));
+    assert_eq!(app.items.len(), 2);
+    app.run_row_action(1);
+    app.run_adopt(1);
+    assert!(app.active_rows.is_empty());
+}

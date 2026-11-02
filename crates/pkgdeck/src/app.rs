@@ -1367,6 +1367,7 @@ impl App {
             self.c()
                 .load("Search".into(), "".into(), "".into(), false, false);
             self.react();
+            self.adopt_controller_rows(page);
             return;
         }
         self.result_query = query.clone();
@@ -1385,9 +1386,24 @@ impl App {
             force,
         );
         self.react();
+        self.adopt_controller_rows(page);
         if !self.busy {
             self.retained = None;
         }
+        self.items_stale = true;
+    }
+
+    /// Takes the controller's rows as `page`'s when the ones held are
+    /// another page's. Rows only arrive when they change, so a page whose
+    /// rows read the same as the controller's last ones (both empty, say,
+    /// while a refresh kept the old list on screen) would otherwise go on
+    /// showing the page it left.
+    fn adopt_controller_rows(&mut self, page: Page) {
+        if self.rows_page == Some(page) {
+            return;
+        }
+        self.rows = self.parse_rows();
+        self.rows_page = Some(page);
         self.items_stale = true;
     }
 
@@ -1666,7 +1682,9 @@ impl App {
         let Some(item) = self.items.get(index).cloned() else {
             return;
         };
-        let row = self.rows[item.raw].clone();
+        // Items point into the rows on screen: while a reload runs, those
+        // are the kept ones, and the controller's may be fewer.
+        let row = self.shown_rows()[item.raw].clone();
         let identity = row.identity();
         self.review_here(&identity);
         let Some(action) = row_action(&row, self.page, &self.catalog) else {
@@ -1685,7 +1703,9 @@ impl App {
         let Some(item) = self.items.get(index).cloned() else {
             return;
         };
-        let row = self.rows[item.raw].clone();
+        // Items point into the rows on screen: while a reload runs, those
+        // are the kept ones, and the controller's may be fewer.
+        let row = self.shown_rows()[item.raw].clone();
         self.review_here(&row.identity());
         if !can_adopt(&row, &self.catalog) || self.retained.is_some() || !self.can_act() {
             return;
