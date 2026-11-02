@@ -10,6 +10,7 @@
 set -Eeuo pipefail
 failed=''
 trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "dev-containers FAILED at $failed" >&2' ERR
+pull_image="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pull-image.sh"
 usage="Usage: scripts/tests/dev-containers.sh toolbox|distrobox <pkd>"
 backend=${1:?$usage}
 pkd=${2:?$usage}
@@ -62,6 +63,9 @@ podman --version
 toolbox --version
 distrobox version
 cleanup
+for image in "$toolbx_image" "$distrobox_image"; do
+    "$pull_image" podman "$image"
+done
 
 case $backend in
 toolbox)

@@ -10,6 +10,7 @@
 set -euo pipefail
 failed=''
 trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "aur-manager FAILED at $failed" >&2' ERR
+pull_image="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pull-image.sh"
 
 binary=${1:?Expected absolute pkd binary path}
 engine=${PKGDECK_CONTAINER_ENGINE:-podman}
@@ -117,6 +118,7 @@ STANDIN
 # sandbox can't apply seccomp, so it is turned off there.
 sandbox=
 [[ $(uname -m) == x86_64 ]] || sandbox=--disable-sandbox
+"$pull_image" "$engine" docker.io/library/archlinux:base --platform linux/amd64
 "$engine" run --rm --platform linux/amd64 -v "$binary:/opt/pkd:ro" docker.io/library/archlinux:base bash -c '
     # Mirrors time out now and then; setup is not what this tests.
     for attempt in 1 2 3; do
