@@ -13660,3 +13660,213 @@ fn automatic_updates_during_a_build_hold_only_what_a_build_may_run() {
     assert!(controller.rust().validated_confirmed.is_none());
     assert_eq!(state(&controller)["waiting_for"], json!(["Homebrew"]));
 }
+
+/// An app's own data folder, planned as its source plans it.
+struct DataSource {
+    item: CleanupItem,
+    ran: std::sync::Arc<std::sync::Mutex<Vec<CleanupId>>>,
+}
+impl Backend for DataSource {
+    fn id(&self) -> &str {
+        "flatpak"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    // The Clean page never lists an installed app's data.
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(vec![])
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        _: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        (*id == self.item.id)
+            .then(|| self.item.clone())
+            .ok_or(EngineError::NotFound)
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if let Operation::Clean(id) = operation {
+            self.ran.lock().unwrap().push(id.clone());
+        }
+        Ok(OperationOutcome::default())
+    }
+}
+fn app_data_item() -> CleanupItem {
+    CleanupItem {
+        id: CleanupId {
+            backend: "flatpak".into(),
+            key: "data:org.example.App".into(),
+        },
+        kind: CleanupKind::Data,
+        title: "Example data".into(),
+        summary: "Example starts over without it".into(),
+        preview: "Moves this folder to the Trash, with the settings and files the app kept in it.\n~/.var/app/org.example.App".into(),
+        bytes: Some(2_000_000),
+        restorable: true,
+    }
+}
+
+#[test]
+fn an_apps_page_moves_its_data_to_the_trash_after_review() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let mut app = synthetic_package("org.example.App", "Example");
+    app.id.backend = "flatpak".into();
+    let mut gone = app.clone();
+    gone.id.name = "org.example.Gone".into();
+    gone.installed_version = None;
+    let mut apt = synthetic_package("example", "Example");
+    apt.installed_version = Some("1".into());
+    controller.as_mut().rust_mut().packages = vec![app.clone(), gone, apt];
+    // Its page shows where the data is and how much it takes.
+    controller
+        .as_mut()
+        .apply(Ok(Payload::Details(Box::new(PackageDetails {
+            package: app.clone(),
+            description: String::new(),
+            homepage: None,
+            dependencies: vec![],
+            data: Some(pkgdeck_core::package::AppData {
+                folder: "/home/user/.var/app/org.example.App".into(),
+                shown: "~/.var/app/org.example.App".into(),
+                bytes: 2_000_000,
+            }),
+        }))));
+    let page: Value =
+        serde_json::from_str(&controller.rust().detail_cache[&app.id].to_string()).unwrap();
+    assert_eq!(
+        page["data"],
+        json!({
+            "folder": "/home/user/.var/app/org.example.App",
+            "shown": "~/.var/app/org.example.App",
+            "size": pkgdeck_core::disk::size(2_000_000),
+        })
+    );
+    // Only an installed app from a source that keeps such folders.
+    for index in [1, 2, 9] {
+        controller.as_mut().propose("trash-data".into(), index);
+        assert!(controller.rust().worker.is_none(), "{index}");
+        assert!(controller.rust().pending.is_none(), "{index}");
+    }
+    // The review names the folder and says it can come back.
+    let item = app_data_item();
+    controller
+        .as_mut()
+        .apply(Ok(Payload::CleanupPlan(item.clone())));
+    let operations = vec![Operation::Clean(item.id.clone())];
+    assert_eq!(
+        controller.rust().pending.as_ref().map(Job::operations),
+        Some(operations.clone())
+    );
+    let text = controller.confirmation().to_string();
+    assert!(text.starts_with("Move to Trash?\n\nExample data"), "{text}");
+    assert!(
+        text.ends_with("Moved folders can be restored from the Trash."),
+        "{text}"
+    );
+    let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+    assert_eq!(data["action"], "Move to Trash");
+    // Confirmed, it runs as it was reviewed, and still is.
+    let job = Job::CleanAll(operations.clone());
+    let preview = controller
+        .rust()
+        .cleanup
+        .iter()
+        .chain(&controller.rust().page_cleanup)
+        .filter(|candidate| operations.contains(&Operation::Clean(candidate.id.clone())))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(preview, [item.clone()]);
+    let leftover = sized("flatpak", "leftover:org.old.App", CleanupKind::Data, None);
+    controller.as_mut().rust_mut().revalidating = Some(Confirmed {
+        job,
+        activity_id: None,
+        cleanup_preview: preview,
+    });
+    controller.as_mut().apply(Ok(Payload::CleanPreview(
+        operations,
+        vec![leftover.clone(), item.clone()],
+    )));
+    assert!(controller.rust().validated_confirmed.is_some());
+    // The Clean page keeps listing only its own tasks.
+    assert_eq!(controller.rust().cleanup, [leftover]);
+}
+
+#[test]
+fn app_data_plans_and_runs_through_the_engine() {
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let item = app_data_item();
+    let mut engine = Engine::default();
+    engine
+        .register(DataSource {
+            item: item.clone(),
+            ran: ran.clone(),
+        })
+        .unwrap();
+    let cancel = Cancellation::default();
+    let replies = run_job(&mut engine, Job::PlanCleanup(item.id.clone()), &cancel);
+    assert!(
+        matches!(replies.last(), Some(Reply::Done(Ok(Payload::CleanupPlan(plan)))) if *plan == item)
+    );
+    let missing = CleanupId {
+        backend: "flatpak".into(),
+        key: "data:org.example.Other".into(),
+    };
+    let replies = run_job(&mut engine, Job::PlanCleanup(missing), &cancel);
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Err(EngineError::NotFound)))
+    ));
+    // A queued one is checked again, though the Clean page doesn't list it.
+    let operations = vec![Operation::Clean(item.id.clone())];
+    let replies = run_job(&mut engine, Job::PlanCleanAll(operations.clone()), &cancel);
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Ok(Payload::CleanPreview(_, fresh)))) if *fresh == [item.clone()]
+    ));
+    run_job(&mut engine, Job::CleanAll(operations), &cancel);
+    assert_eq!(*ran.lock().unwrap(), [item.id.clone()]);
+}
+
+#[test]
+fn confirmations_say_what_the_trash_can_bring_back() {
+    let folder = app_data_item();
+    let cache = sized(
+        "dev-caches",
+        "cargo",
+        CleanupKind::PackageCache,
+        Some(1_000),
+    );
+    let summary = |items: &[&CleanupItem]| clean_confirmation(items)["summary"].clone();
+    assert_eq!(
+        clean_confirmation(&[&folder])["body"],
+        format!(
+            "{}\n\nTasks run in order. Moved folders can be restored from the Trash.",
+            cleanup_label(&folder)
+        )
+    );
+    assert_eq!(
+        summary(&[&cache]),
+        format!(
+            "Clean 1 task\nFrees about {}.\nFinished tasks cannot be undone.",
+            pkgdeck_core::disk::size(1_000)
+        )
+    );
+    assert_eq!(
+        summary(&[&cache, &folder]),
+        format!(
+            "Clean 2 tasks\nFrees about {}.\nFolders go to the Trash. Other finished tasks cannot be undone.",
+            pkgdeck_core::disk::size(2_001_000)
+        )
+    );
+}

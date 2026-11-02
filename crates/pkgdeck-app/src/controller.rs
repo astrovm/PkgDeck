@@ -2,7 +2,7 @@
 //! on the window's thread, when it polls.
 use crate::qt::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
-use pkgdeck_core::backends::AppImage;
+use pkgdeck_core::backends::{app_data_task, is_data_key, AppImage};
 use pkgdeck_core::background::{self, Schedule};
 use pkgdeck_core::hold::{waits_for_builds, Hold, Waits};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
@@ -245,6 +245,9 @@ enum Job {
     /// them all in, with one review.
     PlanAdoptAll(Vec<Package>),
     PlanCleanAll(Vec<Operation>),
+    /// Preview one cleanup task outside the Clean page, such as an app's
+    /// own data from its page.
+    PlanCleanup(CleanupId),
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
@@ -287,7 +290,10 @@ impl Job {
     fn reviews(&self) -> bool {
         matches!(
             self,
-            Self::PlanOperation(_) | Self::PlanUpgrade(..) | Self::PlanCleanAll(_)
+            Self::PlanOperation(_)
+                | Self::PlanUpgrade(..)
+                | Self::PlanCleanAll(_)
+                | Self::PlanCleanup(_)
         )
     }
     fn operations(&self) -> Vec<Operation> {
@@ -429,6 +435,7 @@ enum Payload {
     ManifestExport(usize),
     ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
+    CleanupPlan(CleanupItem),
     /// What automatic cleaning did: tasks finished and failed, and about
     /// how much it freed. `tasks` is what it ran, in order, each as it ended,
     /// and `started_at` when, for Activity.
@@ -1197,9 +1204,20 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             Ok(Payload::AdoptAllPreview(plans, skipped))
         }
         Job::PlanCleanAll(operations) => {
-            let report = engine.cleanup(cancel);
-            Ok(Payload::CleanPreview(operations, report.items))
+            let mut items = engine.cleanup(cancel).items;
+            // App data reviewed on its page isn't on the Clean page.
+            for operation in &operations {
+                if let Operation::Clean(id) = operation {
+                    if is_data_key(&id.key) && !items.iter().any(|item| item.id == *id) {
+                        if let Ok(item) = engine.cleanup_plan(id, cancel) {
+                            items.push(item);
+                        }
+                    }
+                }
+            }
+            Ok(Payload::CleanPreview(operations, items))
         }
+        Job::PlanCleanup(id) => engine.cleanup_plan(&id, cancel).map(Payload::CleanupPlan),
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
@@ -1794,6 +1812,9 @@ pub struct Controller {
     updates_view: bool,
     packages: Vec<Package>,
     cleanup: Vec<CleanupItem>,
+    /// Cleanup reviewed outside the Clean page, such as an app's own data
+    /// from its page: kept for the confirmation, never listed there.
+    page_cleanup: Vec<CleanupItem>,
     failures: Vec<BackendFailure>,
     last_success: BTreeMap<String, u64>,
     retrying_sources: Option<Vec<String>>,
@@ -1951,6 +1972,7 @@ impl Default for Controller {
             updates_view: false,
             packages: vec![],
             cleanup: vec![],
+            page_cleanup: vec![],
             failures: vec![],
             last_success: BTreeMap::new(),
             retrying_sources: None,
@@ -2171,6 +2193,7 @@ impl Controller {
                     .or_else(|| {
                         self.cleanup
                             .iter()
+                            .chain(&self.page_cleanup)
                             .find(|item| item.id == *id)
                             .map(|item| item.title.clone())
                     })
@@ -2348,6 +2371,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::CheckUpdates(_, sources) => sources.clone(),
         Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::PlanCleanup(id) => vec![id.backend.clone()],
         Job::RetryCleans(items) => items.iter().map(|item| item.id.backend.clone()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
@@ -2462,10 +2486,32 @@ fn cleanup_frees(items: &[&CleanupItem]) -> Option<String> {
     let bytes: u64 = items.iter().filter_map(|item| item.bytes).sum();
     (bytes > 0).then(|| format!("Frees about {}.", pkgdeck_core::disk::size(bytes)))
 }
+/// An app's own folder on its page: where it is and how much it takes.
+fn app_data_json(data: &pkgdeck_core::package::AppData) -> Value {
+    json!({
+        "folder": data.folder,
+        "shown": data.shown,
+        "size": pkgdeck_core::disk::size(data.bytes),
+    })
+}
 /// The confirmation for running `items` together.
 fn clean_confirmation(items: &[&CleanupItem]) -> Value {
     let count = items.len();
     let noun = if count == 1 { "task" } else { "tasks" };
+    // Folders go to the Trash; everything else is gone for good.
+    let restorable = items.iter().filter(|item| item.restorable).count();
+    let undo = if restorable == count {
+        "Moved folders can be restored from the Trash."
+    } else if restorable == 0 {
+        "Finished tasks cannot be undone."
+    } else {
+        "Folders go to the Trash. Other finished tasks cannot be undone."
+    };
+    let action = if restorable == count {
+        "Move to Trash".to_owned()
+    } else {
+        format!("Clean {count} {noun}")
+    };
     let labels = items
         .iter()
         .map(|item| cleanup_label(item))
@@ -2475,9 +2521,9 @@ fn clean_confirmation(items: &[&CleanupItem]) -> Value {
         .map(|frees| format!("\n{frees}"))
         .unwrap_or_default();
     json!({
-        "action": format!("Clean {count} {noun}"),
-        "body": format!("{labels}\n\nTasks run in order. Finished tasks cannot be undone."),
-        "summary": format!("Clean {count} {noun}{frees}\nFinished tasks cannot be undone."),
+        "body": format!("{labels}\n\nTasks run in order. {undo}"),
+        "summary": format!("{action}{frees}\n{undo}"),
+        "action": action,
         "labels": labels,
         "items": items.iter().map(|item| json!({
             "group": source_display_name(&item.id.backend),
@@ -5278,6 +5324,7 @@ impl ffi::PackageController {
             self.rust()
                 .cleanup
                 .iter()
+                .chain(&self.rust().page_cleanup)
                 .filter(|item| operations.contains(&Operation::Clean(item.id.clone())))
                 .cloned()
                 .collect()
@@ -6392,6 +6439,23 @@ impl ffi::PackageController {
             self.start(Job::PlanAdoptAll(apps));
             return;
         }
+        if action == "trash-data" {
+            // An installed app's own folder, from its page.
+            let task = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.rust().packages.get(i))
+                .filter(|p| p.installed_version.is_some())
+                .and_then(|p| app_data_task(&p.id));
+            match task {
+                Some(id) => self.start(Job::PlanCleanup(id)),
+                None => {
+                    self.as_mut().set_confirmation(QString::default());
+                    self.as_mut().set_confirmation_data("{}".into());
+                    self.rust_mut().pending = None;
+                }
+            }
+            return;
+        }
         if action == "adopt" {
             // A macOS app a curated cask can take over. The cask's exact
             // identity and the adoption check come from Homebrew itself.
@@ -6905,6 +6969,20 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation(body.as_str().into());
                 self.rust_mut().pending = first;
             }
+            Ok(Payload::CleanupPlan(item)) => {
+                let confirmation = clean_confirmation(&[&item]);
+                let body = confirmation["body"].as_str().unwrap_or_default().to_owned();
+                let action = confirmation["action"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                self.as_mut().set_confirmation_data(encoded(confirmation));
+                self.as_mut()
+                    .set_confirmation(format!("{action}?\n\n{body}").as_str().into());
+                self.as_mut().rust_mut().pending =
+                    Some(Job::CleanAll(vec![Operation::Clean(item.id.clone())]));
+                self.as_mut().rust_mut().page_cleanup = vec![item];
+            }
             Ok(Payload::ManifestExport(count)) => {
                 self.set_status(format!("Exported {count} packages.").as_str().into());
             }
@@ -6912,13 +6990,20 @@ impl ffi::PackageController {
                 self.as_mut().set_manifest_preview(encoded(preview));
                 self.set_status("Inventory preview ready.".into());
             }
-            Ok(Payload::CleanPreview(operations, fresh)) => {
+            Ok(Payload::CleanPreview(operations, mut fresh)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
                     let selected: Vec<_> = fresh
                         .iter()
                         .filter(|item| operations.contains(&Operation::Clean(item.id.clone())))
                         .cloned()
                         .collect();
+                    let page: Vec<_> = self
+                        .rust()
+                        .page_cleanup
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect();
+                    fresh.retain(|item| !page.contains(&item.id));
                     if selected == entry.cleanup_preview {
                         self.as_mut().rust_mut().cleanup = fresh;
                         self.as_mut().rust_mut().validated_confirmed = Some(entry);
@@ -7163,7 +7248,7 @@ impl ffi::PackageController {
                 let more =
                     self.rust().details_preview && crate::metadata::will_fetch(&details.package);
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots), "more": more}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots), "more": more, "data": details.data.as_ref().map(app_data_json)}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {

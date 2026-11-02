@@ -20,6 +20,15 @@ pub fn is_data_key(key: &str) -> bool {
     key.starts_with(LEFTOVER) || key.starts_with(DATA)
 }
 
+/// The task that moves an installed app's own folder to the Trash, for the
+/// sources that keep one per app.
+pub fn app_data_task(id: &PackageId) -> Option<CleanupId> {
+    matches!(id.backend.as_str(), "flatpak" | "snap").then(|| CleanupId {
+        backend: id.backend.clone(),
+        key: format!("{DATA}{}", id.name),
+    })
+}
+
 /// The person's home on the host, when it's known and absolute.
 pub(super) fn home<T: Transport + ?Sized>(transport: &T) -> Option<PathBuf> {
     transport

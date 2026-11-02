@@ -536,3 +536,52 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
     }
     compare(&actual, &expected, "headers");
 }
+
+#[test]
+fn an_apps_own_data_shows_opens_and_goes_to_the_trash() {
+    let mut row = row("package");
+    row.source = "flatpak".into();
+    let details = Details {
+        data: Some(crate::model::AppData {
+            folder: "/home/fixture/.var/app/org.example.My App".into(),
+            shown: "~/.var/app/org.example.My App".into(),
+            size: "1.2 GB".into(),
+        }),
+        ..fixture_details(&row)
+    };
+    let identity = row.identity();
+    let mut harness = draw_details(
+        app(&row, Page::Installed),
+        row.clone(),
+        details,
+        700.0,
+        false,
+        false,
+        false,
+    );
+    assert!(harness
+        .query_by_label("~/.var/app/org.example.My App (1.2 GB)")
+        .is_some());
+    harness.get_by_label("Open data folder").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().1.platform.opened(),
+        ["file:///home/fixture/.var/app/org.example.My%20App"]
+    );
+    // Moving it is a change like any other: reviewed first, for this row.
+    harness.get_by_label("Move data to Trash").click();
+    harness.run_steps(2);
+    assert!(harness.state().1.active_rows.contains(&identity));
+    // Without such a folder, none of it shows.
+    let harness = draw_details(
+        app(&row, Page::Installed),
+        row.clone(),
+        fixture_details(&row),
+        700.0,
+        false,
+        false,
+        false,
+    );
+    assert!(harness.query_by_label("Open data folder").is_none());
+    assert!(harness.query_by_label("Move data to Trash").is_none());
+}
