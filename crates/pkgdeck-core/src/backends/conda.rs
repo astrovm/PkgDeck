@@ -383,6 +383,7 @@ impl<T: Transport> Backend for Conda<T> {
             package,
             homepage: None,
             dependencies: vec![],
+            data: None,
         })
     }
     fn execute(

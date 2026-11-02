@@ -1046,6 +1046,7 @@ fn opened_files_show_a_page_until_back_and_installed_after_their_install() {
         homepage: Some("https://example.invalid/demo".into()),
         dependencies: vec!["libc6".into()],
         package: package.clone(),
+        data: None,
     };
     controller
         .as_mut()
@@ -1105,6 +1106,7 @@ fn opened_files_show_a_page_until_back_and_installed_after_their_install() {
                 homepage: None,
                 dependencies: vec![],
                 package: link.clone(),
+                data: None,
             },
             "Install",
         )
@@ -1475,6 +1477,7 @@ fn retry_cleanup_and_sources_replace_only_failed_source() {
         summary: "Synthetic".into(),
         preview: "No changes".into(),
         bytes: None,
+        restorable: false,
     };
     let source = |name: &str, available| Source {
         backend: name.into(),
@@ -2639,6 +2642,7 @@ fn queued_cleanup_requires_new_consent_when_its_native_preview_changes() {
         summary: "Fixture".into(),
         preview: "Remove one cached file".into(),
         bytes: None,
+        restorable: false,
     };
     let operations = vec![Operation::Clean(item.id.clone())];
     let queued = || Confirmed {
@@ -3766,6 +3770,7 @@ fn selecting_during_a_search_loads_details_alongside_it() {
             description: "Full Grok details".into(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         }))));
     assert_eq!(controller.details().to_string(), "{}");
     assert!(controller
@@ -3804,6 +3809,7 @@ fn cancel_stops_the_parallel_details_lookup() {
             description: "should not land".into(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         })))
         .unwrap();
     controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
@@ -3827,6 +3833,7 @@ fn cancel_stops_the_parallel_details_lookup() {
                 description: "still should not land".into(),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             }
         )))))
         .is_err());
@@ -4208,6 +4215,7 @@ fn a_better_name_from_details_updates_cached_sections_too() {
             description: String::new(),
             homepage: None,
             dependencies: vec![],
+            data: None,
         }))));
     assert!(controller.rows().to_string().contains("Example App"));
     let cached = controller
@@ -4685,6 +4693,7 @@ fn cleanup_rows_show_preview_and_require_confirmation() {
         summary: "One package".into(),
         preview: "Remv synthetic-runtime [1.0]".into(),
         bytes: None,
+        restorable: false,
     };
     controller
         .as_mut()
@@ -5149,6 +5158,7 @@ fn streamed_details_preserve_progress_and_finish_cleanly() {
         description: "Synthetic firmware details".into(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     };
     details.package.display_name = "Synthetic BIOS".into();
     let (sender, receiver) = mpsc::channel();
@@ -5931,6 +5941,7 @@ fn a_failed_step_marks_its_row_until_a_later_look_shows_it_done() {
         summary: String::new(),
         preview: String::new(),
         bytes: None,
+        restorable: false,
     };
     let look =
         |controller: &mut Pin<&mut ffi::PackageController>, items: Vec<CleanupItem>, failures| {
@@ -6166,6 +6177,7 @@ fn a_failed_cleanup_is_named_by_its_row_not_its_key() {
         summary: "3 finished worktrees".into(),
         preview: "Removes these worktrees.".into(),
         bytes: None,
+        restorable: false,
     };
     let clean = Operation::Clean(item.id.clone());
     let mut controller = synthetic_controller();
@@ -7591,6 +7603,7 @@ fn a_cleanup_confirmation_lists_each_task_with_its_size_and_preview() {
         summary: String::new(),
         preview: format!("Would empty {title}"),
         bytes,
+        restorable: false,
     };
     let (cache, logs) = (item("cache", Some(2_000_000_000)), item("logs", None));
     let data = clean_confirmation(&[&cache, &logs]);
@@ -7685,6 +7698,7 @@ fn stale_details_replies_never_take_the_panel() {
         description: String::new(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     };
     assert!(details_fresh(Some(&id), &details));
     assert!(!details_fresh(None, &details));
@@ -9405,6 +9419,7 @@ fn opened_repositories_and_cleanups_confirm_in_plain_words() {
         preview: "Removes 2 packages".into(),
         kind: CleanupKind::OrphanDependencies,
         bytes: None,
+        restorable: false,
     }];
     propose_every_cleanup(&mut controller);
     assert!(controller
@@ -10256,6 +10271,7 @@ impl Backend for Described {
             description: "Described by the warm engine".into(),
             homepage: None,
             dependencies: vec!["libsynthetic".into()],
+            data: None,
         })
     }
 }
@@ -10340,6 +10356,7 @@ fn fixture_details(description: &str) -> Box<PackageDetails> {
         description: description.into(),
         homepage: None,
         dependencies: vec![],
+        data: None,
     })
 }
 #[test]
@@ -10678,6 +10695,7 @@ fn sized(backend: &str, key: &str, kind: CleanupKind, bytes: Option<u64>) -> Cle
         summary: "Synthetic cleanup".into(),
         preview: format!("Empties {key}"),
         bytes,
+        restorable: false,
     }
 }
 struct UpdateCheckFixture {
@@ -12226,6 +12244,7 @@ fn cleanup_item(key: &str) -> CleanupItem {
         summary: "Synthetic cleanup".into(),
         preview: format!("would remove {key}"),
         bytes: None,
+        restorable: false,
     }
 }
 #[test]

@@ -818,6 +818,7 @@ fn opened_payload(package: Package) -> Payload {
         homepage: package.homepages.first().cloned(),
         dependencies: vec![],
         package,
+        data: None,
     }))
 }
 /// An opened file or link, with the copy already installed, if any, so its

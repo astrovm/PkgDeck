@@ -486,6 +486,7 @@ impl<T: Transport> Homebrew<T> {
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
                     dependencies: f.dependencies,
+                    data: None,
                 })
             })
             .collect()
@@ -647,6 +648,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 summary: "Formulae that no installed package needs anymore".into(),
                 bytes: self.cellar_usage(&preview, cancel),
                 preview,
+                restorable: false,
             });
         }
         if let Some(preview) = plan(self.call(&["cleanup", "--dry-run"], cancel, false)?)? {
@@ -660,6 +662,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 summary: "Old files that brew cleanup would remove".into(),
                 bytes: brew_frees(&preview),
                 preview,
+                restorable: false,
             });
         }
         Ok(items)
@@ -780,6 +783,7 @@ impl<T: Transport> HomebrewCask<T> {
                     description: c.desc.unwrap_or_default(),
                     homepage: (!c.homepage.is_empty()).then_some(c.homepage),
                     dependencies: vec![],
+                    data: None,
                 })
             })
             .collect()

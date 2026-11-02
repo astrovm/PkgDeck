@@ -1776,6 +1776,7 @@ mod tests {
                 description: "Synthetic".into(),
                 homepage: None,
                 dependencies: vec![],
+                data: None,
             })
         }
         fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
@@ -1793,6 +1794,7 @@ mod tests {
                     summary: "One synthetic dependency".into(),
                     preview: "synthetic-runtime".into(),
                     bytes: None,
+                    restorable: false,
                 },
                 CleanupItem {
                     id: CleanupId {
@@ -1804,6 +1806,7 @@ mod tests {
                     summary: "Data nothing uses".into(),
                     preview: "synthetic-volume".into(),
                     bytes: Some(1),
+                    restorable: false,
                 },
             ])
         }

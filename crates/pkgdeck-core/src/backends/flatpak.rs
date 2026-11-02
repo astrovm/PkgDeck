@@ -50,6 +50,39 @@ fn joined<R>(worker: std::thread::ScopedJoinHandle<'_, R>) -> R {
 // User and system installations are separate, and each `flatpak` read is
 // its own process, so their queries run at once.
 impl<T: Transport + Sync> Flatpak<T> {
+    /// Where apps keep their data: `~/.var/app`, once the home is known.
+    fn data_folders(&self) -> Option<app_data::DataFolders> {
+        app_data::home(&self.transport).map(|home| app_data::DataFolders::flatpak(&home))
+    }
+    /// Every installed app by id, with its name, from every installation,
+    /// including ones besides the user's and the system's.
+    fn installed_apps(
+        &self,
+        cancel: &Cancellation,
+    ) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
+        let output = bytes(
+            "flatpak",
+            self.call(
+                &["list", "--app", "--columns=application,name"],
+                cancel,
+                false,
+                false,
+            )?,
+        )?;
+        let text = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let (id, name) = line.split_once('\t').unwrap_or((line, ""));
+                let name = if name.trim().is_empty() {
+                    id
+                } else {
+                    name.trim()
+                };
+                flatpak_id(id).then(|| (id.to_owned(), name.to_owned()))
+            })
+            .collect())
+    }
     pub(super) fn call(
         &self,
         args: &[&str],
@@ -396,11 +429,9 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                 .all(|part| part.is_empty() || flatpak_id(part))
     }
     fn capabilities(&self) -> &[Capability] {
-        if self.transport.supports_flatpak_cleanup() {
-            CLEAN_CAPABILITIES
-        } else {
-            CAPABILITIES
-        }
+        // Leftover app data can always be cleaned, unused runtimes only
+        // where Flatpak can preview them.
+        CLEAN_CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         match self.call(
@@ -548,6 +579,7 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                     homepage: None,
                     dependencies: vec![],
                     package,
+                    data: None,
                 })
                 .ok_or(EngineError::NotFound);
         }
@@ -556,18 +588,51 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
             .into_iter()
             .find(|p| p.id == *id)
             .ok_or(EngineError::NotFound)?;
+        // Runtimes keep no data of their own.
+        let runtime = package
+            .id
+            .reference
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("runtime/"));
+        let data = (!runtime)
+            .then(|| self.data_folders())
+            .flatten()
+            .and_then(|folders| folders.data(&id.name, cancel));
         Ok(PackageDetails {
             description: package.summary.clone(),
             homepage: None,
             dependencies: vec![],
             package,
+            data,
         })
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
-        if !self.transport.supports_flatpak_cleanup() {
-            return Err(self.unsupported(Capability::Clean));
+        let mut items = if self.transport.supports_flatpak_cleanup() {
+            self.cleanup_unused(cancel)?
+        } else {
+            vec![]
+        };
+        if let Some(folders) = self.data_folders() {
+            items.extend(folders.leftovers(&self.installed_apps(cancel)?, cancel)?);
         }
-        self.cleanup_unused(cancel)
+        Ok(items)
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        cancel: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        if id.backend != "flatpak" {
+            return Err(EngineError::NotFound);
+        }
+        if app_data::is_data_key(&id.key) {
+            let folders = self.data_folders().ok_or(EngineError::NotFound)?;
+            return folders.plan(&id.key, &self.installed_apps(cancel)?, cancel);
+        }
+        self.cleanup(cancel)?
+            .into_iter()
+            .find(|item| item.id == *id)
+            .ok_or(EngineError::NotFound)
     }
     fn execute(
         &mut self,
@@ -669,6 +734,17 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
             }
         }
         if let Operation::Clean(id) = operation {
+            if app_data::is_data_key(&id.key) {
+                let folders = self.data_folders().ok_or(EngineError::NotFound)?;
+                let installed = self.installed_apps(cancel)?;
+                return folders.trash(
+                    &id.key,
+                    &installed,
+                    app_data::trash(&self.transport),
+                    cancel,
+                    progress,
+                );
+            }
             if !self.transport.supports_flatpak_cleanup() {
                 return Err(self.unsupported(Capability::Clean));
             }
