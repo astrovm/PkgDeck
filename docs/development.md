@@ -54,7 +54,8 @@ workflow mutates the changed lines and keeps one comment listing what no test
 caught; the comment goes away once everything is. Each one is a lead for a
 follow-up PR, unless the change doesn't alter behavior. Every week it runs a
 quarter of all mutants and lists what survived in the open "Missed mutants"
-issue.
+issue. A pull request that changes this setup also runs part 0 of the 64, so
+a broken setup shows before the weekly run.
 
 ### GUI tests
 

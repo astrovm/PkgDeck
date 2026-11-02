@@ -85,17 +85,33 @@ jobs:
 
   plan:
     name: Mutants / Plan
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       parts: ${{ steps.plan.outputs.parts }}
     steps:
-      - name: Pick this week's parts
+      - name: Check out source
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      # A week runs its quarter. A pull request that changes this setup
+      # runs part 0 for real, so a broken setup shows before Saturday; its
+      # findings aren't the pull request's, so they go in no comment.
+      - name: Pick the parts
         id: plan
         env:
+          EVENT: ${{ github.event_name }}
           QUARTER: ${{ inputs.quarter }}
         run: |
+          if [[ $EVENT == pull_request ]]; then
+            if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh .github/workflows/mutants.yml; then
+              echo "The setup didn't change."
+            else
+              echo 'parts=[0]' >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
           quarter=${QUARTER:-$(( $(date -u +%s) / 604800 % 4 ))}
           [[ $quarter =~ ^[0-3]$ ]] || { echo "Quarter must be 0 to 3, got $quarter" >&2; exit 1; }
           echo "parts=$(jq -cn --argjson q "$quarter" '[range($q * 16; $q * 16 + 16)]')" >> "$GITHUB_OUTPUT"
@@ -103,6 +119,7 @@ jobs:
   mutants:
     name: Mutants / Part ${{ matrix.part }} of 64
     needs: plan
+    if: needs.plan.outputs.parts != ''
     # Arm restores Test / Linux (aarch64)'s plain debug builds.
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 350
@@ -139,7 +156,7 @@ jobs:
   report:
     name: Mutants / Report
     needs: [plan, mutants]
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
