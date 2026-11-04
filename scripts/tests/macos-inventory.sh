@@ -133,7 +133,7 @@ brew info --json=v2 --cask --installed > "$logs/brew-installed.json"
 "$pkd" --json --from macos-apps list > "$logs/inventory.json"
 jq -e --arg root "$system_root/" --arg user "$user_root/" --arg owned "$owned" '
   .data | .failures == [] and
-  ([.packages[] | select(.id.name | startswith($root))] | length == 6) and
+  ([.packages[] | select(.id.name | startswith($root))] | length == 7) and
   ([.packages[] | select(.id.name | startswith($user))] | length == 1) and
   any(.packages[]; .id.name == ($root + "XML.app") and .id.scope == "system" and .installed_version == "1.2.3" and (.summary | contains("visual-studio-code (candidate)"))) and
   any(.packages[]; .id.name == ($user + "Binary.app") and (.id.scope | type) == "object" and .installed_version == "1.2.3" and (.summary | contains("firefox (candidate)"))) and
@@ -167,7 +167,7 @@ code=0
 [[ $code == 8 ]]
 jq -e --arg root "$system_root/" '
   .data | any(.failures[]; .backend == "macos-apps" and (.error.InvalidResponse.reason | contains($root + "Restricted"))) and
-  ([.packages[] | select(.id.name | startswith($root))] | length == 6)
+  ([.packages[] | select(.id.name | startswith($root))] | length == 7)
 ' "$logs/partial.json"
 "$pkd" --json --from macos-apps info "$owned" > "$logs/partial-exact-details.json"
 jq -e --arg path "$owned" '.data | .package.id.name == $path and .package.installed_version == "1.2.3"' "$logs/partial-exact-details.json"
