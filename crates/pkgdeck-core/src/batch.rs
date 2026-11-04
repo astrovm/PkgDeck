@@ -3372,7 +3372,6 @@ done"#,
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn cask_updates_move_next_to_the_first_and_join_as_one_run() {
         let update = |backend: &str, name: &str| {
@@ -3419,6 +3418,7 @@ done"#,
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_found_runner_starts_and_a_missing_one_refuses_unattended_batches() {
         let refresh = [Operation::Refresh {
