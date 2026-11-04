@@ -841,6 +841,13 @@ and replaces the file. GitHub answers are reused for 15 minutes, since it
 allows few questions without signing in. AppImages that update themselves
 show **Updates itself** until you set a project.
 
+Electron apps such as Cua Spaces say inside the AppImage where their updates
+are listed (`resources/app-update.yml`, for public feeds and GitHub). PkgDeck
+checks that list, offers the update even if it doesn't manage the AppImage, and
+updating downloads the file, checks it against the published SHA-512 and
+replaces it where it is. If the list can't be read, the update shows as unknown,
+never as up to date.
+
 PkgDeck's menu entries use the app's own name, description, icon,
 categories and launch arguments (such as `--no-sandbox`), read from inside
 the AppImage without running it. Versions also come from inside the file,

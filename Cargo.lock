@@ -3147,6 +3147,7 @@ name = "pkgdeck-core"
 version = "0.13.0"
 dependencies = [
  "backhand",
+ "base64",
  "chrono",
  "dwarfs",
  "flate2",

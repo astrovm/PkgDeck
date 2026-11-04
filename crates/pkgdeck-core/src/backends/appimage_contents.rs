@@ -5,6 +5,7 @@
 // Every reader of the image's contents is behind the Linux cfg below; the
 // other platforms open the file only to report what it is.
 #[cfg(target_os = "linux")]
+use super::appimage_electron::Feed;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,8 @@ pub(super) struct Contents {
     pub startup_wm_class: Option<String>,
     /// The `Exec=` arguments after the program, e.g. `--no-sandbox %U`.
     pub arguments: Option<String>,
+    /// Where an Electron app's updates are listed.
+    pub update_feed: Option<Feed>,
     /// Only right after reading the image: what's remembered of it leaves
     /// the icon out, which is saved to a file instead.
     #[serde(skip)]
@@ -72,6 +75,9 @@ pub(super) fn read(path: &Path) -> Result<Contents, String> {
         categories: field("Categories"),
         startup_wm_class: field("StartupWMClass"),
         arguments: field("Exec").and_then(|exec| exec_arguments(&exec)),
+        update_feed: image
+            .read("resources/app-update.yml", MAX_ENTRY_BYTES)
+            .and_then(|config| Feed::parse(&String::from_utf8_lossy(&config))),
         icon,
     })
 }

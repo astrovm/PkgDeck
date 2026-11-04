@@ -660,8 +660,8 @@ servers of agents that are open, so restart those agents after updating.
 Because of that, automatic updates skip Cua Driver: you get a notification and
 update it yourself.
 
-The Cua Spaces app isn't updated here. PkgDeck lists its AppImage on Linux, and
-updating `cua` leaves the app alone.
+Updating `cua` leaves the Cua Spaces app alone. On Linux, PkgDeck lists and
+updates it as an AppImage (`--from appimage`).
 
 Removing a tool takes away only what its installer put there. Your settings,
 sign-ins and keys stay:

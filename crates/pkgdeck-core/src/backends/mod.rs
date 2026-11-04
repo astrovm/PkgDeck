@@ -5,6 +5,7 @@ mod android;
 mod app_data;
 mod appimage;
 mod appimage_contents;
+mod appimage_electron;
 mod appimage_github;
 mod apt;
 mod aur;
