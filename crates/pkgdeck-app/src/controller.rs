@@ -3607,12 +3607,16 @@ fn display_name_for(id: &PackageId, names: &Names) -> String {
 /// Like `operation_title`, with the package's display name when known.
 fn operation_title_named(operation: &Operation, names: &Names) -> String {
     match operation {
-        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => format!(
-            "{} {} ({})",
-            action_name(operation),
-            display_name_for(id, names),
-            source_display_name(&id.backend)
-        ),
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+            let action = action_name(operation);
+            let name = display_name_for(id, names);
+            // A tool that is its own source doesn't need naming twice.
+            if name == pkgdeck_core::backends::display_name(&id.backend) {
+                format!("{action} {name}")
+            } else {
+                format!("{action} {name} ({})", source_display_name(&id.backend))
+            }
+        }
         // The row's title already names what it cleans.
         Operation::Clean(id) if names.cleanup.contains_key(id) => {
             format!("Clean {}", names.cleanup[id])

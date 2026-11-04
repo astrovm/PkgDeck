@@ -6818,6 +6818,39 @@ fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
     assert!(!controller.rust().driver_in_use);
 }
 #[test]
+fn a_tool_that_is_its_own_source_is_named_once() {
+    let upgrade = |name: &str, backend: &str, shown: &str| {
+        let mut package = synthetic_package(name, shown);
+        package.id.backend = backend.into();
+        let mut names = Names::new();
+        names.insert(package.id.clone(), shown.to_owned());
+        operation_title_named(&Operation::Upgrade(package.id), &names)
+    };
+    for (name, backend, shown, title) in [
+        (
+            "/home/me/.local/bin/cua-driver",
+            "cua-driver",
+            "Cua Driver",
+            "Update Cua Driver",
+        ),
+        (
+            "/home/me/.local/bin/codex",
+            "codex",
+            "Codex",
+            "Update Codex",
+        ),
+        (
+            "/home/me/.foundry/bin/forge",
+            "foundry",
+            "forge",
+            "Update forge (Foundry (standalone))",
+        ),
+        ("wget", "apt", "wget", "Update wget (APT)"),
+    ] {
+        assert_eq!(upgrade(name, backend, shown), title);
+    }
+}
+#[test]
 fn a_finished_automatic_run_counts_and_names_what_it_updated() {
     let package = |path: &str, name: &str, backend: &str| {
         let mut package = synthetic_package(path, name);
