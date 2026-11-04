@@ -91,8 +91,25 @@ bundle "$system_root/XML.app/Contents/Helper.app" md.obsidian
 ln -s "$system_root/XML.app" "$system_root/Z-alias.app"
 ln -s "$system_root" "$system_root/Directory-loop"
 
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' |
+    base64 -d > "$work/dot.png"
+# An app whose only icon is JPEG 2000, like Caffeine's: no PNG in the file.
+bundle "$system_root/Old Icon.app" md.obsidian
+sips -z 512 512 "$work/dot.png" --out "$work/old.png" >/dev/null
+sips -s format jp2 "$work/old.png" --out "$work/old.jp2" >/dev/null
+mkdir -p "$system_root/Old Icon.app/Contents/Resources"
+perl -e 'local $/; binmode STDIN; my $d = <STDIN>; my $e = "ic09" . pack("N", length($d) + 8) . $d; print "icns" . pack("N", length($e) + 8) . $e' \
+    < "$work/old.jp2" > "$system_root/Old Icon.app/Contents/Resources/Old.icns"
+/usr/bin/plutil -insert CFBundleIconFile -string Old -- "$system_root/Old Icon.app/Contents/Info.plist"
+
 # Install a local cask through real Homebrew, then create a second unmanaged copy.
 bundle "$work/PkgDeck CI Owned.app" md.obsidian
+# Its icon is a real one, made by Apple's tools.
+mkdir "$work/Fixture.iconset"
+sips -z 128 128 "$work/dot.png" --out "$work/Fixture.iconset/icon_128x128.png" >/dev/null
+mkdir -p "$work/PkgDeck CI Owned.app/Contents/Resources"
+iconutil -c icns -o "$work/PkgDeck CI Owned.app/Contents/Resources/AppIcon.icns" "$work/Fixture.iconset"
+/usr/bin/plutil -insert CFBundleIconFile -string AppIcon -- "$work/PkgDeck CI Owned.app/Contents/Info.plist"
 ditto -c -k --keepParent "$work/PkgDeck CI Owned.app" "$work/fixture.zip"
 digest=$(shasum -a 256 "$work/fixture.zip" | awk '{print $1}')
 brew tap-new --no-git "$tap"
@@ -116,7 +133,7 @@ brew info --json=v2 --cask --installed > "$logs/brew-installed.json"
 "$pkd" --json --from macos-apps list > "$logs/inventory.json"
 jq -e --arg root "$system_root/" --arg user "$user_root/" --arg owned "$owned" '
   .data | .failures == [] and
-  ([.packages[] | select(.id.name | startswith($root))] | length == 6) and
+  ([.packages[] | select(.id.name | startswith($root))] | length == 7) and
   ([.packages[] | select(.id.name | startswith($user))] | length == 1) and
   any(.packages[]; .id.name == ($root + "XML.app") and .id.scope == "system" and .installed_version == "1.2.3" and (.summary | contains("visual-studio-code (candidate)"))) and
   any(.packages[]; .id.name == ($user + "Binary.app") and (.id.scope | type) == "object" and .installed_version == "1.2.3" and (.summary | contains("firefox (candidate)"))) and
@@ -126,6 +143,17 @@ jq -e --arg root "$system_root/" --arg user "$user_root/" --arg owned "$owned" '
   any(.packages[]; .id.name == $owned and (.summary | contains("Managed by Homebrew")) and (.summary | contains("candidate") | not)) and
   any(.packages[]; .id.name == ($root + "Second Copy.app") and (.summary | contains("Managed by Homebrew") | not) and (.summary | contains("obsidian (candidate)")))
 ' "$logs/inventory.json"
+# The icon reaches both sources that list the app, as a PNG the window can draw.
+icon=$(jq -r --arg owned "$owned" '.data.packages[] | select(.id.name == $owned) | .icon' "$logs/inventory.json")
+[[ $(sips -g format "$icon" | awk '/format:/ { print $2 }') == png ]]
+"$pkd" --json --from homebrew-cask list > "$logs/casks.json"
+jq -e --arg icon "$icon" 'any(.data.packages[]; (.id.name | endswith("pkgdeck-ci-owned")) and .icon == $icon)' "$logs/casks.json"
+# An older icon file holds no PNG, so macOS's own tool converts it.
+old_icon=$(jq -r --arg app "$system_root/Old Icon.app" '.data.packages[] | select(.id.name == $app) | .icon' "$logs/inventory.json")
+[[ $(sips -g format "$old_icon" | awk '/format:/ { print $2 }') == png ]]
+# The apps this Mac really has. Some keep their icon where only macOS reads it.
+jq -r '.data.packages[] | select(.id.name | contains("PkgDeck CI") | not) | "\(if .icon then "icon   " else "no icon" end) \(.id.name)"' \
+    "$logs/inventory.json" | sort
 "$pkd" --json --from macos-apps info "$user_root/Binary.app" > "$logs/details.json"
 jq -e '.data | .package.installed_version == "1.2.3" and (.description | contains("Bundle build: 456"))' "$logs/details.json"
 "$pkd" --json --from macos-apps search 'Second Copy' > "$logs/search.json"
@@ -139,7 +167,7 @@ code=0
 [[ $code == 8 ]]
 jq -e --arg root "$system_root/" '
   .data | any(.failures[]; .backend == "macos-apps" and (.error.InvalidResponse.reason | contains($root + "Restricted"))) and
-  ([.packages[] | select(.id.name | startswith($root))] | length == 6)
+  ([.packages[] | select(.id.name | startswith($root))] | length == 7)
 ' "$logs/partial.json"
 "$pkd" --json --from macos-apps info "$owned" > "$logs/partial-exact-details.json"
 jq -e --arg path "$owned" '.data | .package.id.name == $path and .package.installed_version == "1.2.3"' "$logs/partial-exact-details.json"

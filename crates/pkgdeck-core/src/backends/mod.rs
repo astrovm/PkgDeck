@@ -29,6 +29,7 @@ mod dotnet;
 mod firmware;
 mod go_bin;
 mod mac_apps;
+mod mac_icons;
 mod macos_updates;
 mod mas;
 mod nix;

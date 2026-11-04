@@ -142,6 +142,11 @@ impl Store {
         Some(Self::new(base.join("pkgdeck")))
     }
 
+    /// The folder everything here is kept in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn file(&self, source: &str, kind: &str, args: &[&str]) -> PathBuf {
         let mut hash = Sha256::new();
         for arg in args {

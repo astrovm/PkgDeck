@@ -74,7 +74,8 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         pos2(rect.right(), rect.bottom() - 4.0),
     );
     if app.items.is_empty() {
-        if app.busy && !app.writing {
+        // An empty snapshot still reloading hasn't said there's nothing yet.
+        if app.busy && !app.writing || app.refreshing {
             skeleton_rows(ui, body, &palette);
         } else {
             empty_state(app, ui, body);
@@ -173,7 +174,12 @@ pub fn list_shown(app: &App) -> bool {
 /// The line under the page title: how many, or what the page is doing,
 /// and which sources it still waits for (named on hover past two).
 pub fn subtitle(app: &App) -> (String, Option<String>) {
-    if app.page == Page::Updates && app.opened.is_none() && !app.checking_updates && !app.busy {
+    if app.page == Page::Updates
+        && app.opened.is_none()
+        && !app.checking_updates
+        && !app.busy
+        && !app.refreshing
+    {
         let line = match app.read_failures().is_empty() {
             false => "Some sources couldn't be checked".into(),
             true => app

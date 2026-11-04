@@ -135,7 +135,8 @@ struct FormulaReport {
 struct Formula {
     full_name: String,
     desc: Option<String>,
-    homepage: String,
+    /// A tap's formula doesn't have to declare one.
+    homepage: Option<String>,
     versions: Versions,
     revision: u64,
     installed: Vec<Installed>,
@@ -343,7 +344,9 @@ pub(super) struct Cask {
     full_token: String,
     name: Vec<String>,
     desc: Option<String>,
-    homepage: String,
+    /// `null` for an installed cask Homebrew no longer has a definition for,
+    /// such as one whose tap was removed.
+    homepage: Option<String>,
     /// `null` when the cask has no version for this system, such as
     /// `discord` on Linux, which only has a macOS download.
     version: Option<String>,
@@ -376,6 +379,55 @@ const MACOS_ONLY_ARTIFACTS: &[&str] = &[
     "vst_plugin",
     "vst3_plugin",
 ];
+/// What a cask's app is called once installed: its target when it renames it,
+/// or the app's own file name, wherever in the download that is.
+pub(super) fn cask_app(artifacts: &[serde_json::Value]) -> Option<PathBuf> {
+    let app = artifacts
+        .iter()
+        .find_map(|artifact| artifact.get("app")?.as_array())?;
+    let target = app
+        .iter()
+        .find_map(|part| part.get("target")?.as_str())
+        .map(PathBuf::from);
+    target.or_else(|| {
+        std::path::Path::new(app.first()?.as_str()?)
+            .file_name()
+            .map(PathBuf::from)
+    })
+}
+/// What a cask's app may be called. An installer package doesn't say, but
+/// names its app after the cask: Google Drive, RealVNC Connect Viewer, Tailscale.
+pub(super) fn cask_apps(artifacts: &[serde_json::Value], names: &[String]) -> Vec<PathBuf> {
+    if let Some(app) = cask_app(artifacts) {
+        return vec![app];
+    }
+    if !artifacts
+        .iter()
+        .any(|artifact| artifact.get("pkg").is_some())
+    {
+        return vec![];
+    }
+    names
+        .iter()
+        // A name is only ever one file name, inside the folder it's looked up in.
+        .filter(|name| std::path::Path::new(name).file_name() == Some(name.as_ref()))
+        .map(|name| format!("{name}.app").into())
+        .collect()
+}
+pub(super) fn cask_icon_in(
+    artifacts: &[serde_json::Value],
+    names: &[String],
+    folders: &[PathBuf],
+    cancel: &Cancellation,
+) -> Option<PathBuf> {
+    let bundle = cask_apps(artifacts, names).iter().find_map(|app| {
+        folders
+            .iter()
+            .map(|folder| folder.join(app))
+            .find(|bundle| bundle.is_dir())
+    })?;
+    super::mac_apps::app_icon(&bundle, cancel)
+}
 pub(super) fn cask_installs_here(cask: &Cask) -> bool {
     cfg!(target_os = "macos")
         || (cask.depends_on.get("macos").is_none()
@@ -451,6 +503,7 @@ impl<T: Transport> Homebrew<T> {
                         .or_else(|| f.installed.last())
                         .map(|i| i.version.clone())
                 });
+                let homepage = f.homepage.filter(|home| !home.is_empty());
                 Ok(PackageDetails {
                     package: Package {
                         id: PackageId {
@@ -476,15 +529,11 @@ impl<T: Transport> Homebrew<T> {
                         candidate_version: candidate,
                         icon: None,
                         component_ids: vec![],
-                        homepages: if f.homepage.is_empty() {
-                            vec![]
-                        } else {
-                            vec![f.homepage.clone()]
-                        },
+                        homepages: homepage.iter().cloned().collect(),
                         adopt_with: None,
                     },
                     description: f.desc.unwrap_or_default(),
-                    homepage: (!f.homepage.is_empty()).then_some(f.homepage),
+                    homepage,
                     dependencies: f.dependencies,
                     data: None,
                 })
@@ -720,12 +769,23 @@ impl<T: Transport> HomebrewCask<T> {
             write,
         )?)
     }
+    /// The icon of the app an installed cask put in an Applications folder.
+    fn cask_icon(&self, cask: &Cask, cancel: &Cancellation) -> Option<PathBuf> {
+        let mut folders = vec![PathBuf::from("/Applications")];
+        folders.extend(
+            self.transport
+                .env("HOME")
+                .map(|home| PathBuf::from(home).join("Applications")),
+        );
+        cask_icon_in(&cask.artifacts, &cask.name, &folders, cancel)
+    }
     /// `installable_only` drops casks this system cannot install; searches use
     /// it on Linux, while installed casks always stay listed.
     fn parse(
         &self,
         result: Completion,
         installable_only: bool,
+        cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let report: CaskReport = serde_json::from_slice(&bytes("homebrew-cask", result)?)
             .map_err(|e| invalid("homebrew-cask", e))?;
@@ -741,13 +801,15 @@ impl<T: Transport> HomebrewCask<T> {
                 if !cask_token(&c.full_token) {
                     return Err(invalid("homebrew-cask", "invalid cask token"));
                 }
-                let installed = c.installed.filter(|v| !v.is_empty());
+                let installed = c.installed.clone().filter(|v| !v.is_empty());
+                let icon = installed.as_ref().and_then(|_| self.cask_icon(&c, cancel));
                 let display = c
                     .name
                     .iter()
                     .find(|n| !n.trim().is_empty())
                     .cloned()
                     .unwrap_or_else(|| c.full_token.clone());
+                let homepage = c.homepage.filter(|home| !home.is_empty());
                 Ok(PackageDetails {
                     package: Package {
                         id: PackageId {
@@ -771,17 +833,13 @@ impl<T: Transport> HomebrewCask<T> {
                         },
                         installed_version: installed,
                         candidate_version: c.version,
-                        icon: None,
+                        icon,
                         component_ids: vec![],
-                        homepages: if c.homepage.is_empty() {
-                            vec![]
-                        } else {
-                            vec![c.homepage.clone()]
-                        },
+                        homepages: homepage.iter().cloned().collect(),
                         adopt_with: None,
                     },
                     description: c.desc.unwrap_or_default(),
-                    homepage: (!c.homepage.is_empty()).then_some(c.homepage),
+                    homepage,
                     dependencies: vec![],
                     data: None,
                 })
@@ -914,7 +972,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                 let mut args = vec!["info", "--json=v2", "--cask", "--"];
                 args.extend(chunk);
                 Ok(self
-                    .parse(self.call(&args, cancel, false)?, true)?
+                    .parse(self.call(&args, cancel, false)?, true, cancel)?
                     .into_iter()
                     .map(|d| d.package)
                     .collect())
@@ -931,7 +989,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         }
         match self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false) {
             Ok(result) => Ok(self
-                .parse(result, true)?
+                .parse(result, true, cancel)?
                 .into_iter()
                 .map(|details| details.package)
                 .collect()),
@@ -954,6 +1012,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                     false,
                 )?,
                 false,
+                cancel,
             )?
             .into_iter()
             .map(|d| d.package)
@@ -968,6 +1027,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         self.parse(
             self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false)?,
             false,
+            cancel,
         )?
         .into_iter()
         .find(|d| d.package.id == *id)

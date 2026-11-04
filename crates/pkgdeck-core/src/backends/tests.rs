@@ -2575,3 +2575,81 @@ fn system_file_tasks_have_fixed_root_commands() {
         crate::unattended::Unattended::Never
     );
 }
+
+#[test]
+fn a_casks_app_is_found_by_its_installed_name() {
+    let app = |artifacts: serde_json::Value| cask_app(artifacts.as_array().unwrap());
+    assert_eq!(
+        app(serde_json::json!([{"binary": ["tool"]}, {"app": ["Editor.app"]}])),
+        Some("Editor.app".into())
+    );
+    assert_eq!(
+        app(serde_json::json!([{"app": ["Download/Editor.app"]}])),
+        Some("Editor.app".into())
+    );
+    assert_eq!(
+        app(serde_json::json!([{"app": ["Editor.app", {"target": "Renamed.app"}]}])),
+        Some("Renamed.app".into())
+    );
+    assert_eq!(app(serde_json::json!([{"binary": ["tool"]}])), None);
+    assert_eq!(app(serde_json::json!([{"app": []}])), None);
+}
+
+#[test]
+fn a_package_casks_app_goes_by_the_casks_names() {
+    // As `brew info --json=v2 --cask` reports them (Homebrew 7.0.12).
+    let pkg = [
+        serde_json::json!({"uninstall": [{"pkgutil": "com.tailscale.ipn.macsys"}]}),
+        serde_json::json!({"pkg": ["Tailscale-1.104.5-macos.pkg"]}),
+    ];
+    let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+    assert_eq!(
+        cask_apps(&pkg, &names(&["Tailscale", "Tailscale VPN"])),
+        [PathBuf::from("Tailscale.app"), "Tailscale VPN.app".into()]
+    );
+    // A name can't reach outside the folder it's looked up in.
+    assert_eq!(
+        cask_apps(&pkg, &names(&["../Other", "/Other", "..", ""])),
+        Vec::<PathBuf>::new()
+    );
+    // A cask that says what its app is called is taken at its word.
+    let app = [serde_json::json!({"app": ["Editor.app"]})];
+    assert_eq!(
+        cask_apps(&app, &names(&["Other"])),
+        [PathBuf::from("Editor.app")]
+    );
+    // Command-line tools have no app, whatever the cask is called.
+    let tools = [serde_json::json!({"binary": ["adb"]})];
+    assert_eq!(
+        cask_apps(&tools, &names(&["Platform-Tools"])),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
+fn a_casks_icon_comes_from_the_folder_holding_its_app() {
+    let root = std::env::temp_dir().join(format!("pkgdeck-cask-icon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (system, user) = (root.join("system"), root.join("user"));
+    let app = user.join("Editor.app");
+    std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIconFile</key><string>AppIcon</string></dict></plist>"#,
+    )
+    .unwrap();
+    let mut icns = b"icns\0\0\0\0ic07".to_vec();
+    icns.extend(16u32.to_be_bytes());
+    icns.extend(b"\x89PNG\r\n\x1a\n");
+    std::fs::write(app.join("Contents/Resources/AppIcon.icns"), icns).unwrap();
+    let artifacts = [serde_json::json!({"app": ["Editor.app"]})];
+    let cancel = Cancellation::default();
+    let found = cask_icon_in(&artifacts, &[], &[system.clone(), user], &cancel);
+    // Only a Mac reads an app's Info.plist.
+    assert_eq!(found.is_some(), cfg!(target_os = "macos"));
+    assert_eq!(cask_icon_in(&artifacts, &[], &[system], &cancel), None);
+    assert_eq!(cask_icon_in(&[], &[], &[], &cancel), None);
+    let _ = std::fs::remove_dir_all(&root);
+}

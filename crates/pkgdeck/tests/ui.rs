@@ -2063,21 +2063,70 @@ fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewe
     h.state_mut().1.cancel();
 }
 
+fn count_text(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> usize {
+    fn matches(shape: &egui::Shape, wanted: &str) -> usize {
+        match shape {
+            egui::Shape::Text(text) => usize::from(text.galley.text() == wanted),
+            egui::Shape::Vec(shapes) => shapes.iter().map(|shape| matches(shape, wanted)).sum(),
+            _ => 0,
+        }
+    }
+    shapes
+        .iter()
+        .map(|shape| matches(&shape.shape, wanted))
+        .sum()
+}
+
+#[test]
+fn an_empty_list_still_reloading_never_says_up_to_date() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.c().set_background_state(
+        json!({"last_check": 100, "available": 3, "failures": [], "notify": false})
+            .to_string()
+            .into(),
+    );
+    app.c().set_rows("[]".into());
+    app.c().set_refreshing(true);
+    app.react();
+    app.report.checked_at = Some(pkgdeck::model::now() - 13 * 60 * 60);
+    app.invalidate();
+    let mut h = harness(app);
+    h.run_steps(4);
+    assert_eq!(count_text(&h.output().shapes, "You're up to date"), 0);
+    assert!(h.query_by_label_contains("Last checked").is_none());
+    assert!(h.query_by_label("Checking for updates…").is_some());
+    assert_eq!(h.state().1.background.available, 3);
+    // The reload landed, and there really is nothing.
+    h.state_mut().1.c().set_refreshing(false);
+    h.state_mut().1.react();
+    h.run_steps(4);
+    assert_eq!(count_text(&h.output().shapes, "You're up to date"), 1);
+    assert!(h.query_by_label_contains("Last checked").is_some());
+    assert_eq!(h.state().1.background.available, 0);
+}
+
+#[test]
+fn an_empty_list_is_only_loading_while_a_read_is_running() {
+    let count = |writing: bool| {
+        let mut app = with_sources(app());
+        app.page = Page::Updates;
+        app.c().set_rows("[]".into());
+        app.c().set_busy(true);
+        app.react();
+        app.writing = writing;
+        app.invalidate();
+        let mut h = harness(app);
+        h.run_steps(4);
+        count_text(&h.output().shapes, "You're up to date")
+    };
+    assert_eq!(count(false), 0);
+    // A write is busy too, but no rows are on their way.
+    assert_eq!(count(true), 1);
+}
+
 #[test]
 fn refresh_empty_updates_show_the_timestamp_only_in_the_header() {
-    fn count_text(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> usize {
-        fn matches(shape: &egui::Shape, wanted: &str) -> usize {
-            match shape {
-                egui::Shape::Text(text) => usize::from(text.galley.text() == wanted),
-                egui::Shape::Vec(shapes) => shapes.iter().map(|shape| matches(shape, wanted)).sum(),
-                _ => 0,
-            }
-        }
-        shapes
-            .iter()
-            .map(|shape| matches(&shape.shape, wanted))
-            .sum()
-    }
     for page in [Page::Updates, Page::Clean] {
         let mut app = with_sources(app());
         app.page = page;

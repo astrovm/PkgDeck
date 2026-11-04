@@ -917,6 +917,66 @@ fn homebrew_casks_validate_tokens_and_report_failed_lookups() {
 }
 
 #[test]
+fn a_cask_homebrew_lost_the_definition_of_does_not_hide_the_others() {
+    // What `brew info --json=v2 --cask --installed` said on Homebrew 7.0.12
+    // for an installed cask it had no definition for, next to a healthy one.
+    let report = serde_json::json!({"casks": [
+        {
+            "token": "lost", "full_token": "lost", "tap": null, "name": [],
+            "desc": null, "homepage": null, "url": "", "version": "0.13.0",
+            "installed": "0.13.0", "outdated": false, "artifacts": [],
+        },
+        {
+            "token": "healthy", "full_token": "healthy", "tap": "homebrew/cask",
+            "name": ["Healthy"], "desc": null, "homepage": "https://example.invalid",
+            "version": "2.0", "installed": "1.0", "outdated": true, "artifacts": [],
+        },
+    ]})
+    .to_string();
+    let cancel = Cancellation::default();
+    let mut cask = HomebrewCask::new(brew(move |line| match line {
+        "brew info --json=v2 --cask --installed" => ok(&report),
+        other => panic!("unexpected {other}"),
+    }));
+    assert_eq!(cask.detect(&cancel).unwrap(), Availability::Available);
+    let installed = cask.installed(&cancel).unwrap();
+    let names: Vec<_> = installed.iter().map(|p| p.id.name.as_str()).collect();
+    assert_eq!(names, ["lost", "healthy"]);
+    assert_eq!(installed[0].display_name, "lost");
+    assert!(installed[0].homepages.is_empty());
+    // No app to take an icon from.
+    assert_eq!(installed[0].icon, None);
+    assert_eq!(installed[1].homepages, ["https://example.invalid"]);
+}
+
+#[test]
+fn a_formula_without_a_homepage_does_not_hide_the_others() {
+    let report = serde_json::json!({"formulae": [
+        {
+            "full_name": "me/tools/plain", "desc": null, "homepage": null,
+            "versions": {"stable": "1.0"}, "revision": 0,
+            "installed": [{"version": "1.0"}], "linked_keg": "1.0",
+            "outdated": false, "dependencies": [],
+        },
+        {
+            "full_name": "wget", "desc": "fetch", "homepage": "https://example.invalid",
+            "versions": {"stable": "1.0"}, "revision": 0,
+            "installed": [{"version": "1.0"}], "linked_keg": "1.0",
+            "outdated": false, "dependencies": [],
+        },
+    ]})
+    .to_string();
+    let cancel = Cancellation::default();
+    let mut formula = Homebrew::new(brew(move |_| ok(&report)));
+    assert_eq!(formula.detect(&cancel).unwrap(), Availability::Available);
+    let installed = formula.installed(&cancel).unwrap();
+    let names: Vec<_> = installed.iter().map(|p| p.id.name.as_str()).collect();
+    assert_eq!(names, ["me/tools/plain", "wget"]);
+    assert!(installed[0].homepages.is_empty());
+    assert_eq!(installed[1].homepages, ["https://example.invalid"]);
+}
+
+#[test]
 fn homebrew_cask_detection_rejects_a_prefix_that_is_not_text() {
     let mut cask = HomebrewCask::new(Script::new(|_| {
         Ok(Completion {

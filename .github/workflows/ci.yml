@@ -69,6 +69,24 @@ jobs:
               echo scope=full >> "$GITHUB_OUTPUT"
           fi
 
+  audit:
+    # Known vulnerabilities in what we ship. osv-scanner.toml lists the ones
+    # accepted for now and why, so only a new one fails this.
+    name: Audit / Known vulnerabilities
+    needs: changes
+    if: needs.changes.outputs.builds != 'false'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Scan the lockfile
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            --lockfile=Cargo.lock
+            --config=osv-scanner.toml
+
   reviewed:
     # A merged commit with the exact tree recorded by successful PR CI
     # needs no second test run: main only builds to save caches.
@@ -1073,6 +1091,7 @@ jobs:
     if: ${{ always() && github.event_name == 'pull_request' }}
     needs:
       - changes
+      - audit
       - test-linux
       - test-macos
       - test-podman
