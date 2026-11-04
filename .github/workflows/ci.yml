@@ -272,6 +272,8 @@ jobs:
         if: needs.reviewed.outputs.tested != 'true'
         run: bash scripts/tests/macos-adoption.sh
       - name: Upload native inventory evidence
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
         if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -290,6 +292,8 @@ jobs:
           PATH=$(tr ':' '\n' <<<"$PATH" | grep -v '/coreutils/libexec/gnubin$' | paste -sd: -)
           scripts/tests/backends.sh dev "$PWD/target/debug/pkd"
       - name: Upload MacPorts logs
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
         if: ${{ !cancelled() && ((github.event_name != 'push' && matrix.arch == 'aarch64') || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -357,6 +361,8 @@ jobs:
         if: needs.reviewed.outputs.tested != 'true'
         run: scripts/verify.sh containers --engine podman
       - name: Upload Podman logs
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
         if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -528,6 +534,8 @@ jobs:
             cargo test --locked --release -p pkgdeck --no-fail-fast -- --test-threads=1
           fi
       - name: Upload macOS startup diagnostics
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
         if: ${{ !cancelled() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -718,6 +726,8 @@ jobs:
           test ! -e /Applications/PkgDeck.app
           test ! -e "$(brew --prefix)/bin/pkd"
       - name: Upload macOS startup diagnostics
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
         if: ${{ !cancelled() && runner.os == 'macOS' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
