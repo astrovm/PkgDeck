@@ -5460,6 +5460,61 @@ fn an_automatic_run_remembers_casks_that_stopped_for_the_password() {
     assert!(controller.rust().password_casks.is_empty());
 }
 #[test]
+fn casks_in_one_brew_show_as_it_reaches_each_one() {
+    let cask = |name: &str| PackageId {
+        backend: "homebrew-cask".into(),
+        name: name.into(),
+        architecture: "fixture".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let (first, second) = (cask("acme/tools/first-app"), cask("second-app"));
+    let operations = vec![
+        Operation::Upgrade(first.clone()),
+        Operation::Upgrade(second.clone()),
+    ];
+    let job = Job::UpgradeAll(operations.clone(), None);
+    let mut state = ProgressState::new(&job, None, &Names::new());
+    let snapshot = |state: &ProgressState| -> Value {
+        serde_json::from_str(&state.snapshot().to_string()).unwrap()
+    };
+    assert!(
+        !state.observe("==> Upgrading second-app"),
+        "nothing runs yet"
+    );
+    // All start together, as one brew; the first shows until brew moves on.
+    for operation in &operations {
+        state.apply(&Event::Started(operation.clone()));
+    }
+    let now = snapshot(&state);
+    assert_eq!(now["running"].as_array().unwrap().len(), 1);
+    assert_eq!(now["current"], target_row(&first));
+    assert!(state.observe("==> Upgrading first-app"));
+    assert!(!state.observe("==> Upgrading unlisted"));
+    assert_eq!(snapshot(&state)["done"], 0);
+    assert!(state.observe("==> Upgrading second-app"));
+    let now = snapshot(&state);
+    assert_eq!(now["running"].as_array().unwrap().len(), 1);
+    assert_eq!(now["current"], target_row(&second));
+    assert_eq!(now["done"], 1);
+    assert_eq!(now["finished"], json!([target_row(&first)]));
+    // Results come when brew ends: the one it moved on from failed.
+    state.apply(&Event::Finished {
+        operation: operations[0].clone(),
+        result: Err(EngineError::Cancelled),
+    });
+    state.apply(&Event::Finished {
+        operation: operations[1].clone(),
+        result: Ok(OperationOutcome::default()),
+    });
+    let now = snapshot(&state);
+    assert_eq!(now["done"], 2);
+    assert!(now["running"].as_array().unwrap().is_empty());
+    let result: Value = serde_json::from_str(&state.batch_result().to_string()).unwrap();
+    assert_eq!(result["finished"], json!([target_row(&second)]));
+}
+#[test]
 fn only_updates_someone_started_join_their_cask_updates() {
     let polkit = Authorization::Polkit;
     assert!(joins_cask_updates(&Job::UpgradeAll(vec![], None), polkit));

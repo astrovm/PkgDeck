@@ -1982,30 +1982,26 @@ impl Engine {
                     .and_then(|()| self.preflight(member, cancel))
             })
             .collect::<Vec<_>>();
-        let members = end - index;
-        let results = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
-            vec![Err(error); members]
-        } else {
-            match self.ready(backend, operation.capability(), cancel) {
-                Ok(manager) => manager
-                    .execute_joined(&operations[index..end], cancel, &mut |progress| {
-                        events(Event::Progress {
-                            operation: operation.clone(),
-                            progress,
-                        });
-                    })
-                    .unwrap_or_else(|| {
-                        vec![
-                            Err(EngineError::InvalidResponse {
+        let joined = rechecked.into_iter().find_map(Result::err).map_or_else(
+            || {
+                self.ready(backend, operation.capability(), cancel)
+                    .and_then(|manager| {
+                        manager
+                            .execute_joined(&operations[index..end], cancel, &mut |progress| {
+                                events(Event::Progress {
+                                    operation: operation.clone(),
+                                    progress,
+                                });
+                            })
+                            .ok_or_else(|| EngineError::InvalidResponse {
                                 backend: backend.into(),
                                 reason: "grouped operation unavailable".into(),
-                            });
-                            members
-                        ]
-                    }),
-                Err(error) => vec![Err(error); members],
-            }
-        };
+                            })
+                    })
+            },
+            Err,
+        );
+        let results = joined.unwrap_or_else(|error| vec![Err(error); end - index]);
         crate::cache::invalidate(backend);
         operations[index..end]
             .iter()

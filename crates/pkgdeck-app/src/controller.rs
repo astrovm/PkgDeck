@@ -612,7 +612,41 @@ impl ProgressState {
         sources.iter().any(|backend| {
             pkgdeck_core::backends::output_package(backend, line)
                 .is_some_and(|name| self.move_to(backend, &name))
-        })
+        }) || self.move_to_cask(line)
+    }
+    /// Casks updating in one `brew` move on as it says which it's on: the
+    /// one before is done, whether it worked is only known at the end.
+    fn move_to_cask(&mut self, line: &str) -> bool {
+        let named = pkgdeck_core::backends::output_package("homebrew-cask", line);
+        let operation = self
+            .operations
+            .iter()
+            .find(|operation| {
+                cask_update(operation)
+                    && package_target(operation)
+                        .is_some_and(|id| id.name.rsplit('/').next() == named.as_deref())
+            })
+            .cloned();
+        let Some(operation) = operation else {
+            return false;
+        };
+        if !self.running.iter().any(|step| cask_update(&step.operation)) {
+            return false;
+        }
+        let moved_on: Vec<PackageId> = self
+            .running
+            .iter()
+            .filter(|step| cask_update(&step.operation) && step.operation != operation)
+            .filter_map(|step| package_target(&step.operation).cloned())
+            .collect();
+        for id in moved_on {
+            self.finish(id, false);
+        }
+        self.running
+            .retain(|step| !cask_update(&step.operation) || step.operation == operation);
+        self.label = self.step(&operation).label.clone();
+        self.current = Some(operation);
+        true
     }
     /// Marks a package done and counts it once. Success is confirmed only
     /// when the operation finishes, not when its output moves to another row.
@@ -668,6 +702,10 @@ impl ProgressState {
     }
     fn apply(&mut self, event: &Event) {
         match event {
+            // A cask in the same `brew` as one running waits for its turn.
+            Event::Started(operation)
+                if cask_update(operation)
+                    && self.running.iter().any(|step| cask_update(&step.operation)) => {}
             Event::Started(operation) => {
                 self.running.retain(|step| step.operation != *operation);
                 self.label = self.step(operation).label.clone();
@@ -2907,6 +2945,9 @@ fn covers_update(operation: &Operation, package: &PackageId) -> bool {
         Operation::UpgradeAll { backend } => *backend == package.backend,
         _ => false,
     }
+}
+fn cask_update(operation: &Operation) -> bool {
+    matches!(operation, Operation::Upgrade(id) if id.backend == "homebrew-cask")
 }
 fn package_target(operation: &Operation) -> Option<&PackageId> {
     match operation {
@@ -5651,13 +5692,15 @@ impl ffi::PackageController {
         }
         let cancel = Cancellation::default();
         let (sender, receiver) = crate::wake::channel();
-        // Update all runs one command per source; its output says which
-        // package each one is on, so pass those lines to the progress.
+        // Update all runs one command per source, and checked casks one
+        // between them; the output says which package each one is on, so
+        // pass those lines to the progress.
         let followed: Vec<String> = job
             .operations()
             .into_iter()
             .filter_map(|operation| match operation {
                 Operation::UpgradeAll { backend } => Some(backend),
+                Operation::Upgrade(id) if id.backend == "homebrew-cask" => Some(id.backend),
                 _ => None,
             })
             .collect();
