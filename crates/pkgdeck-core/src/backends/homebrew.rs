@@ -395,16 +395,37 @@ pub(super) fn cask_app(artifacts: &[serde_json::Value]) -> Option<PathBuf> {
             .map(PathBuf::from)
     })
 }
+/// What a cask's app may be called. An installer package doesn't say, but
+/// names its app after the cask: Google Drive, RealVNC Connect Viewer, Tailscale.
+pub(super) fn cask_apps(artifacts: &[serde_json::Value], names: &[String]) -> Vec<PathBuf> {
+    if let Some(app) = cask_app(artifacts) {
+        return vec![app];
+    }
+    if !artifacts
+        .iter()
+        .any(|artifact| artifact.get("pkg").is_some())
+    {
+        return vec![];
+    }
+    names
+        .iter()
+        // A name is only ever one file name, inside the folder it's looked up in.
+        .filter(|name| std::path::Path::new(name).file_name() == Some(name.as_ref()))
+        .map(|name| format!("{name}.app").into())
+        .collect()
+}
 pub(super) fn cask_icon_in(
     artifacts: &[serde_json::Value],
+    names: &[String],
     folders: &[PathBuf],
     cancel: &Cancellation,
 ) -> Option<PathBuf> {
-    let app = cask_app(artifacts)?;
-    let bundle = folders
-        .iter()
-        .map(|folder| folder.join(&app))
-        .find(|bundle| bundle.is_dir())?;
+    let bundle = cask_apps(artifacts, names).iter().find_map(|app| {
+        folders
+            .iter()
+            .map(|folder| folder.join(app))
+            .find(|bundle| bundle.is_dir())
+    })?;
     super::mac_apps::app_icon(&bundle, cancel)
 }
 pub(super) fn cask_installs_here(cask: &Cask) -> bool {
@@ -749,14 +770,14 @@ impl<T: Transport> HomebrewCask<T> {
         )?)
     }
     /// The icon of the app an installed cask put in an Applications folder.
-    fn cask_icon(&self, artifacts: &[serde_json::Value], cancel: &Cancellation) -> Option<PathBuf> {
+    fn cask_icon(&self, cask: &Cask, cancel: &Cancellation) -> Option<PathBuf> {
         let mut folders = vec![PathBuf::from("/Applications")];
         folders.extend(
             self.transport
                 .env("HOME")
                 .map(|home| PathBuf::from(home).join("Applications")),
         );
-        cask_icon_in(artifacts, &folders, cancel)
+        cask_icon_in(&cask.artifacts, &cask.name, &folders, cancel)
     }
     /// `installable_only` drops casks this system cannot install; searches use
     /// it on Linux, while installed casks always stay listed.
@@ -780,10 +801,12 @@ impl<T: Transport> HomebrewCask<T> {
                 if !cask_token(&c.full_token) {
                     return Err(invalid("homebrew-cask", "invalid cask token"));
                 }
-                let installed = c.installed.filter(|v| !v.is_empty());
-                let icon = installed
+                let icon = c
+                    .installed
                     .as_ref()
-                    .and_then(|_| self.cask_icon(&c.artifacts, cancel));
+                    .filter(|v| !v.is_empty())
+                    .and_then(|_| self.cask_icon(&c, cancel));
+                let installed = c.installed.filter(|v| !v.is_empty());
                 let display = c
                     .name
                     .iter()

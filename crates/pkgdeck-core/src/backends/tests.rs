@@ -2596,6 +2596,37 @@ fn a_casks_app_is_found_by_its_installed_name() {
 }
 
 #[test]
+fn a_package_casks_app_goes_by_the_casks_names() {
+    // As `brew info --json=v2 --cask` reports them (Homebrew 7.0.12).
+    let pkg = [
+        serde_json::json!({"uninstall": [{"pkgutil": "com.tailscale.ipn.macsys"}]}),
+        serde_json::json!({"pkg": ["Tailscale-1.104.5-macos.pkg"]}),
+    ];
+    let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+    assert_eq!(
+        cask_apps(&pkg, &names(&["Tailscale", "Tailscale VPN"])),
+        [PathBuf::from("Tailscale.app"), "Tailscale VPN.app".into()]
+    );
+    // A name can't reach outside the folder it's looked up in.
+    assert_eq!(
+        cask_apps(&pkg, &names(&["../Other", "/Other", "..", ""])),
+        Vec::<PathBuf>::new()
+    );
+    // A cask that says what its app is called is taken at its word.
+    let app = [serde_json::json!({"app": ["Editor.app"]})];
+    assert_eq!(
+        cask_apps(&app, &names(&["Other"])),
+        [PathBuf::from("Editor.app")]
+    );
+    // Command-line tools have no app, whatever the cask is called.
+    let tools = [serde_json::json!({"binary": ["adb"]})];
+    assert_eq!(
+        cask_apps(&tools, &names(&["Platform-Tools"])),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
 fn a_casks_icon_comes_from_the_folder_holding_its_app() {
     let root = std::env::temp_dir().join(format!("pkgdeck-cask-icon-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -2615,10 +2646,10 @@ fn a_casks_icon_comes_from_the_folder_holding_its_app() {
     std::fs::write(app.join("Contents/Resources/AppIcon.icns"), icns).unwrap();
     let artifacts = [serde_json::json!({"app": ["Editor.app"]})];
     let cancel = Cancellation::default();
-    let found = cask_icon_in(&artifacts, &[system.clone(), user], &cancel);
+    let found = cask_icon_in(&artifacts, &[], &[system.clone(), user], &cancel);
     // Only a Mac reads an app's Info.plist.
     assert_eq!(found.is_some(), cfg!(target_os = "macos"));
-    assert_eq!(cask_icon_in(&artifacts, &[system], &cancel), None);
-    assert_eq!(cask_icon_in(&[], &[], &cancel), None);
+    assert_eq!(cask_icon_in(&artifacts, &[], &[system], &cancel), None);
+    assert_eq!(cask_icon_in(&[], &[], &[], &cancel), None);
     let _ = std::fs::remove_dir_all(&root);
 }
