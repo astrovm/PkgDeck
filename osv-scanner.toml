@@ -1,0 +1,26 @@
+# Known advisories CI accepts for now. Anything not listed here fails
+# `Audit / Known vulnerabilities`. Remove an entry once its package is gone.
+
+# dwarfs 0.2.1 requires lru 0.14, and has no release with a newer one. It calls
+# only LruCache::new and pop_lru, so neither bug is reached.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0002"
+reason = "Needs IterMut, which dwarfs never calls. Fixed in lru 0.16.3, waiting on dwarfs."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+reason = "Needs LruCache::pop with a panicking key, and dwarfs calls pop_lru. Fixed in lru 0.18.2, waiting on dwarfs."
+
+# Unmaintained notices with no fixed version. zbus 5 comes through
+# accesskit_unix, atspi, ksni and notify-rust, and the newest atspi still needs it.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0370"
+reason = "zvariant 5, through zbus 5. Goes away when those crates move to zbus 6."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0371"
+reason = "zbus_names 4, through zbus 5. Goes away when those crates move to zbus 6."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0372"
+reason = "zvariant_derive 5, through zbus 5. Goes away when those crates move to zbus 6."

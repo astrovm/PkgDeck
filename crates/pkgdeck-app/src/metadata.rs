@@ -485,7 +485,7 @@ fn child<'a, 'input>(
             })
         })
 }
-fn localized(value: &serde_yaml::Value) -> String {
+fn localized(value: &yaml_serde::Value) -> String {
     value
         .as_str()
         .or_else(|| value["C"].as_str())
@@ -664,8 +664,8 @@ impl Catalog {
     }
     fn yaml(&mut self, text: &str) {
         let mut media_base = None;
-        for document in serde_yaml::Deserializer::from_str(text) {
-            let Ok(value) = serde_yaml::Value::deserialize(document) else {
+        for document in yaml_serde::Deserializer::from_str(text) {
+            let Ok(value) = yaml_serde::Value::deserialize(document) else {
                 break;
             };
             if value["File"].as_str() == Some("DEP-11") {

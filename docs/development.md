@@ -124,6 +124,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 
 | Check | What it does |
 | --- | --- |
+| `Audit / Known vulnerabilities` | Scans `Cargo.lock` with `osv-scanner`. A new advisory fails it; `osv-scanner.toml` lists the ones accepted for now and why |
 | `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, and all workspace tests. x86_64 measures them for coverage, the slowest build, so aarch64 also runs clippy and the real sudo/polkit and APT lock tests |
 | `Test / macOS (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption, then real lifecycle tests for every development manager and MacPorts (prebuilt archives only). Pull requests run the lifecycle tests on Apple Silicon only; the Intel runner takes over half an hour for them, and Linux covers the same managers. Release tags without PR proof run them on both. One job per Mac, since only 5 macOS runners run at once |
 | `Mutants / Changed code` | Separate `Mutants` workflow, not required. Mutation testing on the Rust lines the pull request changed, with one PR comment listing what no test caught. The weekly run covers every mutant in 64 parts, a quarter each week, and reports in the open "Missed mutants" issue |
