@@ -14,7 +14,7 @@ serde_json.workspace = true
 rustix.workspace = true
 pkgdeck-core.workspace = true
 roxmltree = { version = "0.21", default-features = false }
-serde_yaml = { version = "0.9", default-features = false }
+yaml_serde = { version = "0.10", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 
 [lints]
