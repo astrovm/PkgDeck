@@ -1355,6 +1355,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     send(Reply::Done(result));
 }
 
+/// Whether `job`'s cask updates run with one `brew`: someone started them and
+/// can answer the one password dialog that lets them all finish. Automatic
+/// updates and sudo mode have no dialog, and go on as they did.
+fn joins_cask_updates(job: &Job, authorization: Authorization) -> bool {
+    matches!(job, Job::UpgradeAll(..)) && matches!(authorization, Authorization::Polkit)
+}
 /// Run a confirmed batch and summarize it. `held` changes are reported as
 /// failed with their reason and never run.
 fn run_batch(
@@ -5790,6 +5796,7 @@ impl ffi::PackageController {
                         job,
                         Job::AutoUpgrade(..) | Job::AutoClean { .. }
                     ));
+                    engine.set_joins_cask_updates(joins_cask_updates(&job, authorization));
                     if let Job::Write(_, Some(plan)) = &job {
                         engine.remember_operation_plan((**plan).clone());
                     }

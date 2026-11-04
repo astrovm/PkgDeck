@@ -151,6 +151,9 @@ other sources still appear as they answer.
   **Update all** tries it too.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
+- Homebrew casks you check together update in one `brew` call, so you enter
+  your password once, and each row still says how its cask went. If you cancel
+  while it runs, PkgDeck waits for all of them to finish.
 - A failed update's notice names the app and says what went wrong, one line
   each. It goes away once those updates are done, even if you ran them
   somewhere else.

@@ -863,7 +863,39 @@ impl<T: Transport> HomebrewCask<T> {
         Ok(&id.name)
     }
 }
+/// What `brew upgrade` said about `token` before going on to the next cask:
+/// its line, `Error: token: why`, and the lines of the reason after it.
+fn cask_failure(stderr: &str, token: &str) -> Option<String> {
+    let start = format!("Error: {token}: ");
+    let mut lines = stderr.lines().skip_while(|line| !line.starts_with(&start));
+    let mut said = format!("{}\n", lines.next()?);
+    for line in
+        lines.take_while(|line| !line.starts_with("Error: ") && !line.starts_with("Warning: "))
+    {
+        said.push_str(line);
+        said.push('\n');
+    }
+    Some(said)
+}
 impl<T: Transport> HomebrewCask<T> {
+    /// Which of `tokens` are at their latest version now. Asked whatever
+    /// the job's cancellation says: what happened has to be told either way.
+    /// None when brew can't say, so nothing passes for updated.
+    fn current_casks(&self, tokens: &[&str]) -> Vec<String> {
+        let mut args = vec!["info", "--json=v2", "--cask", "--"];
+        args.extend(tokens);
+        self.call(&args, &Cancellation::default(), false)
+            .ok()
+            .and_then(|read| serde_json::from_slice::<CaskReport>(&read.stdout).ok())
+            .map_or_else(Vec::new, |report| {
+                report
+                    .casks
+                    .into_iter()
+                    .filter(|cask| cask.installed.is_some() && cask.installed == cask.version)
+                    .map(|cask| cask.full_token)
+                    .collect()
+            })
+    }
     /// A checked adoption when an app is already in the cask's place.
     fn adoption_plan(
         &self,
@@ -1099,5 +1131,66 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
+    }
+    /// Updates casks with one `brew`, so the password it asks for covers
+    /// them all. It reports a cask that fails and goes on with the next, so
+    /// each gets its own result. One brew never got to, because it stopped
+    /// or for a reason it doesn't name a cask in, runs on its own.
+    fn execute_joined(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Vec<Result<OperationOutcome, EngineError>>> {
+        let tokens = operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Upgrade(id) => self.target(id),
+                _ => Err(invalid("homebrew-cask", "foreign operation")),
+            })
+            .collect::<Result<Vec<&str>, EngineError>>();
+        let tokens = match tokens {
+            Ok(tokens) => tokens,
+            Err(error) => return Some(vec![Err(error); operations.len()]),
+        };
+        self.found.clear();
+        progress(Progress::Message(
+            "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
+        ));
+        let mut args = vec!["upgrade", "--cask", "--"];
+        args.extend(&tokens);
+        let failed = match self.call(&args, cancel, true) {
+            Ok(result) => {
+                let outcome = OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred,
+                };
+                return Some(vec![Ok(outcome); operations.len()]);
+            }
+            Err(EngineError::Execution(ExecutionError::Failed(result))) => result,
+            Err(error) => return Some(vec![Err(error); operations.len()]),
+        };
+        let current = self.current_casks(&tokens);
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        Some(
+            operations
+                .iter()
+                .zip(&tokens)
+                .map(|(operation, token)| {
+                    if let Some(said) = cask_failure(&stderr, token) {
+                        Err(EngineError::Execution(ExecutionError::Failed(Completion {
+                            stdout: vec![],
+                            stderr: said.into_bytes(),
+                            ..failed.clone()
+                        })))
+                    } else if current.iter().any(|cask| cask == token) {
+                        Ok(OperationOutcome {
+                            cancellation_deferred: failed.cancellation_deferred,
+                        })
+                    } else {
+                        self.execute(operation, cancel, progress)
+                    }
+                })
+                .collect(),
+        )
     }
 }

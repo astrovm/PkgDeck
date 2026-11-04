@@ -5459,6 +5459,20 @@ fn an_automatic_run_remembers_casks_that_stopped_for_the_password() {
     assert!(!controller.rust().needs_password.skips("editor-app", "5"));
     assert!(controller.rust().password_casks.is_empty());
 }
+#[test]
+fn only_updates_someone_started_join_their_cask_updates() {
+    let polkit = Authorization::Polkit;
+    assert!(joins_cask_updates(&Job::UpgradeAll(vec![], None), polkit));
+    // Automatic updates have no dialog to share, nor has sudo mode.
+    assert!(!joins_cask_updates(
+        &Job::AutoUpgrade(vec![], false),
+        polkit
+    ));
+    assert!(!joins_cask_updates(
+        &Job::UpgradeAll(vec![], None),
+        Authorization::SudoNonInteractive
+    ));
+}
 /// A standalone tool whose updates fail while `broken`.
 struct BrokenTool {
     broken: bool,

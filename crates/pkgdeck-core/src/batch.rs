@@ -341,6 +341,52 @@ fn joining(operation: &Operation) -> Option<&PackageId> {
     }
 }
 
+/// An update of a Homebrew cask. They need joining for a password's sake, not
+/// for a transaction: sudo remembers a password per parent process when there's
+/// no terminal, and every `brew` also forgets it as it starts, so only steps
+/// of the same `brew` share it.
+fn cask_update(operation: &Operation) -> bool {
+    matches!(operation, Operation::Upgrade(id) if id.backend == "homebrew-cask")
+}
+
+/// The positions of `operations` with every cask update next to the first
+/// one, and everything else in its place.
+pub fn cask_updates_together(operations: &[Operation]) -> Vec<usize> {
+    let is_cask = |index: &usize| cask_update(&operations[*index]);
+    let first = (0..operations.len()).find(is_cask);
+    let before = |index: &usize| first.is_none_or(|first| *index < first);
+    let mut order: Vec<usize> = (0..operations.len()).filter(before).collect();
+    order.extend((0..operations.len()).filter(is_cask));
+    order.extend((0..operations.len()).filter(|index| !before(index) && !is_cask(index)));
+    order
+}
+
+/// `lanes` with cask updates next to each other as one run.
+pub fn join_cask_updates(
+    operations: &[Operation],
+    lanes: Vec<Vec<std::ops::Range<usize>>>,
+) -> Vec<Vec<std::ops::Range<usize>>> {
+    lanes
+        .into_iter()
+        .map(|runs| {
+            let mut joined: Vec<std::ops::Range<usize>> = vec![];
+            for run in runs {
+                match joined.last_mut() {
+                    Some(last)
+                        if last.end == run.start
+                            && cask_update(&operations[last.start])
+                            && cask_update(&operations[run.start]) =>
+                    {
+                        last.end = run.end;
+                    }
+                    _ => joined.push(run),
+                }
+            }
+            joined
+        })
+        .collect()
+}
+
 /// The commands for a run [`group_end`] found, all for its first change.
 fn group_commands(group: &[Operation]) -> Result<Vec<ProtectedCommand>, ExecutionError> {
     let ids = group.iter().filter_map(joining);
@@ -3327,6 +3373,52 @@ done"#,
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn cask_updates_move_next_to_the_first_and_join_as_one_run() {
+        let update = |backend: &str, name: &str| {
+            Operation::Upgrade(PackageId {
+                backend: backend.into(),
+                name: name.into(),
+                architecture: "fixture".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            })
+        };
+        let (cask, formula, other) = ("homebrew-cask", "homebrew", "flatpak");
+        let operations = [
+            update(other, "a"),
+            update(cask, "b"),
+            update(formula, "c"),
+            update(cask, "d"),
+            update(other, "e"),
+            update(cask, "f"),
+        ];
+        assert_eq!(cask_updates_together(&operations), [0, 1, 3, 5, 2, 4]);
+        assert_eq!(cask_updates_together(&operations[..1]), [0]);
+        assert!(cask_updates_together(&[]).is_empty());
+        let together = [1, 3, 5, 0, 2, 4].map(|at| operations[at].clone());
+        assert_eq!(
+            join_cask_updates(&together, lanes(&together)),
+            [vec![0..3, 4..5], vec![3..4, 5..6]]
+        );
+        // A cask's install or removal stays apart: only updates report each.
+        let install = Operation::Install(PackageId {
+            backend: cask.into(),
+            name: "g".into(),
+            architecture: "fixture".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        });
+        let mixed = [update(cask, "b"), install, update(cask, "d")];
+        assert_eq!(cask_updates_together(&mixed), [0, 2, 1]);
+        assert_eq!(
+            join_cask_updates(&mixed, lanes(&mixed)),
+            [vec![0..1, 1..2, 2..3]]
+        );
+    }
+
     #[test]
     fn a_found_runner_starts_and_a_missing_one_refuses_unattended_batches() {
         let refresh = [Operation::Refresh {
