@@ -1,6 +1,6 @@
 #!/bin/sh
-# One brew call owns this private directory. Cancel refuses its later sudo
-# steps, while Homebrew can carry on with casks that need no administrator.
+# One update owns this private directory, across all its brew calls. Cancel
+# refuses its later sudo steps, while casks that need no administrator go on.
 cancelled=${HOMEBREW_PKGDECK_ASKPASS_DIR:+$HOMEBREW_PKGDECK_ASKPASS_DIR/cancelled}
 [ -z "$cancelled" ] || [ ! -e "$cancelled" ] || exit 1
 
