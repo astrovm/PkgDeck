@@ -6905,7 +6905,10 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
     assert_eq!(available(&controller), (Some(1), Some(false)));
     assert!(controller.rust().auto_run_updates.is_empty());
 
-    // A run nothing is known about changes nothing.
+    // Refreshing a source's metadata updates nothing, even when it finishes.
+    let mut waiting = synthetic_package("waiting", "waiting");
+    waiting.id.backend = "codex".into();
+    controller.as_mut().rust_mut().auto_run_updates = vec![waiting.id];
     controller
         .as_mut()
         .set_background_state(encoded(json!({"available": 3, "notify": true})));
@@ -6915,7 +6918,12 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
         }],
         &Batch {
             noun: "updates",
-            steps: vec![],
+            steps: vec![Ended {
+                title: String::new(),
+                outcome: Outcome::Finished,
+                said: Said::Completed,
+                kept: None,
+            }],
             note: None,
         },
     );
