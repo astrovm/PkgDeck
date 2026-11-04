@@ -1,4 +1,5 @@
 use super::appimage_contents::{self, Contents, Icon};
+use super::appimage_electron::{self, Feed};
 use super::appimage_github;
 use super::desktop_exec;
 use crate::{
@@ -22,6 +23,10 @@ use std::{
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Shown when an AppImage names no version.
 const UNKNOWN_VERSION: &str = "local";
+/// What's remembered of each AppImage. The name changes when there's more to
+/// read from inside them, so files already seen are read again.
+const CONTENTS_FILE: &str = "appimage-contents-2.json";
+const OLD_CONTENTS_FILE: &str = "appimage-contents.json";
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
@@ -265,8 +270,17 @@ impl AppImage {
         limit: u64,
         cancel: &Cancellation,
     ) -> Result<String, EngineError> {
+        Ok(hex::encode(Self::hash_bounded::<Sha256>(
+            path, limit, cancel,
+        )?))
+    }
+    fn hash_bounded<D: Digest>(
+        path: &Path,
+        limit: u64,
+        cancel: &Cancellation,
+    ) -> Result<Vec<u8>, EngineError> {
         let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
-        let mut hash = Sha256::new();
+        let mut hash = D::new();
         let mut buffer = [0_u8; 64 * 1024];
         let mut total = 0_u64;
         loop {
@@ -285,7 +299,7 @@ impl AppImage {
             }
             hash.update(&buffer[..count]);
         }
-        Ok(hex::encode(hash.finalize()))
+        Ok(hash.finalize().to_vec())
     }
     /// Hashes `path` and requires the digest the user reviewed.
     fn verify_digest(
@@ -498,7 +512,7 @@ impl AppImage {
     /// Where what AppImages say about themselves is remembered, next to the
     /// icons read out of them.
     fn contents_file(&self) -> PathBuf {
-        self.root.with_file_name("appimage-contents.json")
+        self.root.with_file_name(CONTENTS_FILE)
     }
     fn remembered_contents(&self) -> HashMap<String, (ContentsKey, Contents)> {
         fs::read(self.contents_file())
@@ -508,6 +522,7 @@ impl AppImage {
     }
     /// Remember `contents` for `path`, dropping AppImages that are gone.
     fn remember_contents(&self, path: &Path, key: ContentsKey, contents: &Contents) {
+        let _ = fs::remove_file(self.root.with_file_name(OLD_CONTENTS_FILE));
         let mut all = self.remembered_contents();
         all.retain(|known, _| Path::new(known).is_file());
         all.insert(path.display().to_string(), (key, contents.clone()));
@@ -710,7 +725,10 @@ impl AppImage {
             summary: contents.comment.clone().unwrap_or_default(),
             installed_version: Some(version.clone()),
             candidate_version: Some(version),
-            update: if Self::has_update_metadata(&path)? || self.github_source(name).is_some() {
+            update: if Self::has_update_metadata(&path)?
+                || self.github_source(name).is_some()
+                || contents.update_feed.is_some()
+            {
                 UpdateAvailability::Unknown
             } else {
                 UpdateAvailability::Current
@@ -846,7 +864,9 @@ impl AppImage {
                             .unwrap_or_else(|| Self::shown_path(&canonical)),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
-                        update: if Self::has_update_metadata(&canonical).ok()? {
+                        update: if Self::has_update_metadata(&canonical).ok()?
+                            || inside.update_feed.is_some()
+                        {
                             UpdateAvailability::Unknown
                         } else {
                             UpdateAvailability::Current
@@ -1273,7 +1293,8 @@ impl AppImage {
         let (_, file, managed) = self.entry_of(id)?;
         Ok(UpdateSource {
             github: managed.then(|| self.github_source(&id.name)).flatten(),
-            builtin: Self::has_update_metadata(&file).unwrap_or(false),
+            builtin: Self::has_update_metadata(&file).unwrap_or(false)
+                || self.update_feed(&file).is_some(),
             editable: managed,
         })
     }
@@ -1416,15 +1437,7 @@ impl AppImage {
         let theirs = appimage_github::plain_version(&asset.tag);
         let offered = Some(theirs.to_owned());
         if let Some(ours) = self.contents(path).version.clone() {
-            let ours = appimage_github::plain_version(&ours);
-            let newer = match (
-                appimage_github::ordered(theirs),
-                appimage_github::ordered(ours),
-            ) {
-                (Some(theirs), Some(ours)) => theirs > ours,
-                _ => theirs != ours,
-            };
-            let update = if newer {
+            let update = if appimage_github::newer(theirs, &ours) {
                 UpdateAvailability::Available
             } else {
                 UpdateAvailability::Current
@@ -1455,10 +1468,37 @@ impl AppImage {
         let asset = appimage_github::newest(&releases, architecture).ok_or_else(|| {
             Self::invalid(format!("{repository} has no AppImage for this computer"))
         })?;
-        if asset.size > MAX_IMPORT_BYTES {
+        self.replace_with_download(
+            target,
+            &asset.url,
+            &asset.name,
+            asset.size,
+            architecture,
+            cancel,
+            |file| match &asset.sha256 {
+                Some(sha256) => Self::verify_digest(file, sha256, cancel),
+                None => Ok(()),
+            },
+        )
+    }
+    /// Downloads `url` beside `target`, so the last step is a rename even when
+    /// `target` is outside PkgDeck's folder, and replaces `target` if `verify`
+    /// accepts the file and it's a Type 2 AppImage for the same computer.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_with_download(
+        &self,
+        target: &Path,
+        url: &str,
+        name: &str,
+        size: u64,
+        architecture: &str,
+        cancel: &Cancellation,
+        verify: impl FnOnce(&Path) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        if size > MAX_IMPORT_BYTES {
             return Err(Self::invalid("its newest AppImage is larger than 2 GiB"));
         }
-        let temporary = self.root.join(format!(
+        let temporary = target.with_file_name(format!(
             ".pkgdeck-update-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1485,7 +1525,7 @@ impl AppImage {
                 .arg(MAX_IMPORT_BYTES.to_string())
                 .args(["--connect-timeout", "5", "--max-time", "1800", "--output"])
                 .arg(&temporary)
-                .arg(&asset.url);
+                .arg(url);
             let result = process::run(
                 command,
                 Limits {
@@ -1496,11 +1536,9 @@ impl AppImage {
                 true,
             )?;
             if result.code != Some(0) {
-                return Err(Self::invalid(format!("downloading {} failed", asset.name)));
+                return Err(Self::invalid(format!("downloading {name} failed")));
             }
-            if let Some(sha256) = &asset.sha256 {
-                Self::verify_digest(&temporary, sha256, cancel)?;
-            }
+            verify(&temporary)?;
             if Self::type2(&temporary)? != architecture {
                 return Err(Self::invalid(
                     "the new AppImage is for another kind of computer",
@@ -1512,6 +1550,103 @@ impl AppImage {
         })();
         let _ = fs::remove_file(&temporary);
         result
+    }
+    /// Where the Electron app at `path` lists its updates. AppImage's own
+    /// update address wins when it has one.
+    fn update_feed(&self, path: &Path) -> Option<Feed> {
+        if Self::has_update_metadata(path).unwrap_or(false) {
+            return None;
+        }
+        self.contents(path).update_feed.clone()
+    }
+    /// The newest release in an app's feed. Links are read as they are:
+    /// GitHub serves these files without counting them against a limit.
+    fn feed_release(
+        &self,
+        feed: &Feed,
+        architecture: &str,
+        cancel: &Cancellation,
+    ) -> Result<appimage_electron::Release, EngineError> {
+        let mut command = std::process::Command::new(self.curl()?);
+        command
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--max-filesize",
+                "1048576",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "20",
+            ])
+            .arg(feed.url(architecture));
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(25),
+                output_bytes: 1024 * 1024,
+            },
+            cancel,
+            false,
+        )?;
+        if result.code != Some(0) {
+            return Err(ExecutionError::Failed(result).into());
+        }
+        feed.release(&String::from_utf8_lossy(&result.stdout))
+            .ok_or_else(|| Self::invalid("the app's list of updates couldn't be read"))
+    }
+    /// Whether the feed offers a newer release than the file at `path`, and
+    /// its version. A file that names no version can't be compared.
+    fn feed_check(
+        &self,
+        path: &Path,
+        feed: &Feed,
+        architecture: &str,
+        cancel: &Cancellation,
+    ) -> Result<(UpdateAvailability, String), EngineError> {
+        let release = self.feed_release(feed, architecture, cancel)?;
+        let update = match &self.contents(path).version {
+            Some(ours) if appimage_github::newer(&release.version, ours) => {
+                UpdateAvailability::Available
+            }
+            Some(_) => UpdateAvailability::Current,
+            None => UpdateAvailability::Unknown,
+        };
+        Ok((update, release.version))
+    }
+    fn feed_update(
+        &self,
+        target: &Path,
+        feed: &Feed,
+        architecture: &str,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let release = self.feed_release(feed, architecture, cancel)?;
+        self.replace_with_download(
+            target,
+            &release.url,
+            &release.name,
+            release.size,
+            architecture,
+            cancel,
+            |file| {
+                use base64::Engine;
+                let digest = Self::hash_bounded::<sha2::Sha512>(file, MAX_IMPORT_BYTES, cancel)?;
+                if base64::engine::general_purpose::STANDARD.encode(digest) == release.sha512 {
+                    Ok(())
+                } else {
+                    Err(Self::invalid(
+                        "the download doesn't match the checksum its app published",
+                    ))
+                }
+            },
+        )
     }
     fn updater(&self) -> Result<PathBuf, EngineError> {
         #[cfg(test)]
@@ -1576,6 +1711,9 @@ impl AppImage {
                 .map(|(_, _)| PathBuf::from(&id.name))
                 .ok_or(EngineError::NotFound)?
         };
+        if let Some(feed) = self.update_feed(&target) {
+            return self.feed_update(&target, &feed, &id.architecture, cancel);
+        }
         let mut command = std::process::Command::new(self.updater()?);
         command.args([
             "--appimage-extract-and-run",
@@ -1701,10 +1839,24 @@ impl Backend for AppImage {
                         }
                         update
                     }
-                    // A failed check leaves it unknown too; only cancelling stops the list.
-                    None => match self.check_update(&path, cancel) {
-                        Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
-                        result => result.unwrap_or(UpdateAvailability::Unknown),
+                    None => match self.update_feed(&path) {
+                        Some(feed) => {
+                            match self.feed_check(&path, &feed, &package.id.architecture, cancel) {
+                                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                                Ok((update, offered)) => {
+                                    if update == UpdateAvailability::Available {
+                                        package.candidate_version = Some(offered);
+                                    }
+                                    update
+                                }
+                                Err(_) => UpdateAvailability::Unknown,
+                            }
+                        }
+                        // A failed check leaves it unknown too; only cancelling stops the list.
+                        None => match self.check_update(&path, cancel) {
+                            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                            result => result.unwrap_or(UpdateAvailability::Unknown),
+                        },
                     },
                 };
             }
@@ -2052,7 +2204,7 @@ mod tests {
         let read = backend.contents(&path);
         assert_eq!(read.name.as_deref(), Some("Demo App"));
         assert!(read.icon.is_some());
-        let file = fs::read_to_string(root.with_file_name("appimage-contents.json")).unwrap();
+        let file = fs::read_to_string(root.with_file_name(CONTENTS_FILE)).unwrap();
         assert!(file.contains("Demo App"));
         assert!(!file.contains("demo icon"));
         assert!(backend.contents(&path).icon.is_none());
@@ -2081,7 +2233,7 @@ mod tests {
         assert!(!kept.contains_key(&other.display().to_string()));
         assert!(kept.contains_key(&path.display().to_string()));
         // A damaged file is the same as none.
-        fs::write(root.with_file_name("appimage-contents.json"), b"{").unwrap();
+        fs::write(root.with_file_name(CONTENTS_FILE), b"{").unwrap();
         assert!(backend.remembered_contents().is_empty());
         let _ = fs::remove_dir_all(&base);
     }
@@ -2925,6 +3077,7 @@ case "$url" in
     if [ -n "$known" ] && [ "$known" = "$(cat "$dir/etag")" ]; then status=304; : > "$out"; else cat "$dir/releases.json" > "$out"; fi
     printf 'HTTP/2 %s\r\nETag: %s\r\n\r\n' "$status" "$(cat "$dir/etag")" > "$headers"
     printf '%s' "$status" ;;
+  *.yml) [ -f "$dir/feed" ] || exit 22; cat "$dir/feed" ;;
   *) [ -f "$dir/download" ] || exit 22; cat "$dir/download" > "$out" ;;
 esac
 "#,
@@ -2947,6 +3100,222 @@ esac
             "digest": sha256.map(|sha| format!("sha256:{sha}")),
         }]}])
         .to_string()
+    }
+
+    /// An Electron app outside PkgDeck's folder, the way Cua's installer
+    /// leaves Cua Spaces: version with a build number, no update address.
+    #[cfg(target_os = "linux")]
+    fn electron_image(path: &Path, version: &str, config: &str) {
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName=Electron Demo\nIcon=demo\nExec=AppRun %U\nX-AppImage-Version={version}\n"
+        );
+        appimage_contents::fixture::squash(
+            path,
+            backhand::compression::Compressor::Gzip,
+            &[
+                ("demo.desktop", entry.as_bytes()),
+                ("demo.png", DEMO_PNG),
+                ("resources/app-update.yml", config.as_bytes()),
+            ],
+            &[],
+            &["resources"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn feed_list(version: &str, sha512: &str) -> String {
+        format!(
+            "version: {version}\nfiles:\n  - url: https://example.invalid/Demo.AppImage\n    sha512: {sha512}\n    size: 1000\npath: https://example.invalid/Demo.AppImage\nsha512: {sha512}\n"
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn electron_appimages_check_and_update_from_their_own_feed() {
+        use base64::Engine;
+        const FEED: &str =
+            "provider: generic\nurl: https://example.invalid/demo\nchannel: latest\n";
+        let base = test_base("electron");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let bin = base.join("home-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let image = bin.join("demo-app");
+        electron_image(&image, "2.0.0.130", FEED);
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            applications.join("demo.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Electron Demo\nExec=\"{}\" %U\n",
+                image.display()
+            ),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications, uid);
+        let server = base.join("server");
+        fs::create_dir_all(&server).unwrap();
+        backend.curl = Some(fake_curl(&server));
+        let cancel = Cancellation::default();
+        let id = backend.external_packages().unwrap().remove(0).id;
+
+        // Its page says it has a way to update.
+        assert_eq!(
+            backend.update_source(&id).unwrap(),
+            UpdateSource {
+                github: None,
+                builtin: true,
+                editable: false
+            }
+        );
+        // No answer is never "up to date".
+        let listed = backend.installed(&cancel).unwrap().remove(0);
+        assert_eq!(listed.update, UpdateAvailability::Unknown);
+        fs::write(server.join("feed"), "not a list").unwrap();
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Unknown
+        );
+        // The build number isn't a newer release.
+        fs::write(server.join("feed"), feed_list("2.0.0", "sum")).unwrap();
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Current
+        );
+        fs::write(server.join("feed"), feed_list("1.9.0", "sum")).unwrap();
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Current
+        );
+        let new = server.join("new.AppImage");
+        electron_image(&new, "2.1.0.7", FEED);
+        fs::copy(&new, server.join("download")).unwrap();
+        let sha512 = base64::engine::general_purpose::STANDARD
+            .encode(AppImage::hash_bounded::<sha2::Sha512>(&new, u64::MAX, &cancel).unwrap());
+        fs::write(server.join("feed"), feed_list("2.1.0", &sha512)).unwrap();
+        let offered = backend.installed(&cancel).unwrap().remove(0);
+        assert_eq!(offered.update, UpdateAvailability::Available);
+        assert_eq!(offered.installed_version.as_deref(), Some("2.0.0.130"));
+        assert_eq!(offered.candidate_version.as_deref(), Some("2.1.0"));
+        assert!(fs::read_to_string(server.join("calls"))
+            .unwrap()
+            .contains("https://example.invalid/demo/latest-linux.yml"));
+
+        // A download that doesn't match its checksum changes nothing.
+        let before = fs::read(&image).unwrap();
+        fs::write(server.join("feed"), feed_list("2.1.0", "d3Jvbmc=")).unwrap();
+        let refused = backend
+            .execute(&Operation::Upgrade(id.clone()), &cancel, &mut ignore)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("checksum"), "{refused}");
+        assert_eq!(fs::read(&image).unwrap(), before);
+        // Nor does one that isn't an AppImage for this computer.
+        fs::write(server.join("feed"), feed_list("2.1.0", &sha512)).unwrap();
+        let junk = server.join("junk");
+        fs::write(&junk, b"not an AppImage").unwrap();
+        fs::copy(&junk, server.join("download")).unwrap();
+        let junk_sum = base64::engine::general_purpose::STANDARD
+            .encode(AppImage::hash_bounded::<sha2::Sha512>(&junk, u64::MAX, &cancel).unwrap());
+        fs::write(server.join("feed"), feed_list("2.1.0", &junk_sum)).unwrap();
+        assert!(backend
+            .execute(&Operation::Upgrade(id.clone()), &cancel, &mut ignore)
+            .is_err());
+        assert_eq!(fs::read(&image).unwrap(), before);
+
+        // The real one replaces the file where it is, and nothing is left behind.
+        fs::copy(&new, server.join("download")).unwrap();
+        fs::write(server.join("feed"), feed_list("2.1.0", &sha512)).unwrap();
+        backend
+            .execute(&Operation::Upgrade(id), &cancel, &mut ignore)
+            .unwrap();
+        assert_eq!(fs::read(&image).unwrap(), fs::read(&new).unwrap());
+        assert_eq!(
+            fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
+        let updated = backend.installed(&cancel).unwrap().remove(0);
+        assert_eq!(updated.installed_version.as_deref(), Some("2.1.0.7"));
+        assert_eq!(updated.update, UpdateAvailability::Current);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn electron_appimages_without_a_version_or_time_stay_unknown() {
+        let base = test_base("electron-unknown");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let image = base.join("demo-app");
+        electron_image(
+            &image,
+            "",
+            "provider: generic\nurl: https://example.invalid/demo\n",
+        );
+        fs::write(
+            applications.join("demo.desktop"),
+            format!("[Desktop Entry]\nName=Demo\nExec=\"{}\"\n", image.display()),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications, uid);
+        let server = base.join("server");
+        fs::create_dir_all(&server).unwrap();
+        backend.curl = Some(fake_curl(&server));
+        // A file that names no version can't be compared with the list.
+        fs::write(server.join("feed"), feed_list("2.1.0", "sum")).unwrap();
+        let listed = backend.installed(&Cancellation::default()).unwrap();
+        assert_eq!(listed[0].update, UpdateAvailability::Unknown);
+        // Cancelling while the list is read stops the whole answer.
+        let slow = server.join("slow-curl");
+        fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
+        backend.curl = Some(slow);
+        let interrupted = Cancellation::default();
+        let signal = interrupted.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal.cancel();
+        });
+        assert!(matches!(
+            backend.installed(&interrupted),
+            Err(EngineError::Cancelled)
+        ));
+        thread.join().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn what_was_remembered_before_feeds_is_read_again() {
+        let base = test_base("contents-old");
+        let root = base.join("pkgdeck/appimages");
+        fs::create_dir_all(&root).unwrap();
+        let image = base.join("demo.AppImage");
+        electron_image(
+            &image,
+            "2.0.0",
+            "provider: generic\nurl: https://example.invalid/demo\n",
+        );
+        let backend = AppImage::new(root.clone(), base.join("applications"), 0);
+        // An older PkgDeck remembered this very file, without its feed.
+        let old = root.with_file_name(OLD_CONTENTS_FILE);
+        let metadata = fs::metadata(&image).unwrap();
+        fs::write(
+            &old,
+            serde_json::json!({
+                image.display().to_string(): [
+                    [metadata.len(), metadata.mtime(), metadata.mtime_nsec()],
+                    {"name": "Old", "version": "2.0.0"},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(backend.contents(&image).update_feed.is_some());
+        assert!(!old.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

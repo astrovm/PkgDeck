@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "macos-updates", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry", "dev-caches", "projects", "steam", "system-files"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "macos-updates", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry", "cua", "cua-driver", "dev-caches", "projects", "steam", "system-files"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -329,6 +329,8 @@ enum Lookup {
 struct Selection {
     result: Result<PackageId, EngineError>,
     offers: Vec<String>,
+    /// Its source checked and found nothing newer.
+    current: bool,
 }
 fn select(
     engine: &mut Engine,
@@ -368,7 +370,17 @@ fn select(
     } else {
         vec![]
     };
-    Selection { result, offers }
+    let current = result.as_ref().is_ok_and(|id| {
+        report
+            .packages
+            .iter()
+            .any(|package| package.id == *id && package.update == UpdateAvailability::Current)
+    });
+    Selection {
+        result,
+        offers,
+        current,
+    }
 }
 /// "npm, pipx" → "--from npm or --from pipx".
 fn from_flags(sources: &[String]) -> String {
@@ -894,6 +906,9 @@ fn dispatch_command(
                 };
                 for name in names {
                     let selection = select(engine, args, name, lookup, cancel);
+                    // As with upgrading everything, what's up to date stays
+                    // out of the plan, rather than counting as a change made.
+                    let current = selection.current && lookup == Lookup::Installed;
                     let id = match selection.result {
                         Ok(id) => id,
                         Err(error) => {
@@ -910,6 +925,9 @@ fn dispatch_command(
                         .find(|failure| failure.backend == id.backend)
                     {
                         return Err(failure.error.clone());
+                    }
+                    if current {
+                        continue;
                     }
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),
@@ -2737,6 +2755,29 @@ mod tests {
         assert_eq!(code, 0, "{data}");
         assert_eq!(data["operations"].as_array().unwrap().len(), 2);
         assert_eq!((count(&scans), count(&brews)), (1, 1));
+    }
+    #[test]
+    fn upgrading_a_named_package_that_is_up_to_date_changes_nothing() {
+        let mut engine = Engine::default();
+        engine
+            .register(Indexed::new("homebrew", true, false))
+            .unwrap();
+        let upgrade = ["upgrade", "indexed", "--from", "homebrew"];
+        let (data, code) = call(&mut engine, &upgrade, true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["operations"], json!([]));
+        // Once there's something newer, the same command updates it.
+        call(&mut engine, &["refresh"], false);
+        let (data, code) = call(&mut engine, &upgrade, true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["operations"].as_array().unwrap().len(), 1, "{data}");
+        // A name nothing has still isn't found.
+        let (_, code) = call(
+            &mut engine,
+            &["upgrade", "missing", "--from", "homebrew"],
+            true,
+        );
+        assert_ne!(code, 0);
     }
     #[test]
     fn both_homebrew_sources_share_one_brew_update() {

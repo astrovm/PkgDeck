@@ -5,6 +5,7 @@ mod android;
 mod app_data;
 mod appimage;
 mod appimage_contents;
+mod appimage_electron;
 mod appimage_github;
 mod apt;
 mod aur;
@@ -205,6 +206,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "solana",
     "anchor",
     "foundry",
+    "cua",
+    "cua-driver",
     "dev-caches",
     "projects",
     "steam",
@@ -380,6 +383,8 @@ pub fn display_name(id: &str) -> &str {
         "solana" => "Solana CLI (Agave)",
         "anchor" => "Anchor (AVM)",
         "foundry" => "Foundry",
+        "cua" => "Cua",
+        "cua-driver" => "Cua Driver",
         "dev-caches" => "Caches",
         "projects" => "Old projects",
         "steam" => "Steam",

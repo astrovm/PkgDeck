@@ -877,6 +877,9 @@ pub struct BackgroundState {
     pub waiting: Option<String>,
     /// The sources whose updates wait for builds, when `waiting` is "build".
     pub waiting_for: Vec<String>,
+    /// Whether Cua Driver's update waits for it to go idle. The other
+    /// updates may wait for something else as well.
+    pub driver_in_use: bool,
     /// When automatic cleaning last ran, and what it did.
     pub cleaned_at: Option<u64>,
     pub cleaned: Option<AutoCleaned>,
@@ -917,19 +920,28 @@ fn tasks(count: u64) -> &'static str {
 impl BackgroundState {
     /// What automatic updates wait for, as the Settings page says it.
     pub fn waiting_text(&self) -> Option<String> {
-        Some(match self.waiting.as_deref()? {
-            "battery" => "Updates wait for the charger".into(),
-            "metered" => "Updates wait for an unmetered connection".into(),
-            "build" => match self.waiting_for.as_slice() {
-                [] => "Updates wait for builds to finish".into(),
-                [one] => format!("{one} updates wait for builds to finish"),
-                [rest @ .., last] => format!(
-                    "{} and {last} updates wait for builds to finish",
-                    rest.join(", ")
-                ),
-            },
-            _ => return None,
-        })
+        let reason = self.waiting.as_deref().and_then(|waiting| {
+            Some(match waiting {
+                "battery" => "Updates wait for the charger".to_owned(),
+                "metered" => "Updates wait for an unmetered connection".to_owned(),
+                "build" => match self.waiting_for.as_slice() {
+                    [] => "Updates wait for builds to finish".to_owned(),
+                    [one] => format!("{one} updates wait for builds to finish"),
+                    [rest @ .., last] => format!(
+                        "{} and {last} updates wait for builds to finish",
+                        rest.join(", ")
+                    ),
+                },
+                _ => return None,
+            })
+        });
+        let driver = self
+            .driver_in_use
+            .then(|| "Cua Driver updates wait until it's idle".to_owned());
+        match (reason, driver) {
+            (Some(reason), Some(driver)) => Some(format!("{reason}. {driver}")),
+            (reason, driver) => reason.or(driver),
+        }
     }
 }
 

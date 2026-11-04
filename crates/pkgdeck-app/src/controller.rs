@@ -4,7 +4,7 @@ use crate::qt::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::{app_data_task, is_data_key, AppImage};
 use pkgdeck_core::background::{self, Schedule};
-use pkgdeck_core::hold::{waits_for_builds, Hold, Waits};
+use pkgdeck_core::hold::{waits_for_builds, waits_while_used, DriverIdle, DriverWork, Hold, Waits};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{
@@ -1549,10 +1549,16 @@ struct Natives {
     warm_catalog: bool,
     /// Why automatic updates should wait right now, if they should.
     hold: fn(&pkgdeck_core::host::Host, Waits) -> Option<Hold>,
+    /// What the running Cua Driver processes have done so far.
+    driver_work: fn(&pkgdeck_core::host::Host) -> DriverWork,
 }
 /// Never on battery, metered or building.
 fn never_hold(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
     None
+}
+/// Cua Driver isn't running.
+fn no_driver(_: &pkgdeck_core::host::Host) -> DriverWork {
+    DriverWork::default()
 }
 /// Builds an engine for some sources, as `native_engine` does.
 pub type EngineMaker =
@@ -1591,6 +1597,7 @@ fn synthetic_natives(engine: EngineMaker) -> Natives {
         },
         warm_catalog: false,
         hold: never_hold,
+        driver_work: no_driver,
     }
 }
 const NATIVES: Natives = Natives {
@@ -1601,6 +1608,7 @@ const NATIVES: Natives = Natives {
     metadata: crate::metadata::SYSTEM,
     warm_catalog: true,
     hold: pkgdeck_core::hold::current,
+    driver_work: pkgdeck_core::hold::driver_work,
 };
 /// Unit tests never detect the machine's own package managers.
 #[cfg(not(test))]
@@ -1897,6 +1905,13 @@ pub struct Controller {
     auto_held: Option<Hold>,
     /// The sources whose updates a build holds, by name.
     auto_held_sources: Vec<String>,
+    /// The updates the queued automatic run covers, to take the ones it
+    /// finishes off the count without another check.
+    auto_run_updates: Vec<PackageId>,
+    /// Whether Cua Driver's automatic update waits for it to go idle.
+    driver_in_use: bool,
+    /// How long Cua Driver has been idle.
+    driver_idle: DriverIdle,
     /// Let Update all remove packages when APT's plan does.
     allow_removals: bool,
     /// Clean once a day after a background check.
@@ -2048,6 +2063,9 @@ impl Default for Controller {
             waits: Waits::default(),
             auto_held: None,
             auto_held_sources: Vec::new(),
+            auto_run_updates: Vec::new(),
+            driver_in_use: false,
+            driver_idle: DriverIdle::default(),
             allow_removals: true,
             auto_clean: false,
             auto_clean_worktrees: false,
@@ -2876,6 +2894,14 @@ fn target_row(id: &PackageId) -> Value {
     json!({"source": id.backend, "name": id.name, "architecture": id.architecture,
         "remote": id.remote, "scope": id.scope, "reference": id.reference})
 }
+/// Whether `operation` updates `package`.
+fn covers_update(operation: &Operation, package: &PackageId) -> bool {
+    match operation {
+        Operation::Upgrade(id) => id == package,
+        Operation::UpgradeAll { backend } => *backend == package.backend,
+        _ => false,
+    }
+}
 fn package_target(operation: &Operation) -> Option<&PackageId> {
     match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => Some(id),
@@ -3581,12 +3607,16 @@ fn display_name_for(id: &PackageId, names: &Names) -> String {
 /// Like `operation_title`, with the package's display name when known.
 fn operation_title_named(operation: &Operation, names: &Names) -> String {
     match operation {
-        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => format!(
-            "{} {} ({})",
-            action_name(operation),
-            display_name_for(id, names),
-            source_display_name(&id.backend)
-        ),
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+            let action = action_name(operation);
+            let name = display_name_for(id, names);
+            // A tool that is its own source doesn't need naming twice.
+            if name == pkgdeck_core::backends::display_name(&id.backend) {
+                format!("{action} {name}")
+            } else {
+                format!("{action} {name} ({})", source_display_name(&id.backend))
+            }
+        }
         // The row's title already names what it cleans.
         Operation::Clean(id) if names.cleanup.contains_key(id) => {
             format!("Clean {}", names.cleanup[id])
@@ -4387,12 +4417,12 @@ impl ffi::PackageController {
         let busy = self.rust().worker.is_some()
             || !self.rust().confirmed_queue.is_empty()
             || self.rust().pending.is_some();
-        // Updates waiting for power or for a build: check again as soon as
-        // that's over, instead of a whole interval later.
+        // Updates waiting for power, a build or Cua Driver to go idle: check
+        // again as soon as that's over, instead of a whole interval later.
         let retry = self.rust().auto_update
-            && self.rust().auto_held.is_some()
             && !busy
-            && self.as_mut().still_held().is_none();
+            && ((self.rust().auto_held.is_some() && self.as_mut().still_held().is_none())
+                || (self.rust().driver_in_use && self.as_mut().driver_is_idle()));
         if !self.as_mut().rust_mut().background_schedule.ready(
             now,
             enabled,
@@ -4428,6 +4458,7 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().auto_update = enabled;
         if !enabled {
             self.as_mut().rust_mut().auto_held = None;
+            self.as_mut().rust_mut().driver_in_use = false;
         }
     }
     pub fn auto_update(&self) -> bool {
@@ -4455,6 +4486,41 @@ impl ffi::PackageController {
     }
     pub fn waits(&self) -> Waits {
         self.rust().waits
+    }
+    /// Takes the updates an automatic run finished off the count, which
+    /// otherwise stays until the next check, hours away.
+    fn forget_finished_updates(mut self: Pin<&mut Self>, operations: &[Operation], ran: &Batch) {
+        let finished: Vec<&Operation> = operations
+            .iter()
+            .zip(ran.outcomes())
+            .filter(|(_, outcome)| *outcome == Outcome::Finished)
+            .map(|(operation, _)| operation)
+            .collect();
+        let updates = std::mem::take(&mut self.as_mut().rust_mut().auto_run_updates);
+        let done = updates
+            .iter()
+            .filter(|id| finished.iter().any(|o| covers_update(o, id)))
+            .count() as u64;
+        if done == 0 {
+            return;
+        }
+        let mut state: Value =
+            serde_json::from_str(&self.background_state().to_string()).unwrap_or_default();
+        let available = state["available"].as_u64().unwrap_or(0);
+        state["available"] = json!(available.saturating_sub(done));
+        state["notify"] = json!(false);
+        self.as_mut().set_background_state(encoded(state));
+    }
+    /// Whether Cua Driver is idle now, going by what its processes did since
+    /// the last time this asked.
+    fn driver_is_idle(mut self: Pin<&mut Self>) -> bool {
+        let natives = self.rust().natives;
+        let work = (natives.driver_work)(&(natives.host)());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.as_mut().rust_mut().driver_idle.update(work, now)
     }
     /// Why automatic updates wait now, if they still do. A new reason
     /// replaces the old one in the background state.
@@ -4775,6 +4841,7 @@ impl ffi::PackageController {
     fn schedule_auto_update(mut self: Pin<&mut Self>, report: &PackageReport) -> Option<u64> {
         use pkgdeck_core::unattended::{unattended, Unattended};
         self.as_mut().rust_mut().auto_held = None;
+        self.as_mut().rust_mut().driver_in_use = false;
         let rust = self.rust();
         if !rust.auto_update
             || rust.worker.is_some()
@@ -4842,9 +4909,18 @@ impl ffi::PackageController {
             Some(Hold::Build) if held.is_empty() => None,
             hold => hold,
         };
-        if matches!(hold, Some(Hold::Battery | Hold::Metered)) || operations.is_empty() {
+        if matches!(hold, Some(Hold::Battery | Hold::Metered)) {
             return None;
         }
+        // Everything else goes ahead while Cua Driver is working.
+        let driver_in_use = operations
+            .iter()
+            .any(|operation| waits_while_used(operation.backend()))
+            && !self.as_mut().driver_is_idle();
+        self.as_mut().rust_mut().driver_in_use = driver_in_use;
+        let (operations, in_use): (Vec<_>, Vec<_>) = operations
+            .into_iter()
+            .partition(|operation| !(driver_in_use && waits_while_used(operation.backend())));
         let left = report
             .packages
             .iter()
@@ -4853,15 +4929,40 @@ impl ffi::PackageController {
                 !operations
                     .iter()
                     .chain(&held)
+                    .chain(&in_use)
                     .any(|o| o.backend() == p.id.backend)
             })
             .count() as u64;
+        if operations.is_empty() {
+            // An update that's only waiting for Cua Driver to go idle will
+            // run by itself, so it isn't announced as one to do by hand.
+            return driver_in_use.then_some(left);
+        }
         let versions = packages
             .iter()
             .filter(|p| p.id.backend == "homebrew-cask")
             .map(|p| (p.id.clone(), cask_version(p).to_owned()))
             .collect();
         self.as_mut().rust_mut().cask_versions = versions;
+        self.as_mut().rust_mut().auto_run_updates = report
+            .packages
+            .iter()
+            .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+            .filter(|p| operations.iter().any(|o| covers_update(o, &p.id)))
+            .map(|p| p.id.clone())
+            .collect();
+        // No page may have listed these yet, so the check names them.
+        for package in &report.packages {
+            let targeted = operations
+                .iter()
+                .any(|operation| package_target(operation) == Some(&package.id));
+            if targeted && !package.display_name.trim().is_empty() {
+                self.as_mut()
+                    .rust_mut()
+                    .names
+                    .insert(package.id.clone(), package.display_name.clone());
+            }
+        }
         let names = self.rust().names_for(&operations);
         let saved = names.of(&operations);
         self.as_mut().rust_mut().names.extend(names);
@@ -5195,7 +5296,8 @@ impl ffi::PackageController {
             .set_notification_history(saved.as_str().into());
         let waiting = self.rust().auto_held.map(Hold::key);
         let waiting_for = self.rust().held_for_builds().to_vec();
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && left != Some(0), "manual": left, "waiting": waiting, "waiting_for": waiting_for})));
+        let driver_in_use = self.rust().driver_in_use;
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && left != Some(0), "manual": left, "waiting": waiting, "waiting_for": waiting_for, "driver_in_use": driver_in_use})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -7826,6 +7928,7 @@ impl ffi::PackageController {
                         "failed": count(Outcome::Failed) + count(Outcome::Cancelled),
                         "total": operations.len(),
                     })));
+                    self.as_mut().forget_finished_updates(operations, ran);
                 }
             }
             // A source that just refreshed was checked successfully, even

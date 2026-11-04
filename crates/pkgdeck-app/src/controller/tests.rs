@@ -5712,10 +5712,7 @@ fn one_failed_update_is_named_without_its_path() {
         false,
         &names,
     );
-    assert_eq!(
-        install["title"],
-        "Install Anchor (AVM) (Anchor (AVM)) failed"
-    );
+    assert_eq!(install["title"], "Install Anchor (AVM) failed");
 }
 #[test]
 fn a_failure_notice_goes_once_its_updates_are_done() {
@@ -6676,6 +6673,291 @@ fn on_metered(_: &pkgdeck_core::host::Host, waits: Waits) -> Option<Hold> {
 }
 fn building(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
     Some(Hold::Build)
+}
+/// Cua Driver running for an open agent that isn't asking it for anything.
+fn driver_open(_: &pkgdeck_core::host::Host) -> DriverWork {
+    DriverWork(std::collections::BTreeMap::from([(
+        7,
+        "resting".to_owned(),
+    )]))
+}
+#[test]
+fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
+    let package = |name: &str, backend: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = backend.into();
+        package.installed_version = Some("1".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let driver_only = PackageReport {
+        packages: vec![package("cua-driver", "cua-driver")],
+        failures: vec![],
+        successful_sources: vec!["cua-driver".into()],
+    };
+    let state = |controller: &Pin<&mut ffi::PackageController>| -> Value {
+        serde_json::from_str(&controller.background_state().to_string()).unwrap()
+    };
+    let queued = |controller: &Pin<&mut ffi::PackageController>| -> Vec<String> {
+        match controller
+            .rust()
+            .validated_confirmed
+            .as_ref()
+            .map(|entry| &entry.job)
+        {
+            Some(Job::AutoUpgrade(operations, _)) => operations
+                .iter()
+                .map(|operation| operation.backend().to_owned())
+                .collect(),
+            _ => vec![],
+        }
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+
+    // Nothing running: nothing to interrupt.
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert_eq!(queued(&controller), ["cua-driver"]);
+    assert_eq!(state(&controller)["driver_in_use"], false);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // An open agent's server: wait, without announcing it as one to do by
+    // hand, since it runs by itself.
+    controller.as_mut().rust_mut().natives.driver_work = driver_open;
+    let now = epoch_seconds();
+    assert!(controller
+        .as_mut()
+        .rust_mut()
+        .background_schedule
+        .ready(now, true, false, false, false, false));
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert!(queued(&controller).is_empty());
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    assert_eq!(state(&controller)["notify"], false);
+    assert_eq!(state(&controller)["manual"], 0);
+
+    // The other sources don't wait with it, and one left for you still counts.
+    controller
+        .as_mut()
+        .set_manual_sources(vec!["cargo".to_owned()]);
+    controller.as_mut().finish_background_check(PackageReport {
+        packages: vec![
+            package("cua-driver", "cua-driver"),
+            package("codex", "codex"),
+            package("ripgrep", "cargo"),
+        ],
+        failures: vec![],
+        successful_sources: ["cua-driver", "codex", "cargo"].map(str::to_owned).to_vec(),
+    });
+    assert_eq!(queued(&controller), ["codex"]);
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    assert_eq!(state(&controller)["manual"], 1);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // A build doesn't let it through, and both reasons show.
+    controller.as_mut().rust_mut().natives.hold = building;
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert!(queued(&controller).is_empty());
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+
+    // Checking too soon doesn't start the update.
+    controller
+        .as_mut()
+        .check_updates("cua-driver".into(), true, false, false, false);
+    assert!(controller.rust().worker.is_none());
+
+    // Idle for long enough: the next tick checks again right away, and the
+    // update goes ahead.
+    let earlier = now - 300;
+    controller
+        .as_mut()
+        .rust_mut()
+        .driver_idle
+        .update(DriverWork::default(), earlier);
+    controller
+        .as_mut()
+        .rust_mut()
+        .driver_idle
+        .update(driver_open(&pkgdeck_core::host::Host::current()), earlier);
+    controller
+        .as_mut()
+        .check_updates("cua-driver".into(), true, false, false, false);
+    assert!(matches!(
+        controller.rust().worker.as_ref().map(|worker| &worker.job),
+        Some(Job::BackgroundUpdates(sources)) if sources == &["cua-driver"]
+    ));
+    settle(&mut controller);
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert_eq!(queued(&controller), ["cua-driver"]);
+    assert_eq!(state(&controller)["driver_in_use"], false);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // On battery, nothing runs, and that's the only reason given.
+    controller.as_mut().rust_mut().natives.hold = on_battery;
+    controller.as_mut().finish_background_check(driver_only);
+    assert_eq!(state(&controller)["waiting"], "battery");
+    assert_eq!(state(&controller)["driver_in_use"], false);
+
+    // Turning automatic updates off forgets the wait.
+    controller.as_mut().rust_mut().driver_in_use = true;
+    controller.as_mut().set_auto_update(false);
+    assert!(!controller.rust().driver_in_use);
+}
+#[test]
+fn a_tool_that_is_its_own_source_is_named_once() {
+    let upgrade = |name: &str, backend: &str, shown: &str| {
+        let mut package = synthetic_package(name, shown);
+        package.id.backend = backend.into();
+        let mut names = Names::new();
+        names.insert(package.id.clone(), shown.to_owned());
+        operation_title_named(&Operation::Upgrade(package.id), &names)
+    };
+    for (name, backend, shown, title) in [
+        (
+            "/home/me/.local/bin/cua-driver",
+            "cua-driver",
+            "Cua Driver",
+            "Update Cua Driver",
+        ),
+        (
+            "/home/me/.local/bin/codex",
+            "codex",
+            "Codex",
+            "Update Codex",
+        ),
+        (
+            "/home/me/.foundry/bin/forge",
+            "foundry",
+            "forge",
+            "Update forge (Foundry (standalone))",
+        ),
+        ("wget", "apt", "wget", "Update wget (APT)"),
+    ] {
+        assert_eq!(upgrade(name, backend, shown), title);
+    }
+}
+#[test]
+fn a_finished_automatic_run_counts_and_names_what_it_updated() {
+    let package = |path: &str, name: &str, backend: &str| {
+        let mut package = synthetic_package(path, name);
+        package.id.backend = backend.into();
+        package.installed_version = Some("1".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let report = PackageReport {
+        packages: vec![
+            package("/home/me/.local/bin/cua-driver", "Cua Driver", "cua-driver"),
+            package("/home/me/.local/bin/codex", "Codex", "codex"),
+            package("/home/me/.local/bin/cua", "", "cua"),
+            package("/home/me/.local/bin/claude", "Claude Code", "claude"),
+        ],
+        failures: vec![],
+        successful_sources: ["cua-driver", "codex", "cua", "claude"]
+            .map(str::to_owned)
+            .to_vec(),
+    };
+    let available = |controller: &Pin<&mut ffi::PackageController>| {
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        (state["available"].as_u64(), state["notify"].as_bool())
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+    assert!(controller.as_mut().rust_mut().background_schedule.ready(
+        epoch_seconds(),
+        true,
+        false,
+        false,
+        false,
+        false
+    ));
+    controller.as_mut().finish_background_check(report);
+    assert_eq!(available(&controller).0, Some(4));
+    let Some(Confirmed {
+        job: Job::AutoUpgrade(operations, removals),
+        ..
+    }) = controller.as_mut().rust_mut().validated_confirmed.take()
+    else {
+        panic!("no automatic run queued");
+    };
+    // Activity names them the way the list does, even though no page has
+    // listed them, and a package without a name keeps its ID.
+    let names: Vec<_> = controller
+        .rust()
+        .names
+        .of(&operations)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(names, ["Cua Driver", "Codex", "Claude Code"]);
+
+    // What finished comes off the count; what failed stays on it.
+    let outcome = |operation: &Operation| {
+        if operation.backend() == "codex" {
+            Outcome::Failed
+        } else {
+            Outcome::Finished
+        }
+    };
+    let steps = operations
+        .iter()
+        .map(|operation| Ended {
+            title: String::new(),
+            outcome: outcome(operation),
+            said: Said::Completed,
+            kept: None,
+        })
+        .collect();
+    let job = Job::AutoUpgrade(operations, removals);
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        job,
+        vec![Reply::Done(Ok(Payload::Batch(Batch {
+            noun: "updates",
+            steps,
+            note: None,
+        })))],
+    ));
+    controller.as_mut().poll();
+    assert_eq!(available(&controller), (Some(1), Some(false)));
+    assert!(controller.rust().auto_run_updates.is_empty());
+
+    // Refreshing a source's metadata updates nothing, even when it finishes.
+    let mut waiting = synthetic_package("waiting", "waiting");
+    waiting.id.backend = "codex".into();
+    controller.as_mut().rust_mut().auto_run_updates = vec![waiting.id];
+    controller
+        .as_mut()
+        .set_background_state(encoded(json!({"available": 3, "notify": true})));
+    controller.as_mut().forget_finished_updates(
+        &[Operation::Refresh {
+            backend: "codex".into(),
+        }],
+        &Batch {
+            noun: "updates",
+            steps: vec![Ended {
+                title: String::new(),
+                outcome: Outcome::Finished,
+                said: Said::Completed,
+                kept: None,
+            }],
+            note: None,
+        },
+    );
+    assert_eq!(available(&controller), (Some(3), Some(true)));
 }
 #[test]
 fn turned_off_waits_let_updates_run_and_cleaning_ignores_metered() {
@@ -8059,6 +8341,8 @@ fn source_and_scope_names_read_as_people_know_them() {
         ("solana", "Solana CLI (Agave)"),
         ("anchor", "Anchor (AVM)"),
         ("foundry", "Foundry (standalone)"),
+        ("cua", "Cua (standalone)"),
+        ("cua-driver", "Cua Driver (standalone)"),
         ("dev-caches", "Caches"),
         ("projects", "Old projects"),
         ("fixture", "fixture"),
@@ -10159,6 +10443,7 @@ pub(super) const NO_MANAGERS: Natives = Natives {
     metadata: NO_METADATA,
     warm_catalog: false,
     hold: super::never_hold,
+    driver_work: super::no_driver,
 };
 #[test]
 fn sources_are_checked_again_on_request() {
@@ -10211,6 +10496,7 @@ const SYNTHETIC: Natives = Natives {
     metadata: NO_METADATA,
     warm_catalog: false,
     hold: super::never_hold,
+    driver_work: super::no_driver,
 };
 fn synthetic_controller() -> crate::qt::UniquePtr<ffi::PackageController> {
     let mut controller = idle_controller();

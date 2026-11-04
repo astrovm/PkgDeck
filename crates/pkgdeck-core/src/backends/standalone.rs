@@ -25,9 +25,11 @@ pub enum StandaloneTool {
     Solana,
     Anchor,
     Foundry,
+    Cua,
+    CuaDriver,
 }
 impl StandaloneTool {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Codex,
         Self::Claude,
         Self::Grok,
@@ -41,6 +43,8 @@ impl StandaloneTool {
         Self::Solana,
         Self::Anchor,
         Self::Foundry,
+        Self::Cua,
+        Self::CuaDriver,
     ];
     pub fn id(self) -> &'static str {
         match self {
@@ -57,6 +61,8 @@ impl StandaloneTool {
             Self::Solana => "solana",
             Self::Anchor => "anchor",
             Self::Foundry => "foundry",
+            Self::Cua => "cua",
+            Self::CuaDriver => "cua-driver",
         }
     }
     fn name(self) -> &'static str {
@@ -74,6 +80,24 @@ impl StandaloneTool {
             Self::Solana => "Solana CLI (Agave)",
             Self::Anchor => "Anchor (AVM)",
             Self::Foundry => "Foundry",
+            Self::Cua => "Cua",
+            Self::CuaDriver => "Cua Driver",
+        }
+    }
+    /// What the person needs to do once an update is in.
+    fn after_update_note(self) -> &'static str {
+        match self {
+            // Its installer stops the MCP servers of running agents. Claude
+            // Code starts its own again, but not every agent may.
+            Self::CuaDriver => "Restart any agent that lost its Cua Driver tools.",
+            _ => "Restart existing sessions to use it.",
+        }
+    }
+    /// What finishes an update when PkgDeck's own try fails.
+    fn refresh_command(self) -> &'static str {
+        match self {
+            Self::CuaDriver => "cua-driver skills update",
+            _ => "cua connect update",
         }
     }
     /// Text a tool's `--version` output must contain, where it names itself.
@@ -84,6 +108,9 @@ impl StandaloneTool {
             Self::Kiro => Some("kiro-cli"),
             Self::Solana => Some("agave-install"),
             Self::Foundry => Some("forge"),
+            // The space keeps `cua-driver` from answering as `cua`.
+            Self::Cua => Some("cua "),
+            Self::CuaDriver => Some("cua-driver"),
             _ => None,
         }
     }
@@ -116,6 +143,14 @@ trait StandaloneIo: Send {
         version: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError>;
+    /// Brings up to date what a tool's updater leaves alone, like the copies
+    /// of itself it gave other programs. `None` when there's nothing to do.
+    fn after_update(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Option<Completion>, EngineError>;
     fn remove(
         &self,
         tool: StandaloneTool,
@@ -221,6 +256,13 @@ fn github_rate_limit(tool: StandaloneTool, url: &str, error: EngineError) -> Eng
         );
     }
     error
+}
+/// Which release of each Cua product the official installer would install.
+const CUA_MANIFEST: &str =
+    "https://github.com/trycua/cua/releases/download/cua-install-latest/release-artifacts.json";
+/// Cua's installers and programs send usage events unless told not to.
+fn no_telemetry() -> [(&'static str, OsString); 1] {
+    [("DO_NOT_TRACK", "1".into())]
 }
 enum ReleaseLink<'a> {
     Tag(&'a str),
@@ -336,6 +378,30 @@ impl Standalone {
             progress(Progress::Message(String::from_utf8_lossy(&output).into()));
         }
         Ok(deferred)
+    }
+    /// Runs what follows an update. The tool is already updated by then, so
+    /// a failure here only says what's left to do.
+    fn refresh(
+        &self,
+        updated: &Installation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> bool {
+        let refreshed = self
+            .io
+            .after_update(self.tool, updated, cancel)
+            .and_then(|completion| match completion {
+                Some(completion) => self.finish(completion, progress),
+                None => Ok(false),
+            });
+        refreshed.unwrap_or_else(|error| {
+            progress(Progress::Message(format!(
+                "{} is updated, but its skills and MCP settings aren't ({error}). Run `{}` to finish.",
+                self.tool.name(),
+                self.tool.refresh_command(),
+            )));
+            false
+        })
     }
     fn remove(
         &self,
@@ -483,10 +549,12 @@ impl Backend for Standalone {
         {
             return Err(invalid_data(self.tool, "updater completed without installing a newer version; check the tool's update policy"));
         }
+        let deferred = self.refresh(&updated, cancel, progress) || deferred;
         progress(Progress::Message(format!(
-            "{} updated to {}. Restart existing sessions to use it.",
+            "{} updated to {}. {}",
             self.tool.name(),
-            updated.version
+            updated.version,
+            self.tool.after_update_note()
         )));
         Ok(OperationOutcome {
             cancellation_deferred: deferred,
@@ -821,6 +889,18 @@ impl StandaloneIo for NativeStandalone {
                 (root.join("amp"), root)
             }
             StandaloneTool::Droid => (home.join(".local/bin/droid"), home.join(".local/bin")),
+            StandaloneTool::Cua => (home.join(".local/bin/cua"), home.join(".local/bin")),
+            // On macOS the installer links to the app that wraps the binary.
+            StandaloneTool::CuaDriver => {
+                let launcher = home.join(".local/bin/cua-driver");
+                let root = cua_driver_root(
+                    &launcher,
+                    self.host
+                        .filesystem_path(Path::new("/Applications/CuaDriver.app")),
+                    self.cua_driver_home(&home)?.join("packages/releases"),
+                );
+                (launcher, root)
+            }
             StandaloneTool::Solana => return self.locate_solana(&home, cancel),
             StandaloneTool::Anchor => return self.locate_anchor(&home),
             StandaloneTool::Foundry => return self.locate_foundry(&home, cancel),
@@ -867,7 +947,7 @@ impl StandaloneIo for NativeStandalone {
                     }
                 }
             }
-        } else if tool == StandaloneTool::Grok {
+        } else if matches!(tool, StandaloneTool::Grok | StandaloneTool::CuaDriver) {
             channel = "configured channel".into();
         }
         let Some(version) = self.version_at(tool, &launcher, cancel)? else {
@@ -923,6 +1003,51 @@ impl StandaloneIo for NativeStandalone {
                 data["latestVersion"]
                     .as_str()
                     .ok_or_else(|| invalid_data(tool, "missing latestVersion"))?,
+            );
+        }
+        if tool == StandaloneTool::CuaDriver {
+            // Its own check follows the channel it's on, and remembers the
+            // answer for a day: GitHub's API allows an address only 60 checks
+            // an hour, and `trycua/cua` has no latest link for this tool.
+            let output = self.host.read(
+                &installation.launcher,
+                &["check-update".into(), "--json".into()],
+                Limits {
+                    timeout: Duration::from_secs(30),
+                    ..Limits::default()
+                },
+                cancel,
+            )?;
+            let data: Value = serde_json::from_slice(&bytes(tool.id(), output)?)
+                .map_err(|e| invalid_data(tool, e))?;
+            if !data["error"].is_null() {
+                return Err(invalid_data(tool, "its update check failed"));
+            }
+            match data["update_available"].as_bool() {
+                Some(false) => return Ok(installation.version.clone()),
+                Some(true) => {}
+                None => return Err(invalid_data(tool, "missing update availability")),
+            }
+            return version(
+                tool,
+                data["latest_version"]
+                    .as_str()
+                    .ok_or_else(|| invalid_data(tool, "missing latest_version"))?,
+            );
+        }
+        if tool == StandaloneTool::Cua {
+            // Every Cua product releases from `trycua/cua`, so its latest link
+            // names whichever shipped last. The installer's manifest names
+            // each product's release.
+            let text = self
+                .fetch(CUA_MANIFEST, cancel)
+                .map_err(|error| github_rate_limit(tool, CUA_MANIFEST, error))?;
+            let data: Value = serde_json::from_str(&text).map_err(|e| invalid_data(tool, e))?;
+            return version(
+                tool,
+                data["versions"]["cli"]
+                    .as_str()
+                    .ok_or_else(|| invalid_data(tool, "missing CLI version"))?,
             );
         }
         if tool == StandaloneTool::Droid {
@@ -1029,6 +1154,26 @@ impl StandaloneIo for NativeStandalone {
         self.forget(tool);
         result
     }
+    fn after_update(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Option<Completion>, EngineError> {
+        let args: &[&str] = match tool {
+            StandaloneTool::Cua => &["connect", "update"],
+            StandaloneTool::CuaDriver
+                if self
+                    .cua_driver_home(&self.home()?)?
+                    .join("skills/cua-driver")
+                    .is_dir() =>
+            {
+                &["skills", "update"]
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(self.cua_step(&installation.launcher, args, cancel)?))
+    }
     fn remove(
         &self,
         tool: StandaloneTool,
@@ -1071,6 +1216,8 @@ impl NativeStandalone {
         }
         let args: Vec<OsString> = match tool {
             StandaloneTool::Codex => return self.install_codex(installation, candidate, cancel),
+            StandaloneTool::Cua => return self.install_cua(candidate, cancel),
+            StandaloneTool::CuaDriver => return self.install_cua_driver(cancel),
             StandaloneTool::Claude => vec!["update".into()],
             StandaloneTool::Grok => vec![
                 "update".into(),
@@ -1120,10 +1267,18 @@ impl NativeStandalone {
         if current.launcher != installation.launcher {
             return Err(EngineError::NotFound);
         }
+        if tool == StandaloneTool::CuaDriver {
+            return self.uninstall_cua_driver(cancel);
+        }
         let home = self.home()?;
         let removal = self.removal(tool, &home)?;
         let targets = removal.targets(tool, &home)?;
-        let completion = match &self.trash {
+        let disconnected = if tool == StandaloneTool::Cua {
+            self.before_removing_cua(installation, &home, cancel)?
+        } else {
+            true
+        };
+        let mut completion = match &self.trash {
             Some(trash) => {
                 let args: Vec<OsString> = targets.iter().map(Into::into).collect();
                 self.host.standalone_write(trash, &args, &[], cancel)?
@@ -1145,6 +1300,11 @@ impl NativeStandalone {
         // Only folders left empty go; anything else in them stays.
         for folder in &removal.emptied {
             let _ = fs::remove_dir(folder);
+        }
+        if !disconnected {
+            completion.stdout.extend_from_slice(
+                b"Some agents may still list Cua's skills or MCP server. Remove them in each agent's settings.\n",
+            );
         }
         Ok(completion)
     }
@@ -1262,6 +1422,22 @@ impl NativeStandalone {
                 removal.emptied.extend([foundry.join("share"), foundry]);
                 removal
             }
+            // What ships with the CLI. ~/.cua, with your settings, sign-in
+            // and Spaces, stays.
+            StandaloneTool::Cua => removal(
+                bin.clone(),
+                &[
+                    "cua",
+                    "cua-microvm-init",
+                    "cua-spacesd-linux-x86_64",
+                    "cua-spacesd-linux-aarch64",
+                    "cua-vz",
+                    "cua-netgw",
+                ],
+                vec![],
+            ),
+            // `run_remove` hands this one to its own uninstaller.
+            StandaloneTool::CuaDriver => return Err(EngineError::NotFound),
         })
     }
 }
@@ -1337,37 +1513,154 @@ fn managed(path: &Path) -> bool {
 }
 
 impl NativeStandalone {
-    /// Download to private storage, then run the official pinned-version
-    /// installer. No network bytes are piped into a shell.
+    /// Download to private storage, then run an official installer with
+    /// `shell`. No network bytes are piped into a shell.
+    fn run_installer(
+        &self,
+        url: &str,
+        shell: &str,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let script = self.fetch(url, cancel)?;
+        let temporary = InstallerFile::create(script.as_bytes())?;
+        let shell = self
+            .host
+            .resolve(shell)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{shell} not found")))?;
+        let mut arguments = vec![temporary.0.join("install.sh").into_os_string()];
+        arguments.extend_from_slice(args);
+        Ok(self
+            .host
+            .standalone_write(&shell, &arguments, env, cancel)?)
+    }
+    /// The official pinned-version installer.
     fn install_codex(
         &self,
         installation: &Installation,
         candidate: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
-        let script = self.fetch("https://chatgpt.com/codex/install.sh", cancel)?;
-        let temporary = InstallerFile::create(script.as_bytes())?;
-        let sh = self
-            .host
-            .resolve("sh")?
-            .ok_or_else(|| ExecutionError::Disabled("sh not found".into()))?;
         let parent = installation
             .launcher
             .parent()
             .ok_or(EngineError::NotFound)?;
-        Ok(self.host.standalone_write(
-            &sh,
-            &[
-                temporary.0.join("install.sh").into(),
-                "--release".into(),
-                candidate.to_string().into(),
-            ],
+        self.run_installer(
+            "https://chatgpt.com/codex/install.sh",
+            "sh",
+            &["--release".into(), candidate.to_string().into()],
             &[
                 ("CODEX_NON_INTERACTIVE", "1".into()),
                 ("CODEX_INSTALL_DIR", parent.as_os_str().into()),
             ],
             cancel,
-        )?)
+        )
+    }
+}
+
+impl NativeStandalone {
+    fn cua_driver_home(&self, home: &Path) -> Result<PathBuf, EngineError> {
+        self.setting_path("CUA_DRIVER_RS_HOME", home.join(".cua-driver"))
+    }
+    /// A follow-up with its own short limit, so a stuck one can't hold up a
+    /// removal or the end of an update for long.
+    fn cua_step(
+        &self,
+        launcher: &Path,
+        args: &[&str],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let args: Vec<OsString> = args.iter().map(Into::into).collect();
+        self.host.standalone_write_within(
+            launcher,
+            &args,
+            &no_telemetry(),
+            Duration::from_secs(150),
+            cancel,
+        )
+    }
+    /// The CLI only: `--cli-only` leaves the Cua Spaces app alone, and the
+    /// remaining flags keep the installer from asking anything or signing in.
+    fn install_cua(
+        &self,
+        candidate: &Version,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        self.run_installer(
+            "https://cua.ai/install.sh",
+            "sh",
+            &[
+                "--cli-only".into(),
+                "--yes".into(),
+                "--no-onboarding".into(),
+                "--no-modify-path".into(),
+                "--version".into(),
+                candidate.to_string().into(),
+            ],
+            &no_telemetry(),
+            cancel,
+        )
+    }
+    /// `cua-driver update --apply` runs this same installer, which stops every
+    /// running cua-driver, so that command dies (signal 15) before it can say
+    /// how the update went. Run directly, the installer finishes and follows
+    /// the saved stable or nightly channel.
+    fn install_cua_driver(&self, cancel: &Cancellation) -> Result<Completion, EngineError> {
+        self.run_installer(
+            "https://cua.ai/driver/install.sh",
+            "bash",
+            &["--no-modify-path".into()],
+            &no_telemetry(),
+            cancel,
+        )
+    }
+    /// Its daemon, the app on macOS and its links in other agents take care
+    /// that only its uninstaller has.
+    fn uninstall_cua_driver(&self, cancel: &Cancellation) -> Result<Completion, EngineError> {
+        self.run_installer(
+            "https://cua.ai/driver/uninstall.sh",
+            "bash",
+            &[],
+            &no_telemetry(),
+            cancel,
+        )
+    }
+    /// Takes Cua out of the agents it connected, whose settings would
+    /// otherwise point to a missing program, and stops its daemon. Answers
+    /// whether the agents are clean. Neither step can stop the removal, except
+    /// a computer others reach through Cua: turning that off is the user's
+    /// call, and without the CLI its service stops working.
+    fn before_removing_cua(
+        &self,
+        installation: &Installation,
+        home: &Path,
+        cancel: &Cancellation,
+    ) -> Result<bool, EngineError> {
+        let cua_home = self.setting_path("CUA_HOME", home.join(".cua"))?;
+        if cua_home.join("host/config.json").exists() {
+            return Err(invalid_data(
+                StandaloneTool::Cua,
+                "this computer is set up for remote access. Run `cua host remove`, then remove Cua again. Nothing was removed.",
+            ));
+        }
+        let launcher = &installation.launcher;
+        let disconnected = self.cua_step(launcher, &["connect", "remove", "--yes"], cancel);
+        if matches!(disconnected, Err(ExecutionError::Cancelled)) {
+            return Err(EngineError::Cancelled);
+        }
+        let _ = self.cua_step(launcher, &["daemon", "stop"], cancel);
+        Ok(disconnected.is_ok_and(|result| result.code == Some(0)))
+    }
+}
+
+/// Where Cua Driver's binaries live: the app its launcher points into, on
+/// macOS, else its releases folder.
+fn cua_driver_root(launcher: &Path, app: PathBuf, releases: PathBuf) -> PathBuf {
+    if fs::canonicalize(launcher).is_ok_and(|binary| binary.starts_with(&app)) {
+        app
+    } else {
+        releases
     }
 }
 
@@ -1506,7 +1799,7 @@ mod tests {
             // The curl shim is invariant, so install it once before any spawn:
             // rewriting an executable right before executing it trips an
             // ETXTBSY race under parallel test churn (see tests/host.rs).
-            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh) cat \"$HOME/installer\";; *.yml) cat \"$HOME/channel\";; *) cat \"$HOME/release\";; esac\n");
+            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh|*/uninstall.sh) cat \"$HOME/installer\";; *.yml) cat \"$HOME/channel\";; *) cat \"$HOME/release\";; esac\n");
             NativeStandalone {
                 host: Host::new(
                     Runtime::Native,
@@ -1580,6 +1873,11 @@ mod tests {
                     ".foundry/bin/forge",
                     ".foundry/versions/foundry-rs/foundry/v1.0.0/forge",
                 ),
+                StandaloneTool::Cua => (".local/bin/cua", ".local/bin/cua"),
+                StandaloneTool::CuaDriver => (
+                    ".local/bin/cua-driver",
+                    ".cua-driver/packages/releases/1.0.0-test/cua-driver",
+                ),
             };
             let target_path = self.0.join(target);
             fs::create_dir_all(target_path.parent().unwrap()).unwrap();
@@ -1618,6 +1916,8 @@ mod tests {
                 StandaloneTool::Kiro => Some("kiro-cli "),
                 StandaloneTool::Solana => Some("agave-install "),
                 StandaloneTool::Foundry => Some("forge Version: "),
+                StandaloneTool::Cua => Some("cua "),
+                StandaloneTool::CuaDriver => Some("cua-driver "),
                 _ => None,
             } {
                 self.write(
@@ -1660,7 +1960,10 @@ mod tests {
         /// Cancel once the installation is found, as pressing Cancel right
         /// after confirming would.
         cancel_on_locate: bool,
+        /// What the step after an update answers, once.
+        refresh: Arc<Mutex<Option<AfterUpdate>>>,
     }
+    type AfterUpdate = Result<Option<Completion>, EngineError>;
     impl Fixture {
         fn new() -> Self {
             Self {
@@ -1676,6 +1979,7 @@ mod tests {
                 deferred: false,
                 cancel_on_check: false,
                 cancel_on_locate: false,
+                refresh: Arc::default(),
             }
         }
     }
@@ -1718,6 +2022,14 @@ mod tests {
             let mut result = ok("Updated");
             result.cancellation_deferred = self.deferred;
             Ok(result)
+        }
+        fn after_update(
+            &self,
+            _: StandaloneTool,
+            _: &Installation,
+            _: &Cancellation,
+        ) -> AfterUpdate {
+            self.refresh.lock().unwrap().take().unwrap_or(Ok(None))
         }
         fn remove(
             &self,
@@ -2273,6 +2585,8 @@ mod tests {
                 | StandaloneTool::Anchor
                 | StandaloneTool::Foundry
                 | StandaloneTool::Copilot => "https://github.com/owner/repo/releases/tag/v2.0.0",
+                // The app's version is newer, and isn't this CLI's.
+                StandaloneTool::Cua => r#"{"schema":1,"versions":{"cli":"2.0.0","app":"9.0.0"}}"#,
                 _ => r#"{"tag_name":"rust-v2.0.0"}"#,
             });
             assert_eq!(
@@ -2280,7 +2594,7 @@ mod tests {
                 Version::new(2, 0, 0)
             );
             assert!(!installation.launcher.with_extension("args").exists());
-            if tool != StandaloneTool::Grok {
+            if !matches!(tool, StandaloneTool::Grok | StandaloneTool::CuaDriver) {
                 temp.network("invalid");
                 assert!(native.latest(tool, &installation, &cancel).is_err());
                 temp.network(r#"{"tag_name":"v2.0.0","prerelease":true}"#);
@@ -2314,6 +2628,335 @@ mod tests {
             native.latest(StandaloneTool::Grok, &grok, &cancel).unwrap(),
             Version::new(1, 0, 0)
         );
+        // Cua Driver answers for its own channel, and an error is never
+        // taken for being up to date.
+        let driver = native
+            .locate(StandaloneTool::CuaDriver, &cancel)
+            .unwrap()
+            .unwrap();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.latest(StandaloneTool::CuaDriver, &driver, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        let check = ".local/bin/cua-driver.check.json";
+        for text in [
+            r#"{"error":"rate limited","update_available":false,"latest_version":null}"#,
+            r#"{"error":null}"#,
+            r#"{"error":null,"update_available":true}"#,
+            r#"{"error":null,"update_available":true,"latest_version":"soon"}"#,
+            "invalid",
+        ] {
+            temp.write(check, text);
+            assert!(native
+                .latest(StandaloneTool::CuaDriver, &driver, &cancel)
+                .is_err());
+        }
+        temp.write(
+            check,
+            r#"{"error":null,"update_available":false,"latest_version":"1.0.0"}"#,
+        );
+        assert_eq!(
+            native
+                .latest(StandaloneTool::CuaDriver, &driver, &cancel)
+                .unwrap(),
+            Version::new(1, 0, 0)
+        );
+        temp.write(
+            check,
+            r#"{"error":null,"update_available":true,"latest_version":"2.0.0-nightly.20270101.5"}"#,
+        );
+        assert_eq!(
+            native
+                .latest(StandaloneTool::CuaDriver, &driver, &cancel)
+                .unwrap()
+                .to_string(),
+            "2.0.0-nightly.20270101.5"
+        );
+    }
+    #[test]
+    fn cua_is_found_only_where_its_installers_put_it() {
+        let temp = Temp::new();
+        let native = temp.native();
+        let cancel = Cancellation::default();
+        // Another program called `cua` is someone else's.
+        temp.install(StandaloneTool::Cua);
+        temp.write(".local/bin/cua.version", "other 1.0.0");
+        assert!(native
+            .locate(StandaloneTool::Cua, &cancel)
+            .unwrap()
+            .is_none());
+        temp.write(".local/bin/cua.version", "cua 1.0.0");
+        assert!(native
+            .locate(StandaloneTool::Cua, &cancel)
+            .unwrap()
+            .is_some());
+        // The wheel's `cua` links out of ~/.local/bin; its manager owns it.
+        fs::remove_file(temp.0.join(".local/bin/cua")).unwrap();
+        temp.script("wheel/bin/cua", "#!/bin/sh\necho cua 1.0.0\n");
+        symlink(temp.0.join("wheel/bin/cua"), temp.0.join(".local/bin/cua")).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Cua, &cancel)
+            .unwrap()
+            .is_none());
+
+        // The driver must resolve into its own releases folder.
+        temp.install(StandaloneTool::CuaDriver);
+        let link = temp.0.join(".local/bin/cua-driver");
+        fs::remove_file(&link).unwrap();
+        temp.script(
+            ".local/bin/cua-driver",
+            "#!/bin/sh\necho cua-driver 1.0.0\n",
+        );
+        assert!(native
+            .locate(StandaloneTool::CuaDriver, &cancel)
+            .unwrap()
+            .is_none());
+        fs::remove_file(&link).unwrap();
+        // Its installer links through `current` into a versioned folder.
+        fs::create_dir_all(temp.0.join(".cua-driver/packages/current")).unwrap();
+        symlink(
+            temp.0
+                .join(".cua-driver/packages/releases/1.0.0-test/cua-driver"),
+            temp.0.join(".cua-driver/packages/current/cua-driver"),
+        )
+        .unwrap();
+        symlink(
+            temp.0.join(".cua-driver/packages/current/cua-driver"),
+            &link,
+        )
+        .unwrap();
+        assert_eq!(
+            native
+                .locate(StandaloneTool::CuaDriver, &cancel)
+                .unwrap()
+                .unwrap()
+                .launcher,
+            link
+        );
+    }
+    #[test]
+    fn cua_driver_lives_in_its_app_only_when_its_launcher_says_so() {
+        let temp = Temp::new();
+        let home = fs::canonicalize(&temp.0).unwrap();
+        let app = home.join("CuaDriver.app");
+        let binary = temp.script("CuaDriver.app/Contents/MacOS/cua-driver", "#!/bin/sh\n");
+        let releases = home.join("releases");
+        let root = |launcher: &Path| cua_driver_root(launcher, app.clone(), releases.clone());
+        let launcher = temp.0.join("cua-driver");
+        assert_eq!(root(&launcher), releases);
+        symlink(&binary, &launcher).unwrap();
+        assert_eq!(root(&launcher), app);
+    }
+    fn cua_install(temp: &Temp, tool: StandaloneTool) -> Installation {
+        temp.install(tool);
+        temp.native()
+            .locate(tool, &Cancellation::default())
+            .unwrap()
+            .unwrap()
+    }
+    /// Each run of the fixture binary, with its telemetry setting.
+    fn runs(temp: &Temp, tool: StandaloneTool) -> String {
+        fs::read_to_string(
+            temp.0
+                .join(".local/bin")
+                .join(format!("{}.runs", tool.id())),
+        )
+        .unwrap_or_default()
+    }
+    #[test]
+    fn cua_refreshes_its_agent_setup_after_an_update() {
+        let cancel = Cancellation::default();
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, StandaloneTool::Cua);
+        let result = native
+            .after_update(StandaloneTool::Cua, &installation, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(runs(&temp, StandaloneTool::Cua), "connect update DNT=1\n");
+
+        // The driver's skills refresh only where its skill pack was installed.
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, StandaloneTool::CuaDriver);
+        assert!(native
+            .after_update(StandaloneTool::CuaDriver, &installation, &cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(runs(&temp, StandaloneTool::CuaDriver), "");
+        temp.write(".cua-driver/skills/cua-driver/SKILL.md", "skill");
+        native
+            .after_update(StandaloneTool::CuaDriver, &installation, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            runs(&temp, StandaloneTool::CuaDriver),
+            "skills update DNT=1\n"
+        );
+
+        // Other tools have nothing to refresh.
+        let temp = Temp::new();
+        let native = temp.native();
+        let amp = temp.install(StandaloneTool::Amp);
+        let installation = native
+            .locate(StandaloneTool::Amp, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(native
+            .after_update(StandaloneTool::Amp, &installation, &cancel)
+            .unwrap()
+            .is_none());
+        assert!(!amp.with_extension("args").exists());
+    }
+    #[test]
+    fn a_refresh_that_fails_never_fails_the_update() {
+        for (tool, result, expected) in [
+            (StandaloneTool::Cua, Ok(None), None),
+            (
+                StandaloneTool::Cua,
+                Ok(Some(ok("refreshed"))),
+                Some("refreshed"),
+            ),
+            (
+                StandaloneTool::Cua,
+                Err(invalid("cua", "no network")),
+                Some("Run `cua connect update` to finish"),
+            ),
+            (
+                StandaloneTool::Cua,
+                Ok(Some(Completion {
+                    code: Some(3),
+                    ..ok("")
+                })),
+                Some("Run `cua connect update` to finish"),
+            ),
+            (
+                StandaloneTool::CuaDriver,
+                Err(invalid("cua-driver", "no network")),
+                Some("Run `cua-driver skills update` to finish"),
+            ),
+        ] {
+            let fixture = Fixture {
+                refresh: Arc::new(Mutex::new(Some(result))),
+                ..Fixture::new()
+            };
+            let mut backend = Standalone {
+                tool,
+                io: Box::new(fixture.clone()),
+            };
+            let id = backend
+                .package(&fixture.installed.lock().unwrap().clone().unwrap(), None)
+                .id;
+            let mut messages = vec![];
+            backend
+                .execute(
+                    &Operation::Upgrade(id),
+                    &Cancellation::default(),
+                    &mut |progress| {
+                        if let Progress::Message(text) = progress {
+                            messages.push(text);
+                        }
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                fixture.installed.lock().unwrap().as_ref().unwrap().version,
+                Version::new(2, 0, 0)
+            );
+            assert!(messages.last().unwrap().contains("updated to 2.0.0"));
+            if let Some(expected) = expected {
+                assert!(
+                    messages.iter().any(|text| text.contains(expected)),
+                    "{messages:?}"
+                );
+            } else {
+                assert_eq!(messages.len(), 3, "{messages:?}");
+            }
+        }
+    }
+    #[test]
+    fn removing_cua_disconnects_agents_first_and_keeps_its_data() {
+        let cancel = Cancellation::default();
+        let cua = StandaloneTool::Cua;
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, cua);
+        temp.script(".local/bin/cua-spacesd-linux-x86_64", "#!/bin/sh\n");
+        temp.write(".cua/credentials.json", "{}");
+        // A computer others reach through the relay is left to the user:
+        // removing the CLI would strand its service.
+        temp.write(".cua/host/config.json", "{}");
+        let refusal = native
+            .remove(cua, &installation, &cancel)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("cua host remove"), "{refusal}");
+        assert!(exists(&temp.0.join(".local/bin/cua")));
+        assert_eq!(runs(&temp, cua), "");
+        fs::remove_file(temp.0.join(".cua/host/config.json")).unwrap();
+
+        let result = native.remove(cua, &installation, &cancel).unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(
+            runs(&temp, cua),
+            "connect remove --yes DNT=1\ndaemon stop DNT=1\n"
+        );
+        assert!(!exists(&temp.0.join(".local/bin/cua")));
+        assert!(!exists(&temp.0.join(".local/bin/cua-spacesd-linux-x86_64")));
+        assert!(temp.0.join(".cua/credentials.json").is_file());
+        assert!(result.stdout.is_empty());
+
+        // Agents that can't be disconnected don't block removing it, but
+        // the user hears about them.
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, cua);
+        temp.write(".local/bin/cua.fail", "connect");
+        let result = native.remove(cua, &installation, &cancel).unwrap();
+        assert!(!exists(&temp.0.join(".local/bin/cua")));
+        let said = String::from_utf8(result.stdout).unwrap();
+        assert!(said.contains("MCP"), "{said}");
+
+        // Cancelling before the agents are touched stops everything.
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, cua);
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.before_removing_cua(&installation, &temp.0, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(runs(&temp, cua), "");
+        assert!(exists(&temp.0.join(".local/bin/cua")));
+    }
+    #[test]
+    fn cua_driver_is_removed_by_its_own_uninstaller() {
+        let cancel = Cancellation::default();
+        let driver = StandaloneTool::CuaDriver;
+        let temp = Temp::new();
+        let native = temp.native();
+        let launcher = temp.install(driver);
+        temp.write(".cua-driver/config.json", "{}");
+        temp.write(
+            "installer",
+            "#!/bin/bash\n[ \"$DO_NOT_TRACK\" = 1 ] || exit 8\n[ $# = 0 ] || exit 9\nrm -rf \"$HOME/.cua-driver/packages\" \"$HOME/.local/bin/cua-driver\"\n",
+        );
+        let installation = native.locate(driver, &cancel).unwrap().unwrap();
+        assert_eq!(installation.launcher, launcher);
+        let result = native.remove(driver, &installation, &cancel).unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(
+            fs::read_to_string(temp.0.join("request")).unwrap(),
+            "https://cua.ai/driver/uninstall.sh"
+        );
+        assert!(native.locate(driver, &cancel).unwrap().is_none());
+        assert!(temp.0.join(".cua-driver/config.json").is_file());
+        // PkgDeck has no list of its own to delete from.
+        assert!(native.removal(driver, &temp.0).is_err());
     }
     #[test]
     fn native_updaters_target_the_selected_installation_and_private_installer() {
@@ -2324,7 +2967,13 @@ mod tests {
             let launcher = temp.install(tool);
             let installation = native.locate(tool, &cancel).unwrap().unwrap();
             temp.network(r#"{"tag_name":"v2.0.0"}"#);
-            temp.write("installer", "#!/bin/sh\n[ \"$CODEX_NON_INTERACTIVE\" = 1 ] || exit 8\n[ \"$1\" = --release ] || exit 9\nprintf '%s' \"$2\" > \"$CODEX_INSTALL_DIR/codex.version\"\n");
+            temp.write("installer", if tool == StandaloneTool::Cua {
+                "#!/bin/sh\n[ \"$DO_NOT_TRACK\" = 1 ] || exit 8\n[ \"$*\" = '--cli-only --yes --no-onboarding --no-modify-path --version 2.0.0' ] || exit 9\nprintf 'cua 2.0.0' > \"$HOME/.local/bin/cua.version\"\n"
+            } else if tool == StandaloneTool::CuaDriver {
+                "#!/bin/bash\n[ \"$DO_NOT_TRACK\" = 1 ] || exit 8\n[ \"$*\" = --no-modify-path ] || exit 9\nprintf 'cua-driver 2.0.0' > \"$HOME/.local/bin/cua-driver.version\"\n"
+            } else {
+                "#!/bin/sh\n[ \"$CODEX_NON_INTERACTIVE\" = 1 ] || exit 8\n[ \"$1\" = --release ] || exit 9\nprintf '%s' \"$2\" > \"$CODEX_INSTALL_DIR/codex.version\"\n"
+            });
             let result = native.update(tool, &installation, &Version::new(2, 0, 0), &cancel);
             // Updaters never run as root.
             assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
@@ -2346,7 +2995,10 @@ mod tests {
                 native.locate(tool, &cancel).unwrap().unwrap().version,
                 Version::new(2, 0, 0)
             );
-            if tool != StandaloneTool::Codex {
+            if !matches!(
+                tool,
+                StandaloneTool::Codex | StandaloneTool::Cua | StandaloneTool::CuaDriver
+            ) {
                 let args = fs::read_to_string(installation.updater.with_extension("args")).unwrap();
                 match tool {
                     StandaloneTool::OpenCode => {
@@ -2834,6 +3486,34 @@ mod tests {
                             &[".foundry/keystores/dev", ".foundry/cache/rpc.json"],
                         )
                     }
+                    StandaloneTool::Cua => {
+                        for extra in [
+                            "cua-microvm-init",
+                            "cua-spacesd-linux-x86_64",
+                            "cua-spacesd-linux-aarch64",
+                            "cua-vz",
+                            "cua-netgw",
+                        ] {
+                            temp.script(&format!(".local/bin/{extra}"), "#!/bin/sh\n");
+                        }
+                        (
+                            &[
+                                ".local/bin/cua",
+                                ".local/bin/cua-microvm-init",
+                                ".local/bin/cua-spacesd-linux-x86_64",
+                                ".local/bin/cua-spacesd-linux-aarch64",
+                                ".local/bin/cua-vz",
+                                ".local/bin/cua-netgw",
+                            ],
+                            &[
+                                ".cua/credentials.json",
+                                ".cua/config.toml",
+                                ".local/bin/cua-spaces",
+                            ],
+                        )
+                    }
+                    // Its own test covers its uninstaller.
+                    StandaloneTool::CuaDriver => continue,
                 };
                 let kept: Vec<_> = kept.iter().chain(&[".local/bin/unrelated"]).collect();
                 for path in &kept {

@@ -519,7 +519,7 @@ apps remain visible in the partial inventory.
 
 Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot CLI, Kiro CLI,
 Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates,
-and so do the Solana CLI (Agave), Anchor through AVM, and Foundry. PkgDeck updates them with their
+and so do the Solana CLI (Agave), Anchor through AVM, Foundry, Cua and Cua Driver. PkgDeck updates them with their
 own updaters and can remove them, without admin rights. Removing takes away
 only what the tool's installer put there and keeps your settings, sign-ins and
 keys; on macOS the files go to the Trash. It can't install them. Copies
@@ -594,6 +594,11 @@ others) need **Skip the password** first. **Update automatically** in
   something is being built. Both switches start on. Builds always count:
   Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake, Xcode, Gradle,
   Maven, Bazel, `go build` or `go test`, `dotnet build`.
+- Cua Driver waits until it's idle, since its installer stops the MCP servers of
+  agents that are open. Idle means no `cua-driver` process has done anything for
+  about five minutes, so an open agent that isn't using it doesn't hold it back.
+  **Settings** shows **Cua Driver updates wait until it's idle** meanwhile. If an
+  agent loses its Cua Driver tools afterwards, restart it.
 - A build holds only updates that could change what it runs. Flatpak,
   AppImages, Docker and Podman images, Oh My Zsh and coding assistants like
   Codex and Claude Code update during builds. Snap waits, since classic snaps
@@ -838,6 +843,13 @@ computer, and updating downloads it, checks it against GitHub's checksum,
 and replaces the file. GitHub answers are reused for 15 minutes, since it
 allows few questions without signing in. AppImages that update themselves
 show **Updates itself** until you set a project.
+
+Electron apps such as Cua Spaces say inside the AppImage where their updates
+are listed (`resources/app-update.yml`, for public feeds and GitHub). PkgDeck
+checks that list, offers the update even if it doesn't manage the AppImage, and
+updating downloads the file, checks it against the published SHA-512 and
+replaces it where it is. If the list can't be read, the update shows as unknown,
+never as up to date.
 
 PkgDeck's menu entries use the app's own name, description, icon,
 categories and launch arguments (such as `--no-sandbox`), read from inside
