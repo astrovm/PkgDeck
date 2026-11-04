@@ -5712,10 +5712,7 @@ fn one_failed_update_is_named_without_its_path() {
         false,
         &names,
     );
-    assert_eq!(
-        install["title"],
-        "Install Anchor (AVM) (Anchor (AVM)) failed"
-    );
+    assert_eq!(install["title"], "Install Anchor (AVM) failed");
 }
 #[test]
 fn a_failure_notice_goes_once_its_updates_are_done() {
