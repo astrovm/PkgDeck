@@ -10,6 +10,17 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.14.0" date="2026-11-03">
+      <description>
+        <p>Cua, Cua Driver and Cua Spaces get updates.</p>
+        <ul>
+          <li>Cua and Cua Driver show up with real update checks, and updating them refreshes their skills in your agents</li>
+          <li>Electron AppImages such as Cua Spaces check their own update list instead of always showing as up to date</li>
+          <li>Automatic updates skip Cua Driver, since updating it stops the MCP servers of open agents</li>
+          <li>pkd upgrade with a name says nothing needs doing when it's already up to date</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.13.0" date="2026-11-02">
       <description>
         <p>See and clean the data apps keep in your home folder.</p>
