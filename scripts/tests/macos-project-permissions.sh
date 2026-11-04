@@ -2,6 +2,7 @@
 # Exercise the CLI's scan -> preview -> clean flow on a disposable home.
 set -euo pipefail
 [[ $(uname -s) == Darwin ]] || { echo 'Requires macOS' >&2; exit 1; }
+bash "$(dirname "${BASH_SOURCE[0]}")/macos-askpass.sh"
 pkd=${1:?Usage: macos-project-permissions.sh /path/to/pkd}
 work=$(mktemp -d)
 trap 'find "$work" -depth -delete' EXIT
