@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn sips_gets_an_icon_it_cant_read_and_nothing_is_saved() {
+    fn what_sips_leaves_behind_is_a_png_or_nothing() {
         let bundle = Bundle::new("sips");
         bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));
         let found = bundle_icon_with_sips(
@@ -380,8 +380,15 @@ mod tests {
             &bundle.root.join("cache"),
             &Cancellation::default(),
         );
-        assert_eq!(found, None);
-        assert_eq!(bundle.saved_files(), 0);
+        // A Mac's `sips` makes a PNG even from these damaged bytes. Elsewhere
+        // there's no `sips` at all.
+        match found {
+            Some(saved) => {
+                assert!(fs::read(saved).unwrap().starts_with(PNG_MAGIC));
+                assert_eq!(bundle.saved_files(), 1);
+            }
+            None => assert_eq!(bundle.saved_files(), 0),
+        }
     }
 
     #[test]
