@@ -19,6 +19,7 @@ pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct Cancellation {
     flag: Arc<AtomicBool>,
     output: Option<OutputObserver>,
+    pub(crate) askpass: Arc<std::sync::OnceLock<Result<crate::host::AskpassRun, ExecutionError>>>,
 }
 impl std::fmt::Debug for Cancellation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,8 +44,8 @@ impl Cancellation {
     /// the job's commands print, as they print it.
     pub fn with_output(&self, observer: OutputObserver) -> Self {
         Self {
-            flag: self.flag.clone(),
             output: Some(observer),
+            ..self.clone()
         }
     }
     pub(crate) fn observe(&self, line: &str) {

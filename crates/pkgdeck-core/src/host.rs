@@ -99,25 +99,167 @@ fn read_timeout(executable: &str, args: &[OsString]) -> std::time::Duration {
     }
 }
 
+/// A cancellation marker belongs to one job, shared by all its brew calls.
+pub(crate) struct AskpassRun(PathBuf);
+impl AskpassRun {
+    fn create_in(parent: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut attempt = 0u64;
+        loop {
+            let path = parent.join(format!("pkgdeck-askpass-{}-{attempt}", std::process::id()));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+impl Drop for AskpassRun {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Points sudo at the password dialog bundled with the macOS app, so a
 /// Homebrew cask that needs administrator access (Docker Desktop removing
 /// its helper tools, for one) can ask for the password without a terminal.
 /// A prompt the person set up themselves wins; other builds have no helper.
-fn use_askpass(env: &mut BTreeMap<OsString, OsString>, executable: Option<&Path>) {
+fn use_askpass(
+    env: &mut BTreeMap<OsString, OsString>,
+    executable: Option<&Path>,
+    cancel: &Cancellation,
+) -> Result<(), ExecutionError> {
     let helper = executable
         .and_then(Path::parent)
         .and_then(Path::parent)
         .map(|contents| contents.join("Resources/pkgdeck-askpass"))
         .filter(|helper| helper.is_file());
-    if let Some(helper) = helper {
-        env.entry("SUDO_ASKPASS".into())
-            .or_insert_with(|| helper.into_os_string());
+    if let Some(helper) = helper.filter(|_| !env.contains_key(&OsString::from("SUDO_ASKPASS"))) {
+        let run = cancel
+            .askpass
+            .get_or_init(|| {
+                AskpassRun::create_in(&std::env::temp_dir()).map_err(ExecutionError::from)
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        env.insert("SUDO_ASKPASS".into(), helper.into_os_string());
+        // Homebrew removes ordinary variables before cask system_command.
+        // Its HOMEBREW_ namespace survives all the way through sudo -A.
+        env.insert(
+            "HOMEBREW_PKGDECK_ASKPASS_DIR".into(),
+            run.0.clone().into_os_string(),
+        );
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod askpass_tests {
     use super::*;
+    #[test]
+    fn bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+        const REENTRY: &str = "PKGDECK_ASKPASS_TEST_BUNDLE";
+        if let Some(root) = std::env::var_os(REENTRY).map(PathBuf::from) {
+            let host = Host::new(
+                Runtime::Native,
+                BTreeMap::from([
+                    ("HOME".into(), root.clone().into_os_string()),
+                    ("PATH".into(), root.join("bin").into_os_string()),
+                ]),
+            );
+            let args = [OsString::from("fixture")];
+            let cancel = Cancellation::default();
+            for (write, ask) in [(false, true), (true, false)] {
+                let result = host.brew_asking(&args, &cancel, write, ask).unwrap();
+                assert_eq!(result.stdout, b"completed\n");
+                assert!(cancel.askpass.get().is_none());
+            }
+            assert!(!root.join("dialogs").exists());
+            let failed = Cancellation::default();
+            let problem = ExecutionError::Io("fixture: private directory unavailable".into());
+            assert!(failed.askpass.set(Err(problem.clone())).is_ok());
+            assert_eq!(
+                host.brew_asking(&args, &failed, true, true).unwrap_err(),
+                problem
+            );
+            assert!(!root.join("dialogs").exists());
+            for _ in 0..2 {
+                let result = host.brew_asking(&args, &cancel, true, true).unwrap();
+                assert_eq!(result.stdout, b"completed\n");
+            }
+            assert_eq!(
+                fs::read_to_string(root.join("dialogs")).unwrap(),
+                "dialog\n"
+            );
+            let scope = fs::read_to_string(root.join("scope")).unwrap();
+            drop(cancel);
+            assert!(!Path::new(scope.trim()).exists());
+            host.brew_asking(&args, &Cancellation::default(), true, true)
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("dialogs")).unwrap(),
+                "dialog\ndialog\n"
+            );
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-bundled-brew-{}", std::process::id()));
+        let contents = root.join("PkgDeck.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("Resources")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let fake = root.join("bin/osascript");
+        let helper = include_str!("../../../packaging/macos/pkgdeck-askpass")
+            .replace("/usr/bin/osascript", fake.to_str().unwrap());
+        for (path, script) in [
+            (contents.join("Resources/pkgdeck-askpass"), helper),
+            (fake, "#!/bin/sh\nprintf 'dialog\\n' >> \"$HOME/dialogs\"\nprintf '%s\\n' \"$HOMEBREW_PKGDECK_ASKPASS_DIR\" > \"$HOME/scope\"\nexit 1\n".into()),
+            (root.join("bin/brew"), "#!/bin/sh\nif [ -n \"$SUDO_ASKPASS\" ]; then\nfor step in 1 2 3; do \"$SUDO_ASKPASS\" >/dev/null 2>&1 || :; done\nfi\nprintf 'completed\\n'\n".into()),
+        ] {
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let binary = contents.join("MacOS/askpass-test");
+        fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        let output = Command::new(binary).args([
+            "--exact",
+            "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
+            "--nocapture",
+        ]).env(REENTRY, &root).output().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        let transcript = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{transcript}");
+    }
+    #[test]
+    fn askpass_cancellation_is_private_and_never_reuses_an_existing_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-askpass-scope-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let first = AskpassRun::create_in(&root).unwrap();
+        assert_eq!(
+            fs::metadata(&first.0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::write(first.0.join("cancelled"), "").unwrap();
+        let next = AskpassRun::create_in(&root).unwrap();
+        assert_ne!(first.0, next.0);
+        assert!(!next.0.join("cancelled").exists());
+        let path = first.0.clone();
+        drop(first);
+        assert!(!path.exists());
+        drop(next);
+        let file = root.join("file");
+        fs::write(&file, "fixture").unwrap();
+        assert!(AskpassRun::create_in(&file).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn homebrew_asks_for_passwords_with_the_bundled_dialog() {
         let bundle = std::env::temp_dir()
@@ -127,26 +269,54 @@ mod askpass_tests {
         fs::create_dir_all(bundle.join("Resources")).unwrap();
         let executable = bundle.join("MacOS/pkgdeck");
         let mut env = BTreeMap::new();
-        use_askpass(&mut env, Some(&executable));
+        let cancel = Cancellation::default();
+        use_askpass(&mut env, Some(&executable), &cancel).unwrap();
         assert!(env.is_empty(), "no helper, no prompt");
         let helper = bundle.join("Resources/pkgdeck-askpass");
         fs::write(&helper, "#!/bin/sh\n").unwrap();
-        use_askpass(&mut env, Some(&executable));
+        // An allocation failure is shared too, and never falls back to an
+        // unscoped helper that could keep asking indefinitely.
+        let failed = Cancellation::default();
+        let problem = ExecutionError::Io("fixture: no private directory".into());
+        assert!(failed.askpass.set(Err(problem.clone())).is_ok());
+        assert_eq!(
+            use_askpass(&mut env, Some(&executable), &failed),
+            Err(problem)
+        );
+        assert!(env.is_empty());
+        use_askpass(&mut env, Some(&executable), &cancel).unwrap();
         assert_eq!(
             env.get(&OsString::from("SUDO_ASKPASS")),
             Some(&helper.clone().into_os_string())
         );
+        let marker = PathBuf::from(
+            env.get(&OsString::from("HOMEBREW_PKGDECK_ASKPASS_DIR"))
+                .unwrap(),
+        );
+        assert!(marker.is_dir());
+        fs::write(marker.join("cancelled"), "").unwrap();
+        let mut later = BTreeMap::new();
+        let observed = cancel.with_output(std::sync::Arc::new(|_| {}));
+        use_askpass(&mut later, Some(&executable), &observed).unwrap();
+        assert_eq!(
+            later, env,
+            "all brew calls in a job share the same cancellation"
+        );
+        drop(observed);
+        assert!(marker.exists());
+        drop(cancel);
+        assert!(!marker.exists());
         let mut own = BTreeMap::from([(
             OsString::from("SUDO_ASKPASS"),
             OsString::from("/usr/local/bin/mine"),
         )]);
-        use_askpass(&mut own, Some(&executable));
+        use_askpass(&mut own, Some(&executable), &Cancellation::default()).unwrap();
         assert_eq!(
             own.get(&OsString::from("SUDO_ASKPASS")),
             Some(&OsString::from("/usr/local/bin/mine"))
         );
         let mut none = BTreeMap::new();
-        use_askpass(&mut none, None);
+        use_askpass(&mut none, None, &Cancellation::default()).unwrap();
         assert!(none.is_empty());
         fs::remove_dir_all(bundle.parent().unwrap().parent().unwrap()).unwrap();
     }
@@ -779,8 +949,14 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
-        if ask {
-            use_askpass(&mut host.env, std::env::current_exe().ok().as_deref());
+        // The job's cancellation token owns the marker across every native
+        // call, including checked casks updated with separate brew calls.
+        if ask && write {
+            use_askpass(
+                &mut host.env,
+                std::env::current_exe().ok().as_deref(),
+                cancel,
+            )?;
         }
         let run = || {
             let command = host.command(&path, args)?;

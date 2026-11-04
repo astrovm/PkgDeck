@@ -1,7 +1,16 @@
 #!/bin/sh
-# sudo runs this (SUDO_ASKPASS) when a Homebrew cask needs administrator
-# access, such as removing Docker Desktop's helper tools. It asks for the
-# password in a macOS dialog and prints it for sudo; Cancel makes sudo fail.
-exec /usr/bin/osascript \
-    -e 'display dialog "Homebrew needs your password to finish a change that requires administrator access." with title "PkgDeck" default answer "" with hidden answer with icon caution buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"' \
-    -e 'text returned of result'
+# One update owns this private directory, across all its brew calls. Cancel
+# refuses its later sudo steps, while casks that need no administrator go on.
+cancelled=${HOMEBREW_PKGDECK_ASKPASS_DIR:+$HOMEBREW_PKGDECK_ASKPASS_DIR/cancelled}
+[ -z "$cancelled" ] || [ ! -e "$cancelled" ] || exit 1
+
+# osascript exits successfully on timeout, returning `gave up:true` and empty
+# text. Reject that record inside AppleScript before extracting any password.
+password=$(/usr/bin/osascript \
+    -e 'set answer to display dialog "Homebrew needs your password to finish a change that requires administrator access." with title "PkgDeck" default answer "" with hidden answer with icon caution buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel" giving up after 300' \
+    -e 'if gave up of answer then error number -128' \
+    -e 'text returned of answer') && [ -n "$password" ] || {
+    [ -z "$cancelled" ] || : > "$cancelled"
+    exit 1
+}
+printf '%s\n' "$password"
