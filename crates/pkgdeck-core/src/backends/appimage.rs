@@ -3243,6 +3243,51 @@ esac
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn electron_appimages_without_a_version_or_time_stay_unknown() {
+        let base = test_base("electron-unknown");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let image = base.join("demo-app");
+        electron_image(
+            &image,
+            "",
+            "provider: generic\nurl: https://example.invalid/demo\n",
+        );
+        fs::write(
+            applications.join("demo.desktop"),
+            format!("[Desktop Entry]\nName=Demo\nExec=\"{}\"\n", image.display()),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications, uid);
+        let server = base.join("server");
+        fs::create_dir_all(&server).unwrap();
+        backend.curl = Some(fake_curl(&server));
+        // A file that names no version can't be compared with the list.
+        fs::write(server.join("feed"), feed_list("2.1.0", "sum")).unwrap();
+        let listed = backend.installed(&Cancellation::default()).unwrap();
+        assert_eq!(listed[0].update, UpdateAvailability::Unknown);
+        // Cancelling while the list is read stops the whole answer.
+        let slow = server.join("slow-curl");
+        fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
+        backend.curl = Some(slow);
+        let interrupted = Cancellation::default();
+        let signal = interrupted.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal.cancel();
+        });
+        assert!(matches!(
+            backend.installed(&interrupted),
+            Err(EngineError::Cancelled)
+        ));
+        thread.join().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn what_was_remembered_before_feeds_is_read_again() {
         let base = test_base("contents-old");
         let root = base.join("pkgdeck/appimages");

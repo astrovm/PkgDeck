@@ -188,6 +188,14 @@ mod tests {
                 sha512: "imagesum==".into(),
             })
         );
+        // Anything indented before the first file belongs to no file.
+        assert_eq!(
+            feed()
+                .release("version: 2.1.0\n  sha512: stray\nfiles:\n  - url: App.AppImage\n    sha512: sum\n")
+                .unwrap()
+                .sha512,
+            "sum"
+        );
         // A bare name lives beside the list.
         let beside = feed()
             .release("version: 2.1.0\nfiles:\n  - url: App.AppImage\n    sha512: sum\n")

@@ -892,14 +892,12 @@ impl StandaloneIo for NativeStandalone {
             // On macOS the installer links to the app that wraps the binary.
             StandaloneTool::CuaDriver => {
                 let launcher = home.join(".local/bin/cua-driver");
-                let app = self
-                    .host
-                    .filesystem_path(Path::new("/Applications/CuaDriver.app"));
-                let root = if fs::canonicalize(&launcher).is_ok_and(|bin| bin.starts_with(&app)) {
-                    app
-                } else {
-                    self.cua_driver_home(&home)?.join("packages/releases")
-                };
+                let root = cua_driver_root(
+                    &launcher,
+                    self.host
+                        .filesystem_path(Path::new("/Applications/CuaDriver.app")),
+                    self.cua_driver_home(&home)?.join("packages/releases"),
+                );
                 (launcher, root)
             }
             StandaloneTool::Solana => return self.locate_solana(&home, cancel),
@@ -1514,37 +1512,49 @@ fn managed(path: &Path) -> bool {
 }
 
 impl NativeStandalone {
-    /// Download to private storage, then run the official pinned-version
-    /// installer. No network bytes are piped into a shell.
+    /// Download to private storage, then run an official installer with
+    /// `shell`. No network bytes are piped into a shell.
+    fn run_installer(
+        &self,
+        url: &str,
+        shell: &str,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let script = self.fetch(url, cancel)?;
+        let temporary = InstallerFile::create(script.as_bytes())?;
+        let shell = self
+            .host
+            .resolve(shell)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{shell} not found")))?;
+        let mut arguments = vec![temporary.0.join("install.sh").into_os_string()];
+        arguments.extend_from_slice(args);
+        Ok(self
+            .host
+            .standalone_write(&shell, &arguments, env, cancel)?)
+    }
+    /// The official pinned-version installer.
     fn install_codex(
         &self,
         installation: &Installation,
         candidate: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
-        let script = self.fetch("https://chatgpt.com/codex/install.sh", cancel)?;
-        let temporary = InstallerFile::create(script.as_bytes())?;
-        let sh = self
-            .host
-            .resolve("sh")?
-            .ok_or_else(|| ExecutionError::Disabled("sh not found".into()))?;
         let parent = installation
             .launcher
             .parent()
             .ok_or(EngineError::NotFound)?;
-        Ok(self.host.standalone_write(
-            &sh,
-            &[
-                temporary.0.join("install.sh").into(),
-                "--release".into(),
-                candidate.to_string().into(),
-            ],
+        self.run_installer(
+            "https://chatgpt.com/codex/install.sh",
+            "sh",
+            &["--release".into(), candidate.to_string().into()],
             &[
                 ("CODEX_NON_INTERACTIVE", "1".into()),
                 ("CODEX_INSTALL_DIR", parent.as_os_str().into()),
             ],
             cancel,
-        )?)
+        )
     }
 }
 
@@ -1576,16 +1586,10 @@ impl NativeStandalone {
         candidate: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
-        let script = self.fetch("https://cua.ai/install.sh", cancel)?;
-        let temporary = InstallerFile::create(script.as_bytes())?;
-        let sh = self
-            .host
-            .resolve("sh")?
-            .ok_or_else(|| ExecutionError::Disabled("sh not found".into()))?;
-        Ok(self.host.standalone_write(
-            &sh,
+        self.run_installer(
+            "https://cua.ai/install.sh",
+            "sh",
             &[
-                temporary.0.join("install.sh").into(),
                 "--cli-only".into(),
                 "--yes".into(),
                 "--no-onboarding".into(),
@@ -1595,44 +1599,31 @@ impl NativeStandalone {
             ],
             &no_telemetry(),
             cancel,
-        )?)
+        )
     }
     /// `cua-driver update --apply` runs this same installer, which stops every
     /// running cua-driver, so that command dies (signal 15) before it can say
     /// how the update went. Run directly, the installer finishes and follows
     /// the saved stable or nightly channel.
     fn install_cua_driver(&self, cancel: &Cancellation) -> Result<Completion, EngineError> {
-        let script = self.fetch("https://cua.ai/driver/install.sh", cancel)?;
-        let temporary = InstallerFile::create(script.as_bytes())?;
-        let bash = self
-            .host
-            .resolve("bash")?
-            .ok_or_else(|| ExecutionError::Disabled("bash not found".into()))?;
-        Ok(self.host.standalone_write(
-            &bash,
-            &[
-                temporary.0.join("install.sh").into(),
-                "--no-modify-path".into(),
-            ],
+        self.run_installer(
+            "https://cua.ai/driver/install.sh",
+            "bash",
+            &["--no-modify-path".into()],
             &no_telemetry(),
             cancel,
-        )?)
+        )
     }
     /// Its daemon, the app on macOS and its links in other agents take care
     /// that only its uninstaller has.
     fn uninstall_cua_driver(&self, cancel: &Cancellation) -> Result<Completion, EngineError> {
-        let script = self.fetch("https://cua.ai/driver/uninstall.sh", cancel)?;
-        let temporary = InstallerFile::create(script.as_bytes())?;
-        let bash = self
-            .host
-            .resolve("bash")?
-            .ok_or_else(|| ExecutionError::Disabled("bash not found".into()))?;
-        Ok(self.host.standalone_write(
-            &bash,
-            &[temporary.0.join("install.sh").into()],
+        self.run_installer(
+            "https://cua.ai/driver/uninstall.sh",
+            "bash",
+            &[],
             &no_telemetry(),
             cancel,
-        )?)
+        )
     }
     /// Takes Cua out of the agents it connected, whose settings would
     /// otherwise point to a missing program, and stops its daemon. Answers
@@ -1659,6 +1650,16 @@ impl NativeStandalone {
         }
         let _ = self.cua_step(launcher, &["daemon", "stop"], cancel);
         Ok(disconnected.is_ok_and(|result| result.code == Some(0)))
+    }
+}
+
+/// Where Cua Driver's binaries live: the app its launcher points into, on
+/// macOS, else its releases folder.
+fn cua_driver_root(launcher: &Path, app: PathBuf, releases: PathBuf) -> PathBuf {
+    if fs::canonicalize(launcher).is_ok_and(|binary| binary.starts_with(&app)) {
+        app
+    } else {
+        releases
     }
 }
 
@@ -2632,6 +2633,12 @@ mod tests {
             .locate(StandaloneTool::CuaDriver, &cancel)
             .unwrap()
             .unwrap();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.latest(StandaloneTool::CuaDriver, &driver, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
         let check = ".local/bin/cua-driver.check.json";
         for text in [
             r#"{"error":"rate limited","update_available":false,"latest_version":null}"#,
@@ -2727,6 +2734,19 @@ mod tests {
                 .launcher,
             link
         );
+    }
+    #[test]
+    fn cua_driver_lives_in_its_app_only_when_its_launcher_says_so() {
+        let temp = Temp::new();
+        let home = fs::canonicalize(&temp.0).unwrap();
+        let app = home.join("CuaDriver.app");
+        let binary = temp.script("CuaDriver.app/Contents/MacOS/cua-driver", "#!/bin/sh\n");
+        let releases = home.join("releases");
+        let root = |launcher: &Path| cua_driver_root(launcher, app.clone(), releases.clone());
+        let launcher = temp.0.join("cua-driver");
+        assert_eq!(root(&launcher), releases);
+        symlink(&binary, &launcher).unwrap();
+        assert_eq!(root(&launcher), app);
     }
     fn cua_install(temp: &Temp, tool: StandaloneTool) -> Installation {
         temp.install(tool);
@@ -2898,6 +2918,19 @@ mod tests {
         assert!(!exists(&temp.0.join(".local/bin/cua")));
         let said = String::from_utf8(result.stdout).unwrap();
         assert!(said.contains("MCP"), "{said}");
+
+        // Cancelling before the agents are touched stops everything.
+        let temp = Temp::new();
+        let native = temp.native();
+        let installation = cua_install(&temp, cua);
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.before_removing_cua(&installation, &temp.0, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(runs(&temp, cua), "");
+        assert!(exists(&temp.0.join(".local/bin/cua")));
     }
     #[test]
     fn cua_driver_is_removed_by_its_own_uninstaller() {
@@ -2921,6 +2954,8 @@ mod tests {
         );
         assert!(native.locate(driver, &cancel).unwrap().is_none());
         assert!(temp.0.join(".cua-driver/config.json").is_file());
+        // PkgDeck has no list of its own to delete from.
+        assert!(native.removal(driver, &temp.0).is_err());
     }
     #[test]
     fn native_updaters_target_the_selected_installation_and_private_installer() {
