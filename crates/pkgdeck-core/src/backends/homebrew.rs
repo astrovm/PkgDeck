@@ -376,6 +376,34 @@ const MACOS_ONLY_ARTIFACTS: &[&str] = &[
     "vst_plugin",
     "vst3_plugin",
 ];
+/// What a cask's app is called once installed: its target when it renames it,
+/// or the app's own file name, wherever in the download that is.
+pub(super) fn cask_app(artifacts: &[serde_json::Value]) -> Option<PathBuf> {
+    let app = artifacts
+        .iter()
+        .find_map(|artifact| artifact.get("app")?.as_array())?;
+    let target = app
+        .iter()
+        .find_map(|part| part.get("target")?.as_str())
+        .map(PathBuf::from);
+    target.or_else(|| {
+        std::path::Path::new(app.first()?.as_str()?)
+            .file_name()
+            .map(PathBuf::from)
+    })
+}
+pub(super) fn cask_icon_in(
+    artifacts: &[serde_json::Value],
+    folders: &[PathBuf],
+    cancel: &Cancellation,
+) -> Option<PathBuf> {
+    let app = cask_app(artifacts)?;
+    let bundle = folders
+        .iter()
+        .map(|folder| folder.join(&app))
+        .find(|bundle| bundle.is_dir())?;
+    super::mac_apps::app_icon(&bundle, cancel)
+}
 pub(super) fn cask_installs_here(cask: &Cask) -> bool {
     cfg!(target_os = "macos")
         || (cask.depends_on.get("macos").is_none()
@@ -720,12 +748,23 @@ impl<T: Transport> HomebrewCask<T> {
             write,
         )?)
     }
+    /// The icon of the app an installed cask put in an Applications folder.
+    fn cask_icon(&self, artifacts: &[serde_json::Value], cancel: &Cancellation) -> Option<PathBuf> {
+        let mut folders = vec![PathBuf::from("/Applications")];
+        folders.extend(
+            self.transport
+                .env("HOME")
+                .map(|home| PathBuf::from(home).join("Applications")),
+        );
+        cask_icon_in(artifacts, &folders, cancel)
+    }
     /// `installable_only` drops casks this system cannot install; searches use
     /// it on Linux, while installed casks always stay listed.
     fn parse(
         &self,
         result: Completion,
         installable_only: bool,
+        cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let report: CaskReport = serde_json::from_slice(&bytes("homebrew-cask", result)?)
             .map_err(|e| invalid("homebrew-cask", e))?;
@@ -742,6 +781,9 @@ impl<T: Transport> HomebrewCask<T> {
                     return Err(invalid("homebrew-cask", "invalid cask token"));
                 }
                 let installed = c.installed.filter(|v| !v.is_empty());
+                let icon = installed
+                    .as_ref()
+                    .and_then(|_| self.cask_icon(&c.artifacts, cancel));
                 let display = c
                     .name
                     .iter()
@@ -771,7 +813,7 @@ impl<T: Transport> HomebrewCask<T> {
                         },
                         installed_version: installed,
                         candidate_version: c.version,
-                        icon: None,
+                        icon,
                         component_ids: vec![],
                         homepages: if c.homepage.is_empty() {
                             vec![]
@@ -914,7 +956,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                 let mut args = vec!["info", "--json=v2", "--cask", "--"];
                 args.extend(chunk);
                 Ok(self
-                    .parse(self.call(&args, cancel, false)?, true)?
+                    .parse(self.call(&args, cancel, false)?, true, cancel)?
                     .into_iter()
                     .map(|d| d.package)
                     .collect())
@@ -931,7 +973,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         }
         match self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false) {
             Ok(result) => Ok(self
-                .parse(result, true)?
+                .parse(result, true, cancel)?
                 .into_iter()
                 .map(|details| details.package)
                 .collect()),
@@ -954,6 +996,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                     false,
                 )?,
                 false,
+                cancel,
             )?
             .into_iter()
             .map(|d| d.package)
@@ -968,6 +1011,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         self.parse(
             self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false)?,
             false,
+            cancel,
         )?
         .into_iter()
         .find(|d| d.package.id == *id)
