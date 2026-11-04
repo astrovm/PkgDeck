@@ -110,15 +110,25 @@ pub(super) fn bundle_icon(
     Some(saved)
 }
 
-/// [`bundle_icon`] in the user's cache.
+/// [`bundle_icon`] with macOS's own converter.
+fn bundle_icon_with_sips(
+    bundle: &Path,
+    plist: &Value,
+    cache: &Path,
+    cancel: &Cancellation,
+) -> Option<PathBuf> {
+    bundle_icon(bundle, plist, cache, |from, to| {
+        convert_with(Path::new("/usr/bin/sips"), from, to, cancel)
+    })
+}
+
+/// [`bundle_icon_with_sips`] in the user's cache.
 pub(super) fn user_bundle_icon(
     bundle: &Path,
     plist: &Value,
     cancel: &Cancellation,
 ) -> Option<PathBuf> {
-    bundle_icon(bundle, plist, Store::user()?.dir(), |from, to| {
-        convert_with(Path::new("/usr/bin/sips"), from, to, cancel)
-    })
+    bundle_icon_with_sips(bundle, plist, Store::user()?.dir(), cancel)
 }
 
 #[cfg(test)]
@@ -357,6 +367,20 @@ mod tests {
         assert_eq!(bundle.saved_files(), 0);
         // The tool said it worked and wrote nothing.
         assert_eq!(bundle.read_with(plist, |_, _| true), None);
+        assert_eq!(bundle.saved_files(), 0);
+    }
+
+    #[test]
+    fn sips_gets_an_icon_it_cant_read_and_nothing_is_saved() {
+        let bundle = Bundle::new("sips");
+        bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));
+        let found = bundle_icon_with_sips(
+            &bundle.path,
+            &json!({"CFBundleIconFile": "Old"}),
+            &bundle.root.join("cache"),
+            &Cancellation::default(),
+        );
+        assert_eq!(found, None);
         assert_eq!(bundle.saved_files(), 0);
     }
 
