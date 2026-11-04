@@ -944,6 +944,8 @@ fn a_cask_homebrew_lost_the_definition_of_does_not_hide_the_others() {
     assert_eq!(names, ["lost", "healthy"]);
     assert_eq!(installed[0].display_name, "lost");
     assert!(installed[0].homepages.is_empty());
+    // No app to take an icon from.
+    assert_eq!(installed[0].icon, None);
     assert_eq!(installed[1].homepages, ["https://example.invalid"]);
 }
 

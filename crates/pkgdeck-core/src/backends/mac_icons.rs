@@ -287,6 +287,43 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_reaches_the_apps_own_resources() {
+        let bundle = Bundle::new("names");
+        let icon = icns(&[entry(b"ic07", &png(b"one"))]);
+        // Real files, so only the name can be what turns them down.
+        bundle.icon(".icns", &icon);
+        fs::write(bundle.path.join("Contents/Other.icns"), &icon).unwrap();
+        assert_eq!(bundle.read(json!({"CFBundleIconFile": ""})), None);
+        assert_eq!(bundle.read(json!({"CFBundleIconFile": "../Other"})), None);
+    }
+
+    #[test]
+    fn an_icon_file_up_to_64_mib_is_read_and_a_larger_one_is_not() {
+        const LIMIT: u64 = 64 * 1024 * 1024;
+        let bundle = Bundle::new("limit");
+        let plist = json!({"CFBundleIconFile": "Big"});
+        // A real PNG, then an entry of nothing, to reach each size.
+        let sized = |size: u64| {
+            let mut bytes = icns(&[entry(b"ic07", &png(b"one"))]);
+            let padding = size - bytes.len() as u64;
+            bytes.extend(b"pad ");
+            bytes.extend((padding as u32).to_be_bytes());
+            let file = bundle.icon("Big.icns", &bytes);
+            fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+            let _ = fs::remove_dir_all(bundle.root.join("cache"));
+        };
+        sized(LIMIT);
+        assert!(bundle.read(plist.clone()).is_some());
+        sized(LIMIT + 1);
+        assert_eq!(bundle.read(plist), None);
+    }
+
+    #[test]
     fn an_icns_without_a_png_is_converted() {
         let bundle = Bundle::new("converted");
         let file = bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));

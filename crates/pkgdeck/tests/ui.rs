@@ -2107,6 +2107,25 @@ fn an_empty_list_still_reloading_never_says_up_to_date() {
 }
 
 #[test]
+fn an_empty_list_is_only_loading_while_a_read_is_running() {
+    let count = |writing: bool| {
+        let mut app = with_sources(app());
+        app.page = Page::Updates;
+        app.c().set_rows("[]".into());
+        app.c().set_busy(true);
+        app.react();
+        app.writing = writing;
+        app.invalidate();
+        let mut h = harness(app);
+        h.run_steps(4);
+        count_text(&h.output().shapes, "You're up to date")
+    };
+    assert_eq!(count(false), 0);
+    // A write is busy too, but no rows are on their way.
+    assert_eq!(count(true), 1);
+}
+
+#[test]
 fn refresh_empty_updates_show_the_timestamp_only_in_the_header() {
     for page in [Page::Updates, Page::Clean] {
         let mut app = with_sources(app());
