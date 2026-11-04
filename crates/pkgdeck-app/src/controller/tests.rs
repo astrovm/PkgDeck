@@ -13790,6 +13790,57 @@ fn a_retry_settles_only_the_tasks_it_ran() {
     assert_eq!(controller.rust().waiting_cleans.len(), 1);
 }
 #[test]
+fn activity_says_why_homebrew_stopped_without_keeping_its_output() {
+    // What Homebrew 7.0.12 prints with its server out of reach. Activity says
+    // what went wrong without keeping anything the tool printed.
+    let brew_failed = |stderr: &str| {
+        EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: Some(1),
+            signal: None,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }))
+    };
+    let offline = brew_failed(
+        "==> Updating Homebrew...\nError: Failed to download https://formulae.brew.sh/api/internal/packages.arm64_linux.jws.json!\n",
+    );
+    let unreachable = "Homebrew couldn't reach its server. Check your connection, then try again.";
+    for backend in ["homebrew", "homebrew-cask"] {
+        assert_eq!(
+            ended_by(&offline, backend),
+            (Outcome::Failed, Some(unreachable.into()))
+        );
+        assert_eq!(plain_error(&offline, Some(backend), false), unreachable);
+    }
+    // Only Homebrew's own data download means that.
+    assert_eq!(
+        ended_by(&offline, "npm"),
+        (Outcome::Failed, Some("npm stopped with an error.".into()))
+    );
+    assert_eq!(
+        ended_by(
+            &brew_failed("Error: Download failed: https://example.invalid/a.dmg\n"),
+            "homebrew-cask"
+        ),
+        (
+            Outcome::Failed,
+            Some("Homebrew Casks stopped with an error.".into())
+        )
+    );
+    // A cask that got no password says so, not just that it stopped.
+    let (outcome, reason) = ended_by(
+        &brew_failed(
+            "==> Removing helper\nError: Failure while executing; `/usr/bin/sudo -E -- /bin/rm`\n",
+        ),
+        "homebrew-cask",
+    );
+    assert_eq!(outcome, Outcome::Failed);
+    assert_eq!(reason, Some("Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()));
+}
+
+#[test]
 fn a_cleanup_left_alone_is_not_a_failure() {
     let building = EngineError::Refused {
         backend: "dev-caches".into(),

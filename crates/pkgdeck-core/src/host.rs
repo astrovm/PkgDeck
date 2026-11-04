@@ -154,6 +154,105 @@ fn use_askpass(
     Ok(())
 }
 
+/// What Homebrew's curl reads through `HOMEBREW_CURLRC`. Homebrew sets curl no
+/// connection limit, so one address that never answers held `brew update` for
+/// about 75 s on a network with broken IPv6, against under 6 s with this.
+const BREW_CURL_CONFIG: &str = "connect-timeout = 5\n";
+
+/// Points Homebrew's curl at [`BREW_CURL_CONFIG`], kept in `folder`. Homebrew
+/// goes on without it if the file can't be saved. A file with another name
+/// the person set in `brew.env` still wins, as Homebrew reads that last.
+fn use_brew_curl_config(env: &mut BTreeMap<OsString, OsString>, folder: Option<PathBuf>) {
+    let Some(file) = folder
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join("homebrew-curlrc"))
+    else {
+        return;
+    };
+    if save_brew_curl_config(&file).is_ok() {
+        env.insert("HOMEBREW_CURLRC".into(), file.into_os_string());
+    }
+}
+
+/// Saves the file under a name of its own first, so a brew already running
+/// never reads half of it.
+fn save_brew_curl_config(file: &Path) -> std::io::Result<()> {
+    if std::fs::read(file).is_ok_and(|saved| saved == BREW_CURL_CONFIG.as_bytes()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(file.parent().unwrap_or(file))?;
+    let unique = format!(
+        "partial-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    let partial = file.with_extension(unique);
+    std::fs::write(&partial, BREW_CURL_CONFIG)?;
+    std::fs::rename(&partial, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&partial);
+    })
+}
+
+#[cfg(test)]
+mod brew_curl_config_tests {
+    use super::*;
+
+    fn folder(name: &str) -> PathBuf {
+        let folder =
+            std::env::temp_dir().join(format!("pkgdeck-brew-curl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        folder
+    }
+
+    #[test]
+    fn homebrews_curl_gets_a_connection_limit_from_a_saved_file() {
+        let folder = folder("saved");
+        let mut env = BTreeMap::new();
+        use_brew_curl_config(&mut env, Some(folder.join("nested")));
+        let file = folder.join("nested/homebrew-curlrc");
+        assert_eq!(
+            env.get(&OsString::from("HOMEBREW_CURLRC")),
+            Some(&file.clone().into_os_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "connect-timeout = 5\n"
+        );
+        // A file changed by anything else goes back to what PkgDeck needs,
+        // with nothing left beside it.
+        std::fs::write(&file, "output = /tmp/elsewhere\n").unwrap();
+        use_brew_curl_config(&mut env, Some(folder.join("nested")));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "connect-timeout = 5\n"
+        );
+        assert_eq!(std::fs::read_dir(folder.join("nested")).unwrap().count(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn homebrew_runs_without_the_file_when_it_cant_be_saved() {
+        let folder = folder("unsaved");
+        let mut env = BTreeMap::new();
+        use_brew_curl_config(&mut env, None);
+        use_brew_curl_config(&mut env, Some(PathBuf::from("relative/folder")));
+        assert!(env.is_empty());
+        assert!(!Path::new("relative").exists());
+        // A plain file where the folder has to be.
+        std::fs::write(&folder, "").unwrap();
+        use_brew_curl_config(&mut env, Some(folder.clone()));
+        assert!(env.is_empty());
+        // A folder where the file has to be: only the rename can fail.
+        let blocked = folder.with_extension("blocked");
+        std::fs::create_dir_all(blocked.join("homebrew-curlrc/inside")).unwrap();
+        use_brew_curl_config(&mut env, Some(blocked.clone()));
+        assert!(env.is_empty());
+        assert_eq!(std::fs::read_dir(&blocked).unwrap().count(), 1);
+        std::fs::remove_file(folder).unwrap();
+        std::fs::remove_dir_all(blocked).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod askpass_tests {
     use super::*;
@@ -949,6 +1048,10 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
+        use_brew_curl_config(
+            &mut host.env,
+            crate::cache::user_folder(|name| std::env::var_os(name)),
+        );
         // The job's cancellation token owns the marker across every native
         // call, including checked casks updated with separate brew calls.
         if ask && write {
@@ -2157,6 +2260,7 @@ mod flatpak_bridge_tests {
         assert!(output.contains("--env=HOMEBREW_NO_AUTO_UPDATE=1"));
         assert!(output.contains("--env=HOMEBREW_NO_INSTALL_CLEANUP=1"));
         assert!(output.contains("--env=HOMEBREW_NO_ANALYTICS=1"));
+        assert!(output.contains("homebrew-curlrc"));
     }
 
     #[cfg(target_os = "linux")]

@@ -118,6 +118,15 @@ fn visit(path: &Path, depth: usize, hash: &mut Sha256, budget: &mut usize) -> Op
 pub struct Store {
     dir: PathBuf,
 }
+/// PkgDeck's folder in the user's cache, from environment `var`.
+pub(crate) fn user_folder(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let base = var("XDG_CACHE_HOME")
+        .filter(|p| Path::new(p).is_absolute())
+        .map(PathBuf::from)
+        .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(base.join("pkgdeck"))
+}
+
 impl Store {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -135,11 +144,7 @@ impl Store {
         if var("PKGDECK_NO_CACHE").is_some() || root {
             return None;
         }
-        let base = var("XDG_CACHE_HOME")
-            .filter(|p| Path::new(p).is_absolute())
-            .map(PathBuf::from)
-            .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-        Some(Self::new(base.join("pkgdeck")))
+        user_folder(var).map(Self::new)
     }
 
     /// The folder everything here is kept in.

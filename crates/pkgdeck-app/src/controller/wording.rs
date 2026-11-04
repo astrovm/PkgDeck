@@ -213,12 +213,32 @@ pub(super) fn cask_needed_password(error: &EngineError, backend: Option<&str>) -
                 && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo")
     )
 }
+/// `brew update` couldn't fetch Homebrew's package data, so the problem is the
+/// connection or Homebrew's server, not the tool or the packages.
+fn homebrew_unreachable(error: &EngineError, backend: Option<&str>) -> bool {
+    matches!(
+        error,
+        EngineError::Execution(pkgdeck_core::process::ExecutionError::Failed(result))
+            if matches!(backend, Some("homebrew" | "homebrew-cask"))
+                && String::from_utf8_lossy(&result.stderr)
+                    .contains("Failed to download https://formulae.brew.sh/")
+    )
+}
+const HOMEBREW_UNREACHABLE: &str =
+    "Homebrew couldn't reach its server. Check your connection, then try again.";
 /// Why a change didn't finish, as Activity keeps it: [`plain_error`]
 /// without anything a tool printed, which Activity never stores.
 pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
     use pkgdeck_core::process::ExecutionError as E;
     let tool = source_display_name(backend);
     match error {
+        // Fixed wording, known from what the tool printed but holding none of it.
+        error
+            if cask_needed_password(error, Some(backend))
+                || homebrew_unreachable(error, Some(backend)) =>
+        {
+            plain_error(error, Some(backend), false)
+        }
         EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
         EngineError::InvalidResponse { .. } => format!("{tool} reported a problem."),
         error => plain_error(error, Some(backend), false),
@@ -247,6 +267,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         error if cask_needed_password(error, backend) => {
             "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()
         }
+        error if homebrew_unreachable(error, backend) => HOMEBREW_UNREACHABLE.into(),
         EngineError::Execution(E::Failed(result)) => {
             let output = String::from_utf8_lossy(&result.stderr);
             let output = if output.trim().is_empty() {

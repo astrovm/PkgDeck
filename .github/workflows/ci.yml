@@ -694,9 +694,15 @@ jobs:
           merge-multiple: true
       - name: Prepare tap
         run: |
-          brew tap-new --no-git astrovm/pkgdeck
+          # Both first fetch Homebrew's package data, and that server has bad
+          # minutes. A failed tap-new still leaves the tap, so remove it to retry.
           # As the install docs say: Homebrew 6+ only loads trusted third-party taps.
-          brew trust astrovm/pkgdeck
+          for attempt in 1 2 3 4 5; do
+            if brew tap-new --no-git astrovm/pkgdeck && brew trust astrovm/pkgdeck; then break; fi
+            ((attempt < 5)) || exit 1
+            rm -rf "$(brew --repository astrovm/pkgdeck)"
+            sleep 30
+          done
           tap=$(brew --repository astrovm/pkgdeck)
           if [[ $PUBLISHED == true ]]; then
             mkdir -p "$tap/Casks"
