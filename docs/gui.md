@@ -594,8 +594,11 @@ others) need **Skip the password** first. **Update automatically** in
   something is being built. Both switches start on. Builds always count:
   Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake, Xcode, Gradle,
   Maven, Bazel, `go build` or `go test`, `dotnet build`.
-- It skips Cua Driver, whose installer stops the MCP servers of agents that are
-  open. You get a notification and update it yourself.
+- Cua Driver waits until it's idle, since its installer stops the MCP servers of
+  agents that are open. Idle means no `cua-driver` process has done anything for
+  about five minutes, so an open agent that isn't using it doesn't hold it back.
+  **Settings** shows **Cua Driver updates wait until it's idle** meanwhile. If an
+  agent loses its Cua Driver tools afterwards, restart it.
 - A build holds only updates that could change what it runs. Flatpak,
   AppImages, Docker and Podman images, Oh My Zsh and coding assistants like
   Codex and Claude Code update during builds. Snap waits, since classic snaps

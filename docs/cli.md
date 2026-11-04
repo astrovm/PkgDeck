@@ -656,9 +656,9 @@ PkgDeck sets `DO_NOT_TRACK=1` when it runs Cua's installers and updates, so they
 send no usage events.
 
 Cua Driver's installer stops every running `cua-driver`, including the MCP
-servers of agents that are open, so restart those agents after updating.
-Because of that, automatic updates skip Cua Driver: you get a notification and
-update it yourself.
+servers of agents that are open. If an agent loses its Cua Driver tools after
+an update, restart it. `pkd upgrade` runs right away; automatic updates in the
+app wait until Cua Driver is idle.
 
 Updating `cua` leaves the Cua Spaces app alone. On Linux, PkgDeck lists and
 updates it as an AppImage (`--from appimage`).

@@ -16,7 +16,7 @@
         <ul>
           <li>Cua and Cua Driver show up with real update checks, and updating them refreshes their skills in your agents</li>
           <li>Electron AppImages such as Cua Spaces check their own update list instead of always showing as up to date</li>
-          <li>Automatic updates skip Cua Driver, since updating it stops the MCP servers of open agents</li>
+          <li>Automatic updates of Cua Driver wait until it's idle, since updating it stops the MCP servers of open agents</li>
           <li>pkd upgrade with a name says nothing needs doing when it's already up to date</li>
         </ul>
       </description>
