@@ -801,12 +801,8 @@ impl<T: Transport> HomebrewCask<T> {
                 if !cask_token(&c.full_token) {
                     return Err(invalid("homebrew-cask", "invalid cask token"));
                 }
-                let icon = c
-                    .installed
-                    .as_ref()
-                    .filter(|v| !v.is_empty())
-                    .and_then(|_| self.cask_icon(&c, cancel));
-                let installed = c.installed.filter(|v| !v.is_empty());
+                let installed = c.installed.clone().filter(|v| !v.is_empty());
+                let icon = installed.as_ref().and_then(|_| self.cask_icon(&c, cancel));
                 let display = c
                     .name
                     .iter()

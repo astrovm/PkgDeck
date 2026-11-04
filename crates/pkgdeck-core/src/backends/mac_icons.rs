@@ -42,8 +42,9 @@ fn png_in_icns(icns: &[u8]) -> Option<&[u8]> {
         .map(|(_, body)| *body)
 }
 
-/// Write the `.icns` file `from` as a PNG at `to`, with macOS's own tool.
-fn convert_with_sips(from: &Path, to: &Path, cancel: &Cancellation) -> bool {
+/// Write the `.icns` file `from` as a PNG at `to`, with `sips`, macOS's own
+/// tool, at `tool`.
+fn convert_with(tool: &Path, from: &Path, to: &Path, cancel: &Cancellation) -> bool {
     let args = [
         "-s".as_ref(),
         "format".as_ref(),
@@ -56,7 +57,7 @@ fn convert_with_sips(from: &Path, to: &Path, cancel: &Cancellation) -> bool {
     ]
     .map(ToOwned::to_owned);
     Host::current()
-        .read(Path::new("/usr/bin/sips"), &args, Limits::default(), cancel)
+        .read(tool, &args, Limits::default(), cancel)
         .is_ok_and(|result| result.code == Some(0))
 }
 
@@ -116,7 +117,7 @@ pub(super) fn user_bundle_icon(
     cancel: &Cancellation,
 ) -> Option<PathBuf> {
     bundle_icon(bundle, plist, Store::user()?.dir(), |from, to| {
-        convert_with_sips(from, to, cancel)
+        convert_with(Path::new("/usr/bin/sips"), from, to, cancel)
     })
 }
 
@@ -360,13 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn sips_refuses_what_it_cannot_read() {
-        let root = std::env::temp_dir().join(format!("pkgdeck-sips-{}", std::process::id()));
-        assert!(!convert_with_sips(
-            &root.join("missing.icns"),
-            &root.join("out.png"),
-            &Cancellation::default()
-        ));
+    fn a_conversion_worked_only_if_the_tool_says_so() {
+        let cancel = Cancellation::default();
+        let convert =
+            |tool: &str| convert_with(Path::new(tool), Path::new("a"), Path::new("b"), &cancel);
+        assert!(convert("/usr/bin/true"));
+        assert!(!convert("/usr/bin/false"));
+        // A computer without the tool, such as anything but a Mac.
+        assert!(!convert("/nonexistent/sips"));
     }
 
     #[test]
