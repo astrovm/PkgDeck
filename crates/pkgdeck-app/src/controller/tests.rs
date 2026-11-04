@@ -6695,7 +6695,8 @@ fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
     };
     let driver_only = PackageReport {
         packages: vec![package("cua-driver", "cua-driver")],
-        ..PackageReport::default()
+        failures: vec![],
+        successful_sources: vec!["cua-driver".into()],
     };
     let state = |controller: &Pin<&mut ffi::PackageController>| -> Value {
         serde_json::from_str(&controller.background_state().to_string()).unwrap()
@@ -6754,7 +6755,8 @@ fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
             package("codex", "codex"),
             package("ripgrep", "cargo"),
         ],
-        ..PackageReport::default()
+        failures: vec![],
+        successful_sources: ["cua-driver", "codex", "cargo"].map(str::to_owned).to_vec(),
     });
     assert_eq!(queued(&controller), ["codex"]);
     assert_eq!(state(&controller)["driver_in_use"], true);
@@ -6814,6 +6816,110 @@ fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
     controller.as_mut().rust_mut().driver_in_use = true;
     controller.as_mut().set_auto_update(false);
     assert!(!controller.rust().driver_in_use);
+}
+#[test]
+fn a_finished_automatic_run_counts_and_names_what_it_updated() {
+    let package = |path: &str, name: &str, backend: &str| {
+        let mut package = synthetic_package(path, name);
+        package.id.backend = backend.into();
+        package.installed_version = Some("1".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let report = PackageReport {
+        packages: vec![
+            package("/home/me/.local/bin/cua-driver", "Cua Driver", "cua-driver"),
+            package("/home/me/.local/bin/codex", "Codex", "codex"),
+            package("/home/me/.local/bin/cua", "", "cua"),
+            package("/home/me/.local/bin/claude", "Claude Code", "claude"),
+        ],
+        failures: vec![],
+        successful_sources: ["cua-driver", "codex", "cua", "claude"]
+            .map(str::to_owned)
+            .to_vec(),
+    };
+    let available = |controller: &Pin<&mut ffi::PackageController>| {
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        (state["available"].as_u64(), state["notify"].as_bool())
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+    assert!(controller.as_mut().rust_mut().background_schedule.ready(
+        epoch_seconds(),
+        true,
+        false,
+        false,
+        false,
+        false
+    ));
+    controller.as_mut().finish_background_check(report);
+    assert_eq!(available(&controller).0, Some(4));
+    let Some(Confirmed {
+        job: Job::AutoUpgrade(operations, removals),
+        ..
+    }) = controller.as_mut().rust_mut().validated_confirmed.take()
+    else {
+        panic!("no automatic run queued");
+    };
+    // Activity names them the way the list does, even though no page has
+    // listed them, and a package without a name keeps its ID.
+    let names: Vec<_> = controller
+        .rust()
+        .names
+        .of(&operations)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(names, ["Cua Driver", "Codex", "Claude Code"]);
+
+    // What finished comes off the count; what failed stays on it.
+    let outcome = |operation: &Operation| {
+        if operation.backend() == "codex" {
+            Outcome::Failed
+        } else {
+            Outcome::Finished
+        }
+    };
+    let steps = operations
+        .iter()
+        .map(|operation| Ended {
+            title: String::new(),
+            outcome: outcome(operation),
+            said: Said::Completed,
+            kept: None,
+        })
+        .collect();
+    let job = Job::AutoUpgrade(operations, removals);
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        job,
+        vec![Reply::Done(Ok(Payload::Batch(Batch {
+            noun: "updates",
+            steps,
+            note: None,
+        })))],
+    ));
+    controller.as_mut().poll();
+    assert_eq!(available(&controller), (Some(1), Some(false)));
+    assert!(controller.rust().auto_run_updates.is_empty());
+
+    // A run nothing is known about changes nothing.
+    controller
+        .as_mut()
+        .set_background_state(encoded(json!({"available": 3, "notify": true})));
+    controller.as_mut().forget_finished_updates(
+        &[Operation::Refresh {
+            backend: "codex".into(),
+        }],
+        &Batch {
+            noun: "updates",
+            steps: vec![],
+            note: None,
+        },
+    );
+    assert_eq!(available(&controller), (Some(3), Some(true)));
 }
 #[test]
 fn turned_off_waits_let_updates_run_and_cleaning_ignores_metered() {

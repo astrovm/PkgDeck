@@ -1905,6 +1905,9 @@ pub struct Controller {
     auto_held: Option<Hold>,
     /// The sources whose updates a build holds, by name.
     auto_held_sources: Vec<String>,
+    /// The updates the queued automatic run covers, to take the ones it
+    /// finishes off the count without another check.
+    auto_run_updates: Vec<PackageId>,
     /// Whether Cua Driver's automatic update waits for it to go idle.
     driver_in_use: bool,
     /// How long Cua Driver has been idle.
@@ -2060,6 +2063,7 @@ impl Default for Controller {
             waits: Waits::default(),
             auto_held: None,
             auto_held_sources: Vec::new(),
+            auto_run_updates: Vec::new(),
             driver_in_use: false,
             driver_idle: DriverIdle::default(),
             allow_removals: true,
@@ -2889,6 +2893,14 @@ fn operation_kind(operation: &Operation) -> &'static str {
 fn target_row(id: &PackageId) -> Value {
     json!({"source": id.backend, "name": id.name, "architecture": id.architecture,
         "remote": id.remote, "scope": id.scope, "reference": id.reference})
+}
+/// Whether `operation` updates `package`.
+fn covers_update(operation: &Operation, package: &PackageId) -> bool {
+    match operation {
+        Operation::Upgrade(id) => id == package,
+        Operation::UpgradeAll { backend } => *backend == package.backend,
+        _ => false,
+    }
 }
 fn package_target(operation: &Operation) -> Option<&PackageId> {
     match operation {
@@ -4471,6 +4483,30 @@ impl ffi::PackageController {
     pub fn waits(&self) -> Waits {
         self.rust().waits
     }
+    /// Takes the updates an automatic run finished off the count, which
+    /// otherwise stays until the next check, hours away.
+    fn forget_finished_updates(mut self: Pin<&mut Self>, operations: &[Operation], ran: &Batch) {
+        let finished: Vec<&Operation> = operations
+            .iter()
+            .zip(ran.outcomes())
+            .filter(|(_, outcome)| *outcome == Outcome::Finished)
+            .map(|(operation, _)| operation)
+            .collect();
+        let updates = std::mem::take(&mut self.as_mut().rust_mut().auto_run_updates);
+        let done = updates
+            .iter()
+            .filter(|id| finished.iter().any(|o| covers_update(o, id)))
+            .count() as u64;
+        if done == 0 {
+            return;
+        }
+        let mut state: Value =
+            serde_json::from_str(&self.background_state().to_string()).unwrap_or_default();
+        let available = state["available"].as_u64().unwrap_or(0);
+        state["available"] = json!(available.saturating_sub(done));
+        state["notify"] = json!(false);
+        self.as_mut().set_background_state(encoded(state));
+    }
     /// Whether Cua Driver is idle now, going by what its processes did since
     /// the last time this asked.
     fn driver_is_idle(mut self: Pin<&mut Self>) -> bool {
@@ -4904,6 +4940,25 @@ impl ffi::PackageController {
             .map(|p| (p.id.clone(), cask_version(p).to_owned()))
             .collect();
         self.as_mut().rust_mut().cask_versions = versions;
+        self.as_mut().rust_mut().auto_run_updates = report
+            .packages
+            .iter()
+            .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+            .filter(|p| operations.iter().any(|o| covers_update(o, &p.id)))
+            .map(|p| p.id.clone())
+            .collect();
+        // No page may have listed these yet, so the check names them.
+        for package in &report.packages {
+            let targeted = operations
+                .iter()
+                .any(|operation| package_target(operation) == Some(&package.id));
+            if targeted && !package.display_name.trim().is_empty() {
+                self.as_mut()
+                    .rust_mut()
+                    .names
+                    .insert(package.id.clone(), package.display_name.clone());
+            }
+        }
         let names = self.rust().names_for(&operations);
         let saved = names.of(&operations);
         self.as_mut().rust_mut().names.extend(names);
@@ -7869,6 +7924,7 @@ impl ffi::PackageController {
                         "failed": count(Outcome::Failed) + count(Outcome::Cancelled),
                         "total": operations.len(),
                     })));
+                    self.as_mut().forget_finished_updates(operations, ran);
                 }
             }
             // A source that just refreshed was checked successfully, even
