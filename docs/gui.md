@@ -519,7 +519,7 @@ apps remain visible in the partial inventory.
 
 Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot CLI, Kiro CLI,
 Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates,
-and so do the Solana CLI (Agave), Anchor through AVM, and Foundry. PkgDeck updates them with their
+and so do the Solana CLI (Agave), Anchor through AVM, Foundry, Cua and Cua Driver. PkgDeck updates them with their
 own updaters and can remove them, without admin rights. Removing takes away
 only what the tool's installer put there and keeps your settings, sign-ins and
 keys; on macOS the files go to the Trash. It can't install them. Copies
@@ -594,6 +594,8 @@ others) need **Skip the password** first. **Update automatically** in
   something is being built. Both switches start on. Builds always count:
   Cargo, a C, C++ or Swift compiler, Make, Ninja, CMake, Xcode, Gradle,
   Maven, Bazel, `go build` or `go test`, `dotnet build`.
+- It skips Cua Driver, whose installer stops the MCP servers of agents that are
+  open. You get a notification and update it yourself.
 - A build holds only updates that could change what it runs. Flatpak,
   AppImages, Docker and Podman images, Oh My Zsh and coding assistants like
   Codex and Claude Code update during builds. Snap waits, since classic snaps

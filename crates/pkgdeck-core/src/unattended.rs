@@ -43,8 +43,9 @@ pub enum Unattended {
     /// Needs root, so it updates only under the saved approval.
     Approved,
     /// Never updated unattended: firmware (power and restarts), the App
-    /// Store (mas runs sudo itself), inventories, and system managers the
-    /// helper doesn't run.
+    /// Store (mas runs sudo itself), inventories, system managers the helper
+    /// doesn't run, and Cua Driver, whose installer stops the MCP servers of
+    /// running agents, even in the middle of their work.
     Never,
 }
 
@@ -56,7 +57,7 @@ pub fn unattended(backend: &str) -> Unattended {
             Unattended::Approved
         }
         "fwupd" | "mas" | "macos-apps" | "system-image" | "apk" | "xbps" | "aur" | "toolbox"
-        | "distrobox" | "system-files" => Unattended::Never,
+        | "distrobox" | "system-files" | "cua-driver" => Unattended::Never,
         _ => Unattended::User,
     }
 }
@@ -494,6 +495,7 @@ mod tests {
         }
         for id in [
             "fwupd",
+            "cua-driver",
             "mas",
             "macos-apps",
             "apk",

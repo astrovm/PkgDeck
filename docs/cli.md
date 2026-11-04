@@ -593,7 +593,8 @@ So do the blockchain toolchains the [Anchor](https://www.anchor-lang.com/docs/in
 and [Foundry](https://getfoundry.sh/introduction/installation) guides install:
 the Solana CLI (Agave), Anchor through AVM, and Foundry (forge, cast, anvil
 and chisel). Rust comes from the `rustup` source, and Node.js and Yarn from
-Homebrew or npm. Node.js versions installed with nvm aren't covered.
+Homebrew or npm. Node.js versions installed with nvm aren't covered. Cua and
+Cua Driver are covered too.
 
 ```sh
 pkd list --from codex --json
@@ -622,6 +623,8 @@ program must be owned by you and installed in the official location:
 | Solana CLI (Agave) | `~/.local/share/solana/install/active_release/bin/agave-install`, linking into its `releases` folder, with the release channel in `~/.config/solana/install/config.yml` | |
 | Anchor (AVM) | `~/.avm/bin/avm`, with the active Anchor named in `~/.avm/.version` and installed as `~/.avm/bin/anchor-VERSION` | `AVM_HOME` |
 | Foundry | `~/.foundry/bin/forge`, linking into `~/.foundry/versions`, next to `foundryup` | `FOUNDRY_DIR` |
+| Cua | `~/.local/bin/cua`, reporting itself as cua | `CUA_HOME` for its data |
+| Cua Driver | `~/.local/bin/cua-driver`, linking into `~/.cua-driver/packages/releases`, or into `/Applications/CuaDriver.app` on macOS | `CUA_DRIVER_RS_HOME` |
 
 How updates are checked and installed:
 
@@ -640,12 +643,25 @@ How updates are checked and installed:
 | Solana CLI (Agave) | The release on your channel (stable, beta or edge). A pinned release (`agave-install init VERSION`) is never updated | `agave-install update` |
 | Anchor (AVM) | Latest stable Anchor release | `avm install --force VERSION`, which also switches to it, even when an earlier try stopped halfway. AVM also rebuilds its `solana-verify` helper from source with Cargo (found in `~/.cargo/bin` or `CARGO_HOME` when it's not on PATH), so this takes a few minutes |
 | Foundry | Latest stable release. Nightly builds aren't checked | `foundryup --install stable` |
+| Cua | The CLI release in Cua's install manifest | Official installer with `--cli-only`, run from a private temporary folder, then `cua connect update` to refresh your agents' skills and MCP entries |
+| Cua Driver | `cua-driver check-update`, which follows your stable or nightly channel and remembers its answer for up to 20 hours | Official installer, run from a private temporary folder, then `cua-driver skills update` if its skills are installed |
 
 `curl` is needed for the release checks and the Codex installer. If a check
 fails, it's reported as an error, never as "up to date". Updates need
 confirmation, run without admin rights, and never downgrade a newer version.
 PkgDeck checks the version after updating. Restart open sessions of the tool
 to use the new version.
+
+PkgDeck sets `DO_NOT_TRACK=1` when it runs Cua's installers and updates, so they
+send no usage events.
+
+Cua Driver's installer stops every running `cua-driver`, including the MCP
+servers of agents that are open, so restart those agents after updating.
+Because of that, automatic updates skip Cua Driver: you get a notification and
+update it yourself.
+
+The Cua Spaces app isn't updated here. PkgDeck lists its AppImage on Linux, and
+updating `cua` leaves the app alone.
 
 Removing a tool takes away only what its installer put there. Your settings,
 sign-ins and keys stay:
@@ -665,10 +681,15 @@ sign-ins and keys stay:
 | Solana CLI (Agave) | `~/.local/share/solana/install`, with every installed release | `~/.config/solana`: your keypairs and the CLI and installer settings |
 | Anchor (AVM) | In `~/.avm`: `bin` (avm, anchor, every `anchor-VERSION` and `solana-verify`), `.version`, and Cargo's records of AVM (`.crates.toml`, `.crates2.json`) | Your Anchor projects |
 | Foundry | `~/.foundry/bin`, `~/.foundry/versions` and `~/.foundry/share/man` | `~/.foundry/keystores` (cast wallets) and `~/.foundry/cache` |
+| Cua | `~/.local/bin/cua` and what ships with it (`cua-microvm-init`, `cua-spacesd-linux-*`, `cua-vz`, `cua-netgw`), plus Cua's skills and MCP entries in your agents (`cua connect remove`). Its daemon stops | `~/.cua`: settings, sign-in and Spaces. The Cua Spaces app and Cua Driver's own skill and MCP entry |
+| Cua Driver | What its official uninstaller removes: the program, its releases, its skill and the links to it in your agents, and on macOS the app | `~/.cua-driver` settings. MCP entries outside Claude Code stay; `cua connect remove --include-cua-driver` removes them |
+
+If this computer is set up for remote access through Cua, PkgDeck won't remove
+`cua`, because that access would stop working. Run `cua host remove` first.
 
 The same overrides as above apply. Folders left empty are removed too. On
-macOS everything goes to the Trash, so you can put it back; on Linux it's
-deleted. A launcher is removed only while it still points into the tool's own
+macOS everything goes to the Trash, so you can put it back, except Cua Driver,
+which its uninstaller deletes; on Linux it's deleted. A launcher is removed only while it still points into the tool's own
 folder, so a link another tool took over stays. PkgDeck refuses to remove a
 folder that is a link to somewhere else, isn't yours, or holds your home
 folder. Removal needs confirmation, runs without admin rights, and PkgDeck

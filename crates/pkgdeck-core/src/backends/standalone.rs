@@ -84,6 +84,14 @@ impl StandaloneTool {
             Self::CuaDriver => "Cua Driver",
         }
     }
+    /// What the person needs to do once an update is in.
+    fn after_update_note(self) -> &'static str {
+        match self {
+            // Its installer stops the MCP servers of running agents.
+            Self::CuaDriver => "Restart the agents that use it.",
+            _ => "Restart existing sessions to use it.",
+        }
+    }
     /// What finishes an update when PkgDeck's own try fails.
     fn refresh_command(self) -> &'static str {
         match self {
@@ -542,9 +550,10 @@ impl Backend for Standalone {
         }
         let deferred = self.refresh(&updated, cancel, progress) || deferred;
         progress(Progress::Message(format!(
-            "{} updated to {}. Restart existing sessions to use it.",
+            "{} updated to {}. {}",
             self.tool.name(),
-            updated.version
+            updated.version,
+            self.tool.after_update_note()
         )));
         Ok(OperationOutcome {
             cancellation_deferred: deferred,
@@ -1209,6 +1218,7 @@ impl NativeStandalone {
         let args: Vec<OsString> = match tool {
             StandaloneTool::Codex => return self.install_codex(installation, candidate, cancel),
             StandaloneTool::Cua => return self.install_cua(candidate, cancel),
+            StandaloneTool::CuaDriver => return self.install_cua_driver(cancel),
             StandaloneTool::Claude => vec!["update".into()],
             StandaloneTool::Grok => vec![
                 "update".into(),
@@ -1241,16 +1251,10 @@ impl NativeStandalone {
                 candidate.to_string().into(),
             ],
             StandaloneTool::Foundry => vec!["--install".into(), "stable".into()],
-            StandaloneTool::CuaDriver => vec!["update".into(), "--apply".into()],
-        };
-        let env = if tool == StandaloneTool::CuaDriver {
-            no_telemetry().to_vec()
-        } else {
-            vec![]
         };
         Ok(self
             .host
-            .standalone_write(&installation.updater, &args, &env, cancel)?)
+            .standalone_write(&installation.updater, &args, &[], cancel)?)
     }
     fn run_remove(
         &self,
@@ -1588,6 +1592,27 @@ impl NativeStandalone {
                 "--no-modify-path".into(),
                 "--version".into(),
                 candidate.to_string().into(),
+            ],
+            &no_telemetry(),
+            cancel,
+        )?)
+    }
+    /// `cua-driver update --apply` runs this same installer, which stops every
+    /// running cua-driver, so that command dies (signal 15) before it can say
+    /// how the update went. Run directly, the installer finishes and follows
+    /// the saved stable or nightly channel.
+    fn install_cua_driver(&self, cancel: &Cancellation) -> Result<Completion, EngineError> {
+        let script = self.fetch("https://cua.ai/driver/install.sh", cancel)?;
+        let temporary = InstallerFile::create(script.as_bytes())?;
+        let bash = self
+            .host
+            .resolve("bash")?
+            .ok_or_else(|| ExecutionError::Disabled("bash not found".into()))?;
+        Ok(self.host.standalone_write(
+            &bash,
+            &[
+                temporary.0.join("install.sh").into(),
+                "--no-modify-path".into(),
             ],
             &no_telemetry(),
             cancel,
@@ -2908,6 +2933,8 @@ mod tests {
             temp.network(r#"{"tag_name":"v2.0.0"}"#);
             temp.write("installer", if tool == StandaloneTool::Cua {
                 "#!/bin/sh\n[ \"$DO_NOT_TRACK\" = 1 ] || exit 8\n[ \"$*\" = '--cli-only --yes --no-onboarding --no-modify-path --version 2.0.0' ] || exit 9\nprintf 'cua 2.0.0' > \"$HOME/.local/bin/cua.version\"\n"
+            } else if tool == StandaloneTool::CuaDriver {
+                "#!/bin/bash\n[ \"$DO_NOT_TRACK\" = 1 ] || exit 8\n[ \"$*\" = --no-modify-path ] || exit 9\nprintf 'cua-driver 2.0.0' > \"$HOME/.local/bin/cua-driver.version\"\n"
             } else {
                 "#!/bin/sh\n[ \"$CODEX_NON_INTERACTIVE\" = 1 ] || exit 8\n[ \"$1\" = --release ] || exit 9\nprintf '%s' \"$2\" > \"$CODEX_INSTALL_DIR/codex.version\"\n"
             });
@@ -2932,7 +2959,10 @@ mod tests {
                 native.locate(tool, &cancel).unwrap().unwrap().version,
                 Version::new(2, 0, 0)
             );
-            if !matches!(tool, StandaloneTool::Codex | StandaloneTool::Cua) {
+            if !matches!(
+                tool,
+                StandaloneTool::Codex | StandaloneTool::Cua | StandaloneTool::CuaDriver
+            ) {
                 let args = fs::read_to_string(installation.updater.with_extension("args")).unwrap();
                 match tool {
                     StandaloneTool::OpenCode => {
@@ -2940,7 +2970,6 @@ mod tests {
                     }
                     StandaloneTool::Anchor => assert_eq!(args, "install\n--force\n2.0.0\n"),
                     StandaloneTool::Foundry => assert_eq!(args, "--install\nstable\n"),
-                    StandaloneTool::CuaDriver => assert_eq!(args, "update\n--apply\n"),
                     _ => assert!(args.starts_with("update\n")),
                 }
             }
