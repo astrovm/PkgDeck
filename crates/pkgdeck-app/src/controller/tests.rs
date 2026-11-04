@@ -8059,6 +8059,8 @@ fn source_and_scope_names_read_as_people_know_them() {
         ("solana", "Solana CLI (Agave)"),
         ("anchor", "Anchor (AVM)"),
         ("foundry", "Foundry (standalone)"),
+        ("cua", "Cua (standalone)"),
+        ("cua-driver", "Cua Driver (standalone)"),
         ("dev-caches", "Caches"),
         ("projects", "Old projects"),
         ("fixture", "fixture"),

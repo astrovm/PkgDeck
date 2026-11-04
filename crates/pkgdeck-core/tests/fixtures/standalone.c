@@ -29,6 +29,28 @@ int main(int argc, char **argv) {
         print_file(path, "{\"installer\":\"internal\",\"updateAvailable\":true,\"latestVersion\":\"2.0.0\",\"error\":null}");
         return 0;
     }
+    if (argc == 3 && strcmp(argv[1], "check-update") == 0) {
+        snprintf(path, sizeof(path), "%s.check.json", argv[0]);
+        print_file(path, "{\"update_available\":true,\"latest_version\":\"2.0.0\",\"error\":null}");
+        return 0;
+    }
+    /* Keep each run in <argv0>.runs. A <argv0>.fail naming argv[1] fails it. */
+    if (argc >= 2) {
+        snprintf(path, sizeof(path), "%s.runs", argv[0]);
+        FILE *runs = fopen(path, "a"); if (!runs) return 1;
+        for (int i=1; i<argc; ++i) fprintf(runs, "%s ", argv[i]);
+        const char *track = getenv("DO_NOT_TRACK");
+        fprintf(runs, "DNT=%s\n", track ? track : "");
+        fclose(runs);
+        snprintf(path, sizeof(path), "%s.fail", argv[0]);
+        FILE *fail = fopen(path, "r");
+        if (fail) {
+            char word[64] = "";
+            int read = fscanf(fail, "%63s", word);
+            fclose(fail);
+            if (read == 1 && strcmp(word, argv[1]) == 0) return 4;
+        }
+    }
     snprintf(path, sizeof(path), "%s.args", argv[0]);
     FILE *f = fopen(path, "w"); if (!f) return 1;
     for (int i=1; i<argc; ++i) fprintf(f, "%s\n", argv[i]);

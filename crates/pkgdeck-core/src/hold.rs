@@ -188,6 +188,8 @@ pub fn waits_for_builds(backend: &str) -> bool {
             | "antigravity"
             | "amp"
             | "droid"
+            | "cua"
+            | "cua-driver"
     )
 }
 

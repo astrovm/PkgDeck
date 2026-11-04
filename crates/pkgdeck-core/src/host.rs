@@ -448,6 +448,8 @@ impl Host {
             "GROK_BIN_DIR",
             "AVM_HOME",
             "FOUNDRY_DIR",
+            "CUA_HOME",
+            "CUA_DRIVER_RS_HOME",
             "DISABLE_UPDATES",
             // Oh My Zsh's checkout and its custom plugins and themes.
             "ZSH",
@@ -693,6 +695,26 @@ impl Host {
         env: &[(&str, OsString)],
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
+        // AVM builds solana-verify from source during an Anchor update, which
+        // takes minutes on slower machines.
+        self.standalone_write_within(
+            executable,
+            args,
+            env,
+            std::time::Duration::from_secs(900),
+            cancel,
+        )
+    }
+
+    /// `standalone_write` with a time limit of its own.
+    pub(crate) fn standalone_write_within(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        timeout: std::time::Duration,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
         refuse_root(true)?;
         let mut host = self.clone();
         // Updaters such as AVM run Cargo themselves, which a desktop app's
@@ -714,9 +736,7 @@ impl Host {
         process::run(
             command,
             Limits {
-                // AVM builds solana-verify from source during an Anchor
-                // update, which takes minutes on slower machines.
-                timeout: std::time::Duration::from_secs(900),
+                timeout,
                 output_bytes: 1024 * 1024,
             },
             cancel,
