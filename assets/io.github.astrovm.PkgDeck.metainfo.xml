@@ -10,6 +10,15 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.14.1" date="2026-11-04">
+      <description>
+        <p>Updating several Homebrew casks asks for your password once.</p>
+        <ul>
+          <li>Homebrew casks you check together update in one go, so you enter your password once, and each row still says how its cask went</li>
+          <li>If you cancel while they update, PkgDeck waits for all of them to finish</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.14.0" date="2026-11-04">
       <description>
         <p>Updates stay right on opening, Mac apps show their icons, and Cua, Cua Driver and Cua Spaces get updates.</p>
