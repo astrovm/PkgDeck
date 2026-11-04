@@ -96,7 +96,7 @@ pub(super) fn app_icon(bundle: &Path, cancel: &Cancellation) -> Option<PathBuf> 
     let plist = NativeApps(Host::current())
         .plist(&bundle.join("Contents/Info.plist"), cancel)
         .ok()?;
-    super::mac_icons::user_bundle_icon(bundle, &plist)
+    super::mac_icons::user_bundle_icon(bundle, &plist, cancel)
 }
 #[cfg(not(target_os = "macos"))]
 pub(super) fn app_icon(_: &Path, _: &Cancellation) -> Option<PathBuf> {
@@ -947,7 +947,7 @@ impl MacApps {
                 installed_version: Some(version.unwrap_or("unknown").into()),
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
-                icon: super::mac_icons::user_bundle_icon(path, value),
+                icon: super::mac_icons::user_bundle_icon(path, value, cancel),
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: adopt_with.map(str::to_owned),

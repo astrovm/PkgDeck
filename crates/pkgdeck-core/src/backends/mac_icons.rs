@@ -1,7 +1,12 @@
 //! The icons of Mac apps, read from their bundles. An `.icns` file holds one
 //! picture at several sizes, as PNGs in anything `iconutil` made. The window
-//! only draws PNGs, so the one it needs is saved on its own.
-use crate::cache::Store;
+//! only draws PNGs, so the one it needs is saved on its own. Older files keep
+//! their pictures in formats only macOS reads, so `sips` converts those.
+use crate::{
+    cache::Store,
+    host::Host,
+    process::{Cancellation, Limits},
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,6 +19,8 @@ const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// 128 pixels first, the smallest that stays sharp where the window draws
 /// icons at their largest. Then each larger size, in case that one is missing.
 const SIZES: [&[u8; 4]; 6] = [b"ic07", b"ic13", b"ic08", b"ic14", b"ic09", b"ic10"];
+/// As large as a converted icon needs, however large the original is.
+const CONVERTED_PIXELS: &str = "256";
 
 /// The PNG to show from an `.icns` file, if it holds one.
 fn png_in_icns(icns: &[u8]) -> Option<&[u8]> {
@@ -35,9 +42,33 @@ fn png_in_icns(icns: &[u8]) -> Option<&[u8]> {
         .map(|(_, body)| *body)
 }
 
+/// Write the `.icns` file `from` as a PNG at `to`, with macOS's own tool.
+fn convert_with_sips(from: &Path, to: &Path, cancel: &Cancellation) -> bool {
+    let args = [
+        "-s".as_ref(),
+        "format".as_ref(),
+        "png".as_ref(),
+        "-Z".as_ref(),
+        CONVERTED_PIXELS.as_ref(),
+        from.as_os_str(),
+        "--out".as_ref(),
+        to.as_os_str(),
+    ]
+    .map(ToOwned::to_owned);
+    Host::current()
+        .read(Path::new("/usr/bin/sips"), &args, Limits::default(), cancel)
+        .is_ok_and(|result| result.code == Some(0))
+}
+
 /// The saved PNG of the app at `bundle`, whose `Info.plist` is `plist`, kept
-/// under `cache` until the app's icon changes.
-pub(super) fn bundle_icon(bundle: &Path, plist: &Value, cache: &Path) -> Option<PathBuf> {
+/// under `cache` until the app's icon changes. `convert` handles a file that
+/// holds no PNG.
+pub(super) fn bundle_icon(
+    bundle: &Path,
+    plist: &Value,
+    cache: &Path,
+    convert: impl Fn(&Path, &Path) -> bool,
+) -> Option<PathBuf> {
     let name = plist.get("CFBundleIconFile")?.as_str()?;
     if name.is_empty() || name.contains('/') {
         return None;
@@ -61,18 +92,32 @@ pub(super) fn bundle_icon(bundle: &Path, plist: &Value, cache: &Path) -> Option<
         return Some(saved);
     }
     let icns = fs::read(&file).ok()?;
-    let png = png_in_icns(&icns)?;
     fs::create_dir_all(saved.parent()?).ok()?;
     // Whole, then renamed: the window may be reading the old one.
-    let partial = saved.with_extension("partial");
-    fs::write(&partial, png).ok()?;
-    fs::rename(&partial, &saved).ok()?;
+    let partial = saved.with_extension("partial.png");
+    let written = match png_in_icns(&icns) {
+        Some(png) => fs::write(&partial, png).is_ok(),
+        None => {
+            convert(&file, &partial)
+                && fs::read(&partial).is_ok_and(|bytes| bytes.starts_with(PNG_MAGIC))
+        }
+    };
+    if !written || fs::rename(&partial, &saved).is_err() {
+        let _ = fs::remove_file(&partial);
+        return None;
+    }
     Some(saved)
 }
 
 /// [`bundle_icon`] in the user's cache.
-pub(super) fn user_bundle_icon(bundle: &Path, plist: &Value) -> Option<PathBuf> {
-    bundle_icon(bundle, plist, Store::user()?.dir())
+pub(super) fn user_bundle_icon(
+    bundle: &Path,
+    plist: &Value,
+    cancel: &Cancellation,
+) -> Option<PathBuf> {
+    bundle_icon(bundle, plist, Store::user()?.dir(), |from, to| {
+        convert_with_sips(from, to, cancel)
+    })
 }
 
 #[cfg(test)]
@@ -154,7 +199,17 @@ mod tests {
             file
         }
         fn read(&self, plist: Value) -> Option<PathBuf> {
-            bundle_icon(&self.path, &plist, &self.root.join("cache"))
+            self.read_with(plist, |_, _| false)
+        }
+        fn read_with(
+            &self,
+            plist: Value,
+            convert: impl Fn(&Path, &Path) -> bool,
+        ) -> Option<PathBuf> {
+            bundle_icon(&self.path, &plist, &self.root.join("cache"), convert)
+        }
+        fn saved_files(&self) -> usize {
+            fs::read_dir(self.root.join("cache/app-icons")).map_or(0, Iterator::count)
         }
     }
 
@@ -228,10 +283,53 @@ mod tests {
             .set_len(MAX_ICNS_BYTES + 1)
             .unwrap();
         assert_eq!(bundle.read(json!({"CFBundleIconFile": "Huge"})), None);
-        // Holds no PNG: nothing is saved.
-        bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));
-        assert_eq!(bundle.read(json!({"CFBundleIconFile": "Old"})), None);
         assert!(!bundle.root.join("cache").exists());
+    }
+
+    #[test]
+    fn an_icns_without_a_png_is_converted() {
+        let bundle = Bundle::new("converted");
+        let file = bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));
+        let plist = json!({"CFBundleIconFile": "Old"});
+        let saved = bundle
+            .read_with(plist, |from, to| {
+                assert_eq!(from, file);
+                fs::write(to, png(b"converted")).is_ok()
+            })
+            .unwrap();
+        assert_eq!(fs::read(&saved).unwrap(), png(b"converted"));
+        assert_eq!(bundle.saved_files(), 1);
+    }
+
+    #[test]
+    fn a_conversion_that_fails_saves_nothing() {
+        let bundle = Bundle::new("unconverted");
+        bundle.icon("Old.icns", &icns(&[entry(b"it32", b"old")]));
+        let plist = json!({"CFBundleIconFile": "Old"});
+        // The tool failed, after writing part of a file.
+        let failed = |_: &Path, to: &Path| {
+            fs::write(to, b"part").unwrap();
+            false
+        };
+        assert_eq!(bundle.read_with(plist.clone(), failed), None);
+        assert_eq!(bundle.saved_files(), 0);
+        // The tool said it worked, but what it wrote isn't a PNG.
+        let wrong = |_: &Path, to: &Path| fs::write(to, b"not a png").is_ok();
+        assert_eq!(bundle.read_with(plist.clone(), wrong), None);
+        assert_eq!(bundle.saved_files(), 0);
+        // The tool said it worked and wrote nothing.
+        assert_eq!(bundle.read_with(plist, |_, _| true), None);
+        assert_eq!(bundle.saved_files(), 0);
+    }
+
+    #[test]
+    fn sips_refuses_what_it_cannot_read() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-sips-{}", std::process::id()));
+        assert!(!convert_with_sips(
+            &root.join("missing.icns"),
+            &root.join("out.png"),
+            &Cancellation::default()
+        ));
     }
 
     #[test]
@@ -247,7 +345,11 @@ mod tests {
     #[test]
     fn the_user_cache_holds_nothing_without_an_icon_to_save() {
         assert_eq!(
-            user_bundle_icon(Path::new("/nonexistent"), &json!({})),
+            user_bundle_icon(
+                Path::new("/nonexistent"),
+                &json!({}),
+                &Cancellation::default()
+            ),
             None
         );
     }

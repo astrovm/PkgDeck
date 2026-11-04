@@ -91,11 +91,20 @@ bundle "$system_root/XML.app/Contents/Helper.app" md.obsidian
 ln -s "$system_root/XML.app" "$system_root/Z-alias.app"
 ln -s "$system_root" "$system_root/Directory-loop"
 
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' |
+    base64 -d > "$work/dot.png"
+# An app whose only icon is JPEG 2000, like Caffeine's: no PNG in the file.
+bundle "$system_root/Old Icon.app" md.obsidian
+sips -z 512 512 "$work/dot.png" --out "$work/old.png" >/dev/null
+sips -s format jp2 "$work/old.png" --out "$work/old.jp2" >/dev/null
+mkdir -p "$system_root/Old Icon.app/Contents/Resources"
+perl -e 'local $/; binmode STDIN; my $d = <STDIN>; my $e = "ic09" . pack("N", length($d) + 8) . $d; print "icns" . pack("N", length($e) + 8) . $e' \
+    < "$work/old.jp2" > "$system_root/Old Icon.app/Contents/Resources/Old.icns"
+/usr/bin/plutil -insert CFBundleIconFile -string Old -- "$system_root/Old Icon.app/Contents/Info.plist"
+
 # Install a local cask through real Homebrew, then create a second unmanaged copy.
 bundle "$work/PkgDeck CI Owned.app" md.obsidian
 # Its icon is a real one, made by Apple's tools.
-printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' |
-    base64 -d > "$work/dot.png"
 mkdir "$work/Fixture.iconset"
 sips -z 128 128 "$work/dot.png" --out "$work/Fixture.iconset/icon_128x128.png" >/dev/null
 mkdir -p "$work/PkgDeck CI Owned.app/Contents/Resources"
@@ -139,6 +148,9 @@ icon=$(jq -r --arg owned "$owned" '.data.packages[] | select(.id.name == $owned)
 [[ $(sips -g format "$icon" | awk '/format:/ { print $2 }') == png ]]
 "$pkd" --json --from homebrew-cask list > "$logs/casks.json"
 jq -e --arg icon "$icon" 'any(.data.packages[]; (.id.name | endswith("pkgdeck-ci-owned")) and .icon == $icon)' "$logs/casks.json"
+# An older icon file holds no PNG, so macOS's own tool converts it.
+old_icon=$(jq -r --arg app "$system_root/Old Icon.app" '.data.packages[] | select(.id.name == $app) | .icon' "$logs/inventory.json")
+[[ $(sips -g format "$old_icon" | awk '/format:/ { print $2 }') == png ]]
 # The apps this Mac really has. Some keep their icon where only macOS reads it.
 jq -r '.data.packages[] | select(.id.name | contains("PkgDeck CI") | not) | "\(if .icon then "icon   " else "no icon" end) \(.id.name)"' \
     "$logs/inventory.json" | sort
