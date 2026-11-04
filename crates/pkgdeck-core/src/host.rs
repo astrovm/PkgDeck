@@ -158,7 +158,7 @@ fn use_askpass(
 mod askpass_tests {
     use super::*;
     #[test]
-    fn askpass_cancellation_is_private_and_lasts_for_only_one_brew_call() {
+    fn askpass_cancellation_is_private_and_never_reuses_an_existing_directory() {
         use std::os::unix::fs::PermissionsExt;
         let root =
             std::env::temp_dir().join(format!("pkgdeck-askpass-scope-{}", std::process::id()));
@@ -195,6 +195,16 @@ mod askpass_tests {
         assert!(env.is_empty(), "no helper, no prompt");
         let helper = bundle.join("Resources/pkgdeck-askpass");
         fs::write(&helper, "#!/bin/sh\n").unwrap();
+        // An allocation failure is shared too, and never falls back to an
+        // unscoped helper that could keep asking indefinitely.
+        let failed = Cancellation::default();
+        let problem = ExecutionError::Io("fixture: no private directory".into());
+        assert!(failed.askpass.set(Err(problem.clone())).is_ok());
+        assert_eq!(
+            use_askpass(&mut env, Some(&executable), &failed),
+            Err(problem)
+        );
+        assert!(env.is_empty());
         use_askpass(&mut env, Some(&executable), &cancel).unwrap();
         assert_eq!(
             env.get(&OsString::from("SUDO_ASKPASS")),
