@@ -1843,16 +1843,23 @@ fn cask_updates_run_in_one_brew_so_one_password_covers_them() {
     assert_eq!(progress.len(), 1);
 }
 
-/// `brew upgrade` as Homebrew 7 reports a cask whose installer fails and
-/// another that stopped at sudo, and carries on with the rest.
+/// What Homebrew 7.0.12 printed to standard error for `brew upgrade --cask`
+/// in a macOS VM: one cask stopped at sudo, one whose installer failed, and
+/// the others went on.
 const TWO_FAILED: &str = "\
+==> Fetching downloads for: worked, locked, tap/tools/strict and quiet
+Warning: No checksum defined for cask 'worked', skipping verification.
+✔︎ Cask worked (2)
 sudo: no password was provided
 sudo: a password is required
-Error: locked: Failure while executing; `/usr/bin/sudo -E -- /usr/bin/true` exited with 1.
-Warning: Something unrelated
-Error: tap/tools/strict: It stopped here
-on two lines
+Warning: Reverting upgrade for Cask locked
+Warning: Temporary files retained at:
+/private/tmp/cask-locked-20261104-17176-6h0yvt
+Error: locked: Failure while executing; `/usr/bin/sudo -A -E -- /usr/bin/true` exited with 1. Here's the output:
+sudo: no password was provided
+sudo: a password is required
 Warning: Reverting upgrade for Cask tap/tools/strict
+Error: tap/tools/strict: Failure while executing; `/usr/bin/false` exited with 1.
 Error: Not upgrading 1 pinned package:
 ";
 
@@ -1882,15 +1889,17 @@ fn each_cask_gets_its_own_result_from_one_brew() {
     // apart from one whose installer failed by this text.
     let (out, locked) = said(&results[1]);
     assert_eq!(out, "");
-    assert!(locked.starts_with("Error: locked: "), "{locked}");
-    assert!(locked.contains("/usr/bin/sudo"), "{locked}");
-    assert!(!locked.contains("strict"), "{locked}");
-    assert!(!locked.contains("unrelated"), "{locked}");
+    assert_eq!(
+        locked,
+        "Error: locked: Failure while executing; `/usr/bin/sudo -A -E -- /usr/bin/true` \
+         exited with 1. Here's the output:\nsudo: no password was provided\n\
+         sudo: a password is required\n"
+    );
     let (out, strict) = said(&results[2]);
     assert_eq!(out, "");
     assert_eq!(
         strict,
-        "Error: tap/tools/strict: It stopped here\non two lines\n"
+        "Error: tap/tools/strict: Failure while executing; `/usr/bin/false` exited with 1.\n"
     );
     // One `brew`, then one look at what it left.
     assert_eq!(script.calls().len(), 2);
