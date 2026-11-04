@@ -6677,6 +6677,144 @@ fn on_metered(_: &pkgdeck_core::host::Host, waits: Waits) -> Option<Hold> {
 fn building(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
     Some(Hold::Build)
 }
+/// Cua Driver running for an open agent that isn't asking it for anything.
+fn driver_open(_: &pkgdeck_core::host::Host) -> DriverWork {
+    DriverWork(std::collections::BTreeMap::from([(
+        7,
+        "resting".to_owned(),
+    )]))
+}
+#[test]
+fn cua_driver_updates_by_itself_once_nothing_is_using_it() {
+    let package = |name: &str, backend: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = backend.into();
+        package.installed_version = Some("1".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let driver_only = PackageReport {
+        packages: vec![package("cua-driver", "cua-driver")],
+        ..PackageReport::default()
+    };
+    let state = |controller: &Pin<&mut ffi::PackageController>| -> Value {
+        serde_json::from_str(&controller.background_state().to_string()).unwrap()
+    };
+    let queued = |controller: &Pin<&mut ffi::PackageController>| -> Vec<String> {
+        match controller
+            .rust()
+            .validated_confirmed
+            .as_ref()
+            .map(|entry| &entry.job)
+        {
+            Some(Job::AutoUpgrade(operations, _)) => operations
+                .iter()
+                .map(|operation| operation.backend().to_owned())
+                .collect(),
+            _ => vec![],
+        }
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_auto_update(true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+
+    // Nothing running: nothing to interrupt.
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert_eq!(queued(&controller), ["cua-driver"]);
+    assert_eq!(state(&controller)["driver_in_use"], false);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // An open agent's server: wait, without announcing it as one to do by
+    // hand, since it runs by itself.
+    controller.as_mut().rust_mut().natives.driver_work = driver_open;
+    let now = epoch_seconds();
+    assert!(controller
+        .as_mut()
+        .rust_mut()
+        .background_schedule
+        .ready(now, true, false, false, false, false));
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert!(queued(&controller).is_empty());
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    assert_eq!(state(&controller)["notify"], false);
+    assert_eq!(state(&controller)["manual"], 0);
+
+    // The other sources don't wait with it, and one left for you still counts.
+    controller
+        .as_mut()
+        .set_manual_sources(vec!["cargo".to_owned()]);
+    controller.as_mut().finish_background_check(PackageReport {
+        packages: vec![
+            package("cua-driver", "cua-driver"),
+            package("codex", "codex"),
+            package("ripgrep", "cargo"),
+        ],
+        ..PackageReport::default()
+    });
+    assert_eq!(queued(&controller), ["codex"]);
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    assert_eq!(state(&controller)["manual"], 1);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // A build doesn't let it through, and both reasons show.
+    controller.as_mut().rust_mut().natives.hold = building;
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert!(queued(&controller).is_empty());
+    assert_eq!(state(&controller)["driver_in_use"], true);
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+
+    // Checking too soon doesn't start the update.
+    controller
+        .as_mut()
+        .check_updates("cua-driver".into(), true, false, false, false);
+    assert!(controller.rust().worker.is_none());
+
+    // Idle for long enough: the next tick checks again right away, and the
+    // update goes ahead.
+    let earlier = now - 300;
+    controller
+        .as_mut()
+        .rust_mut()
+        .driver_idle
+        .update(DriverWork::default(), earlier);
+    controller
+        .as_mut()
+        .rust_mut()
+        .driver_idle
+        .update(driver_open(&pkgdeck_core::host::Host::current()), earlier);
+    controller
+        .as_mut()
+        .check_updates("cua-driver".into(), true, false, false, false);
+    assert!(matches!(
+        controller.rust().worker.as_ref().map(|worker| &worker.job),
+        Some(Job::BackgroundUpdates(sources)) if sources == &["cua-driver"]
+    ));
+    settle(&mut controller);
+    controller
+        .as_mut()
+        .finish_background_check(driver_only.clone());
+    assert_eq!(queued(&controller), ["cua-driver"]);
+    assert_eq!(state(&controller)["driver_in_use"], false);
+    controller.as_mut().rust_mut().validated_confirmed = None;
+
+    // On battery, nothing runs, and that's the only reason given.
+    controller.as_mut().rust_mut().natives.hold = on_battery;
+    controller.as_mut().finish_background_check(driver_only);
+    assert_eq!(state(&controller)["waiting"], "battery");
+    assert_eq!(state(&controller)["driver_in_use"], false);
+
+    // Turning automatic updates off forgets the wait.
+    controller.as_mut().rust_mut().driver_in_use = true;
+    controller.as_mut().set_auto_update(false);
+    assert!(!controller.rust().driver_in_use);
+}
 #[test]
 fn turned_off_waits_let_updates_run_and_cleaning_ignores_metered() {
     let mut wget = synthetic_package("wget", "wget");
@@ -10161,6 +10299,7 @@ pub(super) const NO_MANAGERS: Natives = Natives {
     metadata: NO_METADATA,
     warm_catalog: false,
     hold: super::never_hold,
+    driver_work: super::no_driver,
 };
 #[test]
 fn sources_are_checked_again_on_request() {
@@ -10213,6 +10352,7 @@ const SYNTHETIC: Natives = Natives {
     metadata: NO_METADATA,
     warm_catalog: false,
     hold: super::never_hold,
+    driver_work: super::no_driver,
 };
 fn synthetic_controller() -> crate::qt::UniquePtr<ffi::PackageController> {
     let mut controller = idle_controller();

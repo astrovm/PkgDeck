@@ -1,7 +1,9 @@
 //! When automatic updates wait: on battery power, where they would drain
 //! the battery, on a metered connection, where they would use up a data
 //! plan, and while something is being built, where they could swap a
-//! compiler or tool out from under the build.
+//! compiler or tool out from under the build. Cua Driver's update also
+//! waits while the driver is working, since its installer stops every
+//! running copy.
 use crate::{
     host::Host,
     process::{Cancellation, Limits},
@@ -191,6 +193,90 @@ pub fn waits_for_builds(backend: &str) -> bool {
             | "cua"
             | "cua-driver"
     )
+}
+
+/// Whether automatic updates from `backend` wait while it's being used.
+/// Cua Driver's installer stops every running `cua-driver`, including what
+/// an agent is in the middle of doing with it.
+pub fn waits_while_used(backend: &str) -> bool {
+    backend == "cua-driver"
+}
+
+/// How long the running Cua Driver processes must do nothing before they
+/// count as idle. PkgDeck checks every five minutes, so this is two checks
+/// in a row, whatever else asked for a check in between.
+const DRIVER_IDLE_SECONDS: u64 = 4 * 60;
+
+/// How much work each running Cua Driver process has done so far, by
+/// process ID. An open agent keeps its server running for hours, so running
+/// says nothing about being used. These numbers only move when it's asked
+/// to do something.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DriverWork(pub BTreeMap<u32, String>);
+impl DriverWork {
+    /// Whether nothing here started or worked since `earlier`. A process
+    /// that ended doesn't count: nobody is using it anymore.
+    fn rested_since(&self, earlier: &Self) -> bool {
+        self.0
+            .iter()
+            .all(|(pid, work)| earlier.0.get(pid) == Some(work))
+    }
+}
+
+/// When Cua Driver last changed, to tell how long it has been idle.
+#[derive(Clone, Debug, Default)]
+pub struct DriverIdle(Option<(DriverWork, u64)>);
+impl DriverIdle {
+    /// Takes in what the processes have done by `now`, in seconds, and
+    /// answers whether Cua Driver is idle: nothing runs, or nothing has
+    /// worked for a while.
+    pub fn update(&mut self, work: DriverWork, now: u64) -> bool {
+        let empty = work.0.is_empty();
+        let since = match &self.0 {
+            Some((seen, since)) if work.rested_since(seen) => *since,
+            _ => now,
+        };
+        self.0 = Some((work, since));
+        empty || now.saturating_sub(since) >= DRIVER_IDLE_SECONDS
+    }
+}
+
+/// What the running Cua Driver processes have done so far. These are the
+/// host's own processes, which `ps` and `cat` read from inside the Flatpak
+/// sandbox too.
+pub fn driver_work(host: &Host) -> DriverWork {
+    let tool = |name| host.resolve(name).ok().flatten();
+    tool("ps").map_or_else(DriverWork::default, |ps| {
+        listed_driver_work(host, &ps, tool("cat").as_deref())
+    })
+}
+/// `x` lists only this user's processes, the ones the installer can stop.
+/// `ps` tells CPU time, finely on macOS but only in seconds on Linux, where
+/// a tool call takes milliseconds. So Linux adds the bytes each process has
+/// read and written, which change with every call.
+fn listed_driver_work(host: &Host, ps: &Path, cat: Option<&Path>) -> DriverWork {
+    let listing = read(host, ps, &["x", "-o", "pid=,time=,args="]).unwrap_or_default();
+    DriverWork(
+        driver_processes(&listing)
+            .map(|(pid, time)| {
+                let bytes = cat
+                    .and_then(|cat| read(host, cat, &[&format!("/proc/{pid}/io")]))
+                    .unwrap_or_default();
+                (pid, format!("{time}\n{bytes}"))
+            })
+            .collect(),
+    )
+}
+/// The `cua-driver` processes of a listing, as process ID and CPU time.
+/// The installer finds them by this exact name too.
+fn driver_processes(listing: &str) -> impl Iterator<Item = (u32, &str)> {
+    listing.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let pid = fields.next()?.parse().ok()?;
+        let time = fields.next()?;
+        let name = fields.next()?.rsplit('/').next()?;
+        (name == "cua-driver").then_some((pid, time))
+    })
 }
 
 /// Whether something is being built right now.
@@ -618,6 +704,161 @@ mod tests {
             read(&host, &long, &[]).map(|text| text.len()),
             Some(3_000_000)
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn work(processes: &[(u32, &str)]) -> DriverWork {
+        DriverWork(
+            processes
+                .iter()
+                .map(|(pid, work)| (*pid, (*work).to_owned()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn only_cua_driver_waits_for_nothing_to_use_it() {
+        assert!(waits_while_used("cua-driver"));
+        for backend in ["cua", "codex", "apt", "flatpak"] {
+            assert!(!waits_while_used(backend), "{backend}");
+        }
+    }
+
+    #[test]
+    fn the_driver_is_found_by_its_exact_name() {
+        let listing = "\
+ 10 00:00:00 /home/me/.local/bin/cua-driver mcp
+ 11 0:00.03 /Applications/CuaDriver.app/Contents/MacOS/cua-driver serve
+ 12 00:00:01 cua-driver
+ 13 00:00:00 /usr/bin/cua-driver-test mcp
+ 14 00:00:00 [cua-driver] <defunct>
+ 15 00:00:00 /bin/bash /tmp/cua-driver
+ nonsense 00:00:00 cua-driver
+ 16
+ 17 00:00:00
+";
+        assert_eq!(
+            driver_processes(listing).collect::<Vec<_>>(),
+            [(10, "00:00:00"), (11, "0:00.03"), (12, "00:00:01")]
+        );
+    }
+
+    #[test]
+    fn the_driver_is_idle_once_nothing_changes_for_a_while() {
+        let open = work(&[(7, "a"), (8, "b")]);
+        let mut idle = DriverIdle::default();
+        // Nothing to go by yet, and nothing has been idle for long enough.
+        assert!(!idle.update(open.clone(), 1000));
+        assert!(!idle.update(open.clone(), 1000 + DRIVER_IDLE_SECONDS - 1));
+        assert!(idle.update(open.clone(), 1000 + DRIVER_IDLE_SECONDS));
+        // One call starts the wait over, for every process.
+        assert!(!idle.update(work(&[(7, "a"), (8, "c")]), 2000));
+        assert!(!idle.update(work(&[(7, "a"), (8, "c")]), 2100));
+        assert!(idle.update(work(&[(7, "a"), (8, "c")]), 2000 + DRIVER_IDLE_SECONDS));
+        // An agent closing changes nothing for the others.
+        assert!(idle.update(work(&[(7, "a")]), 2000 + DRIVER_IDLE_SECONDS));
+        // A new one has just started, so it may be about to work.
+        assert!(!idle.update(work(&[(7, "a"), (9, "d")]), 3000));
+        // Nothing running has nothing to interrupt, right away.
+        assert!(idle.update(work(&[]), 3001));
+        assert!(DriverIdle::default().update(DriverWork::default(), 0));
+        // A clock set back doesn't count as time passing.
+        let mut idle = DriverIdle::default();
+        assert!(!idle.update(open.clone(), 5000));
+        assert!(!idle.update(open, 100));
+    }
+
+    #[test]
+    fn the_driver_work_is_read_from_ps_and_the_process_counters() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-driver-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let host = Host::current();
+        let ps = tool(
+            &dir,
+            "ps",
+            "[ \"$*\" = 'x -o pid=,time=,args=' ] && echo ' 7 00:00:03 /bin/cua-driver mcp\n 8 00:00:00 /bin/zsh'",
+        );
+        let cat = tool(
+            &dir,
+            "cat",
+            "[ \"$*\" = '/proc/7/io' ] && echo 'rchar: 24623'",
+        );
+        assert_eq!(
+            listed_driver_work(&host, &ps, Some(&cat)),
+            work(&[(7, "00:00:03\nrchar: 24623\n")])
+        );
+        // Without the counters, like on macOS, CPU time still tells.
+        let no_counters = tool(&dir, "no-counters", "exit 1");
+        for cat in [Some(no_counters.as_path()), None] {
+            assert_eq!(
+                listed_driver_work(&host, &ps, cat),
+                work(&[(7, "00:00:03\n")])
+            );
+        }
+        // A broken ps shows nothing running.
+        assert_eq!(
+            listed_driver_work(&host, &no_counters, None),
+            DriverWork::default()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A real process named `cua-driver`, read with the machine's real `ps`
+    /// and `cat`, whose counters move when it gets a message.
+    #[test]
+    fn a_running_driver_is_seen_and_its_work_moves_the_numbers() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-real-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("driver.c");
+        fs::write(
+            &source,
+            "#include <unistd.h>\nint main(void) { char b[64]; while (read(0, b, 64) > 0); }\n",
+        )
+        .unwrap();
+        let driver = dir.join("cua-driver");
+        assert!(std::process::Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&driver)
+            .status()
+            .unwrap()
+            .success());
+        let mut child = std::process::Command::new(&driver)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let host = Host::current();
+        let of = || driver_work(&host).0.remove(&pid);
+        let settled = (0..500).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            of()
+        });
+        assert!(settled.is_some());
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write;
+            // Starting up may still count, so wait for it to stop moving.
+            let idle = (0..500)
+                .find_map(|_| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    let (first, second) = (of(), of());
+                    (first == second).then_some(first)
+                })
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"a tool call\n")
+                .unwrap();
+            assert!((0..500).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                of() != idle
+            }));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

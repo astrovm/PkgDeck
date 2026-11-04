@@ -87,8 +87,9 @@ impl StandaloneTool {
     /// What the person needs to do once an update is in.
     fn after_update_note(self) -> &'static str {
         match self {
-            // Its installer stops the MCP servers of running agents.
-            Self::CuaDriver => "Restart the agents that use it.",
+            // Its installer stops the MCP servers of running agents. Claude
+            // Code starts its own again, but not every agent may.
+            Self::CuaDriver => "Restart any agent that lost its Cua Driver tools.",
             _ => "Restart existing sessions to use it.",
         }
     }

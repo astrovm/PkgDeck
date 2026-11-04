@@ -1409,3 +1409,25 @@ fn settings_name_the_updates_that_wait_for_builds() {
     assert_eq!(waiting("later", &[]), None);
     assert_eq!(BackgroundState::default().waiting_text(), None);
 }
+
+#[test]
+fn settings_say_when_cua_driver_waits_to_go_idle() {
+    let driver = BackgroundState {
+        driver_in_use: true,
+        ..BackgroundState::default()
+    };
+    assert_eq!(
+        driver.waiting_text().as_deref(),
+        Some("Cua Driver updates wait until it's idle")
+    );
+    assert_eq!(
+        BackgroundState {
+            waiting: Some("build".into()),
+            waiting_for: vec!["APT".into()],
+            ..driver
+        }
+        .waiting_text()
+        .as_deref(),
+        Some("APT updates wait for builds to finish. Cua Driver updates wait until it's idle")
+    );
+}
