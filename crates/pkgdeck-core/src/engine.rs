@@ -2542,6 +2542,15 @@ mod apt_upgrade_tests {
         log: Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl BrewFixture {
+        fn log_updates(&self, operations: &[Operation]) {
+            let mut names = Vec::new();
+            for operation in operations {
+                if let Operation::Upgrade(id) = operation {
+                    names.push(id.name.as_str());
+                }
+            }
+            self.log.lock().unwrap().push(names.join(" "));
+        }
         fn result(&self, operation: &Operation) -> Result<OperationOutcome, EngineError> {
             match operation {
                 Operation::Upgrade(id) if id.name == self.broken => Err(EngineError::Cancelled),
@@ -2565,10 +2574,7 @@ mod apt_upgrade_tests {
             _: &Cancellation,
             _: &mut dyn FnMut(Progress),
         ) -> Result<OperationOutcome, EngineError> {
-            let Operation::Upgrade(id) = operation else {
-                panic!("not an update");
-            };
-            self.log.lock().unwrap().push(id.name.clone());
+            self.log_updates(std::slice::from_ref(operation));
             self.result(operation)
         }
         fn execute_joined(
@@ -2577,14 +2583,7 @@ mod apt_upgrade_tests {
             _: &Cancellation,
             _: &mut dyn FnMut(Progress),
         ) -> Option<Vec<Result<OperationOutcome, EngineError>>> {
-            let names: Vec<_> = operations
-                .iter()
-                .map(|operation| match operation {
-                    Operation::Upgrade(id) => id.name.clone(),
-                    _ => panic!("not an update"),
-                })
-                .collect();
-            self.log.lock().unwrap().push(names.join(" "));
+            self.log_updates(operations);
             Some(operations.iter().map(|op| self.result(op)).collect())
         }
     }
