@@ -158,6 +158,77 @@ fn use_askpass(
 mod askpass_tests {
     use super::*;
     #[test]
+    fn bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+        const REENTRY: &str = "PKGDECK_ASKPASS_TEST_BUNDLE";
+        if let Some(root) = std::env::var_os(REENTRY).map(PathBuf::from) {
+            let host = Host::new(
+                Runtime::Native,
+                BTreeMap::from([
+                    ("HOME".into(), root.clone().into_os_string()),
+                    ("PATH".into(), root.join("bin").into_os_string()),
+                ]),
+            );
+            let args = [OsString::from("fixture")];
+            let cancel = Cancellation::default();
+            for (write, ask) in [(false, true), (true, false)] {
+                let result = host.brew_asking(&args, &cancel, write, ask).unwrap();
+                assert_eq!(result.stdout, b"completed\n");
+                assert!(cancel.askpass.get().is_none());
+            }
+            assert!(!root.join("dialogs").exists());
+            for _ in 0..2 {
+                let result = host.brew_asking(&args, &cancel, true, true).unwrap();
+                assert_eq!(result.stdout, b"completed\n");
+            }
+            assert_eq!(
+                fs::read_to_string(root.join("dialogs")).unwrap(),
+                "dialog\n"
+            );
+            let scope = fs::read_to_string(root.join("scope")).unwrap();
+            drop(cancel);
+            assert!(!Path::new(scope.trim()).exists());
+            host.brew_asking(&args, &Cancellation::default(), true, true)
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("dialogs")).unwrap(),
+                "dialog\ndialog\n"
+            );
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-bundled-brew-{}", std::process::id()));
+        let contents = root.join("PkgDeck.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("Resources")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let fake = root.join("bin/osascript");
+        let helper = include_str!("../../../packaging/macos/pkgdeck-askpass")
+            .replace("/usr/bin/osascript", fake.to_str().unwrap());
+        for (path, script) in [
+            (contents.join("Resources/pkgdeck-askpass"), helper),
+            (fake, "#!/bin/sh\nprintf 'dialog\\n' >> \"$HOME/dialogs\"\nprintf '%s\\n' \"$HOMEBREW_PKGDECK_ASKPASS_DIR\" > \"$HOME/scope\"\nexit 1\n".into()),
+            (root.join("bin/brew"), "#!/bin/sh\nif [ -n \"$SUDO_ASKPASS\" ]; then\nfor step in 1 2 3; do \"$SUDO_ASKPASS\" >/dev/null 2>&1 || :; done\nfi\nprintf 'completed\\n'\n".into()),
+        ] {
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let binary = contents.join("MacOS/askpass-test");
+        fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        let output = Command::new(binary).args([
+            "--exact",
+            "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
+            "--nocapture",
+        ]).env(REENTRY, &root).output().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
     fn askpass_cancellation_is_private_and_never_reuses_an_existing_directory() {
         use std::os::unix::fs::PermissionsExt;
         let root =
