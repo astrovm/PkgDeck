@@ -5,8 +5,11 @@ cli() {
     local source=$1 user
     shift
     if [[ $source == apt ]]; then user=pkgdeck-test; else user=linuxbrew; fi
-    runuser -u "$user" -- env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin /opt/pkgdeck-bin/pkd --json --yes --from "$source" "$@" |
-        jq -e 'if .schema_version == 1 and .exit_code == 0 then .data else error("CLI failure") end'
+    # pkd's report says why a step failed, so show it instead of only failing.
+    local report
+    report=$(runuser -u "$user" -- env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin /opt/pkgdeck-bin/pkd --json --yes --from "$source" "$@") || true
+    jq -e 'if .schema_version == 1 and .exit_code == 0 then .data else error("CLI failure") end' <<<"$report" ||
+        { printf 'pkd said: %s\n' "$report" >&2; return 1; }
 }
 write() {
     local source=$1 operation=$2 name=${3:-} user
@@ -25,6 +28,23 @@ write() {
         cli) if [[ -n $name ]]; then cli "$source" "$operation" "$name"; else cli "$source" "$operation"; fi ;;
         *) echo "Unknown frontend: $PKGDECK_FRONTEND (expected cli or gui)" >&2; return 2 ;;
     esac
+}
+# `brew update` always asks Homebrew's server for its package data, which this
+# test doesn't depend on, and that server has bad minutes. Only that failure
+# gets another try: a refresh that breaks any other way still fails the test.
+brew_refresh() {
+    local source=$1 attempt log status unreachable="Homebrew couldn't reach its server|Failed to download https://formulae.brew.sh/"
+    log=$(mktemp)
+    for attempt in 1 2 3 4 5; do
+        status=0
+        write "$source" refresh 2>&1 | tee "$log" || status=$?
+        if ((status == 0 || attempt == 5)) || ! grep -Eq "$unreachable" "$log"; then
+            rm -f "$log"
+            return "$status"
+        fi
+        echo "Homebrew's server was out of reach; trying again ($attempt/5)." >&2
+        sleep 30
+    done
 }
 apt_version() {
     local version=$1 package=/tmp/pkgdeck-package repo=/opt/pkgdeck-fixture-repo
@@ -96,7 +116,7 @@ brew_lifecycle() {
     write homebrew install "$name"
     brew info --json=v2 "$name" | jq -e '.formulae[0].installed[0].version=="1.0"'
     brew_version 2.0
-    write homebrew refresh
+    brew_refresh homebrew
     cli homebrew list | jq -e --arg n "$name" 'any(.packages[];.id.name==$n and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
     write homebrew upgrade "$name"
     brew info --json=v2 "$name" | jq -e '[.formulae[0].installed[].version] | contains(["1.0","2.0"])'
@@ -135,14 +155,14 @@ RUBY
 brew_cask_lifecycle() {
     local name=pkgdeck/fixtures/pkgdeck-cask-fixture
     brew_cask_version 1.0
-    write homebrew-cask refresh
+    brew_refresh homebrew-cask
     cli homebrew-cask sources | jq -e '.sources[0].availability=={Ok:"available"}'
     cli homebrew-cask search pkgdeck-cask-fixture | jq -e --arg n "$name" 'any(.packages[];.id.name==$n)'
     cli homebrew-cask info "$name" | jq -e '.package.candidate_version=="1.0"'
     write homebrew-cask install "$name"
     [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 1.0 ]]
     brew_cask_version 2.0
-    write homebrew-cask refresh
+    brew_refresh homebrew-cask
     cli homebrew-cask list | jq -e --arg n "$name" 'any(.packages[];.id.name==$n and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
     write homebrew-cask upgrade "$name"
     [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 2.0 ]]
