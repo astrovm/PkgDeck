@@ -384,7 +384,7 @@ pub fn monogram(id: &str) -> &str {
         "solana" => "So",
         "anchor" => "An",
         "foundry" => "Fo",
-        "cua" => "Cu",
+        "cua" => "Ca",
         "cua-driver" => "CD",
         "steam" => "St",
         "system-files" => "Sf",

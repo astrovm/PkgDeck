@@ -2,10 +2,10 @@
 //! embedded filesystem (SquashFS, or DwarFS for newer runtimes). Read
 //! straight from the file, so the AppImage is never run.
 
+use super::appimage_electron::Feed;
 // Every reader of the image's contents is behind the Linux cfg below; the
 // other platforms open the file only to report what it is.
 #[cfg(target_os = "linux")]
-use super::appimage_electron::Feed;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
