@@ -2575,3 +2575,50 @@ fn system_file_tasks_have_fixed_root_commands() {
         crate::unattended::Unattended::Never
     );
 }
+
+#[test]
+fn a_casks_app_is_found_by_its_installed_name() {
+    let app = |artifacts: serde_json::Value| cask_app(artifacts.as_array().unwrap());
+    assert_eq!(
+        app(serde_json::json!([{"binary": ["tool"]}, {"app": ["Editor.app"]}])),
+        Some("Editor.app".into())
+    );
+    assert_eq!(
+        app(serde_json::json!([{"app": ["Download/Editor.app"]}])),
+        Some("Editor.app".into())
+    );
+    assert_eq!(
+        app(serde_json::json!([{"app": ["Editor.app", {"target": "Renamed.app"}]}])),
+        Some("Renamed.app".into())
+    );
+    assert_eq!(app(serde_json::json!([{"binary": ["tool"]}])), None);
+    assert_eq!(app(serde_json::json!([{"app": []}])), None);
+}
+
+#[test]
+fn a_casks_icon_comes_from_the_folder_holding_its_app() {
+    let root = std::env::temp_dir().join(format!("pkgdeck-cask-icon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (system, user) = (root.join("system"), root.join("user"));
+    let app = user.join("Editor.app");
+    std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIconFile</key><string>AppIcon</string></dict></plist>"#,
+    )
+    .unwrap();
+    let mut icns = b"icns\0\0\0\0ic07".to_vec();
+    icns.extend(16u32.to_be_bytes());
+    icns.extend(b"\x89PNG\r\n\x1a\n");
+    std::fs::write(app.join("Contents/Resources/AppIcon.icns"), icns).unwrap();
+    let artifacts = [serde_json::json!({"app": ["Editor.app"]})];
+    let cancel = Cancellation::default();
+    let found = cask_icon_in(&artifacts, &[system.clone(), user], &cancel);
+    // Only a Mac reads an app's Info.plist.
+    assert_eq!(found.is_some(), cfg!(target_os = "macos"));
+    assert_eq!(cask_icon_in(&artifacts, &[system], &cancel), None);
+    assert_eq!(cask_icon_in(&[], &[], &cancel), None);
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -12,7 +12,7 @@ use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, package::*, process::*};
 use serde::Deserialize;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const ID: &str = "mas";
@@ -161,7 +161,12 @@ impl<T: Transport> MacAppStore<T> {
                     .iter()
                     .find(|update| update.adam_id == app.adam_id)
                     .and_then(|update| update.new_version.as_deref());
-                Self::package(app, Some(candidate))
+                let mut package = Self::package(app, Some(candidate));
+                package.icon = app
+                    .path
+                    .as_deref()
+                    .and_then(|path| super::mac_apps::app_icon(Path::new(path), cancel));
+                package
             })
             .collect())
     }
