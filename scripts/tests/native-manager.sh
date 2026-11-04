@@ -12,7 +12,7 @@ engine=${PKGDECK_CONTAINER_ENGINE:-podman}
 adduser='useradd -m pkgdeck-test'
 fallback=true
 case "$backend" in
-    dnf) image=registry.fedoraproject.org/fedora:44; bootstrap='dnf -y install sudo'; query='rpm -q jq'; writers=/usr/bin/dnf ;;
+    dnf) image=registry.fedoraproject.org/fedora:45; bootstrap='dnf -y install sudo'; query='rpm -q jq'; writers=/usr/bin/dnf ;;
     pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; writers=/usr/bin/pacman ;;
     zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='sed -i "s|http://|https://|g" /etc/zypp/repos.d/*.repo; zypper --non-interactive install sudo'; query='rpm -q jq'; writers=/usr/bin/zypper
         # download.opensuse.org's redirector can time out for minutes; its
