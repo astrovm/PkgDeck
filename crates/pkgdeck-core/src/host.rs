@@ -177,6 +177,14 @@ mod askpass_tests {
                 assert!(cancel.askpass.get().is_none());
             }
             assert!(!root.join("dialogs").exists());
+            let failed = Cancellation::default();
+            let problem = ExecutionError::Io("fixture: private directory unavailable".into());
+            assert!(failed.askpass.set(Err(problem.clone())).is_ok());
+            assert_eq!(
+                host.brew_asking(&args, &failed, true, true).unwrap_err(),
+                problem
+            );
+            assert!(!root.join("dialogs").exists());
             for _ in 0..2 {
                 let result = host.brew_asking(&args, &cancel, true, true).unwrap();
                 assert_eq!(result.stdout, b"completed\n");
@@ -221,12 +229,12 @@ mod askpass_tests {
             "--nocapture",
         ]).env(REENTRY, &root).output().unwrap();
         fs::remove_dir_all(root).unwrap();
-        assert!(
-            output.status.success(),
+        let transcript = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(output.status.success(), "{transcript}");
     }
     #[test]
     fn askpass_cancellation_is_private_and_never_reuses_an_existing_directory() {
