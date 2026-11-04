@@ -635,7 +635,13 @@ impl App {
         }
         if has("busy") && was_busy && !self.busy {
             self.opening = self.opening && self.confirmation.is_some();
-            self.retained = None;
+            // A finished read with nothing to show sends no rows, since they
+            // were already empty, so nothing replaced the ones kept on screen.
+            if self.retained.take().is_some()
+                && matches!(self.report.phase.as_str(), "complete" | "unsupported")
+            {
+                self.rows = self.parse_rows();
+            }
             self.items_stale = true;
             self.flash_changed_rows();
             self.restore_selection();
@@ -721,6 +727,15 @@ impl App {
             match self.ctl.self_update().as_str() {
                 "automatic" => self.restart_at = Some(Instant::now() + Duration::from_secs(5)),
                 "manual" => {
+                    // Asking to restart already says it updated.
+                    if self
+                        .toast
+                        .as_ref()
+                        .is_some_and(|toast| toast.from_notice && toast.tone == Tone::Success)
+                    {
+                        self.toast = None;
+                        self.c().dismiss_notice();
+                    }
                     self.restart_toast = Some(Toast {
                         text: "Restart PkgDeck to use the new version.".into(),
                         tone: Tone::Success,
@@ -769,25 +784,23 @@ impl App {
         if count == self.background.available && self.background.last_check.is_some() {
             return;
         }
-        let failures: Vec<Value> = self
+        // What's waiting and why still holds: only the count and the time are new.
+        let mut state: Value =
+            serde_json::from_str(self.ctl.background_state().as_str()).unwrap_or_default();
+        // A new run hasn't checked yet, so what it last saw is in the app.
+        state["failures"] = self
             .background
             .failures
             .iter()
             .map(|f| serde_json::json!({"source": f.source, "kind": f.kind}))
             .collect();
-        let checked = std::time::SystemTime::now()
+        state["available"] = count.into();
+        state["last_check"] = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs());
-        self.c().set_background_state(
-            serde_json::json!({
-                "last_check": checked,
-                "available": count,
-                "failures": failures,
-                "notify": false,
-            })
-            .to_string()
-            .into(),
-        );
+            .map_or(0, |since| since.as_secs())
+            .into();
+        state["notify"] = false.into();
+        self.c().set_background_state(state.to_string().into());
     }
 
     fn background_changed(&mut self) {

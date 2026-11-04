@@ -541,6 +541,33 @@ fn self_updates_restart_now_or_ask() {
 }
 
 #[test]
+fn updating_pkgdeck_shows_one_toast() {
+    let finish = |kind: &str| {
+        let mut app = app();
+        app.c().set_notice(
+            json!({"kind": kind, "title": "Update PkgDeck"})
+                .to_string()
+                .into(),
+        );
+        app.c().set_self_update("manual".into());
+        app.react();
+        app
+    };
+    let mut updated = finish("success");
+    assert!(updated.toast.is_none());
+    assert_eq!(
+        updated.restart_toast.as_ref().unwrap().action,
+        Some(ToastAction::Restart)
+    );
+    updated.react();
+    assert!(updated.notice.is_empty());
+    // Something else in the batch failed: that still says so.
+    let failed = finish("error");
+    assert_eq!(failed.toast.as_ref().unwrap().tone, Tone::Warning);
+    assert!(failed.restart_toast.is_some());
+}
+
+#[test]
 fn setup_is_offered_once() {
     let mut app = app();
     app.ask_about_setup();
@@ -1257,6 +1284,62 @@ fn quiet_paths_do_nothing() {
     app.react();
     app.open_input("/nonexistent/pkgdeck/x.deb");
     assert!(app.opening);
+}
+
+#[test]
+fn a_reload_that_ends_empty_clears_the_list() {
+    let reload = |phase: &str| {
+        let mut app = app();
+        app.page = Page::Updates;
+        rows(
+            &mut app,
+            json!([row("a", json!({"candidate": "2", "update": "available"}))]),
+        );
+        // A forced reload keeps the rows on screen while it reads.
+        app.retained = Some(app.rows.clone());
+        app.c().set_busy(true);
+        app.c().set_rows("[]".into());
+        app.react();
+        assert_eq!(app.rows.len(), 1);
+        // Nothing arrives after that: the rows are already empty.
+        app.c()
+            .set_report_state(json!({"phase": phase}).to_string().into());
+        app.c().set_busy(false);
+        app.react();
+        app
+    };
+    let done = reload("complete");
+    assert!(done.rows.is_empty());
+    assert!(done.retained.is_none());
+    // Stopped or failed, it said nothing about them: they stay.
+    for phase in ["cancelled", "failed"] {
+        let stopped = reload(phase);
+        assert_eq!(stopped.rows.len(), 1, "{phase}");
+        assert!(stopped.retained.is_none(), "{phase}");
+    }
+}
+
+#[test]
+fn a_finished_updates_list_keeps_what_is_waiting() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.c().set_background_state(
+        json!({"last_check": 100, "available": 3, "failures": [{"source": "snap", "kind": "unavailable"}],
+               "notify": false, "manual": 1, "waiting": "battery", "driver_in_use": true})
+        .to_string()
+        .into(),
+    );
+    app.react();
+    app.c()
+        .set_rows(json!([row("a", json!({}))]).to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 0);
+    let state: Value = serde_json::from_str(app.ctl.background_state().as_str()).unwrap();
+    assert_eq!(state["waiting"], "battery");
+    assert_eq!(state["driver_in_use"], true);
+    assert_eq!(state["manual"], 1);
+    assert_eq!(state["failures"][0]["source"], "snap");
+    assert!(state["last_check"].as_u64().unwrap() > 100);
 }
 
 #[test]
