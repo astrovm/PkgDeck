@@ -135,7 +135,8 @@ struct FormulaReport {
 struct Formula {
     full_name: String,
     desc: Option<String>,
-    homepage: String,
+    /// A tap's formula doesn't have to declare one.
+    homepage: Option<String>,
     versions: Versions,
     revision: u64,
     installed: Vec<Installed>,
@@ -343,7 +344,9 @@ pub(super) struct Cask {
     full_token: String,
     name: Vec<String>,
     desc: Option<String>,
-    homepage: String,
+    /// `null` for an installed cask Homebrew no longer has a definition for,
+    /// such as one whose tap was removed.
+    homepage: Option<String>,
     /// `null` when the cask has no version for this system, such as
     /// `discord` on Linux, which only has a macOS download.
     version: Option<String>,
@@ -479,6 +482,7 @@ impl<T: Transport> Homebrew<T> {
                         .or_else(|| f.installed.last())
                         .map(|i| i.version.clone())
                 });
+                let homepage = f.homepage.filter(|home| !home.is_empty());
                 Ok(PackageDetails {
                     package: Package {
                         id: PackageId {
@@ -504,15 +508,11 @@ impl<T: Transport> Homebrew<T> {
                         candidate_version: candidate,
                         icon: None,
                         component_ids: vec![],
-                        homepages: if f.homepage.is_empty() {
-                            vec![]
-                        } else {
-                            vec![f.homepage.clone()]
-                        },
+                        homepages: homepage.iter().cloned().collect(),
                         adopt_with: None,
                     },
                     description: f.desc.unwrap_or_default(),
-                    homepage: (!f.homepage.is_empty()).then_some(f.homepage),
+                    homepage,
                     dependencies: f.dependencies,
                     data: None,
                 })
@@ -790,6 +790,7 @@ impl<T: Transport> HomebrewCask<T> {
                     .find(|n| !n.trim().is_empty())
                     .cloned()
                     .unwrap_or_else(|| c.full_token.clone());
+                let homepage = c.homepage.filter(|home| !home.is_empty());
                 Ok(PackageDetails {
                     package: Package {
                         id: PackageId {
@@ -815,15 +816,11 @@ impl<T: Transport> HomebrewCask<T> {
                         candidate_version: c.version,
                         icon,
                         component_ids: vec![],
-                        homepages: if c.homepage.is_empty() {
-                            vec![]
-                        } else {
-                            vec![c.homepage.clone()]
-                        },
+                        homepages: homepage.iter().cloned().collect(),
                         adopt_with: None,
                     },
                     description: c.desc.unwrap_or_default(),
-                    homepage: (!c.homepage.is_empty()).then_some(c.homepage),
+                    homepage,
                     dependencies: vec![],
                     data: None,
                 })
