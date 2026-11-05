@@ -266,9 +266,9 @@ pub trait Backend: Send {
     /// formulae and casks share `brew update`) keep `token` until the check
     /// ends. `None` is every other query, which must not fetch.
     fn arm_update_check(&mut self, _token: Option<u64>) {}
-    /// How many days a new release must be old before this source installs
+    /// How many hours old a new release must be before this source installs
     /// it, for managers that can limit that themselves. 0 is no limit.
-    fn set_release_age(&mut self, _days: u32) {}
+    fn set_release_age(&mut self, _hours: u32) {}
     /// Whether this source's own list leaves out releases that are too new,
     /// so PkgDeck has nothing to hold back. Checked only while a wait is on.
     fn limits_release_age(&mut self, _cancel: &Cancellation) -> bool {
@@ -616,12 +616,12 @@ impl Engine {
     /// lists mark what's still too new in every other source.
     pub fn set_release_watch(&mut self, watch: crate::release_wait::ReleaseWatch) {
         for (id, backend) in &mut self.backends {
-            let days = if watch.wait().applies_to(id) {
-                watch.wait().days
+            let hours = if watch.wait().applies_to(id) {
+                watch.wait().hours
             } else {
                 0
             };
-            backend.set_release_age(days);
+            backend.set_release_age(hours);
         }
         self.release_watch = Some(watch);
     }

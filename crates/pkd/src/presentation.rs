@@ -329,13 +329,13 @@ fn waiting_note(count: u64, paint: Paint) -> Option<String> {
 }
 /// The setting `pkd release-wait` shows.
 fn release_wait_text(wait: &Value) -> String {
-    let days = wait["days"].as_u64().unwrap_or(0);
-    if days == 0 {
-        return "New releases don't wait. Turn it on with `pkd release-wait <days>`.".into();
+    if wait["enabled"] != true {
+        return "New releases don't wait. Turn it on with `pkd release-wait 3d`.".into();
     }
+    let hours = wait["hours"].as_u64().unwrap_or(0);
     let mut text = format!(
-        "New releases wait {days} day{}. System sources never wait.",
-        if days == 1 { "" } else { "s" }
+        "New releases wait {}. System sources never wait.",
+        pkgdeck_core::release_wait::hours_text(u32::try_from(hours).unwrap_or(u32::MAX))
     );
     let skipped: Vec<_> = wait["skipped"]
         .as_array()
@@ -1763,14 +1763,14 @@ mod tests {
     #[test]
     fn release_wait_says_what_it_does() {
         let text = |wait: Value| human(&json!({"release_wait": wait}), 100, false);
-        assert!(text(json!({"days": 0, "skipped": []})).contains("don't wait"));
+        assert!(text(json!({"enabled": false, "hours": 24, "skipped": []})).contains("don't wait"));
         assert_eq!(
-            text(json!({"days": 1, "skipped": []})),
+            text(json!({"enabled": true, "hours": 24, "skipped": []})),
             "New releases wait 1 day. System sources never wait."
         );
         assert_eq!(
-            text(json!({"days": 3, "skipped": ["npm"]})),
-            "New releases wait 3 days. System sources never wait.\nThese don't wait: npm."
+            text(json!({"enabled": true, "hours": 12, "skipped": ["npm"]})),
+            "New releases wait 12 hours. System sources never wait.\nThese don't wait: npm."
         );
     }
 

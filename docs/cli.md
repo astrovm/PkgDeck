@@ -25,7 +25,7 @@ pkd refresh                              # check for updates and list them (inst
 pkd upgrade neovim --from apt --yes      # install the update found for one package
 pkd upgrade                              # install every update found
 pkd update                               # check for updates, then install them
-pkd release-wait 3                       # keep releases newer than 3 days out of `pkd upgrade`
+pkd release-wait 3d                      # keep releases newer than 3 days out of `pkd upgrade`
 pkd clean                                # list cleanup tasks
 pkd inspect git                          # find which package provides a command
 pkd audit                                # find apps installed more than once
@@ -179,10 +179,10 @@ keep brand-new releases out for a while. It's off until you turn it on, and
 
 ```sh
 pkd release-wait                     # show the setting
-pkd release-wait 3                   # new releases wait 3 days
+pkd release-wait 3d                  # new releases wait 3 days; also 12h or 2w
 pkd release-wait --skip claude       # this source doesn't wait
 pkd release-wait --no-skip claude    # this source waits again
-pkd release-wait off
+pkd release-wait off                 # `on` brings back the same time
 ```
 
 - `pkd upgrade` and `pkd update` leave out what's waiting, and `pkd refresh`
@@ -196,8 +196,9 @@ pkd release-wait off
   keeps in `release-wait-seen.json` next to the activity history. A newer
   version starts its own wait, so a tool that ships more often than the wait
   may need `--skip`. `pkd upgrade <name>` installs one of these right away.
-  Bun and pipx also get the limit when installing, which covers their
-  dependencies.
+- Bun and pipx wait the same way, and also get the limit when installing, which
+  covers their dependencies. So `pkd upgrade <name>` installs the newest version
+  that's old enough, which may not be the one listed.
 - System sources never wait, since a wait would delay security fixes: APT, DNF,
   Pacman, Zypper, apk, XBPS, MacPorts, firmware, image-based systems, macOS
   updates, the App Store, Toolbx and Distrobox.
@@ -809,7 +810,7 @@ to stderr.
 | Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}`, and `"skipped": true` when PkgDeck left it alone |
 | `refresh` | `operations` (the refreshes), `updates` (packages with an update ready), `waiting` (updates too new to install yet), and `failures` |
 | `upgrade` | Also `waiting`, when it left out updates too new to install yet |
-| `release-wait` | `release_wait`: its `days` and the `skipped` sources |
+| `release-wait` | `release_wait`: `enabled`, `hours` and the `skipped` sources |
 | `update` | Also `refresh`: its `operations`, and `failures` for update information it couldn't fetch |
 | Errors | `error`, and a readable `message` when available |
 | No match | Also `offers`: sources that could try the name, such as `["npm", "pipx"]` |

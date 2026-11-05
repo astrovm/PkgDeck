@@ -80,6 +80,9 @@ pub struct App {
     pub release_wait: pkgdeck_core::release_wait::ReleaseWait,
     /// Why the last change to it couldn't be saved.
     pub release_wait_error: Option<String>,
+    /// A change waiting for the slider to let go, so a drag saves and checks
+    /// once.
+    release_wait_changed: bool,
     pub platform: Platform,
     pub launch: Launch,
 
@@ -266,6 +269,7 @@ impl App {
             settings,
             release_wait,
             release_wait_error: None,
+            release_wait_changed: false,
             store,
             platform,
             launch,
@@ -411,10 +415,17 @@ impl App {
         self.c().set_waits(battery, metered);
     }
 
-    /// Saves a new choice for Wait for new releases, where every job and
-    /// `pkd` read it, then checks again so the lists show it.
+    /// A new choice for Wait for new releases. The next tick that isn't in
+    /// the middle of a drag applies it.
     pub fn set_release_wait(&mut self, wait: pkgdeck_core::release_wait::ReleaseWait) {
         self.release_wait = wait;
+        self.release_wait_changed = true;
+    }
+
+    /// Saves the choice where every job and `pkd` read it, then checks again
+    /// so the lists show it.
+    fn apply_release_wait(&mut self) {
+        self.release_wait_changed = false;
         self.release_wait_error = self.store.release_wait_path().and_then(|path| {
             self.release_wait
                 .save(&path)
@@ -495,6 +506,9 @@ impl App {
         }
         self.flashes.retain(|_, at| now.duration_since(*at) < FLASH);
         self.expire_toasts(now);
+        if self.release_wait_changed && !self.dragging {
+            self.apply_release_wait();
+        }
         if !self.dragging {
             self.save_settings();
         }

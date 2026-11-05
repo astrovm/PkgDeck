@@ -168,8 +168,9 @@ pub enum Commands {
     /// A defense against bad versions that get caught within days. System
     /// sources like APT never wait. Run without options to see the setting.
     ReleaseWait {
-        /// Days a new release waits, or `off`.
-        days: Option<String>,
+        /// How long a new release waits, like `12h`, `3d` or `2w`, or `on` or `off`.
+        /// A number alone is days.
+        time: Option<String>,
         /// Sources that shouldn't wait, such as a tool that ships every day.
         #[arg(long, value_name = "SOURCE")]
         skip: Vec<String>,
@@ -1369,31 +1370,46 @@ fn repository_dispatch(
         Err(error) => failure(error),
     }
 }
+/// A wait like `12h`, `3d` or `2w`, in hours. A number alone is days.
+fn wait_hours(text: &str) -> Option<u32> {
+    let (number, size) = match text.as_bytes().last()? {
+        b'h' => (&text[..text.len() - 1], 1),
+        b'd' => (&text[..text.len() - 1], 24),
+        b'w' => (&text[..text.len() - 1], 168),
+        _ => (text, 24),
+    };
+    number
+        .parse::<u32>()
+        .ok()?
+        .checked_mul(size)
+        .filter(|hours| pkgdeck_core::release_wait::HOUR_RANGE.contains(hours))
+}
 /// `pkd release-wait`: shows the setting, after changing what was asked.
 fn release_wait_command(
     path: Option<&std::path::Path>,
-    days: Option<&str>,
+    time: Option<&str>,
     skip: &[String],
     no_skip: &[String],
 ) -> (Value, u8) {
-    use pkgdeck_core::release_wait::{can_wait, ReleaseWait, MAX_DAYS};
+    use pkgdeck_core::release_wait::{can_wait, ReleaseWait};
     let refuse = |message: String| (json!({"error": "invalid_input", "message": message}), 2);
     let Some(path) = path else {
         return refuse("No home folder to keep the setting in.".into());
     };
     let mut wait = ReleaseWait::load(path);
-    if let Some(days) = days {
-        wait.days = match days {
-            "off" => 0,
-            days => match days.parse().ok().filter(|days| *days <= MAX_DAYS) {
-                Some(days) => days,
-                None => {
-                    return refuse(format!(
-                        "Expected a number of days up to {MAX_DAYS}, or off."
-                    ))
-                }
-            },
-        };
+    match time {
+        None => {}
+        Some("off") => wait.enabled = false,
+        Some("on") => wait.enabled = true,
+        Some(time) => {
+            let Some(hours) = wait_hours(time) else {
+                return refuse(
+                    "Expected a time from 1h to 1 year, like 12h, 3d or 2w, or on or off.".into(),
+                );
+            };
+            wait.enabled = true;
+            wait.hours = hours;
+        }
     }
     if let Some(source) = skip.iter().find(|source| !can_wait(source)) {
         return refuse(format!("{source} never waits, so it can't be skipped."));
@@ -1402,7 +1418,7 @@ fn release_wait_command(
     wait.skipped.retain(|source| !no_skip.contains(source));
     wait.skipped.sort();
     wait.skipped.dedup();
-    if days.is_some() || !skip.is_empty() || !no_skip.is_empty() {
+    if time.is_some() || !skip.is_empty() || !no_skip.is_empty() {
         if let Err(error) = wait.save(path) {
             return (
                 json!({"error": "not_saved", "message": format!("Couldn't save the setting: {error}")}),
@@ -1418,13 +1434,13 @@ pub fn run(args: &Args) -> u8 {
         return 0;
     }
     if let Some(Commands::ReleaseWait {
-        days,
+        time,
         skip,
         no_skip,
     }) = &args.command
     {
         let path = pkgdeck_core::release_wait::ReleaseWait::default_path();
-        let (data, code) = release_wait_command(path.as_deref(), days.as_deref(), skip, no_skip);
+        let (data, code) = release_wait_command(path.as_deref(), time.as_deref(), skip, no_skip);
         return emit(args, data, code, false);
     }
     if let Some(error) = inventory_only_mutation(args) {
@@ -2063,7 +2079,8 @@ mod tests {
         engine.register(fake).unwrap();
         engine.set_release_watch(ReleaseWatch::new(
             ReleaseWait {
-                days: 1,
+                enabled: true,
+                hours: 24,
                 skipped: vec![],
             },
             Some(dir.join("seen.json")),
@@ -2121,35 +2138,59 @@ mod tests {
     fn release_wait_changes_only_what_it_was_told_to() {
         let dir = scratch_dir("command");
         let path = dir.join("release-wait.json");
-        let run = |days, skip: &[&str], no_skip: &[&str]| {
+        let run = |time, skip: &[&str], no_skip: &[&str]| {
             let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-            release_wait_command(Some(&path), days, &owned(skip), &owned(no_skip))
+            release_wait_command(Some(&path), time, &owned(skip), &owned(no_skip))
         };
-        // Reading saves nothing.
+        let wait = |data: &Value| data["release_wait"].clone();
+        // Reading saves nothing, and it starts off.
         assert_eq!(run(None, &[], &[]).1, 0);
         assert!(!path.exists());
-        assert_eq!(run(None, &[], &[]).0["release_wait"]["days"], 0);
+        assert_eq!(wait(&run(None, &[], &[]).0)["enabled"], false);
 
-        assert_eq!(run(Some("3"), &[], &[]).0["release_wait"]["days"], 3);
+        for (time, hours) in [("12h", 12), ("3d", 72), ("2w", 336), ("3", 72), ("1h", 1)] {
+            let (data, code) = run(Some(time), &[], &[]);
+            assert_eq!(code, 0, "{time}");
+            assert_eq!(wait(&data)["enabled"], true, "{time}");
+            assert_eq!(wait(&data)["hours"], hours, "{time}");
+        }
+        run(Some("3d"), &[], &[]);
         let (data, _) = run(None, &["claude", "claude", "bun"], &[]);
-        assert_eq!(data["release_wait"]["skipped"], json!(["bun", "claude"]));
-        assert_eq!(data["release_wait"]["days"], 3);
+        assert_eq!(wait(&data)["skipped"], json!(["bun", "claude"]));
+        assert_eq!(wait(&data)["hours"], 72);
         let (data, _) = run(None, &[], &["bun"]);
-        assert_eq!(data["release_wait"]["skipped"], json!(["claude"]));
+        assert_eq!(wait(&data)["skipped"], json!(["claude"]));
+
+        // Off keeps the time and the skipped sources for turning it back on.
         let (data, _) = run(Some("off"), &[], &[]);
-        assert_eq!(data["release_wait"]["days"], 0);
-        assert_eq!(data["release_wait"]["skipped"], json!(["claude"]));
+        assert_eq!(wait(&data)["enabled"], false);
+        assert_eq!(wait(&data)["hours"], 72);
+        assert_eq!(wait(&data)["skipped"], json!(["claude"]));
+        let (data, _) = run(Some("on"), &[], &[]);
+        assert_eq!(wait(&data)["enabled"], true);
+        assert_eq!(wait(&data)["hours"], 72);
+        run(Some("off"), &[], &[]);
 
         // Refused changes leave the setting alone.
-        for days in ["soon", "-1", "366"] {
-            let (data, code) = run(Some(days), &[], &[]);
-            assert_eq!(code, 2, "{days}");
-            assert!(data["message"].as_str().unwrap().contains("off"), "{data}");
+        for time in [
+            "soon",
+            "-1",
+            "0",
+            "0h",
+            "8761h",
+            "366d",
+            "d",
+            "99999999999w",
+            "",
+        ] {
+            let (data, code) = run(Some(time), &[], &[]);
+            assert_eq!(code, 2, "{time}");
+            assert!(data["message"].as_str().unwrap().contains("12h"), "{data}");
         }
         let (data, code) = run(Some("9"), &["apt"], &[]);
         assert_eq!(code, 2);
         assert!(data["message"].as_str().unwrap().contains("apt"), "{data}");
-        assert_eq!(run(None, &[], &[]).0["release_wait"]["days"], 0);
+        assert_eq!(wait(&run(None, &[], &[]).0)["hours"], 72);
 
         let (data, code) = release_wait_command(None, None, &[], &[]);
         assert_eq!(code, 2, "{data}");

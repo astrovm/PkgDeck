@@ -1478,12 +1478,25 @@ fn wait_for_new_releases_is_saved_where_pkd_reads_it() {
     let mut app = open();
     assert_eq!(app.release_wait, ReleaseWait::default());
     let wait = ReleaseWait {
-        days: 3,
+        enabled: true,
+        hours: 72,
         skipped: vec!["claude".into()],
     };
+    let file = dir.join("release-wait.json");
+
+    // A drag saves once, when it lets go.
+    app.dragging = true;
+    app.set_release_wait(ReleaseWait {
+        hours: 5,
+        ..wait.clone()
+    });
     app.set_release_wait(wait.clone());
+    app.tick(Instant::now());
+    assert!(!file.exists());
+    app.dragging = false;
+    app.tick(Instant::now());
     assert_eq!(app.release_wait_error, None);
-    assert_eq!(ReleaseWait::load(&dir.join("release-wait.json")), wait);
+    assert_eq!(ReleaseWait::load(&file), wait);
     // Back after a restart.
     assert_eq!(open().release_wait, wait);
 
@@ -1491,6 +1504,7 @@ fn wait_for_new_releases_is_saved_where_pkd_reads_it() {
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::write(&dir, "a file, not a folder").unwrap();
     app.set_release_wait(ReleaseWait::default());
+    app.tick(Instant::now());
     assert!(app.release_wait_error.is_some());
     std::fs::remove_file(&dir).unwrap();
 }

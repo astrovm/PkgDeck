@@ -433,7 +433,7 @@ pub struct DevTool<T = NativeTransport> {
     /// keystroke, so going back to a query, or narrowing a complete one,
     /// does not wait for the network again. Any change clears them.
     searches: Vec<RegistrySearch>,
-    /// Wait for new releases, in days. 0 is no limit.
+    /// Wait for new releases, in hours. 0 is no limit.
     release_age: u32,
     /// Whether this copy of the manager applies the limit to its update
     /// check too. Asked once.
@@ -523,8 +523,8 @@ impl<T: Transport> DevTool<T> {
     /// just gets PkgDeck's own wait (see `limits_release_age`).
     fn release_age_env(&self, write: bool, now: u64) -> Vec<(&'static str, OsString)> {
         use crate::release_wait::cutoff;
-        let days = self.release_age;
-        if days == 0 {
+        let hours = self.release_age;
+        if hours == 0 {
             // uv saves the limit a tool was installed under and keeps using
             // it in checks, which would hide updates once the wait is off.
             // Installing without the variable clears it.
@@ -535,21 +535,22 @@ impl<T: Transport> DevTool<T> {
             };
         }
         match self.kind {
-            DevKind::Npm => vec![("npm_config_min_release_age", days.to_string().into())],
+            // `min-release-age` only takes whole days; this takes any time.
+            DevKind::Npm => vec![("npm_config_before", cutoff(hours, now).into())],
             DevKind::Pnpm => vec![(
                 "pnpm_config_minimum_release_age",
                 // Minutes.
-                (u64::from(days) * 1440).to_string().into(),
+                (u64::from(hours) * 60).to_string().into(),
             )],
-            DevKind::Uv => vec![("UV_EXCLUDE_NEWER", cutoff(days, now).into())],
-            DevKind::Pip => vec![("PIP_UPLOADED_PRIOR_TO", cutoff(days, now).into())],
+            DevKind::Uv => vec![("UV_EXCLUDE_NEWER", cutoff(hours, now).into())],
+            DevKind::Pip => vec![("PIP_UPLOADED_PRIOR_TO", cutoff(hours, now).into())],
             // pipx installs with pip or uv, depending on its setup. Its
             // update check ignores both, so only the install gets them.
             DevKind::Pipx if write => vec![
-                ("PIP_UPLOADED_PRIOR_TO", cutoff(days, now).into()),
-                ("UV_EXCLUDE_NEWER", cutoff(days, now).into()),
+                ("PIP_UPLOADED_PRIOR_TO", cutoff(hours, now).into()),
+                ("UV_EXCLUDE_NEWER", cutoff(hours, now).into()),
             ],
-            DevKind::Mise => vec![("MISE_MINIMUM_RELEASE_AGE", format!("{days}d").into())],
+            DevKind::Mise => vec![("MISE_MINIMUM_RELEASE_AGE", format!("{hours}h").into())],
             _ => vec![],
         }
     }
@@ -575,7 +576,7 @@ impl<T: Transport> DevTool<T> {
         (self.kind == DevKind::Bun && self.release_age > 0).then(|| {
             format!(
                 "--minimum-release-age={}",
-                u64::from(self.release_age) * 86_400
+                u64::from(self.release_age) * 3600
             )
         })
     }
@@ -2137,8 +2138,8 @@ impl<T: Transport> Backend for DevTool<T> {
     fn id(&self) -> &str {
         self.kind.id()
     }
-    fn set_release_age(&mut self, days: u32) {
-        self.release_age = days;
+    fn set_release_age(&mut self, hours: u32) {
+        self.release_age = hours;
         self.checks_release_age = None;
     }
     fn limits_release_age(&mut self, cancel: &Cancellation) -> bool {
@@ -2595,8 +2596,8 @@ mod release_age {
         let tools: Vec<(DevTool<&Manager>, Vars, Vars)> = vec![
             (
                 DevTool::npm(&manager),
-                pairs(&[("npm_config_min_release_age", "2")]),
-                pairs(&[("npm_config_min_release_age", "2")]),
+                pairs(&[("npm_config_before", cutoff)]),
+                pairs(&[("npm_config_before", cutoff)]),
             ),
             (
                 DevTool::pnpm(&manager),
@@ -2615,8 +2616,8 @@ mod release_age {
             ),
             (
                 DevTool::mise(&manager),
-                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "2d")]),
-                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "2d")]),
+                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "48h")]),
+                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "48h")]),
             ),
             // pipx's check ignores both, so only its install gets them.
             (
@@ -2639,7 +2640,7 @@ mod release_age {
                 assert_eq!(env_of(&tool, false), Vars::new(), "{id} off, reading");
             }
             assert_eq!(env_of(&tool, true), Vars::new(), "{id} off, writing");
-            tool.set_release_age(2);
+            tool.set_release_age(48);
             assert_eq!(env_of(&tool, false), read, "{id} reading");
             assert_eq!(env_of(&tool, true), write, "{id} writing");
         }
@@ -2735,11 +2736,11 @@ mod release_age {
     fn every_manager_run_carries_the_limit() {
         let manager = Manager::default();
         let mut npm = DevTool::npm(&manager);
-        npm.set_release_age(3);
+        npm.set_release_age(72);
         npm.call(&["outdated"], &Cancellation::default(), false)
             .unwrap();
         let mut pip = DevTool::pip(&manager);
-        pip.set_release_age(3);
+        pip.set_release_age(72);
         pip.pip_call(
             std::path::Path::new("/venv"),
             &["list"],
@@ -2748,11 +2749,7 @@ mod release_age {
         )
         .unwrap();
         let runs = manager.runs.lock().unwrap();
-        assert_eq!(
-            runs[0].2,
-            pairs(&[("npm_config_min_release_age", "3")]),
-            "{runs:?}"
-        );
+        assert_eq!(runs[0].2[0].0, "npm_config_before", "{runs:?}");
         assert_eq!(runs[1].2[0].0, "PIP_UPLOADED_PRIOR_TO", "{runs:?}");
     }
 
@@ -2776,7 +2773,7 @@ mod release_age {
             reference: None,
         };
         bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
-        bun.set_release_age(2);
+        bun.set_release_age(48);
         bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
         let runs = manager.runs.lock().unwrap();
         assert_eq!(runs[0].1, ["add", "--global", "tool@latest"]);

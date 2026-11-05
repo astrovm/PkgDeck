@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::package::{Package, PackageId, UpdateAvailability};
 
-const DAY: u64 = 86_400;
-/// The waits Settings offers. `pkd release-wait` takes any number of days.
-pub const DAY_CHOICES: [u32; 4] = [0, 1, 3, 7];
-/// Longer than any sensible wait, and small enough that time math stays safe.
-pub const MAX_DAYS: u32 = 365;
+const HOUR: u64 = 3600;
+/// How long a new release waits, in hours, unless someone picks otherwise.
+pub const DEFAULT_HOURS: u32 = 24;
+/// The shortest and longest wait, in hours: a year at most.
+pub const HOUR_RANGE: std::ops::RangeInclusive<u32> = 1..=8760;
 
 /// Seconds since 1970, or 0 if the clock is before that.
 pub fn now() -> u64 {
@@ -38,13 +38,24 @@ pub fn now() -> u64 {
 }
 
 /// What the person chose, shared by the window and `pkd`.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ReleaseWait {
-    /// How long a new release waits; 0 is off.
-    pub days: u32,
+    pub enabled: bool,
+    /// How long a new release waits. Kept while it's off, for turning it
+    /// back on.
+    pub hours: u32,
     /// Sources that don't wait, such as a tool that ships every day.
     pub skipped: Vec<String>,
+}
+impl Default for ReleaseWait {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hours: DEFAULT_HOURS,
+            skipped: vec![],
+        }
+    }
 }
 impl ReleaseWait {
     /// Kept with the window's settings in `~/.config/pkgdeck`.
@@ -61,7 +72,7 @@ impl ReleaseWait {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
             .map(|mut wait| {
-                wait.days = wait.days.min(MAX_DAYS);
+                wait.hours = wait.hours.clamp(*HOUR_RANGE.start(), *HOUR_RANGE.end());
                 wait
             })
             .unwrap_or_default()
@@ -71,7 +82,7 @@ impl ReleaseWait {
     }
     /// Whether new releases from `backend` wait.
     pub fn applies_to(&self, backend: &str) -> bool {
-        self.days > 0 && can_wait(backend) && !self.skipped.iter().any(|skip| skip == backend)
+        self.enabled && can_wait(backend) && !self.skipped.iter().any(|skip| skip == backend)
     }
 }
 
@@ -126,7 +137,7 @@ impl ReleaseWatch {
     /// history. Nothing to do while it's off.
     pub fn from_saved() -> Option<Self> {
         let wait = ReleaseWait::load(&ReleaseWait::default_path()?);
-        (wait.days > 0).then(|| Self::new(wait, default_seen_path()))
+        wait.enabled.then(|| Self::new(wait, default_seen_path()))
     }
     pub fn wait(&self) -> &ReleaseWait {
         &self.wait
@@ -140,7 +151,7 @@ impl ReleaseWatch {
             .unwrap_or_else(|poison| poison.into_inner());
         let mut seen = self.read();
         let before = seen.clone();
-        let wait = u64::from(self.wait.days.min(MAX_DAYS)) * DAY;
+        let wait = u64::from(self.wait.hours) * HOUR;
         let is_update = |package: &Package| package.update == UpdateAvailability::Available;
         for package in packages.iter_mut().filter(|package| is_update(package)) {
             let version = package.candidate_version.clone().unwrap_or_default();
@@ -217,9 +228,19 @@ fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// A wait in words, in the largest unit it's a whole number of.
+pub fn hours_text(hours: u32) -> String {
+    let (count, unit) = match hours {
+        hours if hours.is_multiple_of(168) => (hours / 168, "week"),
+        hours if hours.is_multiple_of(24) => (hours / 24, "day"),
+        hours => (hours, "hour"),
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
+}
+
 /// The cutoff some managers take: this long ago, as an RFC 3339 time.
-pub(crate) fn cutoff(days: u32, now: u64) -> String {
-    let seconds = now.saturating_sub(u64::from(days) * DAY);
+pub(crate) fn cutoff(hours: u32, now: u64) -> String {
+    let seconds = now.saturating_sub(u64::from(hours) * HOUR);
     chrono::DateTime::from_timestamp(i64::try_from(seconds).unwrap_or(0), 0)
         .unwrap_or_default()
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -232,6 +253,7 @@ mod tests {
     use crate::package::{PackageId, Scope};
 
     const NOW: u64 = 1_000_000_000;
+    const DAY: u64 = 86_400;
 
     /// A folder of its own, gone when the test ends.
     struct Scratch(PathBuf);
@@ -282,7 +304,8 @@ mod tests {
     fn watch(dir: &Path, days: u32) -> ReleaseWatch {
         ReleaseWatch::new(
             ReleaseWait {
-                days,
+                enabled: true,
+                hours: days * 24,
                 skipped: vec![],
             },
             Some(dir.join("seen.json")),
@@ -394,7 +417,8 @@ mod tests {
 
         let nowhere = ReleaseWatch::new(
             ReleaseWait {
-                days: 1,
+                enabled: true,
+                hours: 24,
                 skipped: vec![],
             },
             None,
@@ -429,10 +453,11 @@ mod tests {
         let dir = scratch();
         let path = dir.path().join("deep/release-wait.json");
         assert_eq!(ReleaseWait::load(&path), ReleaseWait::default());
-        assert_eq!(ReleaseWait::default().days, 0);
+        assert!(!ReleaseWait::default().enabled);
 
         let wait = ReleaseWait {
-            days: 3,
+            enabled: true,
+            hours: 72,
             skipped: vec!["claude".into()],
         };
         wait.save(&path).unwrap();
@@ -442,14 +467,17 @@ mod tests {
 
         std::fs::write(&path, "{ broken").unwrap();
         assert_eq!(ReleaseWait::load(&path), ReleaseWait::default());
-        std::fs::write(&path, r#"{"days": 4000000000}"#).unwrap();
-        assert_eq!(ReleaseWait::load(&path).days, MAX_DAYS);
+        std::fs::write(&path, r#"{"hours": 4000000000}"#).unwrap();
+        assert_eq!(ReleaseWait::load(&path).hours, *HOUR_RANGE.end());
+        std::fs::write(&path, r#"{"hours": 0}"#).unwrap();
+        assert_eq!(ReleaseWait::load(&path).hours, *HOUR_RANGE.start());
     }
 
     #[test]
     fn system_sources_and_skipped_sources_never_wait() {
         let wait = ReleaseWait {
-            days: 1,
+            enabled: true,
+            hours: 24,
             skipped: vec!["claude".into()],
         };
         for backend in [
@@ -480,7 +508,7 @@ mod tests {
     struct Limiting {
         fake: crate::fake::Fake,
         limits: bool,
-        days: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        hours: std::sync::Arc<std::sync::atomic::AtomicU32>,
     }
     impl crate::engine::Backend for Limiting {
         fn id(&self) -> &str {
@@ -508,8 +536,8 @@ mod tests {
         ) -> Result<Vec<Package>, crate::engine::EngineError> {
             self.fake.search(query, cancel)
         }
-        fn set_release_age(&mut self, days: u32) {
-            self.days.store(days, std::sync::atomic::Ordering::Relaxed);
+        fn set_release_age(&mut self, hours: u32) {
+            self.hours.store(hours, std::sync::atomic::Ordering::Relaxed);
         }
         fn limits_release_age(&mut self, _: &crate::process::Cancellation) -> bool {
             self.limits
@@ -551,7 +579,8 @@ mod tests {
 
         engine.set_release_watch(ReleaseWatch::new(
             ReleaseWait {
-                days: 1,
+                enabled: true,
+                hours: 24,
                 skipped: vec!["cargo".into()],
             },
             Some(dir.path().join("seen.json")),
@@ -587,7 +616,7 @@ mod tests {
             Arc::new(AtomicU32::new(99)),
         );
         let mut engine = crate::engine::Engine::default();
-        for (id, name, limits, days) in [
+        for (id, name, limits, hours) in [
             ("npm", "limited", true, &npm),
             ("uv", "older", false, &uv),
             ("pnpm", "skipped", false, &skipped),
@@ -596,19 +625,20 @@ mod tests {
                 .register(Limiting {
                     fake: source(id, name),
                     limits,
-                    days: days.clone(),
+                    hours: hours.clone(),
                 })
                 .unwrap();
         }
         engine.set_release_watch(ReleaseWatch::new(
             ReleaseWait {
-                days: 3,
+                enabled: true,
+                hours: 72,
                 skipped: vec!["pnpm".into()],
             },
             Some(dir.path().join("seen.json")),
         ));
-        assert_eq!(npm.load(Ordering::Relaxed), 3);
-        assert_eq!(uv.load(Ordering::Relaxed), 3);
+        assert_eq!(npm.load(Ordering::Relaxed), 72);
+        assert_eq!(uv.load(Ordering::Relaxed), 72);
         assert_eq!(skipped.load(Ordering::Relaxed), 0);
         // A manager too old to limit it falls back to PkgDeck's own wait.
         assert_eq!(waiting_names(&engine.installed(&cancel)), ["older"]);
@@ -635,8 +665,24 @@ mod tests {
     #[test]
     fn the_cutoff_is_the_format_managers_accept() {
         assert_eq!(cutoff(0, 0), "1970-01-01T00:00:00Z");
-        assert_eq!(cutoff(1, 2 * DAY + 61), "1970-01-02T00:01:01Z");
+        assert_eq!(cutoff(24, 2 * DAY + 61), "1970-01-02T00:01:01Z");
+        assert_eq!(cutoff(1, 2 * HOUR), "1970-01-01T01:00:00Z");
         // Never before 1970, however long the wait.
-        assert_eq!(cutoff(MAX_DAYS, 10), "1970-01-01T00:00:00Z");
+        assert_eq!(cutoff(*HOUR_RANGE.end(), 10), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn a_wait_reads_in_the_largest_whole_unit() {
+        for (hours, text) in [
+            (1, "1 hour"),
+            (12, "12 hours"),
+            (24, "1 day"),
+            (36, "36 hours"),
+            (72, "3 days"),
+            (168, "1 week"),
+            (336, "2 weeks"),
+        ] {
+            assert_eq!(hours_text(hours), text);
+        }
     }
 }

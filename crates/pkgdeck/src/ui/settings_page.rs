@@ -1173,50 +1173,42 @@ fn waiting_sources(
     sources
 }
 
-/// The choices for how long new releases wait, plus any other number of
-/// days set with `pkd release-wait`.
-fn release_wait_choices(current: u32) -> Vec<u32> {
-    let mut days = pkgdeck_core::release_wait::DAY_CHOICES.to_vec();
-    if !days.contains(&current) {
-        days.push(current);
-    }
-    days
-}
-
-fn release_wait_label(days: u32) -> String {
-    match days {
-        0 => "Off".into(),
-        1 => "1 day".into(),
-        days => format!("{days} days"),
-    }
-}
-
 fn new_releases(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "New releases", |ui| {
-        let current = app.release_wait.days;
-        let choices = release_wait_choices(current);
-        let labels: Vec<String> = choices
-            .iter()
-            .map(|days| release_wait_label(*days))
-            .collect();
-        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let width = 84.0 * labels.len() as f32;
         setting_row(
             ui,
             "Wait for new releases",
-            "Automatic updates and Update all skip versions newer than this. System updates never wait.",
-            vec2(width, 34.0),
+            "Automatic updates and Update all skip what's too new. System updates never wait",
+            SWITCH,
             |ui| {
-                let at = choices.iter().position(|days| *days == current).unwrap_or(0);
-                if let Some(choice) = segmented(ui, Id::unique("release-wait"), &labels, at) {
+                let mut on = app.release_wait.enabled;
+                if switch(ui, &mut on, true, "Wait for new releases").changed() {
                     let mut wait = app.release_wait.clone();
-                    wait.days = choices[choice];
+                    wait.enabled = on;
                     app.set_release_wait(wait);
                 }
             },
         );
-        if app.release_wait.days > 0 {
+        if app.release_wait.enabled {
+            let mut hours = app.release_wait.hours;
+            let hint = pkgdeck_core::release_wait::hours_text(hours);
+            setting_row(ui, "Wait", &hint, DURATION, |ui| {
+                if duration(
+                    ui,
+                    Id::unique("release-wait"),
+                    &mut hours,
+                    &RELEASE_WAIT_HOURS,
+                    &HOUR_UNITS,
+                    pkgdeck_core::release_wait::HOUR_RANGE,
+                    true,
+                    "Wait",
+                ) {
+                    let mut wait = app.release_wait.clone();
+                    wait.hours = hours;
+                    app.set_release_wait(wait);
+                }
+            });
             let sources = waiting_sources(&app.catalog, &app.enabled_sources());
             if !sources.is_empty() {
                 ui.label(
@@ -1311,6 +1303,12 @@ fn notifications(app: &mut App, ui: &mut Ui) {
 /// up to a month, then months. Any number in between can be typed.
 const PROJECT_HOURS: [u32; 19] = [
     6, 12, 24, 48, 72, 96, 120, 144, 168, 336, 504, 720, 1440, 2160, 2880, 3600, 4320, 6480, 8760,
+];
+/// How long a new release waits, in hours: the slider's stops. Hours up to a
+/// day, every day up to a week, then weeks. Any number in between can be
+/// typed.
+const RELEASE_WAIT_HOURS: [u32; 15] = [
+    1, 3, 6, 12, 24, 48, 72, 96, 120, 144, 168, 336, 504, 672, 1344,
 ];
 /// The shortest and longest Old after, in hours: five years at most.
 const PROJECT_RANGE: std::ops::RangeInclusive<u32> = 1..=43_800;
