@@ -179,12 +179,19 @@ impl ReleaseWatch {
         if complete {
             seen.retain(|entry| {
                 entry.id.backend != backend
-                    || packages.iter().any(|package| {
-                        is_update(package)
-                            && package.id == entry.id
-                            && package.candidate_version.as_deref().unwrap_or_default()
-                                == entry.version
-                    })
+                    || packages
+                        .iter()
+                        .find(|package| package.id == entry.id)
+                        .is_some_and(|package| {
+                            // Listed with no update, its check may just have
+                            // failed. Only installing this version ends its wait.
+                            if is_update(package) {
+                                package.candidate_version.as_deref().unwrap_or_default()
+                                    == entry.version
+                            } else {
+                                package.installed_version.as_deref() != Some(&entry.version)
+                            }
+                        })
             });
         }
         if seen != before {
@@ -394,6 +401,40 @@ mod tests {
         let mut rows = [update("tool", "2")];
         watch.mark("npm", &mut rows, true, NOW + 20);
         assert_eq!(rows[0].waiting_until, Some(NOW + 20 + DAY));
+    }
+
+    #[test]
+    fn a_check_that_failed_quietly_doesnt_restart_the_wait() {
+        let dir = scratch();
+        let watch = watch(dir.path(), 1);
+        watch.mark("npm", &mut [update("tool", "2")], true, NOW);
+
+        // A manager that couldn't check lists the package with no update.
+        let mut unchecked = update("tool", "2");
+        unchecked.candidate_version = None;
+        unchecked.update = UpdateAvailability::Current;
+        watch.mark("npm", &mut [unchecked.clone()], true, NOW + 10);
+        let mut rows = [update("tool", "2")];
+        watch.mark("npm", &mut rows, true, NOW + 20);
+        assert_eq!(rows[0].waiting_until, Some(NOW + DAY));
+
+        // Installed by name: this version is done with.
+        unchecked.installed_version = Some("2".into());
+        watch.mark("npm", &mut [unchecked], true, NOW + 30);
+        assert!(watch.read().is_empty());
+    }
+
+    #[test]
+    fn a_newer_release_takes_the_place_of_the_one_waiting() {
+        let dir = scratch();
+        let watch = watch(dir.path(), 1);
+        watch.mark("npm", &mut [update("tool", "2")], true, NOW);
+        let mut rows = [update("tool", "3")];
+        watch.mark("npm", &mut rows, true, NOW + 10);
+        assert_eq!(rows[0].waiting_until, Some(NOW + 10 + DAY));
+        let seen = watch.read();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].version, "3");
     }
 
     #[test]

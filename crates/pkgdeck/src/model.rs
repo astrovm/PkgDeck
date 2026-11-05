@@ -1853,6 +1853,16 @@ fn plural(count: i64, noun: &str) -> Option<String> {
     })
 }
 
+/// The count on the Updates page, which keeps apart what's still waiting.
+pub fn updates_heading(total: usize, waiting: usize) -> String {
+    let ready = plural(total.saturating_sub(waiting) as i64, "update").unwrap_or_default();
+    match (total, waiting) {
+        (_, 0) => ready,
+        _ if total == waiting => format!("{waiting} waiting"),
+        _ => format!("{ready}, {waiting} waiting"),
+    }
+}
+
 /// "42 s", "3 min 5 s", "1 h 2 min".
 pub fn duration(seconds: i64) -> String {
     let seconds = seconds.max(0);

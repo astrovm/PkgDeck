@@ -38,6 +38,15 @@ fn only_an_update_still_too_new_waits() {
 }
 
 #[test]
+fn the_updates_count_keeps_apart_what_is_waiting() {
+    assert_eq!(updates_heading(1, 0), "1 update");
+    assert_eq!(updates_heading(3, 0), "3 updates");
+    assert_eq!(updates_heading(3, 1), "2 updates, 1 waiting");
+    assert_eq!(updates_heading(2, 1), "1 update, 1 waiting");
+    assert_eq!(updates_heading(2, 2), "2 waiting");
+}
+
+#[test]
 fn pages_name_their_icons_capabilities_and_filters() {
     for page in Page::ALL {
         assert!(!page.name().is_empty());

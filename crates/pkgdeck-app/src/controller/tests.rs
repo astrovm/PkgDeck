@@ -6649,6 +6649,58 @@ fn automatic_runs_skip_casks_that_needed_the_password() {
     let _ = std::fs::remove_dir_all(dir);
 }
 #[test]
+fn a_preload_waits_for_new_releases_like_any_other_load() {
+    fn gem_engine(
+        _: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut package = synthetic_package("rainbow", "Rainbow");
+        package.id.backend = "gem".into();
+        package.installed_version = Some("1".into());
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        let mut engine = Engine::default();
+        engine.register(Fixture {
+            package,
+            fail: false,
+        })?;
+        Ok(engine)
+    }
+    fn a_day() -> Option<pkgdeck_core::release_wait::ReleaseWatch> {
+        Some(pkgdeck_core::release_wait::ReleaseWatch::new(
+            pkgdeck_core::release_wait::ReleaseWait {
+                enabled: true,
+                hours: 24,
+                skipped: vec![],
+            },
+            None,
+        ))
+    }
+    let mut controller = ffi::create_synthetic_controller(gem_engine);
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().natives.release_watch = a_day;
+    controller.as_mut().rust_mut().prefetch.clear();
+    let key = cache_key("Updates", "", &[], false);
+    controller
+        .as_mut()
+        .start_prefetch("Updates".into(), key.clone());
+    wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+    let Some((_, Payload::Packages(report))) = controller.rust().prefetched.get(&key) else {
+        panic!("the preload kept nothing");
+    };
+    assert!(report.packages[0].waiting());
+
+    // Changing the wait leaves nothing read under the old one.
+    assert!(controller.rust().engine.is_some());
+    controller.as_mut().forget_update_list();
+    assert!(controller.rust().prefetched.is_empty());
+    assert!(controller.rust().engine.is_none());
+    assert!(controller.rust().engine_scope.is_none());
+}
+
+#[test]
 fn a_waiting_release_stays_out_of_update_all_and_keeps_its_source_apart() {
     let row = |backend: &str, name: &str, waiting_until| {
         let mut package = synthetic_package(name, name);

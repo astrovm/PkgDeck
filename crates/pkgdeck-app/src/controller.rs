@@ -1605,6 +1605,23 @@ struct Natives {
     /// What Wait for new releases asks of each job's engine.
     release_watch: fn() -> Option<pkgdeck_core::release_wait::ReleaseWatch>,
 }
+impl Natives {
+    /// An engine for a job: everything that reads or changes packages waits
+    /// for new releases the same way.
+    fn job_engine(
+        &self,
+        sources: &[String],
+        sources_view: bool,
+        authorization: Authorization,
+        cancel: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = (self.engine)(sources, sources_view, authorization, cancel)?;
+        if let Some(watch) = (self.release_watch)() {
+            engine.set_release_watch(watch);
+        }
+        Ok(engine)
+    }
+}
 /// Never on battery, metered or building.
 fn never_hold(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
     None
@@ -4566,12 +4583,15 @@ impl ffi::PackageController {
     pub fn auto_update(&self) -> bool {
         self.rust().auto_update
     }
-    /// Leave these sources' updates for you, even with automatic updates.
     /// Lists kept from earlier say what was waiting under the old choice for
     /// Wait for new releases. They still show at once, and reload behind.
     pub fn forget_update_list(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().view_cache.expire();
+        self.as_mut().rust_mut().invalidate_prefetch();
+        self.as_mut().rust_mut().engine = None;
+        self.as_mut().rust_mut().engine_scope = None;
     }
+    /// Leave these sources' updates for you, even with automatic updates.
     pub fn set_manual_sources(mut self: Pin<&mut Self>, sources: Vec<String>) {
         self.as_mut().rust_mut().manual_sources = sources;
     }
@@ -5868,16 +5888,13 @@ impl ffi::PackageController {
                     }
                 }
             }
-            match (natives.engine)(
+            match natives.job_engine(
                 &engine_source(&job, &source_filter),
                 sources_view,
                 authorization,
                 &token,
             ) {
                 Ok(mut engine) => {
-                    if let Some(watch) = (natives.release_watch)() {
-                        engine.set_release_watch(watch);
-                    }
                     for item in cleanup {
                         engine.remember_cleanup_plan(item);
                     }
@@ -7594,7 +7611,7 @@ impl ffi::PackageController {
                     let _ = sender.send(reply);
                 }
             };
-            match (natives.engine)(&scope, false, authorization, &token) {
+            match natives.job_engine(&scope, false, authorization, &token) {
                 Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
                 Err(error) => send(Reply::Done(Err(error))),
             }
@@ -7716,7 +7733,7 @@ impl ffi::PackageController {
             };
             let engine = match cached {
                 Some(engine) => Ok(engine),
-                None => (natives.engine)(&scope_for_worker, sources_view, authorization, &token),
+                None => natives.job_engine(&scope_for_worker, sources_view, authorization, &token),
             };
             match engine {
                 Ok(mut engine) => {

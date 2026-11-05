@@ -1216,18 +1216,24 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 .filter(|i| app.unchecked.contains(&rows[i.raw].identity()))
                 .count();
             let checked = total - unchecked;
+            let to_run = app.updates_to_run();
             let label = if unchecked == 0 {
                 "Update all".to_owned()
             } else if width < 560.0 {
                 "Update".to_owned()
             } else {
-                format!("Update selected ({checked})")
+                format!("Update selected ({to_run})")
+            };
+            let tooltip = if to_run == 0 {
+                "These are still waiting. The arrow on a row updates it now."
+            } else {
+                "Ctrl+Shift+U"
             };
             if checked > 0
                 && Button::new(Look::Primary, &label)
                     .icon("updates")
-                    .tooltip("Ctrl+Shift+U")
-                    .enabled(!app.checking_updates && !(app.busy && !app.writing))
+                    .tooltip(tooltip)
+                    .enabled(to_run > 0 && !app.checking_updates && !(app.busy && !app.writing))
                     .show(ui)
                     .clicked()
             {

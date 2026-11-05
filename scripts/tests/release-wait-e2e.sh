@@ -20,7 +20,7 @@ if [[ ${2:-} != --as-user ]]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl unzip xz-utils jq python3-venv pipx ruby build-essential >/dev/null
+        ca-certificates curl unzip xz-utils jq python3-venv ruby build-essential >/dev/null
     # Ubuntu's npm is too old to limit release age, or to update itself.
     node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
     curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
@@ -38,6 +38,10 @@ npm config set ignore-scripts true
 curl -fsSL https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
 curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >/dev/null 2>&1
 curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
+# Ubuntu's pipx is too old to report updates.
+python3 -m venv "$HOME/pipx-tool"
+"$HOME/pipx-tool/bin/pip" install -q pipx
+ln -s "$HOME/pipx-tool/bin/pipx" "$HOME/.local/bin/pipx"
 
 failures=0
 check() { # what expected actual

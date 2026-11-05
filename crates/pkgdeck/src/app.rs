@@ -819,6 +819,7 @@ impl App {
             .rows
             .iter()
             .filter(|row| row.is_package() && row.has_update())
+            .filter(|row| row.waiting_until().is_none())
             .count() as u64;
         if count == self.background.available && self.background.last_check.is_some() {
             return;
@@ -1819,9 +1820,35 @@ impl App {
         self.react();
     }
 
+    /// How many updates the Updates button would run. Update all leaves out
+    /// what's still waiting, and so does Update selected unless that's all
+    /// that's checked: then it's what the person asked for.
+    pub fn updates_to_run(&self) -> usize {
+        let rows = self.shown_rows();
+        let packages: Vec<&Row> = self
+            .items
+            .iter()
+            .filter_map(|item| rows.get(item.raw))
+            .filter(|row| row.is_package())
+            .collect();
+        let checked: Vec<&&Row> = packages
+            .iter()
+            .filter(|row| !self.unchecked.contains(&row.identity()))
+            .collect();
+        let ready = checked
+            .iter()
+            .filter(|row| row.waiting_until().is_none())
+            .count();
+        if ready > 0 || checked.len() == packages.len() {
+            ready
+        } else {
+            checked.len()
+        }
+    }
+
     /// Update all, or the checked ones.
     pub fn upgrade_updates(&mut self) {
-        if self.checking_updates {
+        if self.checking_updates || self.updates_to_run() == 0 {
             return;
         }
         if self.unchecked.is_empty() {

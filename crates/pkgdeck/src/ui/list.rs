@@ -126,9 +126,17 @@ fn heading_text(app: &App) -> String {
             return format!("Best {count} of {matches} packages. Type more to narrow.");
         }
     }
+    if app.page == Page::Updates {
+        let rows = app.shown_rows();
+        let waiting = app
+            .items
+            .iter()
+            .filter(|item| rows[item.raw].waiting_until().is_some())
+            .count();
+        return model::updates_heading(count, waiting);
+    }
     let noun = match app.page {
         Page::Clean => "cleanup task",
-        Page::Updates => "update",
         _ => "package",
     };
     if count == 1 {

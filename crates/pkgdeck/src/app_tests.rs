@@ -1343,6 +1343,44 @@ fn a_finished_updates_list_keeps_what_is_waiting() {
 }
 
 #[test]
+fn what_is_still_waiting_stays_out_of_the_count_and_update_all() {
+    let far = u64::MAX / 2;
+    let mut app = app();
+    app.page = Page::Updates;
+    let ready = row("a", json!({"candidate": "2", "update": "available"}));
+    let waiting = row(
+        "b",
+        json!({"candidate": "3", "update": "available", "waiting_until": far}),
+    );
+    rows(&mut app, json!([ready, waiting]));
+    assert_eq!(app.background.available, 1);
+    assert_eq!(app.updates_to_run(), 1);
+
+    // Checked with something ready, it stays out.
+    let b = app.rows[1].clone();
+    let a = app.rows[0].clone();
+    let c = row("c", json!({"candidate": "4", "update": "available"}));
+    rows(&mut app, json!([ready, waiting, c]));
+    let c_row = app.rows[2].clone();
+    app.set_row_checked(&c_row, false);
+    assert_eq!(app.updates_to_run(), 1);
+    // Checked alone, it's what the person asked for.
+    app.set_row_checked(&a, false);
+    assert_eq!(app.updates_to_run(), 1);
+    app.set_row_checked(&b, false);
+    assert_eq!(app.updates_to_run(), 0);
+
+    // With only that left, Update all has nothing to run and starts nothing.
+    let mut app = self::app();
+    app.page = Page::Updates;
+    rows(&mut app, json!([waiting]));
+    assert_eq!(app.background.available, 0);
+    assert_eq!(app.updates_to_run(), 0);
+    app.upgrade_updates();
+    assert!(app.active_rows.is_empty());
+}
+
+#[test]
 fn a_finished_updates_list_sets_the_badge() {
     let mut app = app();
     app.c().set_background_state(
