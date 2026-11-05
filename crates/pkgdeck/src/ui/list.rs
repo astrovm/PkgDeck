@@ -804,6 +804,12 @@ fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
         .on_hover_text(held.tip());
 }
 
+/// Where a row's status icon goes: centered in the row, left of its buttons,
+/// where `x` is the free space's right edge.
+fn status_mark(x: f32, y: f32) -> Rect {
+    Rect::from_center_size(pos2(x - 17.0, y), Vec2::splat(16.0))
+}
+
 /// The clock on an update too new to install yet.
 fn waiting_mark(ui: &mut Ui, until: u64, rect: Rect, row: Id) {
     let palette = Palette::current(ui.ctx());
@@ -1008,15 +1014,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         };
         let width = cols.name.width();
         let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
-        let mut at = pos2(cols.name.left(), top_y + 30.0);
-        if let Some(held) = &held {
-            held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
-            at.x += 20.0;
-        }
-        if let Some(until) = waiting {
-            waiting_mark(ui, until, Rect::from_min_size(at, Vec2::splat(15.0)), id);
-            at.x += 20.0;
-        }
+        let at = pos2(cols.name.left(), top_y + 30.0);
         // No version, no gap before the summary.
         let used = version.size().x;
         let gap = if used > 0.0 { 12.0 } else { 0.0 };
@@ -1041,23 +1039,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         // what it replaces under it.
         if row.has_update() {
             let new = model::new_version(&row);
-            let mut left = v.left();
-            if let Some(held) = &held {
-                let mark = Rect::from_center_size(
-                    pos2(left + 8.0, rect.center().y - 10.0),
-                    Vec2::splat(16.0),
-                );
-                held_mark(ui, held, mark, id);
-                left += 22.0;
-            }
-            if let Some(until) = waiting {
-                let mark = Rect::from_center_size(
-                    pos2(left + 8.0, rect.center().y - 10.0),
-                    Vec2::splat(16.0),
-                );
-                waiting_mark(ui, until, mark, id);
-                left += 22.0;
-            }
+            let left = v.left();
             let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
             painter.galley(
                 pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
@@ -1116,7 +1098,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     // Buttons.
     let mut x = cols.actions.right();
     if let Some(action) = action.filter(|_| !page_open_here) {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(32.0));
         x -= 38.0;
         let enabled = running || (app.can_act() && !retaining);
         // Coloured only on the row in hand, so a long list isn't a wall of
@@ -1161,7 +1143,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     if pull && !running {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(32.0));
+        x -= 38.0;
         let mut child = ui.new_child(UiBuilder::new().max_rect(button));
         let tip = format!("Pull {title} from {line}");
         if icon_button(
@@ -1178,6 +1161,14 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             app.c().propose("upgrade".into(), item.raw as i32);
             app.react();
         }
+    }
+    // What holds an update back goes beside its button, in the room every
+    // row keeps there, so the versions stay lined up.
+    let mark = status_mark(x, rect.center().y);
+    if let Some(held) = &held {
+        held_mark(ui, held, mark, id);
+    } else if let Some(until) = waiting {
+        waiting_mark(ui, until, mark, id);
     }
     // Divider.
     painter.line_segment(
@@ -1762,6 +1753,27 @@ mod column_tests {
     }
 
     #[test]
+    fn a_rows_status_mark_stays_clear_of_its_columns_and_button() {
+        for (width, kind) in [
+            (1000.0, Width::Wide),
+            (700.0, Width::Medium),
+            (420.0, Width::Compact),
+        ] {
+            let cols = columns(row(width), kind, Page::Updates, 38.0, Shares::default());
+            let button = cols.actions.right() - 38.0;
+            let mark = status_mark(button, cols.actions.center().y);
+            assert_eq!(mark.center().y, cols.actions.center().y);
+            assert!(mark.right() <= button, "{width}");
+            for column in [Some(cols.name), cols.version, cols.summary]
+                .into_iter()
+                .flatten()
+            {
+                assert!(column.right() < mark.left(), "{width}");
+            }
+        }
+    }
+
+    #[test]
     fn compact_rows_make_room_for_a_second_line() {
         use crate::{app::Launch, platform::Platform, settings::Store};
         let (store, settings) = Store::open(None, None);
@@ -1936,7 +1948,7 @@ mod grid_tests {
     };
     use crate::{model::Page, settings::Style};
     use eframe::egui::{self, pos2, vec2, Rect};
-    use egui_kittest::Harness;
+    use egui_kittest::{kittest::Queryable, Harness};
     use pkgdeck_app::controller::ffi::create_synthetic_controller;
     use serde_json::json;
 
@@ -2041,6 +2053,91 @@ mod grid_tests {
                     "{labels} off-grid edges in the Installed card body, {style:?} at {pixels_per_point} ppp"
                 );
             }
+        }
+    }
+
+    /// Where the text starting with each of `starts` was drawn.
+    fn text_x(shape: &egui::Shape, starts: &str, out: &mut Vec<f32>) {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with(starts) => {
+                out.push(text.pos.x);
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| text_x(s, starts, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn a_waiting_update_keeps_its_version_lined_up_with_the_others() {
+        let update = |name: &str, version: &str, waiting_until: Option<u64>| -> crate::model::Row {
+            serde_json::from_value(json!({
+                "kind": "package", "name": name, "display_name": name, "source": "apt",
+                "scope": "system", "installed": "1.0", "candidate": version,
+                "update": "available", "available": true, "summary": "Fixture summary",
+                "waiting_until": waiting_until, "capabilities": ["search", "upgrade"],
+            }))
+            .unwrap()
+        };
+        let later = pkgdeck_core::release_wait::now() + 3600;
+        for card in [900.0, 480.0] {
+            let (store, settings) = Store::open(None, None);
+            let mut platform = Platform::start(|| {});
+            platform.record_notifications();
+            platform.record_links();
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                platform,
+                Launch::default(),
+            );
+            app.page = Page::Updates;
+            app.catalog = vec![crate::model::Source {
+                source: "apt".into(),
+                available: true,
+                capabilities: vec!["search".into(), "upgrade".into()],
+                ..crate::model::Source::default()
+            }];
+            app.rows = vec![
+                update("waiting", "2.5.0", Some(later)),
+                update("ready", "3.5.0", None),
+            ];
+            app.invalidate();
+            app.refresh_items();
+            let mut harness = Harness::builder()
+                .with_size(vec2(card + 40.0, 500.0))
+                .build_ui_state(
+                    move |ui, (ready, app): &mut (bool, App)| {
+                        if !*ready {
+                            crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                            *ready = true;
+                            return;
+                        }
+                        let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(card, 400.0));
+                        super::list_card(app, ui, rect);
+                    },
+                    (false, app),
+                );
+            harness.run_steps(3);
+            let at = |version: &str| {
+                let mut found = Vec::new();
+                for clipped in &harness.output().shapes {
+                    text_x(&clipped.shape, version, &mut found);
+                }
+                found.first().copied().expect("the version was drawn")
+            };
+            assert_eq!(at("2.5.0"), at("3.5.0"), "{card}");
+            // The arrow sits in the middle of its row, as the clock does.
+            let arrow = harness.get_by_label("Update ready from APT").rect();
+            let row = harness
+                .get_by_label_contains("Update available. ready")
+                .rect();
+            assert!(
+                (arrow.center().y - row.center().y).abs() < 0.25,
+                "{card}: arrow {arrow:?}, row {row:?}"
+            );
         }
     }
 }

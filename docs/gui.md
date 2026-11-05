@@ -159,10 +159,11 @@ other sources still appear as they answer.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
 - With **Wait for new releases** on, an update too new to install yet shows a
-  clock, and the count above the list says how many wait. **Update all** and
-  automatic updates skip it, **Update selected** skips it unless it's all you
-  checked, and you aren't notified until it's ready. Its row's arrow installs
-  it now, or for Bun and pipx, the newest version that's old enough.
+  clock beside its arrow, and the count above the list says how many wait.
+  **Update all** and automatic updates skip it, **Update selected** skips it
+  unless it's all you checked, and you aren't notified until it's ready. Its
+  row's arrow installs it now, or for Bun and pipx, the newest version that's
+  old enough.
 - Homebrew casks you check together update in one `brew` call, so you enter
   your password once, and each row still says how its cask went. If you cancel
   while it runs, PkgDeck waits for all of them to finish.
