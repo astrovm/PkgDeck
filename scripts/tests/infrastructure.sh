@@ -75,6 +75,26 @@ grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
+# Size limit uses apparent bytes, so sparse files exercise the real boundary.
+mkdir -p "$work/cache/target" "$work/cache/cargo"
+touch "$work/cache/cargo/keep"
+truncate -s 19999990000 "$work/cache/target/under"
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec true
+[[ -f $work/cache/target/under ]]
+truncate -s 20000000001 "$work/cache/target/over"
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec true
+[[ ! -e $work/cache/target/over && -f $work/cache/cargo/keep ]]
+grep -q 'Deleting oversized container target:' "$work/output"
+# A live run holds the shared lock; a second run must leave its target alone.
+truncate -s 20000000001 "$work/cache/target/busy"
+exec 8>"$work/cache/.target-lock"
+flock -s 8
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec true
+[[ -f $work/cache/target/busy ]]
+flock -u 8
+exec 8>&-
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec true
+[[ ! -e $work/cache/target/busy ]]
 # Without a chosen cache, a run deletes the caches nobody uses any more: an
 # older recipe's after a day, another checkout's once it's gone or after two
 # weeks. What is in use, or was used lately, stays.

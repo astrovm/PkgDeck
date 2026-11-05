@@ -63,7 +63,24 @@ if [[ "$kind" == development ]]; then
     workspace_key=$(printf '%s' "$PWD" | sha256sum | cut -c1-12)
     caches="${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/containers"
     cache="${PKGDECK_CONTAINER_CACHE:-$caches/$workspace_key/$key-$(uname -m)}"
-    mkdir -p "$cache/cargo" "$cache/target"
+    mkdir -p "$cache/cargo"
+    # Hold a shared lock for the entire run. Only an exclusive holder may
+    # replace target, so another wrapper cannot delete it under a container.
+    exec 9>"$cache/.target-lock"
+    if flock -n -x 9; then
+        if [[ -d $cache/target ]]; then
+            target_bytes=$(du -sb "$cache/target" | cut -f1)
+            if ((target_bytes > 20000000000)); then
+                echo "Deleting oversized container target: $cache/target ($target_bytes bytes)" >&2
+                rm -rf "$cache/target"
+            fi
+        fi
+        mkdir -p "$cache/target"
+        flock -s 9
+    else
+        flock -s 9
+        mkdir -p "$cache/target"
+    fi
     if [[ -z ${PKGDECK_CONTAINER_CACHE:-} ]]; then
         scripts/prune-container-caches.sh "$caches" "$workspace_key" "$key-$(uname -m)" "$PWD"
     fi
