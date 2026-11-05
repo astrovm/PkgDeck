@@ -438,6 +438,37 @@ mod tests {
     }
 
     #[test]
+    fn a_memory_that_cant_be_saved_leaves_nothing_behind() {
+        let dir = scratch();
+        let wait = ReleaseWait {
+            enabled: true,
+            hours: 24,
+            skipped: vec![],
+        };
+        // Its folder is a file.
+        let file = dir.path().join("file");
+        fs::write(&file, "").unwrap();
+        ReleaseWatch::new(wait.clone(), Some(file.join("seen.json"))).mark(
+            "npm",
+            &mut [update("tool", "2")],
+            true,
+            NOW,
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"");
+        // Its name is taken by a folder.
+        let taken = dir.path().join("seen.json");
+        fs::create_dir(&taken).unwrap();
+        ReleaseWatch::new(wait, Some(taken.clone())).mark(
+            "npm",
+            &mut [update("tool", "2")],
+            true,
+            NOW,
+        );
+        assert!(taken.is_dir());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
     fn a_clock_that_went_backwards_cant_stretch_the_wait() {
         let dir = scratch();
         let watch = watch(dir.path(), 1);
@@ -569,13 +600,6 @@ mod tests {
             cancel: &crate::process::Cancellation,
         ) -> Result<Vec<Package>, crate::engine::EngineError> {
             self.fake.installed(cancel)
-        }
-        fn search(
-            &mut self,
-            query: &str,
-            cancel: &crate::process::Cancellation,
-        ) -> Result<Vec<Package>, crate::engine::EngineError> {
-            self.fake.search(query, cancel)
         }
         fn set_release_age(&mut self, hours: u32) {
             self.hours

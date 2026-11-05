@@ -2194,6 +2194,11 @@ mod tests {
 
         let (data, code) = release_wait_command(None, None, &[], &[]);
         assert_eq!(code, 2, "{data}");
+
+        // Saying it couldn't save beats pretending it did.
+        let inside_a_file = path.join("release-wait.json");
+        let (data, code) = release_wait_command(Some(&inside_a_file), Some("off"), &[], &[]);
+        assert_eq!((code, &data["error"]), (1, &json!("not_saved")), "{data}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
     fn decline(_: &[Operation]) -> bool {
