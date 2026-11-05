@@ -2382,6 +2382,18 @@ fn cask_version(package: &Package) -> &str {
 }
 /// Passes on the lines of output that name a package one of `backends` is
 /// updating; everything else a manager prints stays in the worker.
+/// The sources whose output says which package `job` is on: Update all runs
+/// one command per source, and checked casks one between them.
+fn followed_sources(job: &Job) -> Vec<String> {
+    job.operations()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            Operation::UpgradeAll { backend } => Some(backend),
+            Operation::Upgrade(id) if id.backend == "homebrew-cask" => Some(id.backend),
+            _ => None,
+        })
+        .collect()
+}
 fn output_follower(
     backends: Vec<String>,
     sender: crate::wake::Sender<Reply>,
@@ -5699,18 +5711,7 @@ impl ffi::PackageController {
         }
         let cancel = Cancellation::default();
         let (sender, receiver) = crate::wake::channel();
-        // Update all runs one command per source, and checked casks one
-        // between them; the output says which package each one is on, so
-        // pass those lines to the progress.
-        let followed: Vec<String> = job
-            .operations()
-            .into_iter()
-            .filter_map(|operation| match operation {
-                Operation::UpgradeAll { backend } => Some(backend),
-                Operation::Upgrade(id) if id.backend == "homebrew-cask" => Some(id.backend),
-                _ => None,
-            })
-            .collect();
+        let followed = followed_sources(&job);
         let token = if followed.is_empty() {
             cancel.clone()
         } else {

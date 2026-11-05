@@ -1982,6 +1982,13 @@ fn a_cask_brew_wont_touch_fails_once_with_brews_words() {
         .unwrap();
     assert_eq!(said(&results[0]).1, pinned);
     assert!(results[1].is_ok(), "{:?}", results[1]);
+    // Alone already, so there's nothing more to try.
+    let writes = script
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("w:"))
+        .count();
+    assert_eq!(writes, 2, "{:?}", script.calls());
 }
 
 #[test]

@@ -5519,6 +5519,58 @@ fn casks_in_one_brew_show_as_it_reaches_each_one() {
     assert_eq!(result["finished"], json!([target_row(&second)]));
 }
 #[test]
+fn a_cask_moving_on_leaves_other_sources_running() {
+    let package = |backend: &str, name: &str| PackageId {
+        backend: backend.into(),
+        name: name.into(),
+        architecture: "fixture".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let operations = vec![
+        Operation::Upgrade(package("apt", "tool")),
+        Operation::Upgrade(package("homebrew-cask", "first")),
+        Operation::Upgrade(package("homebrew-cask", "second")),
+    ];
+    let job = Job::UpgradeAll(operations.clone(), None);
+    let mut state = ProgressState::new(&job, None, &Names::new());
+    for operation in &operations {
+        state.apply(&Event::Started(operation.clone()));
+    }
+    assert!(state.observe("==> Upgrading second"));
+    let now: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+    let running: Vec<&str> = now["running"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["current"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(running, ["tool", "second"]);
+}
+#[test]
+fn only_casks_and_whole_sources_follow_output() {
+    let package = |backend: &str| PackageId {
+        backend: backend.into(),
+        name: "fixture".into(),
+        architecture: "fixture".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let job = Job::UpgradeAll(
+        vec![
+            Operation::Upgrade(package("apt")),
+            Operation::Upgrade(package("homebrew-cask")),
+            Operation::UpgradeAll {
+                backend: "snap".into(),
+            },
+        ],
+        None,
+    );
+    assert_eq!(followed_sources(&job), ["homebrew-cask", "snap"]);
+}
+#[test]
 fn only_updates_someone_started_join_their_cask_updates() {
     let polkit = Authorization::Polkit;
     assert!(joins_cask_updates(&Job::UpgradeAll(vec![], None), polkit));
