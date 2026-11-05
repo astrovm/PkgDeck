@@ -39,7 +39,7 @@ curl -fsSL https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >/dev/null 2
 curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >/dev/null 2>&1
 curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
 # Ubuntu's pipx is too old to report updates.
-python3 -m venv "$HOME/pipx-tool"
+uv venv -q --seed "$HOME/pipx-tool"
 "$HOME/pipx-tool/bin/pip" install -q pipx
 ln -s "$HOME/pipx-tool/bin/pipx" "$HOME/.local/bin/pipx"
 
@@ -126,7 +126,7 @@ rm -rf "$HOME/.local/share/mise/installs/ruff/latest"
 limited mise ruff
 
 echo "== pip"
-python3 -m venv "$HOME/venv"
+uv venv -q --seed "$HOME/venv"
 "$HOME/venv/bin/pip" install -q -U pip
 "$HOME/venv/bin/pip" install -q ruff==0.16.0
 (

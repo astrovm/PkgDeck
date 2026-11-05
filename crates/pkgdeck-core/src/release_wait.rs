@@ -225,9 +225,7 @@ fn default_seen_path() -> Option<PathBuf> {
 /// Replaces a file whole, so a crash or another process never sees half of
 /// it. The window and `pkd` may write at the same time.
 fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
     let partial = path.with_extension(format!("partial.{}", std::process::id()));
     fs::write(&partial, bytes)?;
     fs::rename(&partial, path).inspect_err(|_| {
