@@ -317,6 +317,9 @@ fn app_page(
                 .as_ref()
                 .filter(|i| i.variants.len() > 1)
                 .map(|i| i.variants.clone());
+            // A Flatpak file replaces the installed copy, so the page keeps
+            // **Update**, **Reinstall** or **Downgrade** beside **Launch**.
+            let flatpak_action = opened && row.source == "flatpak" && main.is_some();
             let mut buttons = Vec::new();
             if launchable || runnable {
                 buttons.push(PageButton::Launch);
@@ -331,7 +334,7 @@ fn app_page(
             {
                 buttons.push(PageButton::Update);
             }
-            if matches!(&main, Some(Main::Opened(_)) if !launchable)
+            if matches!(&main, Some(Main::Opened(_)) if !launchable || flatpak_action)
                 || matches!(main, Some(Main::Row(_)))
             {
                 buttons.push(PageButton::Main);
@@ -352,7 +355,7 @@ fn app_page(
             }
             let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
                 PageButton::Launch => {
-                    let look = if update_waits || runnable {
+                    let look = if update_waits || runnable || flatpak_action {
                         Look::Secondary
                     } else {
                         Look::Primary

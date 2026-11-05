@@ -262,6 +262,54 @@ fn package_headers_show_actions_for_opened_files_and_both_flatpak_scopes() {
 }
 
 #[test]
+fn an_installed_flatpak_opened_from_a_file_keeps_its_action_beside_launch() {
+    for action in ["Update", "Reinstall", "Downgrade"] {
+        let mut row = row("package");
+        row.source = "flatpak".into();
+        row.installed = Some("1.0".into());
+        let details = Details {
+            package: Some(row.clone()),
+            action: action.into(),
+            launchable: true,
+            ..Details::default()
+        };
+        let harness = draw_details(
+            app(&row, Page::Search),
+            row,
+            details,
+            900.0,
+            false,
+            true,
+            false,
+        );
+        assert!(harness.query_by_label("Launch").is_some());
+        assert!(harness.query_by_label(action).is_some(), "{action}");
+        // It stays in the installation it's in.
+        assert!(harness.query_by_label("System").is_none());
+    }
+    // An installed AppImage has only Launch to offer.
+    let mut row = row("package");
+    row.source = "appimage".into();
+    row.installed = Some("1.0".into());
+    let details = Details {
+        package: Some(row.clone()),
+        action: "Manage".into(),
+        ..Details::default()
+    };
+    let harness = draw_details(
+        app(&row, Page::Search),
+        row,
+        details,
+        900.0,
+        false,
+        true,
+        false,
+    );
+    assert!(harness.query_by_label("Launch").is_some());
+    assert!(harness.query_by_label("Manage").is_none());
+}
+
+#[test]
 fn an_opened_flatpak_page_chooses_system_or_user_and_remembers_it() {
     for (scope, shown) in [("user", true), ("system", true), ("", false)] {
         let mut row = row("package");

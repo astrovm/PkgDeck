@@ -17,7 +17,8 @@
           <li>Wait for new releases, off by default, holds back versions published too recently, for the time you pick</li>
           <li>The page of an opened Flatpak file or link has a System and User switch, and the next one starts with your last choice</li>
           <li>.flatpak files can install for the whole system, not only for you</li>
-          <li>A .flatpak file whose app is already installed for the system can update or reinstall it</li>
+          <li>A .flatpak file whose app is already installed offers Update, Reinstall or Downgrade beside Launch, also when it's installed for the system</li>
+          <li>Replacing an installed copy from a file says so when it finishes, and no longer offers an Undo that would remove the app</li>
         </ul>
       </description>
     </release>

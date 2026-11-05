@@ -977,6 +977,78 @@ fn every_opened_flatpak_chooses_where_it_installs_on_its_page_and_in_review() {
     }
 }
 #[test]
+fn replacing_an_installed_copy_says_so_and_offers_no_undo() {
+    let mut package = synthetic_package("org.example.Demo", "Demo");
+    package.id.backend = "flatpak".into();
+    package.id.scope = Scope::System;
+    package.id.reference = Some(format!(
+        "artifact:flatpak:{}::/tmp/Demo.flatpak",
+        "ab".repeat(32)
+    ));
+    let job = Job::Write(Operation::Install(package.id.clone()), None);
+    let finished = |package: &Package| {
+        let mut notice = write_notice(
+            &job,
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &Names::new(),
+        );
+        note_replaced_copy(&mut notice, &job, Some(package));
+        notice
+    };
+    for (installed, candidate, word) in [
+        ("1.0", "2.0", "Update"),
+        ("2.0", "2.0", "Reinstall"),
+        ("3.0", "2.0", "Downgrade"),
+    ] {
+        package.installed_version = Some(installed.into());
+        package.candidate_version = Some(candidate.into());
+        let notice = finished(&package);
+        assert_eq!(notice["kind"], "success");
+        assert!(
+            notice["title"].as_str().unwrap().starts_with(word),
+            "{notice}"
+        );
+        assert_eq!(notice["undo"], false);
+        assert_eq!(notice["undo_action"], "");
+        // The review names it too, and what changes.
+        let install = Operation::Install(package.id.clone());
+        let preview = confirmation_preview(&install, &[package.clone()], &[], None);
+        assert!(
+            preview["action"].as_str().unwrap().starts_with(word),
+            "{preview}"
+        );
+        if installed != candidate {
+            assert!(
+                preview["summary"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("{installed} → {candidate}")),
+                "{preview}"
+            );
+        }
+    }
+    // A first install can still be undone, and says it installed.
+    package.installed_version = None;
+    let notice = finished(&package);
+    assert!(notice["title"].as_str().unwrap().starts_with("Install"));
+    assert_eq!(notice["undo"], true);
+    // So can an install of something other than the opened app.
+    package.installed_version = Some("1.0".into());
+    let mut other = package.clone();
+    other.id.name = "org.example.Other".into();
+    let notice = finished(&other);
+    assert_eq!(notice["undo"], true);
+    // A failure stays as it was.
+    let mut failed = write_notice(&job, &Err(EngineError::NotFound), false, &Names::new());
+    let before = failed.clone();
+    note_replaced_copy(&mut failed, &job, Some(&package));
+    assert_eq!(failed, before);
+    let mut none = before.clone();
+    note_replaced_copy(&mut none, &job, None);
+    assert_eq!(none, before);
+}
+#[test]
 fn an_opened_file_that_isnt_a_flatpak_has_no_place_to_choose() {
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();

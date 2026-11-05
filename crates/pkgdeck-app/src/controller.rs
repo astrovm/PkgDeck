@@ -3818,6 +3818,10 @@ fn confirmation_preview(
         }
         _ => false,
     }) {
+        if let Some(word) = replacing_action(operation, package) {
+            title = word.to_owned();
+            lines[0] = lines[0].replacen("Install", word, 1);
+        }
         title = format!(
             "{} {}",
             title,
@@ -3855,7 +3859,7 @@ fn confirmation_preview(
             &package.candidate_version,
         ) {
             (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
-            (Operation::Install(_), _, Some(new)) => summary.push(new.clone()),
+            (Operation::Install(_), None, Some(new)) => summary.push(new.clone()),
             (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
             (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
             _ => {}
@@ -4037,6 +4041,34 @@ fn confirmation_preview(
         _ => "",
     };
     json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_scope": flatpak_scope, "icon": icon, "review": review || !flatpak_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+}
+/// What installing `package` really does when a copy of it is already
+/// there, as an opened file or link can: **Update**, **Reinstall** or
+/// **Downgrade**.
+fn replacing_action(operation: &Operation, package: &Package) -> Option<&'static str> {
+    package.installed_version.as_ref()?;
+    matches!(operation, Operation::Install(id) if *id == package.id)
+        .then(|| pkgdeck_core::installed_copy::action(package))
+        .filter(|word| !word.is_empty())
+}
+/// A finished install that replaced the opened app's copy says what it did.
+/// It has no Undo: removing the app wouldn't bring the old version back.
+fn note_replaced_copy(notice: &mut Value, job: &Job, opened: Option<&Package>) {
+    let Some(package) = opened else {
+        return;
+    };
+    let word = job
+        .operations()
+        .iter()
+        .find_map(|operation| replacing_action(operation, package));
+    let Some(word) = word.filter(|_| notice["kind"] == "success") else {
+        return;
+    };
+    notice["undo"] = json!(false);
+    notice["undo_action"] = json!("");
+    if let Some(title) = notice["title"].as_str() {
+        notice["title"] = json!(title.replacen("Install", word, 1));
+    }
 }
 /// Where a Flatpak opened from a file or link installs, as the word its
 /// **User** / **System** choice shows. Empty for anything else, and for
@@ -8223,6 +8255,11 @@ impl ffi::PackageController {
                                         write_notice(&job, &result, self.rust().sudo, &names)
                                     })
                             };
+                            note_replaced_copy(
+                                &mut notice,
+                                &job,
+                                self.rust().opened_package.as_ref(),
+                            );
                             let batch_output =
                                 std::mem::take(&mut self.as_mut().rust_mut().failure_output);
                             let retry = if notice["kind"] == "error" {
