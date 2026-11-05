@@ -1,7 +1,7 @@
 class Pkd < Formula
   desc "Command-line tool to manage packages across native package managers"
   homepage "https://github.com/astrovm/PkgDeck"
-  version "0.14.0"
+  version "0.14.1"
   license "MIT"
 
   # macOS gets pkd with the app: brew install astrovm/pkgdeck/pkgdeck
@@ -9,10 +9,10 @@ class Pkd < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/astrovm/PkgDeck/releases/download/v#{version}/PkgDeck-v#{version}-linux-aarch64-cli.tar.gz"
-    sha256 "c56aa7d50cea6c389e0f5d3ff744aaf53774ad297723894b1b5bdcb4451089b7"
+    sha256 "90c14dea8ac44acb7126c39485126a4e3213ad1a549c0a1bd993ca96f32964ae"
   else
     url "https://github.com/astrovm/PkgDeck/releases/download/v#{version}/PkgDeck-v#{version}-linux-x86_64-cli.tar.gz"
-    sha256 "7f9cf816b55489cc619158156132a2669ca892eda24d421c88e9cd080b25ddc9"
+    sha256 "e68eb8cc5f9b55a0f6a30093ad32eb865aa30331738e09430fe317da81fe014f"
   end
 
   def install
