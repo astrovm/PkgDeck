@@ -362,6 +362,7 @@ impl<T: Transport> DotnetTools<T> {
             homepages: vec![format!("https://www.nuget.org/packages/{}", id.name)],
             id,
             adopt_with: None,
+            waiting_until: None,
         }
     }
 
@@ -382,6 +383,7 @@ impl<T: Transport> DotnetTools<T> {
             homepages: vec![format!("https://www.nuget.org/packages/{}", id.name)],
             id,
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

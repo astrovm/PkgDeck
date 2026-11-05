@@ -318,6 +318,7 @@ impl<T: Transport> Rustup<T> {
             component_ids: vec![],
             homepages: vec!["https://rust-lang.github.io/rustup/".into()],
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

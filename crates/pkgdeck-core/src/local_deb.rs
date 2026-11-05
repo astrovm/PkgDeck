@@ -174,6 +174,7 @@ fn inspect_with(
         component_ids: vec![],
         homepages: homepage.iter().cloned().collect(),
         adopt_with: None,
+        waiting_until: None,
     };
     Ok(PackageDetails {
         description: extended_description(&metadata),

@@ -86,6 +86,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     ui.add_space(gap);
                     automatic_updates(app, ui);
                     ui.add_space(gap);
+                    new_releases(app, ui);
+                    ui.add_space(gap);
                     notifications(app, ui);
                 }
                 Tab::Sources => sources(app, ui),
@@ -1150,6 +1152,106 @@ fn automatic_updates(app: &mut App, ui: &mut Ui) {
             .filter(|_| app.settings.background_mode && app.settings.auto_update)
         {
             status_line(ui, "clock", &waiting, palette.muted);
+        }
+    });
+}
+
+/// The sources whose new releases can wait: found, turned on and able to
+/// update. By name.
+fn waiting_sources(
+    catalog: &[model::Source],
+    enabled: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut sources: Vec<String> = catalog
+        .iter()
+        .filter(|entry| entry.available && enabled.contains(&entry.source))
+        .filter(|entry| entry.capabilities.iter().any(|c| c == "upgrade"))
+        .filter(|entry| pkgdeck_core::release_wait::can_wait(&entry.source))
+        .map(|entry| entry.source.clone())
+        .collect();
+    sources.sort_by_key(|source| model::source_name(source).to_lowercase());
+    sources
+}
+
+/// The choices for how long new releases wait, plus any other number of
+/// days set with `pkd release-wait`.
+fn release_wait_choices(current: u32) -> Vec<u32> {
+    let mut days = pkgdeck_core::release_wait::DAY_CHOICES.to_vec();
+    if !days.contains(&current) {
+        days.push(current);
+    }
+    days
+}
+
+fn release_wait_label(days: u32) -> String {
+    match days {
+        0 => "Off".into(),
+        1 => "1 day".into(),
+        days => format!("{days} days"),
+    }
+}
+
+fn new_releases(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    section(ui, "New releases", |ui| {
+        let current = app.release_wait.days;
+        let choices = release_wait_choices(current);
+        let labels: Vec<String> = choices
+            .iter()
+            .map(|days| release_wait_label(*days))
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let width = 84.0 * labels.len() as f32;
+        setting_row(
+            ui,
+            "Wait for new releases",
+            "Automatic updates and Update all skip versions newer than this. System updates never wait.",
+            vec2(width, 34.0),
+            |ui| {
+                let at = choices.iter().position(|days| *days == current).unwrap_or(0);
+                if let Some(choice) = segmented(ui, Id::unique("release-wait"), &labels, at) {
+                    let mut wait = app.release_wait.clone();
+                    wait.days = choices[choice];
+                    app.set_release_wait(wait);
+                }
+            },
+        );
+        if app.release_wait.days > 0 {
+            let sources = waiting_sources(&app.catalog, &app.enabled_sources());
+            if !sources.is_empty() {
+                ui.label(
+                    egui::RichText::new("Wait for")
+                        .font(theme::font(14.5))
+                        .color(palette.ink),
+                );
+            }
+            for source in &sources {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(SWITCH.y + 6.0);
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    theme::paint_source_icon(ui.painter(), icon, source, palette.accent);
+                    let name = model::source_name(source);
+                    ui.label(
+                        egui::RichText::new(name)
+                            .font(theme::font(14.5))
+                            .color(palette.ink),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut on = !app.release_wait.skipped.contains(source);
+                        if switch(ui, &mut on, true, name).changed() {
+                            let mut wait = app.release_wait.clone();
+                            wait.skipped.retain(|skipped| skipped != source);
+                            if !on {
+                                wait.skipped.push(source.clone());
+                            }
+                            app.set_release_wait(wait);
+                        }
+                    });
+                });
+            }
+        }
+        if let Some(error) = app.release_wait_error.clone() {
+            status_line(ui, "warning", &error, palette.warning);
         }
     });
 }

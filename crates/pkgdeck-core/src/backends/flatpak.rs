@@ -205,6 +205,7 @@ impl<T: Transport + Sync> Flatpak<T> {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: None,
+                waiting_until: None,
             });
         }
         if packages.is_empty() || !updates {
@@ -383,6 +384,7 @@ impl<T: Transport + Sync> Flatpak<T> {
                     component_ids: vec![],
                     homepages: vec![],
                     adopt_with: None,
+                    waiting_until: None,
                 })
             })
             .collect()

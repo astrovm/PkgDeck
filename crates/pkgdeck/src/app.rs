@@ -76,6 +76,10 @@ pub struct App {
     changed: Changed,
     pub settings: Settings,
     store: Store,
+    /// Wait for new releases, shared with `pkd`.
+    pub release_wait: pkgdeck_core::release_wait::ReleaseWait,
+    /// Why the last change to it couldn't be saved.
+    pub release_wait_error: Option<String>,
     pub platform: Platform,
     pub launch: Launch,
 
@@ -252,10 +256,16 @@ impl App {
         let scope_choices =
             serde_json::from_str(&settings.flatpak_scope_choices).unwrap_or_default();
         let now = Instant::now();
+        let release_wait = store
+            .release_wait_path()
+            .map(|path| pkgdeck_core::release_wait::ReleaseWait::load(&path))
+            .unwrap_or_default();
         let mut app = Self {
             ctl,
             changed,
             settings,
+            release_wait,
+            release_wait_error: None,
             store,
             platform,
             launch,
@@ -399,6 +409,21 @@ impl App {
             self.settings.wait_for_unmetered,
         );
         self.c().set_waits(battery, metered);
+    }
+
+    /// Saves a new choice for Wait for new releases, where every job and
+    /// `pkd` read it, then checks again so the lists show it.
+    pub fn set_release_wait(&mut self, wait: pkgdeck_core::release_wait::ReleaseWait) {
+        self.release_wait = wait;
+        self.release_wait_error = self.store.release_wait_path().and_then(|path| {
+            self.release_wait
+                .save(&path)
+                .err()
+                .map(|error| format!("Couldn't save this: {error}"))
+        });
+        self.c().forget_update_list();
+        self.check_updates(true);
+        self.refresh_page();
     }
 
     pub fn save_settings(&mut self) {

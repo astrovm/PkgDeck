@@ -106,6 +106,8 @@ impl Schedule {
             .packages
             .iter()
             .filter(|package| package.update == UpdateAvailability::Available)
+            // Announced once it's ready, when it can be installed.
+            .filter(|package| !package.waiting())
         {
             if let Some(updates) = current.get_mut(&package.id.backend) {
                 updates.insert((package.id.clone(), package.candidate_version.clone()));
@@ -378,6 +380,38 @@ mod tests {
         schedule.set_interval(60);
         assert_eq!(schedule.interval(), MIN_CHECK_INTERVAL_SECONDS);
     }
+    #[test]
+    fn a_waiting_release_is_announced_when_it_can_be_installed() {
+        let report = |waiting_until: u64| {
+            let mut report = PackageReport::default();
+            report.successful_sources.push("npm".into());
+            report.packages.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": {"backend":"npm", "name":"tool", "architecture":"all", "scope":"system"},
+                    "display_name":"Tool", "summary":"", "installed_version":"1",
+                    "candidate_version":"2", "update":"available", "waiting_until": waiting_until
+                }))
+                .unwrap(),
+            );
+            report
+        };
+        let mut schedule = Schedule::default();
+        assert!(
+            !schedule
+                .complete(&PackageReport {
+                    successful_sources: vec!["npm".into()],
+                    ..Default::default()
+                })
+                .notify
+        );
+        let waiting = schedule.complete(&report(u64::MAX));
+        assert_eq!(waiting.count, 0);
+        assert!(!waiting.notify);
+        let ready = schedule.complete(&report(1));
+        assert_eq!(ready.count, 1);
+        assert!(ready.notify);
+    }
+
     #[test]
     fn first_check_notifies_once_and_history_survives_restart() {
         let mut schedule = Schedule::default();

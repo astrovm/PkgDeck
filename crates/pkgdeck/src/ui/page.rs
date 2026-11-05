@@ -1016,9 +1016,13 @@ fn percent(segment: &str) -> String {
 
 fn update_state(app: &App, row: &Row) -> String {
     if row.has_update() {
-        return match row.candidate.as_deref().filter(|c| !c.is_empty()) {
+        let state = match row.candidate.as_deref().filter(|c| !c.is_empty()) {
             Some(version) => format!("Update {version} available"),
             None => "Update available".into(),
+        };
+        return match row.waiting_until() {
+            Some(until) => format!("{state}. {}", model::waiting_text(until)),
+            None => state,
         };
     }
     if let Some(github) = app

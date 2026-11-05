@@ -1042,6 +1042,7 @@ Icon: {{stock: '{}', cached: [{{name: missing.png}}]}}
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     #[test]

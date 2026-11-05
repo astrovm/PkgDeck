@@ -148,6 +148,7 @@ impl<T: Transport> MacAppStore<T> {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

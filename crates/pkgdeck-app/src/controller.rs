@@ -1602,6 +1602,8 @@ struct Natives {
     hold: fn(&pkgdeck_core::host::Host, Waits) -> Option<Hold>,
     /// What the running Cua Driver processes have done so far.
     driver_work: fn(&pkgdeck_core::host::Host) -> DriverWork,
+    /// What Wait for new releases asks of each job's engine.
+    release_watch: fn() -> Option<pkgdeck_core::release_wait::ReleaseWatch>,
 }
 /// Never on battery, metered or building.
 fn never_hold(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
@@ -1610,6 +1612,10 @@ fn never_hold(_: &pkgdeck_core::host::Host, _: Waits) -> Option<Hold> {
 /// Cua Driver isn't running.
 fn no_driver(_: &pkgdeck_core::host::Host) -> DriverWork {
     DriverWork::default()
+}
+/// New releases don't wait, whatever this machine's settings say.
+fn no_release_watch() -> Option<pkgdeck_core::release_wait::ReleaseWatch> {
+    None
 }
 /// Builds an engine for some sources, as `native_engine` does.
 pub type EngineMaker =
@@ -1649,6 +1655,7 @@ fn synthetic_natives(engine: EngineMaker) -> Natives {
         warm_catalog: false,
         hold: never_hold,
         driver_work: no_driver,
+        release_watch: no_release_watch,
     }
 }
 const NATIVES: Natives = Natives {
@@ -1660,6 +1667,7 @@ const NATIVES: Natives = Natives {
     warm_catalog: true,
     hold: pkgdeck_core::hold::current,
     driver_work: pkgdeck_core::hold::driver_work,
+    release_watch: pkgdeck_core::release_wait::ReleaseWatch::from_saved,
 };
 /// Unit tests never detect the machine's own package managers.
 #[cfg(not(test))]
@@ -2289,10 +2297,19 @@ impl Controller {
 /// firmware, ...). Progress still names each package: sources report which
 /// one they are on (see `Progress::Package`).
 fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
-    let (each, whole): (Vec<_>, Vec<_>) = packages
+    // A source with a release still waiting updates the others one by one,
+    // since updating the whole source would bring that release along.
+    let waiting: std::collections::BTreeSet<&str> = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-        .partition(|p| pkgdeck_core::backends::per_package_upgrades(&p.id.backend));
+        .filter(|p| p.waiting())
+        .map(|p| p.id.backend.as_str())
+        .collect();
+    let (each, whole): (Vec<_>, Vec<_>) =
+        packages.iter().filter(|p| p.update_ready()).partition(|p| {
+            pkgdeck_core::backends::per_package_upgrades(&p.id.backend)
+                || waiting.contains(p.id.backend.as_str())
+        });
     let backends: std::collections::BTreeSet<_> =
         whole.iter().map(|p| p.id.backend.clone()).collect();
     // A package listed twice is still updated once, in list order.
@@ -2337,6 +2354,25 @@ fn without_failed(
         kept
     }
 }
+/// Update selected leaves out releases still waiting. When nothing else is
+/// selected it goes ahead: that's what the person asked for.
+fn without_waiting(operations: Vec<Operation>, packages: &[Package]) -> Vec<Operation> {
+    let waiting = |operation: &Operation| {
+        package_target(operation).is_some_and(|id| {
+            packages
+                .iter()
+                .any(|package| package.id == *id && package.waiting())
+        })
+    };
+    if operations.iter().all(waiting) {
+        operations
+    } else {
+        operations
+            .into_iter()
+            .filter(|operation| !waiting(operation))
+            .collect()
+    }
+}
 /// [`upgrade_plan`] for an automatic run, which only downloads macOS
 /// updates, with the one command the saved approval names. Casks update
 /// one at a time, so one that needs the password stops only itself, and
@@ -2351,7 +2387,7 @@ fn automatic_plan(
     let casks: Vec<Operation> = packages
         .iter()
         .filter(|p| p.id.backend == "homebrew-cask")
-        .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+        .filter(|p| p.update_ready())
         .filter(|p| !needs_password.skips(&p.id.name, cask_version(p)))
         .filter(|p| seen.insert(&p.id))
         .map(|p| Operation::Upgrade(p.id.clone()))
@@ -2524,10 +2560,7 @@ fn repreview_changed_plan(
         Job::UpgradeAll(operations, Some(_)) => {
             let count = packages
                 .iter()
-                .filter(|package| {
-                    package.installed_version.is_some()
-                        && package.update == UpdateAvailability::Available
-                })
+                .filter(|package| package.update_ready())
                 .count();
             Some(Job::PlanUpgrade(operations.clone(), count))
         }
@@ -3309,7 +3342,10 @@ fn plan_checked_upgrade(
     identities: &str,
     failed: &FailedUpdates,
 ) -> CheckedPlan {
-    let operations = without_failed(checked_upgrades(packages, identities), packages, failed);
+    let operations = without_waiting(
+        without_failed(checked_upgrades(packages, identities), packages, failed),
+        packages,
+    );
     if operations.is_empty() {
         return CheckedPlan {
             operations: vec![],
@@ -4131,7 +4167,7 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
-        "same_app_from": same_from, "same_app_group": same_group, "adopt_with": p.adopt_with})
+        "same_app_from": same_from, "same_app_group": same_group, "adopt_with": p.adopt_with, "waiting_until": p.waiting_until})
 }
 fn update_detail_name(
     packages: &mut [Package],
@@ -4531,6 +4567,11 @@ impl ffi::PackageController {
         self.rust().auto_update
     }
     /// Leave these sources' updates for you, even with automatic updates.
+    /// Lists kept from earlier say what was waiting under the old choice for
+    /// Wait for new releases. They still show at once, and reload behind.
+    pub fn forget_update_list(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().view_cache.expire();
+    }
     pub fn set_manual_sources(mut self: Pin<&mut Self>, sources: Vec<String>) {
         self.as_mut().rust_mut().manual_sources = sources;
     }
@@ -4990,7 +5031,7 @@ impl ffi::PackageController {
         let left = report
             .packages
             .iter()
-            .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+            .filter(|p| p.update_ready())
             .filter(|p| {
                 !operations
                     .iter()
@@ -5834,6 +5875,9 @@ impl ffi::PackageController {
                 &token,
             ) {
                 Ok(mut engine) => {
+                    if let Some(watch) = (natives.release_watch)() {
+                        engine.set_release_watch(watch);
+                    }
                     for item in cleanup {
                         engine.remember_cleanup_plan(item);
                     }
@@ -6564,10 +6608,7 @@ impl ffi::PackageController {
                 .rust()
                 .packages
                 .iter()
-                .filter(|package| {
-                    package.installed_version.is_some()
-                        && package.update == UpdateAvailability::Available
-                })
+                .filter(|package| package.update_ready())
                 .count()
                 - skipped;
             if !writing && operations.iter().any(|operation| {
@@ -8289,10 +8330,7 @@ impl ffi::PackageController {
                                     .rust()
                                     .packages
                                     .iter()
-                                    .filter(|package| {
-                                        package.installed_version.is_some()
-                                            && package.update == UpdateAvailability::Available
-                                    })
+                                    .filter(|package| package.update_ready())
                                     .count();
                                 self.as_mut().rust_mut().queued =
                                     Some(Job::PlanUpgrade(operations, count));

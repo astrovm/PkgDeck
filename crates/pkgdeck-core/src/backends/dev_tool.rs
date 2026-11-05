@@ -433,6 +433,11 @@ pub struct DevTool<T = NativeTransport> {
     /// keystroke, so going back to a query, or narrowing a complete one,
     /// does not wait for the network again. Any change clears them.
     searches: Vec<RegistrySearch>,
+    /// Wait for new releases, in days. 0 is no limit.
+    release_age: u32,
+    /// Whether this copy of the manager applies the limit to its update
+    /// check too. Asked once.
+    checks_release_age: Option<bool>,
 }
 /// One registry answer, before ranking.
 struct RegistrySearch {
@@ -461,6 +466,8 @@ impl<T> DevTool<T> {
             transport,
             home: None,
             searches: vec![],
+            release_age: 0,
+            checks_release_age: None,
         }
     }
     pub fn cargo(transport: T) -> Self {
@@ -502,12 +509,88 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.transport.dev_tool(
+        self.transport.dev_tool_with(
             self.kind.executable(),
             &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            &self.release_age_env(write, crate::release_wait::now()),
             cancel,
             write,
         )
+    }
+    /// The variables that make this manager leave out releases that are too
+    /// new. Variables, not options, because every command of a manager reads
+    /// them and one that doesn't know them ignores them: an older manager
+    /// just gets PkgDeck's own wait (see `limits_release_age`).
+    fn release_age_env(&self, write: bool, now: u64) -> Vec<(&'static str, OsString)> {
+        use crate::release_wait::cutoff;
+        let days = self.release_age;
+        if days == 0 {
+            // uv saves the limit a tool was installed under and keeps using
+            // it in checks, which would hide updates once the wait is off.
+            // Installing without the variable clears it.
+            return if self.kind == DevKind::Uv && !write && !self.uv_has_own_limit() {
+                vec![("UV_EXCLUDE_NEWER", cutoff(0, now).into())]
+            } else {
+                vec![]
+            };
+        }
+        match self.kind {
+            DevKind::Npm => vec![("npm_config_min_release_age", days.to_string().into())],
+            DevKind::Pnpm => vec![(
+                "pnpm_config_minimum_release_age",
+                // Minutes.
+                (u64::from(days) * 1440).to_string().into(),
+            )],
+            DevKind::Uv => vec![("UV_EXCLUDE_NEWER", cutoff(days, now).into())],
+            DevKind::Pip => vec![("PIP_UPLOADED_PRIOR_TO", cutoff(days, now).into())],
+            // pipx installs with pip or uv, depending on its setup. Its
+            // update check ignores both, so only the install gets them.
+            DevKind::Pipx if write => vec![
+                ("PIP_UPLOADED_PRIOR_TO", cutoff(days, now).into()),
+                ("UV_EXCLUDE_NEWER", cutoff(days, now).into()),
+            ],
+            DevKind::Mise => vec![("MISE_MINIMUM_RELEASE_AGE", format!("{days}d").into())],
+            _ => vec![],
+        }
+    }
+    /// Whether the person set their own `exclude-newer` for uv, which a
+    /// check shouldn't overrule while PkgDeck's wait is off.
+    fn uv_has_own_limit(&self) -> bool {
+        let config = self
+            .transport
+            .env("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.transport
+                    .env("HOME")
+                    .map(|home| PathBuf::from(home).join(".config"))
+            });
+        config.is_some_and(|config| {
+            std::fs::read_to_string(config.join("uv/uv.toml"))
+                .is_ok_and(|text| text.contains("exclude-newer"))
+        })
+    }
+    /// Bun reads its limit only from an option, and only when installing.
+    fn bun_release_age(&self) -> Option<String> {
+        (self.kind == DevKind::Bun && self.release_age > 0).then(|| {
+            format!(
+                "--minimum-release-age={}",
+                u64::from(self.release_age) * 86_400
+            )
+        })
+    }
+    /// The first version of each manager known to apply the limit to the
+    /// update check and to installs, as `(major, minor)`. npm, pnpm and pip
+    /// come from their release notes; uv and mise from what was tested.
+    fn release_age_check_since(&self) -> Option<(u64, u64)> {
+        match self.kind {
+            DevKind::Npm => Some((11, 10)),
+            DevKind::Pnpm => Some((10, 16)),
+            DevKind::Pip => Some((26, 0)),
+            DevKind::Uv => Some((0, 13)),
+            DevKind::Mise => Some((2026, 11)),
+            _ => None,
+        }
     }
     /// Resolve the manager home used as the package scope. npm, pnpm, uv,
     /// Composer, and gem report it; Cargo, Bun, and pipx derive it from the
@@ -705,9 +788,10 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.transport.venv_pip(
+        self.transport.venv_pip_with(
             venv,
             &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            &self.release_age_env(write, crate::release_wait::now()),
             cancel,
             write,
         )
@@ -769,6 +853,7 @@ impl<T: Transport> DevTool<T> {
                 // keys so dev tools group with native builds of the same app.
                 homepages: homepage.clone().into_iter().collect(),
                 adopt_with: None,
+                waiting_until: None,
             },
             description: summary,
             homepage,
@@ -1502,6 +1587,7 @@ impl<T: Transport> DevTool<T> {
                         component_ids: vec![],
                         homepages: vec![],
                         adopt_with: None,
+                        waiting_until: None,
                     },
                 }
             })
@@ -1728,6 +1814,7 @@ impl<T: Transport> DevTool<T> {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         })
     }
     /// Installed tools; `updates` also looks for newer versions, which costs
@@ -1775,7 +1862,10 @@ impl<T: Transport> DevTool<T> {
             DevKind::Npm => self.call(&["update", "--global", name], cancel, true)?,
             DevKind::Pnpm | DevKind::Bun => {
                 let latest = format!("{name}@latest");
-                self.call(&["add", "--global", &latest], cancel, true)?
+                let limit = self.bun_release_age();
+                let mut args = vec!["add", "--global", &latest];
+                args.extend(limit.as_deref());
+                self.call(&args, cancel, true)?
             }
             DevKind::Pip => self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?,
             DevKind::Pipx => self.call(&["upgrade", name], cancel, true)?,
@@ -1914,7 +2004,10 @@ impl<T: Transport> DevTool<T> {
                 _ => {
                     progress(Progress::Message(format!("Updating {name} to latest…")));
                     let latest = format!("{name}@latest");
-                    self.call(&["add", "--global", &latest], cancel, true)?;
+                    let limit = self.bun_release_age();
+                    let mut args = vec!["add", "--global", &latest];
+                    args.extend(limit.as_deref());
+                    self.call(&args, cancel, true)?;
                 }
             }
             Ok(())
@@ -2030,9 +2123,45 @@ fn cargo_features(home: &std::path::Path, name: &str) -> Vec<String> {
     flags
 }
 
+/// The `(major, minor)` in a manager's `--version` output: `12.2.2`,
+/// `uv 0.13.7 (...)`, `pip 26.3 from ...` or `2026.11.1 linux-x64 (...)`.
+fn version_in(output: &str) -> Option<(u64, u64)> {
+    let word = output
+        .split_whitespace()
+        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut parts = word.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 impl<T: Transport> Backend for DevTool<T> {
     fn id(&self) -> &str {
         self.kind.id()
+    }
+    fn set_release_age(&mut self, days: u32) {
+        self.release_age = days;
+        self.checks_release_age = None;
+    }
+    fn limits_release_age(&mut self, cancel: &Cancellation) -> bool {
+        if self.release_age == 0 {
+            return false;
+        }
+        if let Some(known) = self.checks_release_age {
+            return known;
+        }
+        let Some(since) = self.release_age_check_since() else {
+            return false;
+        };
+        let version = match (self.kind, &self.home) {
+            (DevKind::Pip, Some(home)) => self.pip_call(home, &["--version"], cancel, false),
+            _ => self.call(&["--version"], cancel, false),
+        };
+        // Not knowing means PkgDeck's own wait, which is always safe.
+        let known = version
+            .ok()
+            .and_then(|result| version_in(&String::from_utf8_lossy(&result.stdout)))
+            .is_some_and(|version| version >= since);
+        self.checks_release_age = Some(known);
+        known
     }
     /// Installed tools and install offers both use valid registry names.
     fn may_have(&self, name: &str) -> bool {
@@ -2170,6 +2299,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: None,
+                waiting_until: None,
             });
         }
         // PyPI cannot be searched, and npm search ranks product names poorly,
@@ -2210,6 +2340,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: None,
+                waiting_until: None,
             });
         }
         // A catalog alias must not hide the exact name the user typed:
@@ -2369,5 +2500,310 @@ impl<T: Transport> Backend for DevTool<T> {
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
+    }
+}
+
+#[cfg(test)]
+mod release_age {
+    use super::*;
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    type Run = (String, Vec<String>, Vec<(String, String)>);
+    /// Answers `--version` with what it's given, and remembers every run.
+    #[derive(Default)]
+    struct Manager {
+        version: &'static str,
+        env: BTreeMap<String, OsString>,
+        runs: Mutex<Vec<Run>>,
+    }
+    impl Manager {
+        fn answer(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            env: &[(&str, OsString)],
+        ) -> Result<Completion, ExecutionError> {
+            let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            let stdout = if args == ["--version"] {
+                if self.version.is_empty() {
+                    return Err(ExecutionError::Disabled("no version".into()));
+                }
+                self.version.as_bytes().to_vec()
+            } else {
+                vec![]
+            };
+            self.runs.lock().unwrap().push((
+                executable.into(),
+                args,
+                env.iter()
+                    .map(|(name, value)| ((*name).into(), value.to_string_lossy().into()))
+                    .collect(),
+            ));
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+    impl Transport for &Manager {
+        fn env(&self, name: &str) -> Option<OsString> {
+            self.env.get(name).cloned()
+        }
+        fn dev_tool_with(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            env: &[(&str, OsString)],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.answer(executable, args, env)
+        }
+        fn venv_pip_with(
+            &self,
+            _: &std::path::Path,
+            args: &[OsString],
+            env: &[(&str, OsString)],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.answer("pip", args, env)
+        }
+    }
+    const NOW: u64 = 1_000_000_000; // 2001-09-09T01:46:40Z
+    fn env_of<T: Transport>(tool: &DevTool<T>, write: bool) -> Vec<(String, String)> {
+        tool.release_age_env(write, NOW)
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.to_string_lossy().into()))
+            .collect()
+    }
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect()
+    }
+
+    #[test]
+    fn each_manager_gets_the_limit_in_the_form_it_reads() {
+        let manager = Manager::default();
+        let cutoff = "2001-09-07T01:46:40Z";
+        type Vars = Vec<(String, String)>;
+        let tools: Vec<(DevTool<&Manager>, Vars, Vars)> = vec![
+            (
+                DevTool::npm(&manager),
+                pairs(&[("npm_config_min_release_age", "2")]),
+                pairs(&[("npm_config_min_release_age", "2")]),
+            ),
+            (
+                DevTool::pnpm(&manager),
+                pairs(&[("pnpm_config_minimum_release_age", "2880")]),
+                pairs(&[("pnpm_config_minimum_release_age", "2880")]),
+            ),
+            (
+                DevTool::uv(&manager),
+                pairs(&[("UV_EXCLUDE_NEWER", cutoff)]),
+                pairs(&[("UV_EXCLUDE_NEWER", cutoff)]),
+            ),
+            (
+                DevTool::pip(&manager),
+                pairs(&[("PIP_UPLOADED_PRIOR_TO", cutoff)]),
+                pairs(&[("PIP_UPLOADED_PRIOR_TO", cutoff)]),
+            ),
+            (
+                DevTool::mise(&manager),
+                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "2d")]),
+                pairs(&[("MISE_MINIMUM_RELEASE_AGE", "2d")]),
+            ),
+            // pipx's check ignores both, so only its install gets them.
+            (
+                DevTool::pipx(&manager),
+                vec![],
+                pairs(&[
+                    ("PIP_UPLOADED_PRIOR_TO", cutoff),
+                    ("UV_EXCLUDE_NEWER", cutoff),
+                ]),
+            ),
+            (DevTool::cargo(&manager), vec![], vec![]),
+            (DevTool::bun(&manager), vec![], vec![]),
+            (DevTool::composer(&manager), vec![], vec![]),
+            (DevTool::gem(&manager), vec![], vec![]),
+        ];
+        for (mut tool, read, write) in tools {
+            let id = tool.kind.id();
+            // uv is the exception: see the test about turning the wait off.
+            if tool.kind != DevKind::Uv {
+                assert_eq!(env_of(&tool, false), Vars::new(), "{id} off, reading");
+            }
+            assert_eq!(env_of(&tool, true), Vars::new(), "{id} off, writing");
+            tool.set_release_age(2);
+            assert_eq!(env_of(&tool, false), read, "{id} reading");
+            assert_eq!(env_of(&tool, true), write, "{id} writing");
+        }
+    }
+
+    #[test]
+    fn turning_the_wait_off_doesnt_leave_uv_tools_stuck_on_the_old_limit() {
+        // uv saves the limit a tool was installed under and keeps using it
+        // in checks, so a check overrules it with no limit at all.
+        let dir = std::env::temp_dir().join(format!("pkgdeck-uv-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = Manager {
+            env: BTreeMap::from([("HOME".to_owned(), dir.clone().into_os_string())]),
+            ..Default::default()
+        };
+        let mut uv = DevTool::uv(&manager);
+        // With no wait set: the one exception to `each_manager_gets...`.
+        uv.set_release_age(0);
+        assert_eq!(
+            env_of(&uv, false),
+            pairs(&[("UV_EXCLUDE_NEWER", "2001-09-09T01:46:40Z")])
+        );
+        // Installing without it is what clears the saved limit.
+        assert_eq!(env_of(&uv, true), vec![] as Vec<(String, String)>);
+
+        // A limit the person set for uv themselves stays in charge.
+        std::fs::create_dir_all(dir.join(".config/uv")).unwrap();
+        std::fs::write(
+            dir.join(".config/uv/uv.toml"),
+            "exclude-newer = \"7 days\"\n",
+        )
+        .unwrap();
+        assert_eq!(env_of(&uv, false), vec![] as Vec<(String, String)>);
+        // Without that setting, the file changes nothing.
+        std::fs::write(dir.join(".config/uv/uv.toml"), "native-tls = true\n").unwrap();
+        assert_eq!(env_of(&uv, false).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_manager_known_to_check_the_limit_skips_pkgdecks_own_wait() {
+        let cancel = Cancellation::default();
+        let cases: [(DevKind, &'static str, bool); 16] = [
+            (DevKind::Npm, "11.9.9\n", false),
+            (DevKind::Npm, "11.10.0\n", true),
+            (DevKind::Npm, "12.2.2\n", true),
+            (DevKind::Pnpm, "10.15.0\n", false),
+            (DevKind::Pnpm, "10.16.0\n", true),
+            (DevKind::Uv, "uv 0.12.9 (abc 2026-01-01)\n", false),
+            (DevKind::Uv, "uv 0.13.7 (Homebrew 2026-11-03)\n", true),
+            (DevKind::Pip, "pip 25.1.1 from /x (python 3.14)\n", false),
+            (DevKind::Pip, "pip 26.3 from /x (python 3.14)\n", true),
+            (DevKind::Mise, "2026.10.9 linux-x64 (2026-10-01)\n", false),
+            (DevKind::Mise, "2026.11.1 linux-x64 (2026-11-04)\n", true),
+            // Can't tell: PkgDeck's own wait, which is always safe.
+            (DevKind::Npm, "", false),
+            (DevKind::Npm, "garbage\n", false),
+            // These have no way to limit their checks.
+            (DevKind::Cargo, "cargo 1.99.1 (x)\n", false),
+            (DevKind::Bun, "1.4.4\n", false),
+            (DevKind::Pipx, "1.18.12\n", false),
+        ];
+        for (kind, version, expected) in cases {
+            let manager = Manager {
+                version,
+                ..Default::default()
+            };
+            let mut tool = DevTool::new(kind, &manager);
+            let id = tool.kind.id();
+            // A pip check runs in its virtual environment.
+            tool.home = Some(PathBuf::from("/venv"));
+            assert!(
+                !tool.limits_release_age(&cancel),
+                "{id}: nothing to limit while off"
+            );
+            assert!(
+                manager.runs.lock().unwrap().is_empty(),
+                "{id}: off asks nothing"
+            );
+            tool.set_release_age(1);
+            assert_eq!(
+                tool.limits_release_age(&cancel),
+                expected,
+                "{id} {version:?}"
+            );
+            let asked = manager.runs.lock().unwrap().len();
+            assert_eq!(tool.limits_release_age(&cancel), expected, "{id} again");
+            assert_eq!(manager.runs.lock().unwrap().len(), asked, "{id}: asks once");
+        }
+    }
+
+    #[test]
+    fn every_manager_run_carries_the_limit() {
+        let manager = Manager::default();
+        let mut npm = DevTool::npm(&manager);
+        npm.set_release_age(3);
+        npm.call(&["outdated"], &Cancellation::default(), false)
+            .unwrap();
+        let mut pip = DevTool::pip(&manager);
+        pip.set_release_age(3);
+        pip.pip_call(
+            std::path::Path::new("/venv"),
+            &["list"],
+            &Cancellation::default(),
+            false,
+        )
+        .unwrap();
+        let runs = manager.runs.lock().unwrap();
+        assert_eq!(
+            runs[0].2,
+            pairs(&[("npm_config_min_release_age", "3")]),
+            "{runs:?}"
+        );
+        assert_eq!(runs[1].2[0].0, "PIP_UPLOADED_PRIOR_TO", "{runs:?}");
+    }
+
+    #[test]
+    fn bun_updates_carry_its_limit_as_an_option() {
+        let manager = Manager {
+            env: BTreeMap::from([("HOME".to_owned(), OsString::from("/home/test"))]),
+            ..Default::default()
+        };
+        let mut bun = DevTool::bun(&manager);
+        let cancel = Cancellation::default();
+        bun.home = Some(PathBuf::from("/home/test/.bun/install/global"));
+        let id = PackageId {
+            backend: "bun".into(),
+            name: "tool".into(),
+            architecture: std::env::consts::ARCH.into(),
+            scope: Scope::Environment {
+                path: PathBuf::from("/home/test/.bun/install/global"),
+            },
+            remote: None,
+            reference: None,
+        };
+        bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
+        bun.set_release_age(2);
+        bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
+        let runs = manager.runs.lock().unwrap();
+        assert_eq!(runs[0].1, ["add", "--global", "tool@latest"]);
+        assert_eq!(
+            runs[1].1,
+            [
+                "add",
+                "--global",
+                "tool@latest",
+                "--minimum-release-age=172800"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_is_read_from_how_each_manager_prints_it() {
+        for (text, version) in [
+            ("12.2.2\n", Some((12, 2))),
+            ("uv 0.13.7 (Homebrew 2026-11-03)", Some((0, 13))),
+            ("pip 26.3 from /usr/lib (python 3.14)", Some((26, 3))),
+            ("2026.11.1 linux-x64 (2026-11-04)", Some((2026, 11))),
+            ("", None),
+            ("no digits here", None),
+            ("7", None),
+            ("7.x.1", None),
+        ] {
+            assert_eq!(version_in(text), version, "{text:?}");
+        }
     }
 }

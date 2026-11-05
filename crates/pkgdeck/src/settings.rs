@@ -717,6 +717,12 @@ pub struct Store {
 }
 
 impl Store {
+    /// Where Wait for new releases is kept, next to the settings, so `pkd`
+    /// shares it.
+    pub fn release_wait_path(&self) -> Option<PathBuf> {
+        Some(self.file.as_ref()?.with_file_name("release-wait.json"))
+    }
+
     #[cfg(test)]
     pub fn saved(&self) -> &Settings {
         &self.saved

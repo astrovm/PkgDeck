@@ -343,6 +343,7 @@ impl<T: Transport> GoBinaries<T> {
             component_ids: vec![],
             homepages: binary.path.iter().map(|path| pkg_go_dev(path)).collect(),
             adopt_with: None,
+            waiting_until: None,
         }
     }
 
@@ -444,6 +445,7 @@ impl<T: Transport> GoBinaries<T> {
             component_ids: vec![],
             homepages: vec![pkg_go_dev(path)],
             adopt_with: None,
+            waiting_until: None,
         }))
     }
 

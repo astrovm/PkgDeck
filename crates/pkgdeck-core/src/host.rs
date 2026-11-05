@@ -1323,8 +1323,26 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
+        self.dev_tool_with(executable, label, args, &[], cancel, write)
+    }
+    /// [`dev_tool`](Self::dev_tool) with extra variables set for this one run.
+    pub fn dev_tool_with(
+        &self,
+        executable: &str,
+        label: &str,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
         refuse_root(write)?;
         let mut host = std::borrow::Cow::Borrowed(self);
+        if !env.is_empty() {
+            let owned = host.to_mut();
+            for (name, value) in env {
+                owned.env.insert((*name).into(), value.clone());
+            }
+        }
         let path = match self.resolve(executable)? {
             Some(path) => path,
             None => {
@@ -1449,6 +1467,17 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
+        self.venv_pip_with(venv, args, &[], cancel, write)
+    }
+    /// [`venv_pip`](Self::venv_pip) with extra variables set for this one run.
+    pub fn venv_pip_with(
+        &self,
+        venv: &Path,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
         refuse_root(write)?;
         if !venv.is_absolute() {
             return Err(ExecutionError::Invalid(
@@ -1488,7 +1517,14 @@ impl Host {
         }
         let mut full = vec![OsString::from("-m"), OsString::from("pip")];
         full.extend(args.iter().cloned());
-        let command = self.command(&python, &full)?;
+        let mut host = std::borrow::Cow::Borrowed(self);
+        if !env.is_empty() {
+            let owned = host.to_mut();
+            for (name, value) in env {
+                owned.env.insert((*name).into(), value.clone());
+            }
+        }
+        let command = host.command(&python, &full)?;
         let result = process::run(
             command,
             Limits {

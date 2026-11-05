@@ -53,6 +53,7 @@ fn package(id: PackageId) -> Package {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     }
 }
 fn selector() -> Selector {

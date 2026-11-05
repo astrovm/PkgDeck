@@ -186,6 +186,7 @@ fn parse(source: &str, bytes: &[u8]) -> Result<(Package, String), EngineError> {
         component_ids: vec![name.into()],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     Ok((package, url.into()))
 }

@@ -25,6 +25,7 @@ pkd refresh                              # check for updates and list them (inst
 pkd upgrade neovim --from apt --yes      # install the update found for one package
 pkd upgrade                              # install every update found
 pkd update                               # check for updates, then install them
+pkd release-wait 3                       # keep releases newer than 3 days out of `pkd upgrade`
 pkd clean                                # list cleanup tasks
 pkd inspect git                          # find which package provides a command
 pkd audit                                # find apps installed more than once
@@ -169,6 +170,37 @@ and options (`pkd update neovim`, `--allow-removals`) and one review for the
 upgrade. If a source can't refresh, `pkd update` without names stops before
 changing anything. With names, it refuses only packages from that source,
 since its old information could hide the new version.
+
+### Waiting for new releases
+
+Bad versions are usually caught within days of being published, so you can
+keep brand-new releases out for a while. It's off until you turn it on, and
+**Wait for new releases** in the app is the same setting.
+
+```sh
+pkd release-wait                     # show the setting
+pkd release-wait 3                   # new releases wait 3 days
+pkd release-wait --skip claude       # this source doesn't wait
+pkd release-wait --no-skip claude    # this source waits again
+pkd release-wait off
+```
+
+- `pkd upgrade` and `pkd update` leave out what's waiting, and `pkd refresh`
+  lists it apart. A source with something waiting updates its other packages
+  one at a time.
+- npm 11.10+, pnpm 10.16+, pip 26.0+, uv 0.13+ and mise 2026.11+ apply the limit
+  themselves, dependencies included, so they only ever offer a version that's
+  old enough. Those updates install as usual, and even by name they stay
+  within the limit.
+- Every other source waits by the time PkgDeck first saw a version, which it
+  keeps in `release-wait-seen.json` next to the activity history. A newer
+  version starts its own wait, so a tool that ships more often than the wait
+  may need `--skip`. `pkd upgrade <name>` installs one of these right away.
+  Bun and pipx also get the limit when installing, which covers their
+  dependencies.
+- System sources never wait, since a wait would delay security fixes: APT, DNF,
+  Pacman, Zypper, apk, XBPS, MacPorts, firmware, image-based systems, macOS
+  updates, the App Store, Toolbx and Distrobox.
 
 ## Confirmation and passwords
 
@@ -775,7 +807,9 @@ to stderr.
 | `sources` | `sources` |
 | `clean` | Cleanup `items` and `failures` |
 | Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}`, and `"skipped": true` when PkgDeck left it alone |
-| `refresh` | `operations` (the refreshes), `updates` (packages with an update), and `failures` |
+| `refresh` | `operations` (the refreshes), `updates` (packages with an update ready), `waiting` (updates too new to install yet), and `failures` |
+| `upgrade` | Also `waiting`, when it left out updates too new to install yet |
+| `release-wait` | `release_wait`: its `days` and the `skipped` sources |
 | `update` | Also `refresh`: its `operations`, and `failures` for update information it couldn't fetch |
 | Errors | `error`, and a readable `message` when available |
 | No match | Also `offers`: sources that could try the name, such as `["npm", "pipx"]` |
@@ -783,7 +817,8 @@ to stderr.
 - Package IDs have `backend`, `name`, `architecture`, and `scope`, plus remote
   and ref fields when the source needs them.
 - Versions are the package manager's own strings. `update` is `unknown`,
-  `current`, or `available`.
+  `current`, or `available`. An update too new to install yet also has
+  `waiting_until`, in seconds since 1970.
 - If an APT full upgrade would remove packages and `--allow-removals` wasn't
   passed, the error is `apt_removals_require_consent` and includes the `plan`.
 - A failed source includes the package manager's own error message when

@@ -368,6 +368,16 @@ impl Transport for NativeTransport {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
+        self.dev_tool_with(executable, args, &[], cancel, write)
+    }
+    fn dev_tool_with(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
         let label = match executable {
             "cargo" => "Cargo",
             "npm" => "npm",
@@ -380,7 +390,8 @@ impl Transport for NativeTransport {
             "git" => "Git",
             other => other,
         };
-        self.host.dev_tool(executable, label, args, cancel, write)
+        self.host
+            .dev_tool_with(executable, label, args, env, cancel, write)
     }
     fn venv_pip(
         &self,
@@ -389,7 +400,17 @@ impl Transport for NativeTransport {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.host.venv_pip(venv, args, cancel, write)
+        self.venv_pip_with(venv, args, &[], cancel, write)
+    }
+    fn venv_pip_with(
+        &self,
+        venv: &std::path::Path,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.venv_pip_with(venv, args, env, cancel, write)
     }
     fn system_manager(
         &self,

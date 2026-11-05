@@ -1461,6 +1461,41 @@ fn the_window_sleeps_until_something_is_due() {
 }
 
 #[test]
+fn wait_for_new_releases_is_saved_where_pkd_reads_it() {
+    use pkgdeck_core::release_wait::ReleaseWait;
+    let dir = std::env::temp_dir().join(format!("pkgdeck-release-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let open = || {
+        let (store, settings) = Store::open(Some(dir.clone()), None);
+        App::with_controller(
+            create_synthetic_controller(empty),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        )
+    };
+    let mut app = open();
+    assert_eq!(app.release_wait, ReleaseWait::default());
+    let wait = ReleaseWait {
+        days: 3,
+        skipped: vec!["claude".into()],
+    };
+    app.set_release_wait(wait.clone());
+    assert_eq!(app.release_wait_error, None);
+    assert_eq!(ReleaseWait::load(&dir.join("release-wait.json")), wait);
+    // Back after a restart.
+    assert_eq!(open().release_wait, wait);
+
+    // Not being able to save says so.
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::write(&dir, "a file, not a folder").unwrap();
+    app.set_release_wait(ReleaseWait::default());
+    assert!(app.release_wait_error.is_some());
+    std::fs::remove_file(&dir).unwrap();
+}
+
+#[test]
 fn settings_wait_for_a_drag_to_end_before_they_are_written() {
     let dir = std::env::temp_dir().join(format!("pkgdeck-drag-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

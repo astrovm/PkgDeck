@@ -951,6 +951,7 @@ impl MacApps {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: adopt_with.map(str::to_owned),
+                waiting_until: None,
             },
             description: description.join("\n\n"),
             homepage: candidate.map(|token| format!("https://formulae.brew.sh/cask/{token}")),

@@ -310,10 +310,44 @@ pub fn operations_summary(data: &Value, color: bool) -> String {
         return refresh_summary(data, paint);
     }
     let mut summary = changes_summary(data, paint);
+    if let Some(note) = waiting_note(data["waiting"].as_u64().unwrap_or(0), paint) {
+        summary.push_str(&format!("\n{note}"));
+    }
     for failure in data["refresh"]["failures"].as_array().into_iter().flatten() {
         summary.push_str(&failure_line(paint, &failure_text(failure)));
     }
     summary
+}
+/// Why `pkd upgrade` left updates out, and how to install one anyway.
+fn waiting_note(count: u64, paint: Paint) -> Option<String> {
+    (count > 0).then(|| {
+        paint.dim(&format!(
+            "{count} new release{} still waiting. `pkd upgrade <name>` installs one now.",
+            if count == 1 { " is" } else { "s are" }
+        ))
+    })
+}
+/// The setting `pkd release-wait` shows.
+fn release_wait_text(wait: &Value) -> String {
+    let days = wait["days"].as_u64().unwrap_or(0);
+    if days == 0 {
+        return "New releases don't wait. Turn it on with `pkd release-wait <days>`.".into();
+    }
+    let mut text = format!(
+        "New releases wait {days} day{}. System sources never wait.",
+        if days == 1 { "" } else { "s" }
+    );
+    let skipped: Vec<_> = wait["skipped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(source_name)
+        .collect();
+    if !skipped.is_empty() {
+        text.push_str(&format!("\nThese don't wait: {}.", skipped.join(", ")));
+    }
+    text
 }
 /// The end of `pkd refresh`: the updates `pkd upgrade` would install, then
 /// the sources that couldn't be refreshed or read.
@@ -326,7 +360,10 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
             .into_iter()
             .flatten()
             .any(|item| item["result"].get("Err").is_some());
-    let mut output = if updates.is_empty() && incomplete {
+    let waiting = data["waiting"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut output = if updates.is_empty() && !waiting.is_empty() {
+        String::new()
+    } else if updates.is_empty() && incomplete {
         "No updates found in the sources that answered.".to_string()
     } else if updates.is_empty() {
         paint.green("Everything is up to date.")
@@ -362,6 +399,12 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
         ));
         text
     };
+    if let Some(note) = waiting_note(waiting.len() as u64, paint) {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&note);
+    }
     for failure in failures {
         output.push_str(&failure_line(paint, &failure_text(failure)));
     }
@@ -724,6 +767,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
     let width = width.clamp(24, 160);
     let paint = Paint(color);
     let mut output = String::new();
+    if data["release_wait"].is_object() {
+        return release_wait_text(&data["release_wait"]);
+    }
     if let Some(items) = data["items"].as_array() {
         if items.is_empty() {
             output.push_str(&paint.green("Nothing to clean."));
@@ -1714,6 +1760,53 @@ mod tests {
         assert_eq!(error_message(&EngineError::Cancelled), "Cancelled.");
         assert_eq!(failure_text(&json!("plain")), "plain");
     }
+    #[test]
+    fn release_wait_says_what_it_does() {
+        let text = |wait: Value| human(&json!({"release_wait": wait}), 100, false);
+        assert!(text(json!({"days": 0, "skipped": []})).contains("don't wait"));
+        assert_eq!(
+            text(json!({"days": 1, "skipped": []})),
+            "New releases wait 1 day. System sources never wait."
+        );
+        assert_eq!(
+            text(json!({"days": 3, "skipped": ["npm"]})),
+            "New releases wait 3 days. System sources never wait.\nThese don't wait: npm."
+        );
+    }
+
+    #[test]
+    fn what_waits_is_noted_after_a_refresh_and_an_upgrade() {
+        let package = json!({"id": {"name": "tool", "backend": "npm"}, "display_name": "tool",
+            "installed_version": "1", "candidate_version": "2"});
+        let refreshed = |updates: Vec<Value>, waiting: Vec<Value>| {
+            operations_summary(
+                &json!({"operations": [], "updates": updates, "waiting": waiting, "failures": []}),
+                false,
+            )
+        };
+        // Nothing ready isn't "up to date" while something waits.
+        let only = refreshed(vec![], vec![package.clone()]);
+        assert!(!only.contains("up to date"), "{only}");
+        assert!(only.contains("1 new release is still waiting"), "{only}");
+        let both = refreshed(
+            vec![package.clone()],
+            vec![package.clone(), package.clone()],
+        );
+        assert!(both.contains("1 update available"), "{both}");
+        assert!(both.contains("2 new releases are still waiting"), "{both}");
+        let none = refreshed(vec![], vec![]);
+        assert!(
+            none.contains("up to date") && !none.contains("waiting"),
+            "{none}"
+        );
+
+        let upgraded = operations_summary(&json!({"operations": [], "waiting": 2}), false);
+        assert!(
+            upgraded.contains("2 new releases are still waiting"),
+            "{upgraded}"
+        );
+    }
+
     #[test]
     fn scopes_updates_unavailable_sources_and_source_errors_render() {
         let packages = json!({"packages": [

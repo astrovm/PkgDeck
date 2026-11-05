@@ -87,6 +87,9 @@ pub struct Row {
     pub same_app_from: Vec<String>,
     pub same_app_group: Option<String>,
     pub adopt_with: Option<String>,
+    /// When a release too new to install yet stops waiting, in seconds
+    /// since 1970.
+    pub waiting_until: Option<u64>,
     pub failure_kind: String,
     pub cleanup_key: String,
     pub cleanup_kind: String,
@@ -124,6 +127,12 @@ impl Row {
     }
     pub fn has_update(&self) -> bool {
         self.update == "available"
+    }
+    /// When this update stops waiting, if it's still too new.
+    pub fn waiting_until(&self) -> Option<u64> {
+        let now = pkgdeck_core::release_wait::now();
+        self.waiting_until
+            .filter(|until| self.has_update() && *until > now)
     }
     /// The name people know it by.
     pub fn title(&self) -> &str {
@@ -1188,6 +1197,20 @@ pub fn new_version(row: &Row) -> String {
         .clone()
         .filter(|version| !version.is_empty())
         .unwrap_or_else(|| "Unknown".into())
+}
+
+/// Why an update is left out for now, in the person's own time zone.
+pub fn waiting_text(until: u64) -> String {
+    let when = i64::try_from(until)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%b %-d, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "later".into());
+    format!("Waiting until {when}. Update all and automatic updates skip it for now.")
 }
 
 /// The version column's text.
