@@ -1226,6 +1226,9 @@ fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Pale
             theme::paint_icon(ui.painter(), mark, "clock", alpha(palette.muted, 0.8))
         }
         model::RowState::Running => paint_spinner(ui, mark, palette.accent),
+        model::RowState::Passed => {
+            theme::paint_icon(ui.painter(), mark, "installed", alpha(palette.muted, 0.8))
+        }
         model::RowState::Done => {
             theme::paint_icon(ui.painter(), mark, "installed", palette.success)
         }
@@ -1914,6 +1917,27 @@ mod grid_tests {
         }
     }
 
+    #[test]
+    fn each_batch_mark_looks_different() {
+        let painted = |state: crate::model::RowState| {
+            let mut harness = Harness::new_ui(move |ui| {
+                let palette = super::Palette::current(ui.ctx());
+                let icon = Rect::from_min_size(pos2(10.0, 10.0), vec2(32.0, 32.0));
+                super::paint_batch_state(ui, icon, state, &palette);
+            });
+            harness.run();
+            format!("{:?}", harness.output().shapes)
+        };
+        let (queued, passed, done) = (
+            painted(crate::model::RowState::Queued),
+            painted(crate::model::RowState::Passed),
+            painted(crate::model::RowState::Done),
+        );
+        // A row not known to have worked never looks like one that did.
+        assert_ne!(passed, done);
+        assert_ne!(passed, queued);
+        assert_ne!(done, queued);
+    }
     #[test]
     fn card_body_stays_on_the_ui_grid_when_the_card_is_off_grid() {
         // egui flags any Ui edge off the 1/32 grid with an orange "Unaligned" label.

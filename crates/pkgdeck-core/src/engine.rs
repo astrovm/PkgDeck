@@ -402,6 +402,21 @@ pub trait Backend: Send {
     ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
         None
     }
+    /// Runs `operations` together and says how each one went. In a
+    /// transaction, [`Self::execute_group`], they all go the same way; a
+    /// manager that carries on after one fails answers for each itself.
+    fn execute_joined(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Vec<Result<OperationOutcome, EngineError>>> {
+        let grouped = self.execute_group(operations, cancel, progress)?;
+        Some(match grouped {
+            Ok(outcomes) => vec![Ok(outcomes[0].clone()); operations.len()],
+            Err(error) => vec![Err(error); operations.len()],
+        })
+    }
     fn unsupported(&self, capability: Capability) -> EngineError {
         EngineError::Unsupported {
             backend: self.id().into(),
@@ -555,6 +570,7 @@ pub struct Engine {
     batch_authorization: Option<(Host, Authorization)>,
     batch_mode: crate::batch::BatchMode,
     unattended: bool,
+    joins_cask_updates: bool,
 }
 /// Whether `backend` has packages at all. Sources that only clean, such as
 /// developer caches, stay out of searches and installed lists; a package
@@ -586,6 +602,12 @@ impl Engine {
     /// need someone there (see [`crate::unattended::Unattended::Never`]).
     pub fn set_unattended(&mut self, unattended: bool) {
         self.unattended = unattended;
+    }
+    /// Someone is here to answer one password dialog for all of a batch's
+    /// cask updates: run them with one `brew` (see
+    /// [`crate::batch::join_cask_updates`]).
+    pub fn set_joins_cask_updates(&mut self, joins: bool) {
+        self.joins_cask_updates = joins;
     }
     /// Simulate the host APT solver before asking the user to approve a full update.
     pub fn plan_apt_upgrade(
@@ -1577,8 +1599,29 @@ impl Engine {
     /// Ordered, best-effort batch. Successful writes are not rolled back after another failure.
     /// Every input receives its own result and terminal event, including cancelled items.
     /// Updates that have to join them run too, in the same transaction,
-    /// with no result or events of their own.
+    /// with no result or events of their own. Cask updates that join (see
+    /// [`Self::set_joins_cask_updates`]) run where the first of them is;
+    /// results stay in the order of `operations`.
     pub fn execute_batch(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        if !self.joins_cask_updates {
+            return self.execute_in_order(operations, cancel, events);
+        }
+        let order = crate::batch::cask_updates_together(operations);
+        let together: Vec<Operation> = order.iter().map(|at| operations[*at].clone()).collect();
+        let mut results: Vec<_> = order
+            .into_iter()
+            .zip(self.execute_in_order(&together, cancel, events))
+            .collect();
+        results.sort_by_key(|(at, _)| *at);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+
+    fn execute_in_order(
         &mut self,
         operations: &[Operation],
         cancel: &Cancellation,
@@ -1726,13 +1769,8 @@ impl Engine {
             .iter()
             .any(|commands| !commands.is_empty());
         if !protected {
-            return self.run_lanes(
-                operations,
-                crate::batch::lanes(operations),
-                cancel,
-                events,
-                false,
-            );
+            let lanes = self.lanes(operations);
+            return self.run_lanes(operations, lanes, cancel, events, false);
         }
         let (host, authorization) = self.batch_authorization.clone().expect("configured above");
         events(Event::Started(operations[0].clone()));
@@ -1770,15 +1808,19 @@ impl Engine {
                 ),
             });
         }
-        let results = self.run_lanes(
-            operations,
-            crate::batch::lanes(operations),
-            cancel,
-            events,
-            true,
-        );
+        let lanes = self.lanes(operations);
+        let results = self.run_lanes(operations, lanes, cancel, events, true);
         drop(guard);
         results
+    }
+
+    fn lanes(&self, operations: &[Operation]) -> Vec<Vec<std::ops::Range<usize>>> {
+        let lanes = crate::batch::lanes(operations);
+        if self.joins_cask_updates {
+            crate::batch::join_cask_updates(operations, lanes)
+        } else {
+            lanes
+        }
     }
 
     /// Runs `operations` lane by lane (see [`crate::batch::lanes`]), up to
@@ -1895,6 +1937,7 @@ impl Engine {
             batch_authorization: self.batch_authorization.clone(),
             batch_mode: self.batch_mode,
             unattended: self.unattended,
+            joins_cask_updates: self.joins_cask_updates,
         }
     }
 
@@ -1939,34 +1982,31 @@ impl Engine {
                     .and_then(|()| self.preflight(member, cancel))
             })
             .collect::<Vec<_>>();
-        let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
-            Err(error)
-        } else {
-            self.ready(backend, operation.capability(), cancel)
-                .and_then(|manager| {
-                    manager
-                        .execute_group(&operations[index..end], cancel, &mut |progress| {
-                            events(Event::Progress {
-                                operation: operation.clone(),
-                                progress,
-                            });
-                        })
-                        .unwrap_or_else(|| {
-                            Err(EngineError::InvalidResponse {
+        let joined = rechecked.into_iter().find_map(Result::err).map_or_else(
+            || {
+                self.ready(backend, operation.capability(), cancel)
+                    .and_then(|manager| {
+                        manager
+                            .execute_joined(&operations[index..end], cancel, &mut |progress| {
+                                events(Event::Progress {
+                                    operation: operation.clone(),
+                                    progress,
+                                });
+                            })
+                            .ok_or_else(|| EngineError::InvalidResponse {
                                 backend: backend.into(),
                                 reason: "grouped operation unavailable".into(),
                             })
-                        })
-                })
-        };
+                    })
+            },
+            Err,
+        );
+        let results = joined.unwrap_or_else(|error| vec![Err(error); end - index]);
         crate::cache::invalidate(backend);
         operations[index..end]
             .iter()
-            .map(|member| {
-                let result = match &grouped {
-                    Ok(outcomes) => Ok(outcomes[0].clone()),
-                    Err(error) => Err(error.clone()),
-                };
+            .zip(results)
+            .map(|(member, result)| {
                 events(Event::Finished {
                     operation: member.clone(),
                     result: result.clone(),
@@ -2493,6 +2533,132 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
         assert!(results.iter().all(Result::is_ok));
         assert_eq!(writes.load(Ordering::SeqCst), 3);
+    }
+
+    /// Formulae and casks that record how they ran, and fail `broken`.
+    struct BrewFixture {
+        id: &'static str,
+        broken: &'static str,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl BrewFixture {
+        fn log_updates(&self, operations: &[Operation]) {
+            let mut names = Vec::new();
+            for operation in operations {
+                if let Operation::Upgrade(id) = operation {
+                    names.push(id.name.as_str());
+                }
+            }
+            self.log.lock().unwrap().push(names.join(" "));
+        }
+        fn result(&self, operation: &Operation) -> Result<OperationOutcome, EngineError> {
+            match operation {
+                Operation::Upgrade(id) if id.name == self.broken => Err(EngineError::Cancelled),
+                _ => Ok(OperationOutcome::default()),
+            }
+        }
+    }
+    impl Backend for BrewFixture {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn execute(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.log_updates(std::slice::from_ref(operation));
+            self.result(operation)
+        }
+        fn execute_joined(
+            &mut self,
+            operations: &[Operation],
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Option<Vec<Result<OperationOutcome, EngineError>>> {
+            self.log_updates(operations);
+            Some(operations.iter().map(|op| self.result(op)).collect())
+        }
+    }
+    fn brew_update(backend: &str, name: &str) -> Operation {
+        Operation::Upgrade(PackageId {
+            backend: backend.into(),
+            name: name.into(),
+            architecture: "fixture".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        })
+    }
+
+    #[test]
+    fn someones_cask_updates_run_together_and_keep_their_own_results() {
+        let run = |joins: bool, operations: &[Operation]| {
+            let log = Arc::new(std::sync::Mutex::new(vec![]));
+            let mut engine = Engine::default();
+            for id in ["homebrew", "homebrew-cask"] {
+                engine
+                    .register(BrewFixture {
+                        id,
+                        broken: "second",
+                        log: log.clone(),
+                    })
+                    .unwrap();
+            }
+            engine.enable_batch_authorization(
+                Host::new(Runtime::Native, Default::default()),
+                Authorization::Polkit,
+            );
+            engine.set_joins_cask_updates(joins);
+            let mut finished = vec![];
+            let results =
+                engine.execute_batch(operations, &Cancellation::default(), &mut |event| {
+                    if let Event::Finished { operation, result } = event {
+                        finished.push((operation, result.is_ok()));
+                    }
+                });
+            let ran = log.lock().unwrap().clone();
+            (ran, results, finished)
+        };
+        // Casks on both sides of a formula are one run, wherever they were.
+        let selected = [
+            brew_update("homebrew-cask", "first"),
+            brew_update("homebrew", "formula"),
+            brew_update("homebrew-cask", "second"),
+            brew_update("homebrew-cask", "third"),
+        ];
+        let (ran, results, finished) = run(true, &selected);
+        assert_eq!(ran, ["first second third", "formula"]);
+        // Answers stay in the order asked for, each with its own result.
+        assert_eq!(
+            results.iter().map(Result::is_ok).collect::<Vec<_>>(),
+            [true, true, false, true]
+        );
+        for (operation, ok) in [
+            (&selected[0], true),
+            (&selected[1], true),
+            (&selected[2], false),
+            (&selected[3], true),
+        ] {
+            assert!(finished.contains(&(operation.clone(), ok)), "{operation:?}");
+        }
+        // One cask has nothing to join.
+        let (ran, ..) = run(true, &selected[..2]);
+        assert_eq!(ran, ["first", "formula"]);
+        // Automatic updates and the CLI run each on its own, as before.
+        let (ran, results, _) = run(false, &selected);
+        assert_eq!(ran, ["first", "formula", "second", "third"]);
+        assert_eq!(
+            results.iter().map(Result::is_ok).collect::<Vec<_>>(),
+            [true, true, false, true]
+        );
     }
 
     #[test]

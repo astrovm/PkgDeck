@@ -612,7 +612,41 @@ impl ProgressState {
         sources.iter().any(|backend| {
             pkgdeck_core::backends::output_package(backend, line)
                 .is_some_and(|name| self.move_to(backend, &name))
-        })
+        }) || self.move_to_cask(line)
+    }
+    /// Casks updating in one `brew` move on as it says which it's on: the
+    /// one before is done, whether it worked is only known at the end.
+    fn move_to_cask(&mut self, line: &str) -> bool {
+        let named = pkgdeck_core::backends::output_package("homebrew-cask", line);
+        let operation = self
+            .operations
+            .iter()
+            .find(|operation| {
+                cask_update(operation)
+                    && package_target(operation)
+                        .is_some_and(|id| id.name.rsplit('/').next() == named.as_deref())
+            })
+            .cloned();
+        let Some(operation) = operation else {
+            return false;
+        };
+        if !self.running.iter().any(|step| cask_update(&step.operation)) {
+            return false;
+        }
+        let moved_on: Vec<PackageId> = self
+            .running
+            .iter()
+            .filter(|step| cask_update(&step.operation) && step.operation != operation)
+            .filter_map(|step| package_target(&step.operation).cloned())
+            .collect();
+        for id in moved_on {
+            self.finish(id, false);
+        }
+        self.running
+            .retain(|step| !cask_update(&step.operation) || step.operation == operation);
+        self.label = self.step(&operation).label.clone();
+        self.current = Some(operation);
+        true
     }
     /// Marks a package done and counts it once. Success is confirmed only
     /// when the operation finishes, not when its output moves to another row.
@@ -668,6 +702,10 @@ impl ProgressState {
     }
     fn apply(&mut self, event: &Event) {
         match event {
+            // A cask in the same `brew` as one running waits for its turn.
+            Event::Started(operation)
+                if cask_update(operation)
+                    && self.running.iter().any(|step| cask_update(&step.operation)) => {}
             Event::Started(operation) => {
                 self.running.retain(|step| step.operation != *operation);
                 self.label = self.step(operation).label.clone();
@@ -788,7 +826,14 @@ impl ProgressState {
             "action": current.map_or("", operation_kind),
             "current": item.or_else(|| current.and_then(package_target)).map(target_row),
             "running": running,
-            "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
+            // A check mark only for what's known to have worked.
+            "finished": self.succeeded.iter().map(target_row).collect::<Vec<_>>(),
+            "passed": self
+                .finished
+                .iter()
+                .filter(|id| !self.succeeded.contains(id))
+                .map(target_row)
+                .collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
     }
@@ -1355,6 +1400,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     send(Reply::Done(result));
 }
 
+/// Whether `job`'s cask updates run with one `brew`: someone started them and
+/// can answer the one password dialog that lets them all finish. Automatic
+/// updates and sudo mode have no dialog, and go on as they did.
+fn joins_cask_updates(job: &Job, authorization: Authorization) -> bool {
+    matches!(job, Job::UpgradeAll(..)) && matches!(authorization, Authorization::Polkit)
+}
 /// Run a confirmed batch and summarize it. `held` changes are reported as
 /// failed with their reason and never run.
 fn run_batch(
@@ -2331,6 +2382,18 @@ fn cask_version(package: &Package) -> &str {
 }
 /// Passes on the lines of output that name a package one of `backends` is
 /// updating; everything else a manager prints stays in the worker.
+/// The sources whose output says which package `job` is on: Update all runs
+/// one command per source, and checked casks one between them.
+fn followed_sources(job: &Job) -> Vec<String> {
+    job.operations()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            Operation::UpgradeAll { backend } => Some(backend),
+            Operation::Upgrade(id) if id.backend == "homebrew-cask" => Some(id.backend),
+            _ => None,
+        })
+        .collect()
+}
 fn output_follower(
     backends: Vec<String>,
     sender: crate::wake::Sender<Reply>,
@@ -2901,6 +2964,9 @@ fn covers_update(operation: &Operation, package: &PackageId) -> bool {
         Operation::UpgradeAll { backend } => *backend == package.backend,
         _ => false,
     }
+}
+fn cask_update(operation: &Operation) -> bool {
+    matches!(operation, Operation::Upgrade(id) if id.backend == "homebrew-cask")
 }
 fn package_target(operation: &Operation) -> Option<&PackageId> {
     match operation {
@@ -5645,16 +5711,7 @@ impl ffi::PackageController {
         }
         let cancel = Cancellation::default();
         let (sender, receiver) = crate::wake::channel();
-        // Update all runs one command per source; its output says which
-        // package each one is on, so pass those lines to the progress.
-        let followed: Vec<String> = job
-            .operations()
-            .into_iter()
-            .filter_map(|operation| match operation {
-                Operation::UpgradeAll { backend } => Some(backend),
-                _ => None,
-            })
-            .collect();
+        let followed = followed_sources(&job);
         let token = if followed.is_empty() {
             cancel.clone()
         } else {
@@ -5790,6 +5847,7 @@ impl ffi::PackageController {
                         job,
                         Job::AutoUpgrade(..) | Job::AutoClean { .. }
                     ));
+                    engine.set_joins_cask_updates(joins_cask_updates(&job, authorization));
                     if let Job::Write(_, Some(plan)) = &job {
                         engine.remember_operation_plan((**plan).clone());
                     }

@@ -41,23 +41,29 @@ pub fn channel<T>() -> (Sender<T>, mpsc::Receiver<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
-    static WOKEN: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        // Per thread, so wakes from tests running alongside don't count here.
+        static WOKEN: Cell<usize> = const { Cell::new(0) };
+    }
 
     #[test]
     fn each_message_wakes_the_front_end() {
-        set_waker(|| {
-            WOKEN.fetch_add(1, Ordering::SeqCst);
-        });
+        set_waker(|| WOKEN.set(WOKEN.get() + 1));
         let (sender, receiver) = channel();
         let copy = sender.clone();
         sender.send(1).unwrap();
         copy.send(2).unwrap();
+        // A sender on another thread, like the ones other tests use.
+        std::thread::spawn(|| channel().0.send(0))
+            .join()
+            .unwrap()
+            .unwrap();
         assert_eq!(receiver.try_iter().collect::<Vec<_>>(), [1, 2]);
-        assert_eq!(WOKEN.load(Ordering::SeqCst), 2);
+        assert_eq!(WOKEN.get(), 2);
         drop(receiver);
         assert!(sender.send(3).is_err());
-        assert_eq!(WOKEN.load(Ordering::SeqCst), 3);
+        assert_eq!(WOKEN.get(), 3);
     }
 }

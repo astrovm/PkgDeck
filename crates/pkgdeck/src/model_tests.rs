@@ -214,6 +214,15 @@ fn progress_tells_each_row_how_far_it_is() {
         Some(RowState::Running)
     );
     assert_eq!(batch.for_row(&identity("c"), "apt"), Some(RowState::Queued));
+    let moved_past = Progress {
+        finished: vec![],
+        passed: vec![id("a")],
+        ..batch.clone()
+    };
+    assert_eq!(
+        moved_past.for_row(&identity("a"), "apt"),
+        Some(RowState::Passed)
+    );
     let by_source = Progress {
         targets: vec![id("a"), id("b")],
         current_source: Some("apt".into()),
