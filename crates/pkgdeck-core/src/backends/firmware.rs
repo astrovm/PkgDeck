@@ -119,6 +119,7 @@ impl<T: Transport> Firmware<T> {
                         component_ids: vec![],
                         homepages: vec![],
                         adopt_with: None,
+                        waiting_until: None,
                     },
                     description,
                     homepage: None,

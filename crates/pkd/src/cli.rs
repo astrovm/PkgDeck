@@ -163,6 +163,21 @@ pub enum Commands {
         #[command(subcommand)]
         command: InventoryCommand,
     },
+    /// Keep brand-new releases out of `pkd upgrade` and automatic updates for a while.
+    ///
+    /// A defense against bad versions that get caught within days. System
+    /// sources like APT never wait. Run without options to see the setting.
+    ReleaseWait {
+        /// How long a new release waits, like `12h`, `3d` or `2w`, or `on` or `off`.
+        /// A number alone is days.
+        time: Option<String>,
+        /// Sources that shouldn't wait, such as a tool that ships every day.
+        #[arg(long, value_name = "SOURCE")]
+        skip: Vec<String>,
+        /// Sources that should wait again.
+        #[arg(long, value_name = "SOURCE")]
+        no_skip: Vec<String>,
+    },
     /// Print a shell completion script, for bash, zsh, or fish.
     Completions {
         #[arg(value_enum)]
@@ -614,18 +629,18 @@ fn refresh_report(
     let report = engine.installed_for_mutation(cancel);
     let mut failures = refreshed.index_failures;
     failures.extend(report.failures);
-    let updates: Vec<_> = report
+    let (waiting, updates): (Vec<_>, Vec<_>) = report
         .packages
         .into_iter()
         .filter(|p| p.update == UpdateAvailability::Available)
-        .collect();
+        .partition(Package::waiting);
     let code = if refreshed.code == 0 && !failures.is_empty() {
         8
     } else {
         refreshed.code
     };
     (
-        json!({"operations": refreshed.operations, "updates": updates, "failures": failures}),
+        json!({"operations": refreshed.operations, "updates": updates, "waiting": waiting, "failures": failures}),
         code,
     )
 }
@@ -854,6 +869,8 @@ fn dispatch_command(
     // What each chosen cleanup task is called, for Activity: once it's
     // done, its title can't be found again.
     let mut titles = std::collections::BTreeMap::new();
+    // New releases `pkd upgrade` left out, too new to install yet.
+    let mut waiting = 0;
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
             // Reads what the last refresh found; `update` refreshes first.
@@ -862,12 +879,30 @@ fn dispatch_command(
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
+                let is_waiting = |p: &Package| {
+                    p.update == UpdateAvailability::Available
+                        && p.waiting()
+                        && !pkgdeck_core::backends::inventory_only(&p.id.backend)
+                        && args.arch.as_ref().is_none_or(|a| a == &p.id.architecture)
+                        && args.scope.is_none_or(|scope| scope.native() == p.id.scope)
+                };
+                waiting = report.packages.iter().filter(|p| is_waiting(p)).count();
+                // A source with a release still waiting updates the others
+                // one by one, since updating the whole source would bring
+                // that release along.
+                let waiting_sources: std::collections::BTreeSet<String> = report
+                    .packages
+                    .iter()
+                    .filter(|p| is_waiting(p))
+                    .map(|p| p.id.backend.clone())
+                    .collect();
                 if args.arch.is_some() || args.scope.is_some() {
                     return Ok(report
                         .packages
                         .into_iter()
                         .filter(|p| {
                             p.update == UpdateAvailability::Available
+                                && !p.waiting()
                                 && args.arch.as_ref().is_none_or(|a| a == &p.id.architecture)
                                 && args.scope.is_none_or(|scope| scope.native() == p.id.scope)
                         })
@@ -878,11 +913,13 @@ fn dispatch_command(
                 for package in report
                     .packages
                     .into_iter()
-                    .filter(|p| p.update == UpdateAvailability::Available)
+                    .filter(|p| p.update == UpdateAvailability::Available && !p.waiting())
                     .filter(|p| !pkgdeck_core::backends::inventory_only(&p.id.backend))
                 {
                     let operation =
-                        if pkgdeck_core::backends::per_package_upgrades(&package.id.backend) {
+                        if pkgdeck_core::backends::per_package_upgrades(&package.id.backend)
+                            || waiting_sources.contains(&package.id.backend)
+                        {
                             Operation::Upgrade(package.id)
                         } else {
                             Operation::UpgradeAll {
@@ -1111,10 +1148,11 @@ fn dispatch_command(
         .collect();
     let results = execute(engine, history, &operations, names, cancel, events);
     let code = exit_code(&results);
-    (
-        json!({ "operations": results_json(operations, results) }),
-        code,
-    )
+    let mut data = json!({ "operations": results_json(operations, results) });
+    if waiting > 0 {
+        data["waiting"] = json!(waiting);
+    }
+    (data, code)
 }
 /// Run approved operations, recording them in `history` when there is one,
 /// under `names` when known.
@@ -1235,7 +1273,9 @@ fn working_label(command: &Commands) -> Option<String> {
         }
         Commands::Clean { .. } => "Looking for cleanup tasks".into(),
         Commands::Repos { .. } => "Reading repositories".into(),
-        Commands::Doctor | Commands::Completions { .. } => return None,
+        Commands::Doctor | Commands::Completions { .. } | Commands::ReleaseWait { .. } => {
+            return None
+        }
     })
 }
 fn repository_command(
@@ -1330,10 +1370,78 @@ fn repository_dispatch(
         Err(error) => failure(error),
     }
 }
+/// A wait like `12h`, `3d` or `2w`, in hours. A number alone is days.
+fn wait_hours(text: &str) -> Option<u32> {
+    let (number, size) = match text.as_bytes().last()? {
+        b'h' => (&text[..text.len() - 1], 1),
+        b'd' => (&text[..text.len() - 1], 24),
+        b'w' => (&text[..text.len() - 1], 168),
+        _ => (text, 24),
+    };
+    number
+        .parse::<u32>()
+        .ok()?
+        .checked_mul(size)
+        .filter(|hours| pkgdeck_core::release_wait::HOUR_RANGE.contains(hours))
+}
+/// `pkd release-wait`: shows the setting, after changing what was asked.
+fn release_wait_command(
+    path: Option<&std::path::Path>,
+    time: Option<&str>,
+    skip: &[String],
+    no_skip: &[String],
+) -> (Value, u8) {
+    use pkgdeck_core::release_wait::{can_wait, ReleaseWait};
+    let refuse = |message: String| (json!({"error": "invalid_input", "message": message}), 2);
+    let Some(path) = path else {
+        return refuse("No home folder to keep the setting in.".into());
+    };
+    let mut wait = ReleaseWait::load(path);
+    match time {
+        None => {}
+        Some("off") => wait.enabled = false,
+        Some("on") => wait.enabled = true,
+        Some(time) => {
+            let Some(hours) = wait_hours(time) else {
+                return refuse(
+                    "Expected a time from 1h to 1 year, like 12h, 3d or 2w, or on or off.".into(),
+                );
+            };
+            wait.enabled = true;
+            wait.hours = hours;
+        }
+    }
+    if let Some(source) = skip.iter().find(|source| !can_wait(source)) {
+        return refuse(format!("{source} never waits, so it can't be skipped."));
+    }
+    wait.skipped.extend(skip.iter().cloned());
+    wait.skipped.retain(|source| !no_skip.contains(source));
+    wait.skipped.sort();
+    wait.skipped.dedup();
+    if time.is_some() || !skip.is_empty() || !no_skip.is_empty() {
+        if let Err(error) = wait.save(path) {
+            return (
+                json!({"error": "not_saved", "message": format!("Couldn't save the setting: {error}")}),
+                1,
+            );
+        }
+    }
+    (json!({"release_wait": wait}), 0)
+}
 pub fn run(args: &Args) -> u8 {
     if let Some(Commands::Completions { shell }) = args.command {
         completions(shell, &mut io::stdout().lock());
         return 0;
+    }
+    if let Some(Commands::ReleaseWait {
+        time,
+        skip,
+        no_skip,
+    }) = &args.command
+    {
+        let path = pkgdeck_core::release_wait::ReleaseWait::default_path();
+        let (data, code) = release_wait_command(path.as_deref(), time.as_deref(), skip, no_skip);
+        return emit(args, data, code, false);
     }
     if let Some(error) = inventory_only_mutation(args) {
         let (data, code) = failure(error);
@@ -1399,6 +1507,9 @@ pub fn run(args: &Args) -> u8 {
             return emit(args, data, code, false);
         }
     };
+    if let Some(watch) = pkgdeck_core::release_wait::ReleaseWatch::from_saved() {
+        engine.set_release_watch(watch);
+    }
     let session = Session::new(&live);
     let history = History::default_store();
     let (data, code) = dispatch_with(
@@ -1765,6 +1876,7 @@ mod tests {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: None,
+                waiting_until: None,
             }
         }
     }
@@ -1920,6 +2032,175 @@ mod tests {
         )
     }
     fn ignore(_: Event) {}
+    /// An npm with one update ready and, once the wait is on, one too new.
+    fn waiting_engine(
+        dir: &std::path::Path,
+    ) -> (Engine, std::sync::Arc<std::sync::Mutex<Vec<Operation>>>) {
+        use pkgdeck_core::release_wait::{ReleaseWait, ReleaseWatch};
+        let row = |name: &str| Package {
+            id: PackageId {
+                backend: "npm".into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+            waiting_until: None,
+        };
+        // Seen long ago, so the wait for this one is over.
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("seen.json"),
+            serde_json::to_string(&json!([{"id": row("ready").id, "version": "2", "at": 1}]))
+                .unwrap(),
+        )
+        .unwrap();
+        let fake = pkgdeck_core::fake::Fake::new(
+            "npm",
+            &[
+                Capability::Installed,
+                Capability::Search,
+                Capability::Upgrade,
+            ],
+        )
+        .listing(vec![row("ready"), row("fresh")]);
+        let ran = fake.ran.clone();
+        let mut engine = Engine::default();
+        engine.register(fake).unwrap();
+        engine.set_release_watch(ReleaseWatch::new(
+            ReleaseWait {
+                enabled: true,
+                hours: 24,
+                skipped: vec![],
+            },
+            Some(dir.join("seen.json")),
+        ));
+        (engine, ran)
+    }
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pkd-release-wait-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+    #[test]
+    fn upgrade_leaves_out_what_waits_and_says_so() {
+        let dir = scratch_dir("upgrade");
+        let (mut engine, ran) = waiting_engine(&dir);
+        let (data, code) = call(&mut engine, &["--yes", "upgrade"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["waiting"], 1, "{data}");
+        let ran = ran.lock().unwrap().clone();
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        assert!(
+            matches!(&ran[0], Operation::Upgrade(id) if id.name == "ready"),
+            "the source can't update as a whole: {ran:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn upgrade_by_name_installs_what_waits() {
+        let dir = scratch_dir("named");
+        let (mut engine, ran) = waiting_engine(&dir);
+        let (data, code) = call(&mut engine, &["--yes", "upgrade", "fresh"], true);
+        assert_eq!(code, 0, "{data}");
+        assert!(data["waiting"].is_null(), "{data}");
+        let ran = ran.lock().unwrap().clone();
+        assert!(
+            matches!(&ran[..], [Operation::Upgrade(id)] if id.name == "fresh"),
+            "{ran:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn refresh_lists_what_waits_apart_from_what_upgrade_would_install() {
+        let dir = scratch_dir("refresh");
+        let (mut engine, _) = waiting_engine(&dir);
+        let (data, code) = call(&mut engine, &["refresh"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["updates"][0]["id"]["name"], "ready", "{data}");
+        assert_eq!(data["updates"].as_array().unwrap().len(), 1, "{data}");
+        assert_eq!(data["waiting"][0]["id"]["name"], "fresh", "{data}");
+        assert!(data["waiting"][0]["waiting_until"].is_u64(), "{data}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn release_wait_changes_only_what_it_was_told_to() {
+        let dir = scratch_dir("command");
+        let path = dir.join("release-wait.json");
+        let run = |time, skip: &[&str], no_skip: &[&str]| {
+            let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+            release_wait_command(Some(&path), time, &owned(skip), &owned(no_skip))
+        };
+        let wait = |data: &Value| data["release_wait"].clone();
+        // Reading saves nothing, and it starts off.
+        assert_eq!(run(None, &[], &[]).1, 0);
+        assert!(!path.exists());
+        assert_eq!(wait(&run(None, &[], &[]).0)["enabled"], false);
+
+        for (time, hours) in [("12h", 12), ("3d", 72), ("2w", 336), ("3", 72), ("1h", 1)] {
+            let (data, code) = run(Some(time), &[], &[]);
+            assert_eq!(code, 0, "{time}");
+            assert_eq!(wait(&data)["enabled"], true, "{time}");
+            assert_eq!(wait(&data)["hours"], hours, "{time}");
+        }
+        run(Some("3d"), &[], &[]);
+        let (data, _) = run(None, &["claude", "claude", "bun"], &[]);
+        assert_eq!(wait(&data)["skipped"], json!(["bun", "claude"]));
+        assert_eq!(wait(&data)["hours"], 72);
+        let (data, _) = run(None, &[], &["bun"]);
+        assert_eq!(wait(&data)["skipped"], json!(["claude"]));
+
+        // Off keeps the time and the skipped sources for turning it back on.
+        let (data, _) = run(Some("off"), &[], &[]);
+        assert_eq!(wait(&data)["enabled"], false);
+        assert_eq!(wait(&data)["hours"], 72);
+        assert_eq!(wait(&data)["skipped"], json!(["claude"]));
+        let (data, _) = run(Some("on"), &[], &[]);
+        assert_eq!(wait(&data)["enabled"], true);
+        assert_eq!(wait(&data)["hours"], 72);
+        run(Some("off"), &[], &[]);
+
+        // Refused changes leave the setting alone.
+        for time in [
+            "soon",
+            "-1",
+            "0",
+            "0h",
+            "8761h",
+            "366d",
+            "d",
+            "99999999999w",
+            "",
+        ] {
+            let (data, code) = run(Some(time), &[], &[]);
+            assert_eq!(code, 2, "{time}");
+            assert!(data["message"].as_str().unwrap().contains("12h"), "{data}");
+        }
+        let (data, code) = run(Some("9"), &["apt"], &[]);
+        assert_eq!(code, 2);
+        assert!(data["message"].as_str().unwrap().contains("apt"), "{data}");
+        assert_eq!(wait(&run(None, &[], &[]).0)["hours"], 72);
+
+        let (data, code) = release_wait_command(None, None, &[], &[]);
+        assert_eq!(code, 2, "{data}");
+
+        // Saying it couldn't save beats pretending it did.
+        let inside_a_file = path.join("release-wait.json");
+        let (data, code) = release_wait_command(Some(&inside_a_file), Some("off"), &[], &[]);
+        assert_eq!((code, &data["error"]), (1, &json!("not_saved")), "{data}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     fn decline(_: &[Operation]) -> bool {
         false
     }

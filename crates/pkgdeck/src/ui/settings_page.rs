@@ -86,6 +86,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     ui.add_space(gap);
                     automatic_updates(app, ui);
                     ui.add_space(gap);
+                    new_releases(app, ui);
+                    ui.add_space(gap);
                     notifications(app, ui);
                 }
                 Tab::Sources => sources(app, ui),
@@ -1154,6 +1156,98 @@ fn automatic_updates(app: &mut App, ui: &mut Ui) {
     });
 }
 
+/// The sources whose new releases can wait: found, turned on and able to
+/// update. By name.
+fn waiting_sources(
+    catalog: &[model::Source],
+    enabled: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut sources: Vec<String> = catalog
+        .iter()
+        .filter(|entry| entry.available && enabled.contains(&entry.source))
+        .filter(|entry| entry.capabilities.iter().any(|c| c == "upgrade"))
+        .filter(|entry| pkgdeck_core::release_wait::can_wait(&entry.source))
+        .map(|entry| entry.source.clone())
+        .collect();
+    sources.sort_by_key(|source| model::source_name(source).to_lowercase());
+    sources
+}
+
+fn new_releases(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    section(ui, "New releases", |ui| {
+        setting_row(
+            ui,
+            "Wait for new releases",
+            "Automatic updates and Update all skip what's too new. System updates never wait",
+            SWITCH,
+            |ui| {
+                let mut on = app.release_wait.enabled;
+                if switch(ui, &mut on, true, "Wait for new releases").changed() {
+                    let mut wait = app.release_wait.clone();
+                    wait.enabled = on;
+                    app.set_release_wait(wait);
+                }
+            },
+        );
+        if app.release_wait.enabled {
+            let mut hours = app.release_wait.hours;
+            let hint = pkgdeck_core::release_wait::hours_text(hours);
+            setting_row(ui, "Wait", &hint, DURATION, |ui| {
+                if duration(
+                    ui,
+                    Id::unique("release-wait"),
+                    &mut hours,
+                    &RELEASE_WAIT_HOURS,
+                    &HOUR_UNITS,
+                    pkgdeck_core::release_wait::HOUR_RANGE,
+                    true,
+                    "Wait",
+                ) {
+                    let mut wait = app.release_wait.clone();
+                    wait.hours = hours;
+                    app.set_release_wait(wait);
+                }
+            });
+            let sources = waiting_sources(&app.catalog, &app.enabled_sources());
+            if !sources.is_empty() {
+                ui.label(
+                    egui::RichText::new("Wait for")
+                        .font(theme::font(14.5))
+                        .color(palette.ink),
+                );
+            }
+            for source in &sources {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(SWITCH.y + 6.0);
+                    let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    theme::paint_source_icon(ui.painter(), icon, source, palette.accent);
+                    let name = model::source_name(source);
+                    ui.label(
+                        egui::RichText::new(name)
+                            .font(theme::font(14.5))
+                            .color(palette.ink),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut on = !app.release_wait.skipped.contains(source);
+                        if switch(ui, &mut on, true, name).changed() {
+                            let mut wait = app.release_wait.clone();
+                            wait.skipped.retain(|skipped| skipped != source);
+                            if !on {
+                                wait.skipped.push(source.clone());
+                            }
+                            app.set_release_wait(wait);
+                        }
+                    });
+                });
+            }
+        }
+        if let Some(error) = app.release_wait_error.clone() {
+            status_line(ui, "warning", &error, palette.warning);
+        }
+    });
+}
+
 fn notifications(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Notifications", |ui| {
@@ -1209,6 +1303,12 @@ fn notifications(app: &mut App, ui: &mut Ui) {
 /// up to a month, then months. Any number in between can be typed.
 const PROJECT_HOURS: [u32; 19] = [
     6, 12, 24, 48, 72, 96, 120, 144, 168, 336, 504, 720, 1440, 2160, 2880, 3600, 4320, 6480, 8760,
+];
+/// How long a new release waits, in hours: the slider's stops. Hours up to a
+/// day, every day up to a week, then weeks. Any number in between can be
+/// typed.
+const RELEASE_WAIT_HOURS: [u32; 15] = [
+    1, 3, 6, 12, 24, 48, 72, 96, 120, 144, 168, 336, 504, 672, 1344,
 ];
 /// The shortest and longest Old after, in hours: five years at most.
 const PROJECT_RANGE: std::ops::RangeInclusive<u32> = 1..=43_800;

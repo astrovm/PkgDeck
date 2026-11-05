@@ -402,6 +402,7 @@ impl<T: Transport> Pixi<T> {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
 
@@ -426,6 +427,7 @@ impl<T: Transport> Pixi<T> {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

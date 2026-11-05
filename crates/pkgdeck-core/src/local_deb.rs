@@ -174,6 +174,7 @@ fn inspect_with(
         component_ids: vec![],
         homepages: homepage.iter().cloned().collect(),
         adopt_with: None,
+        waiting_until: None,
     };
     Ok(PackageDetails {
         description: extended_description(&metadata),
@@ -337,7 +338,7 @@ mod tests {
         fs::write(control.join("control"), "Package: pkgdeck-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDepends: libc6 (>= 2.34), zlib1g\nHomepage: https://example.invalid/synthetic\nDescription: Synthetic fixture\n A fixture that\n spans lines.\n .\n Second paragraph.\n").unwrap();
         let archive = base.join("Synthetic package.deb");
         let status = Command::new("dpkg-deb")
-            .arg("--build")
+            .args(["--build", "--root-owner-group"])
             .arg(base.join("staging"))
             .arg(&archive)
             .status()

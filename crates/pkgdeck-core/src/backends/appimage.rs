@@ -737,6 +737,7 @@ impl AppImage {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -883,6 +884,7 @@ impl AppImage {
                         homepages: vec![],
                         // PkgDeck can take it over: Manage moves it in.
                         adopt_with: Some("appimage".into()),
+                        waiting_until: None,
                     },
                     desktop,
                 ))
@@ -1798,6 +1800,7 @@ impl Backend for AppImage {
                 homepages: vec![],
                 // Already installed some other way: PkgDeck would move it in.
                 adopt_with: self.external_at(&source).map(|_| "appimage".into()),
+                waiting_until: None,
             }]);
         }
         let query = query.to_ascii_lowercase();

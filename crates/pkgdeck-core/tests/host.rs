@@ -559,6 +559,33 @@ fn container_engine_uses_bounded_user_commands_and_preserves_failures() {
 }
 
 #[test]
+fn venv_pip_with_sets_variables_for_that_run_only() {
+    let fixture = Fixture::new();
+    let venv = fixture.0.join("venv");
+    fs::create_dir_all(venv.join("bin")).unwrap();
+    let python = venv.join("bin/python");
+    fs::write(&python, "#!/bin/sh\nprintf %s \"$PIP_UPLOADED_PRIOR_TO\"\n").unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    let host = Host::new(
+        Runtime::Native,
+        env(&[
+            ("PATH", fixture.0.to_str().unwrap()),
+            ("HOME", "/home/test"),
+            ("VIRTUAL_ENV", venv.to_str().unwrap()),
+        ]),
+    );
+    let cancel = Cancellation::default();
+    let limit = [("PIP_UPLOADED_PRIOR_TO", OsString::from("2026-01-01"))];
+    let with = host
+        .venv_pip_with(&venv, &[], &limit, &cancel, false)
+        .unwrap();
+    assert_eq!(with.stdout, b"2026-01-01");
+    let without = host.venv_pip(&venv, &[], &cancel, false).unwrap();
+    assert_eq!(without.stdout, b"");
+}
+
+#[test]
 fn venv_pip_runs_only_inside_explicit_absolute_environments() {
     let fixture = Fixture::new();
     let venv = fixture.0.join("venv");

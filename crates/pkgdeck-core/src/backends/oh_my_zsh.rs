@@ -223,6 +223,7 @@ impl<T: Transport> OhMyZsh<T> {
                 vec![]
             },
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

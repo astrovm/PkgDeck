@@ -246,6 +246,7 @@ impl<T: Transport> Aur<T> {
             component_ids: vec![],
             homepages: info.and_then(|info| info.url.clone()).into_iter().collect(),
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

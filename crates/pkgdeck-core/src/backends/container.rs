@@ -523,6 +523,7 @@ impl<T: Transport> Container<T> {
                     component_ids: vec![],
                     homepages: vec![],
                     adopt_with: None,
+                    waiting_until: None,
                 }
             })
             .collect())
@@ -726,6 +727,7 @@ impl<T: Transport> Backend for Container<T> {
                 component_ids: vec![],
                 homepages: vec![],
                 adopt_with: None,
+                waiting_until: None,
             });
         }
         Ok(packages)
@@ -871,6 +873,7 @@ impl<T: Transport> Backend for Container<T> {
                     component_ids: vec![],
                     homepages: vec![],
                     adopt_with: None,
+                    waiting_until: None,
                 },
                 description: format!(
                     "Pull {} into {}. The container engine downloads it and verifies its digest.",

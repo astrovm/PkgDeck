@@ -1952,6 +1952,7 @@ fn one_cask_brew_cannot_load_does_not_hide_the_others() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let names = ["a", "b", "clocksaver", "d", "e", "grid-clock", "g"];
     // Like brew: any broken name fails the whole call.

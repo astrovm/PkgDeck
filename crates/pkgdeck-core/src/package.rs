@@ -63,6 +63,24 @@ pub struct Package {
     /// Homebrew owner. Installing that cask re-checks everything first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_with: Option<String>,
+    /// When a release too new to install yet stops waiting, in seconds since
+    /// 1970, under Wait for new releases (see [`crate::release_wait`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_until: Option<u64>,
+}
+impl Package {
+    /// Whether this update is still too new. Read at the moment of asking,
+    /// so a list kept from an earlier check doesn't hold it back for longer.
+    pub fn waiting(&self) -> bool {
+        self.waiting_until
+            .is_some_and(|until| until > crate::release_wait::now())
+    }
+    /// Whether Update all and automatic updates may install this now.
+    pub fn update_ready(&self) -> bool {
+        self.installed_version.is_some()
+            && self.update == UpdateAvailability::Available
+            && !self.waiting()
+    }
 }
 /// Search text matching shared by the sources that filter names
 /// themselves: case-insensitive, and spaces, dashes, underscores and dots
@@ -599,6 +617,7 @@ mod tests {
             component_ids: components.iter().map(ToString::to_string).collect(),
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     fn firefox_id() -> PackageId {

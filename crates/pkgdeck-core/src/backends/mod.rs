@@ -530,6 +530,29 @@ pub trait Transport: Send {
     ) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Disabled(format!("{executable} not found")))
     }
+    /// [`dev_tool`](Self::dev_tool) with extra variables for this one run.
+    /// Fixtures that don't care about them get a plain `dev_tool` call.
+    fn dev_tool_with(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        _env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.dev_tool(executable, args, cancel, write)
+    }
+    /// [`venv_pip`](Self::venv_pip) with extra variables for this one run.
+    fn venv_pip_with(
+        &self,
+        venv: &std::path::Path,
+        args: &[OsString],
+        _env: &[(&str, OsString)],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.venv_pip(venv, args, cancel, write)
+    }
     /// Run `<venv>/bin/python -m pip` for an explicitly selected virtual
     /// environment. Fixtures override this seam for `pip` tests.
     fn venv_pip(

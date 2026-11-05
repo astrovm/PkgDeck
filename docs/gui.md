@@ -151,6 +151,11 @@ other sources still appear as they answer.
   **Update all** tries it too.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
+- With **Wait for new releases** on, an update too new to install yet shows a
+  clock, and the count above the list says how many wait. **Update all** and
+  automatic updates skip it, **Update selected** skips it unless it's all you
+  checked, and you aren't notified until it's ready. Its row's arrow installs
+  it now, or for Bun and pipx, the newest version that's old enough.
 - Homebrew casks you check together update in one `brew` call, so you enter
   your password once, and each row still says how its cask went. If you cancel
   while it runs, PkgDeck waits for all of them to finish.
@@ -769,6 +774,14 @@ and **About**.
   them**, **Install from**, **Allow removals**, **Wait for the charger**,
   **Wait on metered connections** (Linux) and **Skip the password**.
   See [Update notifications](#update-notifications).
+- **New releases**: **Wait for new releases** keeps versions that are too new
+  out of **Update all** and automatic updates, as a defense against bad versions
+  that get caught within days. It's off by default. With it on, **Wait** sets
+  how long, and **Wait for** turns it off for one source, such as a tool that
+  ships every day. npm, pnpm, pip, uv and mise apply the limit themselves, dependencies
+  included, so they only offer a version that's old enough. System updates
+  never wait, since that would delay security fixes. `pkd release-wait` is the
+  same setting. See [Waiting for new releases](cli.md#waiting-for-new-releases).
 - **Notifications**: why notifications can't show, when they can't, and
   **Test notification**.
 

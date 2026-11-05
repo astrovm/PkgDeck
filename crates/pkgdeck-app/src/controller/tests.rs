@@ -387,7 +387,7 @@ fn opening_local_deb_reads_metadata_without_installing_it() {
         .unwrap();
     let archive = base.join("Synthetic package.deb");
     let status = std::process::Command::new("dpkg-deb")
-        .arg("--build")
+        .args(["--build", "--root-owner-group"])
         .arg(base.join("staging"))
         .arg(&archive)
         .status()
@@ -3134,6 +3134,7 @@ fn label_helpers_cover_scopes_sources_and_cleanup_operations() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let other = firmware("other-device");
     let target = firmware("target-device");
@@ -3378,6 +3379,7 @@ fn synthetic_package(name: &str, display_name: &str) -> Package {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     }
 }
 fn wait_until(
@@ -4516,6 +4518,7 @@ fn opening_a_preloading_section_waits_for_that_preload() {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         });
         report.successful_sources.push("apt".into());
         let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
@@ -4926,6 +4929,7 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     controller.as_mut().rust_mut().packages = vec![package.clone()];
     controller.as_mut().rust_mut().detail_cache.insert(
@@ -5035,6 +5039,7 @@ fn container_pull_is_explicit_and_requires_a_stored_tag() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     controller.as_mut().rust_mut().packages = vec![package];
     controller.as_mut().propose("upgrade".into(), 0);
@@ -5147,6 +5152,7 @@ fn streamed_details_preserve_progress_and_finish_cleanly() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     controller.as_mut().rust_mut().packages = vec![package.clone()];
     controller.as_mut().rust_mut().selected = Some(package.id.clone());
@@ -6643,6 +6649,183 @@ fn automatic_runs_skip_casks_that_needed_the_password() {
     let _ = std::fs::remove_dir_all(dir);
 }
 #[test]
+fn a_preload_waits_for_new_releases_like_any_other_load() {
+    fn gem_engine(
+        _: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut package = synthetic_package("rainbow", "Rainbow");
+        package.id.backend = "gem".into();
+        package.installed_version = Some("1".into());
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        let mut engine = Engine::default();
+        engine.register(Fixture {
+            package,
+            fail: false,
+        })?;
+        Ok(engine)
+    }
+    fn a_day() -> Option<pkgdeck_core::release_wait::ReleaseWatch> {
+        Some(pkgdeck_core::release_wait::ReleaseWatch::new(
+            pkgdeck_core::release_wait::ReleaseWait {
+                enabled: true,
+                hours: 24,
+                skipped: vec![],
+            },
+            None,
+        ))
+    }
+    let mut controller = ffi::create_synthetic_controller(gem_engine);
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().natives.release_watch = a_day;
+    controller.as_mut().rust_mut().prefetch.clear();
+    let key = cache_key("Updates", "", &[], false);
+    controller
+        .as_mut()
+        .start_prefetch("Updates".into(), key.clone());
+    wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+    let Some((_, Payload::Packages(report))) = controller.rust().prefetched.get(&key) else {
+        panic!("the preload kept nothing");
+    };
+    assert!(report.packages[0].waiting());
+
+    // Changing the wait leaves nothing read under the old one.
+    assert!(controller.rust().engine.is_some());
+    controller.as_mut().forget_update_list();
+    assert!(controller.rust().prefetched.is_empty());
+    assert!(controller.rust().engine.is_none());
+    assert!(controller.rust().engine_scope.is_none());
+}
+
+#[test]
+fn a_waiting_release_stays_out_of_update_all_and_keeps_its_source_apart() {
+    let row = |backend: &str, name: &str, waiting_until| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = backend.into();
+        package.installed_version = Some("1".into());
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        package.waiting_until = waiting_until;
+        package
+    };
+    let all = |backend: &str| Operation::UpgradeAll {
+        backend: backend.into(),
+    };
+    // No wait: each source updates as a whole, as always.
+    let tool = row("npm", "tool", None);
+    let other = row("npm", "other", None);
+    assert_eq!(upgrade_plan(&[tool.clone(), other.clone()]), [all("npm")]);
+    // An ended wait counts as no wait.
+    let ended = row("npm", "other", Some(1));
+    assert_eq!(upgrade_plan(&[tool.clone(), ended]), [all("npm")]);
+    // One still waiting: the whole source would bring it along, so the rest
+    // go one by one. Other sources aren't affected.
+    let new = row("npm", "other", Some(u64::MAX));
+    let brew = row("homebrew", "wget", None);
+    assert_eq!(
+        upgrade_plan(&[tool.clone(), new.clone(), brew]),
+        [all("homebrew"), Operation::Upgrade(tool.id.clone())]
+    );
+    // Only waiting rows: nothing to update, so Update all doesn't offer it.
+    assert_eq!(upgrade_plan(std::slice::from_ref(&new)), []);
+    // Automatic updates use the same list.
+    let plan = automatic_plan(
+        &[tool.clone(), new.clone()],
+        &NeedsPassword::default(),
+        &FailedUpdates::default(),
+    );
+    assert_eq!(plan, [Operation::Upgrade(tool.id.clone())]);
+    let cask = row("homebrew-cask", "app", Some(u64::MAX));
+    let ready_cask = row("homebrew-cask", "ready", None);
+    let plan = automatic_plan(
+        &[cask, ready_cask.clone()],
+        &NeedsPassword::default(),
+        &FailedUpdates::default(),
+    );
+    assert_eq!(plan, [Operation::Upgrade(ready_cask.id)]);
+}
+
+#[test]
+fn update_selected_leaves_out_waiting_releases_unless_nothing_else_is_chosen() {
+    let row = |name: &str, waiting_until| {
+        let mut package = synthetic_package(name, name);
+        package.update = UpdateAvailability::Available;
+        package.candidate_version = Some("2".into());
+        package.waiting_until = waiting_until;
+        package
+    };
+    let (ready, new) = (row("ready", None), row("new", Some(u64::MAX)));
+    let packages = [ready.clone(), new.clone()];
+    let (ready_op, new_op) = (
+        Operation::Upgrade(ready.id.clone()),
+        Operation::Upgrade(new.id.clone()),
+    );
+    assert_eq!(
+        without_waiting(vec![ready_op.clone(), new_op.clone()], &packages),
+        std::slice::from_ref(&ready_op)
+    );
+    assert_eq!(
+        without_waiting(vec![new_op.clone()], &packages),
+        std::slice::from_ref(&new_op)
+    );
+    assert_eq!(without_waiting(vec![], &packages), []);
+    // What isn't about one package is left alone.
+    let whole = Operation::UpgradeAll {
+        backend: "apt".into(),
+    };
+    assert_eq!(
+        without_waiting(vec![whole.clone(), new_op], &packages),
+        [whole]
+    );
+}
+
+#[test]
+fn a_background_check_doesnt_announce_or_queue_a_waiting_release() {
+    let row = |name: &str, waiting_until| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = "homebrew".into();
+        package.update = UpdateAvailability::Available;
+        package.candidate_version = Some("2".into());
+        package.waiting_until = waiting_until;
+        package
+    };
+    let report = |packages| PackageReport {
+        packages,
+        failures: vec![],
+        successful_sources: vec!["homebrew".into()],
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().prefetch.clear();
+    controller.as_mut().set_auto_update(true);
+    controller
+        .as_mut()
+        .finish_background_check(report(vec![row("new", Some(u64::MAX))]));
+    let state: Value = serde_json::from_str(&controller.background_state().to_string()).unwrap();
+    assert_eq!(state["notify"], false, "{state}");
+    assert!(controller.rust().validated_confirmed.is_none());
+
+    // Once its wait is over, it goes.
+    controller
+        .as_mut()
+        .finish_background_check(report(vec![row("new", Some(1))]));
+    let queued = controller
+        .rust()
+        .validated_confirmed
+        .as_ref()
+        .map(|entry| entry.job.operations());
+    assert_eq!(
+        queued,
+        Some(vec![Operation::UpgradeAll {
+            backend: "homebrew".into()
+        }])
+    );
+}
+
+#[test]
 fn background_checks_queue_only_what_may_update_unattended() {
     let available = |backend: &str, name: &str| {
         let mut package = synthetic_package(name, name);
@@ -7561,6 +7744,7 @@ fn installed_view_filters_by_query_while_other_views_ignore_it() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let mut engine = Engine::default();
     engine
@@ -7631,6 +7815,7 @@ fn checked_identities_resolve_only_to_upgradable_packages() {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     let packages = vec![
@@ -7702,6 +7887,7 @@ fn rows_made_on_the_worker_match_rows_made_here() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let packages = vec![package("one"), package("two")];
     let made_here = serde_json::to_string(&package_rows(&packages)).unwrap();
@@ -7817,6 +8003,7 @@ fn huge_searches_keep_only_the_best_matches() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let mut report = PackageReport {
         packages: (0..2000)
@@ -7888,6 +8075,7 @@ fn checked_proposals_plan_selected_upgrades() {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope, reference].
@@ -7975,6 +8163,7 @@ fn an_apt_confirmation_says_only_what_its_rows_do_not() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let items = update_items(
         &[Operation::UpgradeAll {
@@ -8101,6 +8290,7 @@ fn stale_details_replies_never_take_the_panel() {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         },
         description: String::new(),
         homepage: None,
@@ -8131,6 +8321,7 @@ fn loads_stream_partials_before_the_terminal_report() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let mut engine = Engine::default();
     engine
@@ -8182,6 +8373,7 @@ fn installed_and_updates_loads_stream_filtered_partials() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     let mut engine = Engine::default();
     engine
@@ -8235,6 +8427,7 @@ fn jobs_keep_source_identity_native_updates_and_typed_failures() {
         component_ids: vec![],
         homepages: vec![],
         adopt_with: None,
+        waiting_until: None,
     };
     assert_eq!(package_row(&package, &[], None)["source"], "fixture");
     assert!(encoded(package_row(&package, &[], None))
@@ -10569,6 +10762,7 @@ pub(super) const NO_MANAGERS: Natives = Natives {
     warm_catalog: false,
     hold: super::never_hold,
     driver_work: super::no_driver,
+    release_watch: no_release_watch,
 };
 #[test]
 fn sources_are_checked_again_on_request() {
@@ -10622,6 +10816,7 @@ const SYNTHETIC: Natives = Natives {
     warm_catalog: false,
     hold: super::never_hold,
     driver_work: super::no_driver,
+    release_watch: no_release_watch,
 };
 fn synthetic_controller() -> crate::qt::UniquePtr<ffi::PackageController> {
     let mut controller = idle_controller();

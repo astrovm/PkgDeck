@@ -126,9 +126,17 @@ fn heading_text(app: &App) -> String {
             return format!("Best {count} of {matches} packages. Type more to narrow.");
         }
     }
+    if app.page == Page::Updates {
+        let rows = app.shown_rows();
+        let waiting = app
+            .items
+            .iter()
+            .filter(|item| rows[item.raw].waiting_until().is_some())
+            .count();
+        return model::updates_heading(count, waiting);
+    }
     let noun = match app.page {
         Page::Clean => "cleanup task",
-        Page::Updates => "update",
         _ => "package",
     };
     if count == 1 {
@@ -796,6 +804,14 @@ fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
         .on_hover_text(held.tip());
 }
 
+/// The clock on an update too new to install yet.
+fn waiting_mark(ui: &mut Ui, until: u64, rect: Rect, row: Id) {
+    let palette = Palette::current(ui.ctx());
+    theme::paint_icon(ui.painter(), rect, "clock", palette.muted);
+    ui.interact(rect, row.with("waiting"), Sense::hover())
+        .on_hover_text(model::waiting_text(until));
+}
+
 /// Draws one row; returns its raw index when the pointer rests on it.
 fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Option<usize> {
     let ctx = ui.ctx().clone();
@@ -815,6 +831,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let held = (app.page == Page::Updates && row.has_update())
         .then(|| app.held.iter().find(|held| held.matches(&row)).cloned())
         .flatten();
+    // A release too new to install yet. What's held shows first.
+    let waiting = row.waiting_until().filter(|_| held.is_none());
     let mut rect = rect;
     if let Some(group) = &item.group {
         let heading = Rect::from_min_size(
@@ -995,6 +1013,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
             at.x += 20.0;
         }
+        if let Some(until) = waiting {
+            waiting_mark(ui, until, Rect::from_min_size(at, Vec2::splat(15.0)), id);
+            at.x += 20.0;
+        }
         // No version, no gap before the summary.
         let used = version.size().x;
         let gap = if used > 0.0 { 12.0 } else { 0.0 };
@@ -1026,6 +1048,14 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                     Vec2::splat(16.0),
                 );
                 held_mark(ui, held, mark, id);
+                left += 22.0;
+            }
+            if let Some(until) = waiting {
+                let mark = Rect::from_center_size(
+                    pos2(left + 8.0, rect.center().y - 10.0),
+                    Vec2::splat(16.0),
+                );
+                waiting_mark(ui, until, mark, id);
                 left += 22.0;
             }
             let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
@@ -1160,7 +1190,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let accessible = format!(
         "{}{}{title}, {line}, {}",
         held.as_ref()
-            .map_or(String::new(), |held| format!("{} ", held.tip())),
+            .map(|held| format!("{} ", held.tip()))
+            .or_else(|| waiting.map(|until| format!("{} ", model::waiting_text(until))))
+            .unwrap_or_default(),
         if row.has_update() {
             "Update available. "
         } else if row.is_installed() {

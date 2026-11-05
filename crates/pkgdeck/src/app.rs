@@ -76,6 +76,13 @@ pub struct App {
     changed: Changed,
     pub settings: Settings,
     store: Store,
+    /// Wait for new releases, shared with `pkd`.
+    pub release_wait: pkgdeck_core::release_wait::ReleaseWait,
+    /// Why the last change to it couldn't be saved.
+    pub release_wait_error: Option<String>,
+    /// A change waiting for the slider to let go, so a drag saves and checks
+    /// once.
+    release_wait_changed: bool,
     pub platform: Platform,
     pub launch: Launch,
 
@@ -252,10 +259,17 @@ impl App {
         let scope_choices =
             serde_json::from_str(&settings.flatpak_scope_choices).unwrap_or_default();
         let now = Instant::now();
+        let release_wait = store
+            .release_wait_path()
+            .map(|path| pkgdeck_core::release_wait::ReleaseWait::load(&path))
+            .unwrap_or_default();
         let mut app = Self {
             ctl,
             changed,
             settings,
+            release_wait,
+            release_wait_error: None,
+            release_wait_changed: false,
             store,
             platform,
             launch,
@@ -401,6 +415,28 @@ impl App {
         self.c().set_waits(battery, metered);
     }
 
+    /// A new choice for Wait for new releases. The next tick that isn't in
+    /// the middle of a drag applies it.
+    pub fn set_release_wait(&mut self, wait: pkgdeck_core::release_wait::ReleaseWait) {
+        self.release_wait = wait;
+        self.release_wait_changed = true;
+    }
+
+    /// Saves the choice where every job and `pkd` read it, then checks again
+    /// so the lists show it.
+    fn apply_release_wait(&mut self) {
+        self.release_wait_changed = false;
+        self.release_wait_error = self.store.release_wait_path().and_then(|path| {
+            self.release_wait
+                .save(&path)
+                .err()
+                .map(|error| format!("Couldn't save this: {error}"))
+        });
+        self.c().forget_update_list();
+        self.check_updates(true);
+        self.refresh_page();
+    }
+
     pub fn save_settings(&mut self) {
         self.settings.sort_column = self
             .sort
@@ -470,6 +506,9 @@ impl App {
         }
         self.flashes.retain(|_, at| now.duration_since(*at) < FLASH);
         self.expire_toasts(now);
+        if self.release_wait_changed && !self.dragging {
+            self.apply_release_wait();
+        }
         if !self.dragging {
             self.save_settings();
         }
@@ -780,6 +819,7 @@ impl App {
             .rows
             .iter()
             .filter(|row| row.is_package() && row.has_update())
+            .filter(|row| row.waiting_until().is_none())
             .count() as u64;
         if count == self.background.available && self.background.last_check.is_some() {
             return;
@@ -1780,9 +1820,35 @@ impl App {
         self.react();
     }
 
+    /// How many updates the Updates button would run. Update all leaves out
+    /// what's still waiting, and so does Update selected unless that's all
+    /// that's checked: then it's what the person asked for.
+    pub fn updates_to_run(&self) -> usize {
+        let rows = self.shown_rows();
+        let packages: Vec<&Row> = self
+            .items
+            .iter()
+            .filter_map(|item| rows.get(item.raw))
+            .filter(|row| row.is_package())
+            .collect();
+        let checked: Vec<&&Row> = packages
+            .iter()
+            .filter(|row| !self.unchecked.contains(&row.identity()))
+            .collect();
+        let ready = checked
+            .iter()
+            .filter(|row| row.waiting_until().is_none())
+            .count();
+        if ready > 0 || checked.len() == packages.len() {
+            ready
+        } else {
+            checked.len()
+        }
+    }
+
     /// Update all, or the checked ones.
     pub fn upgrade_updates(&mut self) {
-        if self.checking_updates {
+        if self.checking_updates || self.updates_to_run() == 0 {
             return;
         }
         if self.unchecked.is_empty() {
@@ -1797,9 +1863,6 @@ impl App {
             .map(|item| &rows[item.raw])
             .filter(|row| row.is_package() && !self.unchecked.contains(&row.identity()))
             .collect();
-        if checked.is_empty() {
-            return;
-        }
         let identities: Vec<Value> = checked.iter().map(|row| row.identity_value()).collect();
         self.active_rows = checked.iter().map(|row| row.identity()).collect();
         let json = Value::Array(identities).to_string();

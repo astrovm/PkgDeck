@@ -1,6 +1,6 @@
 //! End-to-end paths of the `pkd` binary against synthetic managers in a
 //! temporary PATH and HOME.
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
@@ -37,6 +37,7 @@ impl Fixture {
         command
             .env("PATH", &self.0)
             .env("HOME", &self.0)
+            .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_STATE_HOME")
             .env_remove("XDG_CACHE_HOME")
             .env_remove("SNAP")
@@ -164,6 +165,27 @@ fn inspect_reads_the_inventory_of_a_manager_that_owns_the_file() {
     let (owner, code) = inspect(&["--from", "flatpak"]);
     assert_eq!(code, 0);
     assert_eq!(owner["state"], "unmatched", "{owner}");
+}
+
+#[test]
+fn a_saved_release_wait_is_there_for_later_runs() {
+    if root() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let (data, code) = fixture.json(&["release-wait"]);
+    assert_eq!((code, &data["release_wait"]["enabled"]), (0, &json!(false)));
+    let (data, code) = fixture.json(&["release-wait", "12h"]);
+    assert_eq!((code, &data["release_wait"]["hours"]), (0, &json!(12)));
+    assert!(fixture
+        .0
+        .join(".config/pkgdeck/release-wait.json")
+        .is_file());
+    let (data, _) = fixture.json(&["release-wait"]);
+    assert_eq!(data["release_wait"]["enabled"], true);
+    // Other commands run with it on.
+    let (_, code) = fixture.json(&["--from", "homebrew", "list"]);
+    assert_eq!(code, 0);
 }
 
 #[test]

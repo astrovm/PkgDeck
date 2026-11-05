@@ -87,6 +87,9 @@ pub struct Row {
     pub same_app_from: Vec<String>,
     pub same_app_group: Option<String>,
     pub adopt_with: Option<String>,
+    /// When a release too new to install yet stops waiting, in seconds
+    /// since 1970.
+    pub waiting_until: Option<u64>,
     pub failure_kind: String,
     pub cleanup_key: String,
     pub cleanup_kind: String,
@@ -124,6 +127,12 @@ impl Row {
     }
     pub fn has_update(&self) -> bool {
         self.update == "available"
+    }
+    /// When this update stops waiting, if it's still too new.
+    pub fn waiting_until(&self) -> Option<u64> {
+        let now = pkgdeck_core::release_wait::now();
+        self.waiting_until
+            .filter(|until| self.has_update() && *until > now)
     }
     /// The name people know it by.
     pub fn title(&self) -> &str {
@@ -1190,6 +1199,20 @@ pub fn new_version(row: &Row) -> String {
         .unwrap_or_else(|| "Unknown".into())
 }
 
+/// Why an update is left out for now, in the person's own time zone.
+pub fn waiting_text(until: u64) -> String {
+    let when = i64::try_from(until)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%b %-d, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "later".into());
+    format!("Waiting until {when}. Update all and automatic updates skip it for now.")
+}
+
 /// The version column's text.
 pub fn version_text(row: &Row) -> String {
     let known = |value: &Option<String>| value.clone().filter(|v| !v.is_empty());
@@ -1828,6 +1851,16 @@ fn plural(count: i64, noun: &str) -> Option<String> {
         1 => format!("1 {noun}"),
         count => format!("{count} {noun}s"),
     })
+}
+
+/// The count on the Updates page, which keeps apart what's still waiting.
+pub fn updates_heading(total: usize, waiting: usize) -> String {
+    let ready = plural(total.saturating_sub(waiting) as i64, "update").unwrap_or_default();
+    match (total, waiting) {
+        (_, 0) => ready,
+        _ if total == waiting => format!("{waiting} waiting"),
+        _ => format!("{ready}, {waiting} waiting"),
+    }
 }
 
 /// "42 s", "3 min 5 s", "1 h 2 min".

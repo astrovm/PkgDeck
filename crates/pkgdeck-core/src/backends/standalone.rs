@@ -363,6 +363,7 @@ impl Standalone {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     /// Shows what a tool's updater or removal printed; returns whether it

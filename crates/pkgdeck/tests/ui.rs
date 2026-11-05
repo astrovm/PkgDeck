@@ -2005,6 +2005,7 @@ fn refresh_checks_block_update_shortcuts_and_normal_updates_can_still_be_reviewe
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     let (store, settings) = Store::open(None, None);

@@ -467,6 +467,7 @@ impl<T: Transport> DevContainers<T> {
             component_ids: vec![],
             homepages: vec![self.kind.homepage().into()],
             adopt_with: None,
+            waiting_until: None,
         }
     }
 

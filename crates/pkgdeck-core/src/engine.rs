@@ -266,6 +266,14 @@ pub trait Backend: Send {
     /// formulae and casks share `brew update`) keep `token` until the check
     /// ends. `None` is every other query, which must not fetch.
     fn arm_update_check(&mut self, _token: Option<u64>) {}
+    /// How many hours old a new release must be before this source installs
+    /// it, for managers that can limit that themselves. 0 is no limit.
+    fn set_release_age(&mut self, _hours: u32) {}
+    /// Whether this source's own list leaves out releases that are too new,
+    /// so PkgDeck has nothing to hold back. Checked only while a wait is on.
+    fn limits_release_age(&mut self, _cancel: &Cancellation) -> bool {
+        false
+    }
     /// Whether update checks need an explicit metadata refresh. This is a
     /// cheap declaration: non-participants are not detected just to refresh.
     fn has_update_index(&self) -> bool {
@@ -571,6 +579,7 @@ pub struct Engine {
     batch_mode: crate::batch::BatchMode,
     unattended: bool,
     joins_cask_updates: bool,
+    release_watch: Option<crate::release_wait::ReleaseWatch>,
 }
 /// Whether `backend` has packages at all. Sources that only clean, such as
 /// developer caches, stay out of searches and installed lists; a package
@@ -602,6 +611,19 @@ impl Engine {
     /// need someone there (see [`crate::unattended::Unattended::Never`]).
     pub fn set_unattended(&mut self, unattended: bool) {
         self.unattended = unattended;
+    }
+    /// Wait for new releases: managers get their own limit, and installed
+    /// lists mark what's still too new in every other source.
+    pub fn set_release_watch(&mut self, watch: crate::release_wait::ReleaseWatch) {
+        for (id, backend) in &mut self.backends {
+            let hours = if watch.wait().applies_to(id) {
+                watch.wait().hours
+            } else {
+                0
+            };
+            backend.set_release_age(hours);
+        }
+        self.release_watch = Some(watch);
     }
     /// Someone is here to answer one password dialog for all of a batch's
     /// cask updates: run them with one `brew` (see
@@ -1072,12 +1094,8 @@ impl Engine {
         cancel: &Cancellation,
         ask: &(dyn Fn(&dyn Backend) -> bool + Sync),
     ) -> PackageReport {
-        let capability = if query.is_some() {
-            Capability::Search
-        } else {
-            Capability::Installed
-        };
         let noted = &self.detected;
+        let watch = self.release_watch.as_ref();
         // Query backends concurrently; results merge in registration order so
         // the report is identical to a sequential traversal.
         let results: Vec<_> = std::thread::scope(|s| {
@@ -1092,9 +1110,9 @@ impl Engine {
                             &mut **backend,
                             id,
                             &mut noted,
-                            capability,
                             query,
                             exact,
+                            watch,
                             cancel,
                         );
                         (id.clone(), noted, result)
@@ -1167,6 +1185,7 @@ impl Engine {
         // reassembles itself afterwards for reuse.
         let backends = std::mem::take(&mut self.backends);
         let (noted, optional) = (&self.detected, &self.optional);
+        let watch = self.release_watch.as_ref();
         let (tx, rx) = std::sync::mpsc::channel();
         let (backends, idle): (BTreeMap<_, _>, BTreeMap<_, _>) = backends
             .into_iter()
@@ -1175,20 +1194,15 @@ impl Engine {
         let (accumulated, stash, learned) = std::thread::scope(|s| {
             for (id, mut backend) in backends {
                 let tx = tx.clone();
-                let capability = if query.is_some() {
-                    Capability::Search
-                } else {
-                    Capability::Installed
-                };
                 let mut noted = noted.get(&id).cloned();
                 s.spawn(move || {
                     let result = Self::query_backend(
                         &mut *backend,
                         &id,
                         &mut noted,
-                        capability,
                         query,
                         false,
+                        watch,
                         cancel,
                     );
                     let _ = tx.send((id, backend, noted, result));
@@ -1255,14 +1269,19 @@ impl Engine {
         backend: &mut dyn Backend,
         id: &str,
         noted: &mut Option<Availability>,
-        capability: Capability,
         query: Option<&str>,
         exact: bool,
+        watch: Option<&crate::release_wait::ReleaseWatch>,
         cancel: &Cancellation,
     ) -> Result<(Vec<Package>, Vec<EngineError>), EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
+        let capability = if query.is_some() {
+            Capability::Search
+        } else {
+            Capability::Installed
+        };
         if !backend.capabilities().contains(&capability) {
             return Err(backend.unsupported(capability));
         }
@@ -1277,7 +1296,7 @@ impl Engine {
                 Err(error) => index_error = Some(error),
             }
         }
-        let packages = read_again_once(cancel, || match query {
+        let mut packages = read_again_once(cancel, || match query {
             Some(name) if exact => backend.lookup(name, cancel),
             Some(query) => backend.search(query, cancel),
             None => backend.installed(cancel),
@@ -1296,6 +1315,14 @@ impl Engine {
         let mut errors = backend.query_errors();
         if let Some(error) = index_error {
             errors.insert(0, error);
+        }
+        // Only an installed list says what's new. A name someone asked for
+        // by itself never waits.
+        if let Some(watch) = watch.filter(|watch| query.is_none() && watch.wait().applies_to(id)) {
+            if !backend.limits_release_age(cancel) {
+                let now = crate::release_wait::now();
+                watch.mark(id, &mut packages, errors.is_empty(), now);
+            }
         }
         Ok((packages, errors))
     }
@@ -1938,6 +1965,9 @@ impl Engine {
             batch_mode: self.batch_mode,
             unattended: self.unattended,
             joins_cask_updates: self.joins_cask_updates,
+            // Only lists mark what's waiting. A lane makes changes, and its
+            // backends already have their limits.
+            release_watch: None,
         }
     }
 
@@ -3102,6 +3132,7 @@ mod read_again_tests {
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
+            waiting_until: None,
         }
     }
     /// Busy on every first read, and always busy refreshing its index.

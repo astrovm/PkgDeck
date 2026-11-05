@@ -15,6 +15,38 @@ fn row(value: Value) -> Row {
 }
 
 #[test]
+fn only_an_update_still_too_new_waits() {
+    let waits = |value| row(value).waiting_until();
+    let far = u64::MAX / 2;
+    assert_eq!(waits(json!({"update": "available"})), None);
+    assert_eq!(
+        waits(json!({"update": "available", "waiting_until": far})),
+        Some(far)
+    );
+    // The wait ended since the list was read.
+    assert_eq!(
+        waits(json!({"update": "available", "waiting_until": 1})),
+        None
+    );
+    assert_eq!(
+        waits(json!({"update": "current", "waiting_until": far})),
+        None
+    );
+    let text = waiting_text(1_000_000_000);
+    assert!(text.starts_with("Waiting until Sep "), "{text}");
+    assert!(waiting_text(u64::MAX).starts_with("Waiting until later"));
+}
+
+#[test]
+fn the_updates_count_keeps_apart_what_is_waiting() {
+    assert_eq!(updates_heading(1, 0), "1 update");
+    assert_eq!(updates_heading(3, 0), "3 updates");
+    assert_eq!(updates_heading(3, 1), "2 updates, 1 waiting");
+    assert_eq!(updates_heading(2, 1), "1 update, 1 waiting");
+    assert_eq!(updates_heading(2, 2), "2 waiting");
+}
+
+#[test]
 fn pages_name_their_icons_capabilities_and_filters() {
     for page in Page::ALL {
         assert!(!page.name().is_empty());
