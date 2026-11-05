@@ -1863,9 +1863,6 @@ impl App {
             .map(|item| &rows[item.raw])
             .filter(|row| row.is_package() && !self.unchecked.contains(&row.identity()))
             .collect();
-        if checked.is_empty() {
-            return;
-        }
         let identities: Vec<Value> = checked.iter().map(|row| row.identity_value()).collect();
         self.active_rows = checked.iter().map(|row| row.identity()).collect();
         let json = Value::Array(identities).to_string();
