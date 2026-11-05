@@ -1586,8 +1586,7 @@ fn flatpak_update_checks_and_bundle_scopes() {
         flatpak.installed(&cancel),
         Err(EngineError::Execution(ExecutionError::Disabled(_)))
     ));
-    // Bundles are imported for the current user; the reviewed identity
-    // cannot be moved to the system installation.
+    // A bundle installs where the person chose: this user or the system.
     let base = temp_dir("system-bundle");
     let bundle = base.join("synthetic.flatpak");
     std::fs::write(
@@ -1598,7 +1597,42 @@ fn flatpak_update_checks_and_bundle_scopes() {
     let mut id = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel)
         .unwrap()
         .id;
+    let user = id.scope.clone();
+    for (scope, flag) in [
+        (user, "--user install"),
+        (Scope::System, "--system install"),
+    ] {
+        id.scope = scope;
+        let script = Script::new(|_| ok(""));
+        let mut flatpak = Flatpak::new(script.clone());
+        run(&mut flatpak, &Operation::Install(id.clone())).unwrap();
+        let calls = script.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains(flag), "{calls:?}");
+        assert!(calls[0].contains("--bundle"), "{calls:?}");
+        // Only the system installation runs with the password.
+        assert_eq!(calls[0].starts_with("w:sys:"), id.scope == Scope::System);
+    }
+    // Nowhere else, and never before the file is checked.
+    let uid = rustix::process::getuid().as_raw();
+    for scope in [
+        Scope::User { uid: uid + 1 },
+        Scope::Environment {
+            path: "/opt/flatpak".into(),
+        },
+    ] {
+        id.scope = scope;
+        let script = Script::new(|_| ok(""));
+        let mut flatpak = Flatpak::new(script.clone());
+        invalid_response(
+            run(&mut flatpak, &Operation::Install(id.clone())),
+            "invalid Flatpak scope",
+        );
+        assert!(script.calls().is_empty());
+    }
+    // The file itself still has to be the one that was reviewed.
     id.scope = Scope::System;
+    id.name = "org.example.Other".into();
     let script = Script::new(|_| ok(""));
     let mut flatpak = Flatpak::new(script.clone());
     invalid_response(
