@@ -391,17 +391,17 @@ impl App {
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
         self.c().set_auto_clean_worktrees(worktrees);
-        let system = self.settings.flatpak_links_for_system;
-        self.c().set_flatpak_links_for_system(system);
+        let system = self.settings.opened_flatpaks_for_system;
+        self.c().set_opened_flatpaks_for_system(system);
         self.sync_cleanup_preferences();
     }
 
-    /// Install a Flatpak link for the whole system or this user, and start
-    /// the next link there too.
-    pub fn choose_flatpak_link_scope(&mut self, system: bool) {
+    /// Install an opened Flatpak file or link for the whole system or this
+    /// user, and start the next one there too.
+    pub fn choose_opened_flatpak_scope(&mut self, system: bool) {
         self.c().set_open_flatpak_scope(system);
-        self.c().set_flatpak_links_for_system(system);
-        self.settings.flatpak_links_for_system = system;
+        self.c().set_opened_flatpaks_for_system(system);
+        self.settings.opened_flatpaks_for_system = system;
         self.save_settings();
         self.react();
     }
@@ -919,7 +919,7 @@ impl App {
             ReviewOn::Page(key) => self.page_key().as_ref() == Some(key),
             ReviewOn::Dialog => false,
         };
-        if on_page && data.flatpak_ref_scope.is_empty() {
+        if on_page && data.flatpak_scope.is_empty() {
             self.review_on_page = true;
         } else {
             self.confirm_open = true;

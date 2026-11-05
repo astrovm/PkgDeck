@@ -500,7 +500,7 @@ fn opening_flatpak_reference_uses_confirmation_and_rejects_unsupported_input() {
         Some(Job::Write(Operation::Install(_), _))
     ));
     let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
-    assert_eq!(data["flatpak_ref_scope"], "user");
+    assert_eq!(data["flatpak_scope"], "user");
     controller.as_mut().set_open_flatpak_scope(true);
     assert!(controller.confirmation().to_string().contains("System"));
     assert!(matches!(
@@ -508,7 +508,7 @@ fn opening_flatpak_reference_uses_confirmation_and_rejects_unsupported_input() {
         Some(Job::Write(Operation::Install(id), _)) if id.scope == Scope::System
     ));
     let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
-    assert_eq!(data["flatpak_ref_scope"], "system");
+    assert_eq!(data["flatpak_scope"], "system");
     controller.as_mut().set_open_flatpak_scope(false);
     assert!(controller.confirmation().to_string().contains("User"));
     controller.as_mut().confirm(false);
@@ -866,28 +866,135 @@ fn flatpak_links_start_where_the_last_one_was_installed() {
         );
         page["package"]["scope_label"].as_str().unwrap().to_owned()
     };
-    assert!(!controller.flatpak_links_for_system());
+    assert!(!controller.opened_flatpaks_for_system());
     assert!(scope_of(&mut controller, &link).starts_with("User"));
-    controller.as_mut().set_flatpak_links_for_system(true);
+    controller.as_mut().set_opened_flatpaks_for_system(true);
     assert_eq!(scope_of(&mut controller, &link), "System");
     // The review starts there too.
     controller.as_mut().install_opened();
     let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
-    assert_eq!(data["flatpak_ref_scope"], "system");
+    assert_eq!(data["flatpak_scope"], "system");
     controller.as_mut().confirm(false);
     // An app that's already installed stays where it is.
     let mut installed = link.clone();
     installed.installed_version = Some("1.0".into());
     assert!(scope_of(&mut controller, &installed).starts_with("User"));
-    // Other files keep their own scope.
+    // A bundle file starts there too.
     let mut bundle = link.clone();
     bundle.id.reference = Some(format!(
         "artifact:flatpak:{}::/tmp/Demo.flatpak",
         "ab".repeat(32)
     ));
+    assert_eq!(scope_of(&mut controller, &bundle), "System");
+    bundle.id.scope = user.clone();
+    bundle.installed_version = Some("1.0".into());
     assert!(scope_of(&mut controller, &bundle).starts_with("User"));
-    controller.as_mut().set_flatpak_links_for_system(false);
+    // Other opened files aren't Flatpaks.
+    let mut other = link.clone();
+    other.id.backend = "snap".into();
+    other.id.reference = Some(format!("artifact:snap:{}::/tmp/Demo.snap", "ab".repeat(32)));
+    assert!(scope_of(&mut controller, &other).starts_with("User"));
+    controller.as_mut().set_opened_flatpaks_for_system(false);
     assert!(scope_of(&mut controller, &link).starts_with("User"));
+}
+#[test]
+fn every_opened_flatpak_chooses_where_it_installs_on_its_page_and_in_review() {
+    let user = Scope::User {
+        uid: rustix::process::getuid().as_raw(),
+    };
+    for reference in [
+        format!(
+            "flatpakref:{}:https://example.invalid/Demo.flatpakref",
+            "ab".repeat(32)
+        ),
+        format!("artifact:flatpak:{}::/tmp/Demo.flatpak", "ab".repeat(32)),
+    ] {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let mut package = synthetic_package("org.example.Demo", "Demo");
+        package.id.backend = "flatpak".into();
+        package.id.scope = user.clone();
+        package.id.reference = Some(reference.clone());
+        package.installed_version = None;
+        let page = |controller: &Pin<&mut ffi::PackageController>| -> Value {
+            serde_json::from_str(&controller.opened().to_string()).unwrap()
+        };
+        let review = |controller: &Pin<&mut ffi::PackageController>| -> Value {
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap()
+        };
+        controller
+            .as_mut()
+            .apply(Ok(opened_payload(package.clone())));
+        assert_eq!(page(&controller)["flatpak_scope"], "user", "{reference}");
+        // On the page, before any review.
+        controller.as_mut().set_open_flatpak_scope(true);
+        assert!(controller.rust().pending.is_none());
+        let shown = page(&controller);
+        assert_eq!(shown["flatpak_scope"], "system");
+        assert_eq!(shown["package"]["scope_label"], "System");
+        assert_eq!(
+            controller.rust().opened_package.as_ref().unwrap().id.scope,
+            Scope::System
+        );
+        // The review starts there, and can still change it.
+        controller.as_mut().install_opened();
+        assert_eq!(review(&controller)["flatpak_scope"], "system");
+        controller.as_mut().set_open_flatpak_scope(false);
+        assert_eq!(review(&controller)["flatpak_scope"], "user");
+        assert_eq!(page(&controller)["flatpak_scope"], "user");
+        let chosen = expect!(
+            controller.rust().pending.clone(),
+            Some(Job::Write(Operation::Install(id), None)) => id
+        );
+        assert_eq!(chosen.scope, user);
+        // Once it's installed the choice is gone.
+        controller.as_mut().mark_opened_installed(
+            &Job::Write(Operation::Install(chosen), None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        assert_eq!(page(&controller)["flatpak_scope"], "");
+        controller.as_mut().confirm(false);
+        // An installed copy stays where it is, on the page and in review.
+        let mut installed = package.clone();
+        installed.installed_version = Some("1.0".into());
+        controller
+            .as_mut()
+            .apply(Ok(opened_payload(installed.clone())));
+        assert_eq!(page(&controller)["flatpak_scope"], "");
+        controller.as_mut().set_open_flatpak_scope(true);
+        assert_eq!(
+            controller.rust().opened_package.as_ref().unwrap().id.scope,
+            user
+        );
+        controller.as_mut().install_opened();
+        assert_eq!(review(&controller)["flatpak_scope"], "");
+        controller.as_mut().set_open_flatpak_scope(true);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(id), None)) if id.scope == user
+        ));
+        controller.as_mut().confirm(false);
+    }
+}
+#[test]
+fn an_opened_file_that_isnt_a_flatpak_has_no_place_to_choose() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let mut package = synthetic_package("demo", "Demo");
+    package.id.backend = "snap".into();
+    package.id.scope = Scope::System;
+    package.id.reference = Some(format!("artifact:snap:{}::/tmp/Demo.snap", "ab".repeat(32)));
+    package.installed_version = None;
+    controller
+        .as_mut()
+        .apply(Ok(opened_payload(package.clone())));
+    let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+    assert_eq!(page["flatpak_scope"], "");
+    controller.as_mut().set_open_flatpak_scope(false);
+    assert_eq!(
+        controller.rust().opened_package.as_ref().unwrap().id,
+        package.id
+    );
 }
 #[test]
 fn an_opened_flatpak_installed_for_the_system_shows_installed_and_launch() {
@@ -3294,7 +3401,7 @@ fn removal_confirmation_lists_the_selected_and_other_native_changes() {
     };
     let install = Operation::Install(reference.id.clone());
     let preview = confirmation_preview(&install, &[reference], &[], None);
-    assert_eq!(preview["flatpak_ref_scope"], "");
+    assert_eq!(preview["flatpak_scope"], "");
     assert!(preview["body"]
         .as_str()
         .unwrap()

@@ -25,6 +25,7 @@ enum PageButton {
     Main,
     Manage,
     Scope,
+    OpenedScope,
 }
 
 /// The launch settings being edited, for one row.
@@ -341,6 +342,14 @@ fn app_page(
             if scope.is_some() {
                 buttons.push(PageButton::Scope);
             }
+            let opened_scope = details
+                .as_ref()
+                .filter(|_| opened)
+                .map(|d| d.flatpak_scope.clone())
+                .filter(|scope| !scope.is_empty());
+            if opened_scope.is_some() {
+                buttons.push(PageButton::OpenedScope);
+            }
             let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
                 PageButton::Launch => {
                     let look = if update_waits || runnable {
@@ -432,6 +441,13 @@ fn app_page(
                 PageButton::Scope => {
                     if let Some(variants) = scope.clone() {
                         scope_toggle(app, ui, variants, &identity, can_act);
+                    }
+                }
+                // Where an opened Flatpak file or link installs.
+                PageButton::OpenedScope => {
+                    let current = usize::from(opened_scope.as_deref() != Some("system"));
+                    if let Some(index) = scope_switch(ui, current, &row.name, can_act) {
+                        app.choose_opened_flatpak_scope(index == 0);
                     }
                 }
             };
@@ -599,11 +615,20 @@ fn app_page(
 }
 
 fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str, enabled: bool) {
-    let palette = Palette::current(ui.ctx());
     let current = variants
         .iter()
         .position(|&raw| app.rows.get(raw).is_some_and(|r| r.identity() == identity))
         .unwrap_or(0);
+    if let Some(index) = scope_switch(ui, current, identity, enabled) {
+        app.choose_scope(index);
+    }
+}
+
+/// The **System** / **User** switch, which answers the part clicked: 0 for
+/// **System** and 1 for **User**.
+fn scope_switch(ui: &mut Ui, current: usize, identity: &str, enabled: bool) -> Option<usize> {
+    let palette = Palette::current(ui.ctx());
+    let mut clicked = None;
     let (rect, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
     ui.painter()
         .rect_filled(rect, theme::round(9), palette.hover_solid());
@@ -637,6 +662,9 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
                 },
             )
             .on_hover_cursor(CursorIcon::PointingHand);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, index == current, label)
+        });
         let color = if index == current {
             palette.ink
         } else {
@@ -654,9 +682,10 @@ fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str
             color,
         );
         if response.clicked() && index != current {
-            app.choose_scope(index);
+            clicked = Some(index);
         }
     }
+    clicked
 }
 
 fn skeleton(ui: &mut Ui, palette: &Palette) {

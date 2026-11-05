@@ -25,7 +25,9 @@ architecture, and scope (User or System), so you always act on one exact
 package. A Flatpak found in both places shows one row, with **System** first
 and opened by default. If only one copy is installed, that copy is shown
 instead. Switch to **User** in the details; PkgDeck remembers your last
-choice for that app.
+choice for that app. A repository set up in only one place can only install
+there: add it to the other one under **Settings** → **Sources** →
+**Repositories** to choose.
 
 - The button on the right of a row installs, removes, or updates that package.
   Some sources only keep what's already installed up to date, such as
@@ -76,10 +78,15 @@ What the page shows:
   **Install** checks the changes APT would make before it asks for your
   password.
 - Flatpak reference: the app, its repository, whether a signing key is
-  included, and any extra repository it needs. Choose User or System here.
-  The next link starts with the same choice, unless that app is already
-  installed. Flatpak may still download extra runtimes during install. Once
-  the app is installed, the page has **Launch**. Runtimes don't.
+  included, and any extra repository it needs. Flatpak may still download
+  extra runtimes during install. Once the app is installed, the page has
+  **Launch**. Runtimes don't.
+- Flatpak file (`.flatpak`): the app and its version. Flatpak checks what's
+  inside when it installs. Installing again replaces the installed copy,
+  so the page can offer **Update**, **Reinstall** or **Downgrade**.
+- Any opened Flatpak, reference or file: choose **System** or **User** on its
+  page or in the review. The next one starts with the same choice. An app
+  that's already installed stays where it is.
 - RPM, Arch, and Snap files: checked by their own package manager.
 - Repository files: checked again right before they are added. `.ymp` files
   open the openSUSE installer.

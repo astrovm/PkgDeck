@@ -10,6 +10,17 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.15.0" date="2026-11-05">
+      <description>
+        <p>Wait before installing brand new releases, and choose System or User for any Flatpak you open.</p>
+        <ul>
+          <li>Wait for new releases, off by default, holds back versions published too recently, for the time you pick</li>
+          <li>The page of an opened Flatpak file or link has a System and User switch, and the next one starts with your last choice</li>
+          <li>.flatpak files can install for the whole system, not only for you</li>
+          <li>A .flatpak file whose app is already installed for the system can update or reinstall it</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.14.1" date="2026-11-04">
       <description>
         <p>Updating several Homebrew casks asks for your password once.</p>

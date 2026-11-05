@@ -762,7 +762,7 @@ fn confirmations_show_on_the_page_in_a_dialog_or_run_alone() {
     app.c().set_confirmation("".into());
     app.react();
     app.c().set_confirmation_data(
-        json!({"action": "Install", "flatpak_ref_scope": "user"})
+        json!({"action": "Install", "flatpak_scope": "user"})
             .to_string()
             .into(),
     );
@@ -1964,13 +1964,13 @@ fn the_last_flatpak_link_scope_is_saved_and_starts_the_next_link() {
         Platform::start(|| {}),
         Launch::default(),
     );
-    assert!(!app.ctl.flatpak_links_for_system());
-    app.choose_flatpak_link_scope(true);
-    assert!(app.ctl.flatpak_links_for_system());
-    assert!(app.store.saved().flatpak_links_for_system);
+    assert!(!app.ctl.opened_flatpaks_for_system());
+    app.choose_opened_flatpak_scope(true);
+    assert!(app.ctl.opened_flatpaks_for_system());
+    assert!(app.store.saved().opened_flatpaks_for_system);
     // The next start reads it back and tells the controller.
     let (store, settings) = Store::open(Some(dir.clone()), None);
-    assert!(settings.flatpak_links_for_system);
+    assert!(settings.opened_flatpaks_for_system);
     let mut again = App::with_controller(
         create_synthetic_controller(empty),
         settings,
@@ -1978,10 +1978,10 @@ fn the_last_flatpak_link_scope_is_saved_and_starts_the_next_link() {
         Platform::start(|| {}),
         Launch::default(),
     );
-    assert!(again.ctl.flatpak_links_for_system());
-    again.choose_flatpak_link_scope(false);
-    assert!(!again.ctl.flatpak_links_for_system());
-    assert!(!again.store.saved().flatpak_links_for_system);
+    assert!(again.ctl.opened_flatpaks_for_system());
+    again.choose_opened_flatpak_scope(false);
+    assert!(!again.ctl.opened_flatpaks_for_system());
+    assert!(!again.store.saved().opened_flatpaks_for_system);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

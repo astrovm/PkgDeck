@@ -362,6 +362,9 @@ pub struct Details {
     /// An opened AppImage file that isn't installed, which can start where
     /// it is.
     pub runnable: bool,
+    /// An opened Flatpak that isn't installed yet can choose where it
+    /// installs: "user" or "system" is where it would go now.
+    pub flatpak_scope: String,
     /// The app's own folder, for sources that keep one per app.
     pub data: Option<AppData>,
     pub cleanup: Option<Cleanup>,
@@ -790,7 +793,7 @@ pub struct Confirmation {
     pub body: String,
     pub summary: String,
     pub details: String,
-    pub flatpak_ref_scope: String,
+    pub flatpak_scope: String,
     pub icon: Option<String>,
     pub review: Option<bool>,
     pub notes: Vec<String>,

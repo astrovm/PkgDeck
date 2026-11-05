@@ -134,10 +134,10 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
         if title(ui, "Confirm changes") {
             answer = Some(false);
         }
-        if !data.flatpak_ref_scope.is_empty() {
+        if !data.flatpak_scope.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Install for").color(palette.muted));
-                let system = data.flatpak_ref_scope == "system";
+                let system = data.flatpak_scope == "system";
                 for (label, value) in [("User", false), ("System", true)] {
                     let look = if system == value {
                         Look::Soft(Tone::Accent)
@@ -261,7 +261,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
     });
     app.ui.confirm_details_flipped = flipped && open;
     if let Some(system) = scope {
-        app.choose_flatpak_link_scope(system);
+        app.choose_opened_flatpak_scope(system);
     }
     if open && !still && answer.is_none() {
         answer = Some(false);

@@ -431,9 +431,10 @@ pub struct Settings {
     /// Whether the window was last maximized, so the next one opens so.
     pub window_maximized: bool,
     pub flatpak_scope_choices: String,
-    /// Flatpak links install for the whole system: the last choice in
-    /// their review.
-    pub flatpak_links_for_system: bool,
+    /// Flatpak files and links install for the whole system: the last
+    /// choice on their page or in their review.
+    #[serde(alias = "flatpakLinksForSystem")]
+    pub opened_flatpaks_for_system: bool,
     pub search_hint: String,
 }
 
@@ -483,7 +484,7 @@ impl Default for Settings {
             window_height: 0.0,
             window_maximized: false,
             flatpak_scope_choices: "{}".into(),
-            flatpak_links_for_system: false,
+            opened_flatpaks_for_system: false,
             search_hint: String::new(),
         }
     }
@@ -915,6 +916,19 @@ mod tests {
         let read = Store::open(Some(config), Some(&home)).1;
         assert_eq!(read.auto_update, cfg!(target_os = "macos"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_flatpak_choice_saved_for_links_still_counts() {
+        let settings: Settings = serde_json::from_str(r#"{"flatpakLinksForSystem":true}"#).unwrap();
+        assert!(settings.opened_flatpaks_for_system);
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(
+            saved.contains(r#""openedFlatpaksForSystem":true"#),
+            "{saved}"
+        );
+        let again: Settings = serde_json::from_str(&saved).unwrap();
+        assert!(again.opened_flatpaks_for_system);
     }
 
     #[test]

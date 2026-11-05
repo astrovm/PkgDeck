@@ -1868,7 +1868,7 @@ pub struct Controller {
     opened_package: Option<Package>,
     /// Flatpak links install for the whole system unless the app is
     /// already installed: the last choice in their review.
-    flatpak_links_for_system: bool,
+    opened_flatpaks_for_system: bool,
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
@@ -2037,7 +2037,7 @@ impl Default for Controller {
             opened: QString::default(),
             appimage_data: None,
             opened_package: None,
-            flatpak_links_for_system: false,
+            opened_flatpaks_for_system: false,
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
@@ -4025,23 +4025,32 @@ fn confirmation_preview(
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
     }
-    let flatpak_ref_scope = match operation {
+    let flatpak_scope = match operation {
+        // An installed copy stays where it is.
         Operation::Install(id)
-            if id.backend == "flatpak"
-                && id
-                    .reference
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("flatpakref:")) =>
+            if !packages
+                .iter()
+                .any(|package| package.id == *id && package.installed_version.is_some()) =>
         {
-            match &id.scope {
-                Scope::System => "system",
-                Scope::User { .. } => "user",
-                _ => "",
-            }
+            opened_flatpak_scope(id)
         }
         _ => "",
     };
-    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope, "icon": icon, "review": review || !flatpak_ref_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_scope": flatpak_scope, "icon": icon, "review": review || !flatpak_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+}
+/// Where a Flatpak opened from a file or link installs, as the word its
+/// **User** / **System** choice shows. Empty for anything else, and for
+/// a scope Flatpak can't be told to install into.
+fn opened_flatpak_scope(id: &PackageId) -> &'static str {
+    let opened = id.backend == "flatpak"
+        && id.reference.as_deref().is_some_and(|value| {
+            value.starts_with("flatpakref:") || value.starts_with("artifact:flatpak:")
+        });
+    match &id.scope {
+        Scope::System if opened => "system",
+        Scope::User { .. } if opened => "user",
+        _ => "",
+    }
 }
 /// The app page of an opened file or link: the `details` shape, plus where
 /// it came from and what its button does.
@@ -4088,6 +4097,11 @@ fn opened_page(details: &PackageDetails, action: &str) -> Value {
         "action": action,
         "launchable": package.installed_version.is_some() && launchable_flatpak(package),
         "runnable": runnable_file(package).is_some(),
+        "flatpak_scope": if package.installed_version.is_none() {
+            opened_flatpak_scope(&package.id)
+        } else {
+            ""
+        },
     })
 }
 /// An AppImage file that isn't installed yet, which can still start from
@@ -4422,6 +4436,7 @@ impl ffi::PackageController {
             version
         };
         data["launchable"] = json!(launchable_flatpak(&package));
+        data["flatpak_scope"] = json!("");
         // The installed copy starts instead.
         data["runnable"] = json!(false);
         self.as_mut().set_opened(encoded(data));
@@ -4430,19 +4445,18 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().opened_package = None;
         self.as_mut().set_opened(QString::default());
     }
+    /// Choose where the opened Flatpak installs: from its page, or from the
+    /// review of its install, which then shows the new place.
     pub fn set_open_flatpak_scope(mut self: Pin<&mut Self>, system: bool) {
-        let Some(Job::Write(Operation::Install(previous), None)) = &self.rust().pending else {
-            return;
+        let previous = match (&self.rust().pending, &self.rust().opened_package) {
+            (Some(Job::Write(Operation::Install(id), None)), _) => id.clone(),
+            (None, Some(package)) => package.id.clone(),
+            _ => return,
         };
-        if previous.backend != "flatpak"
-            || !previous
-                .reference
-                .as_deref()
-                .is_some_and(|value| value.starts_with("flatpakref:"))
-        {
+        let reviewing = self.rust().pending.is_some();
+        if opened_flatpak_scope(&previous).is_empty() {
             return;
         }
-        let previous = previous.clone();
         let scope = if system {
             Scope::System
         } else {
@@ -4458,7 +4472,7 @@ impl ffi::PackageController {
             let Some(package) = rust
                 .packages
                 .iter_mut()
-                .find(|package| package.id == previous)
+                .find(|package| package.id == previous && package.installed_version.is_none())
             else {
                 return;
             };
@@ -4469,24 +4483,27 @@ impl ffi::PackageController {
                 opened.id.scope = scope.clone();
             }
         }
+        let mut selected = previous;
+        selected.scope = scope;
         if self
             .rust()
             .opened_package
             .as_ref()
-            .is_some_and(|p| p.id.scope == scope)
+            .is_some_and(|p| p.id == selected)
         {
             let mut data: Value =
                 serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
-            data["package"]["scope"] = json!(scope);
-            data["package"]["scope_label"] = json!(scope_label(&scope));
+            data["package"]["scope"] = json!(selected.scope);
+            data["package"]["scope_label"] = json!(scope_label(&selected.scope));
+            data["flatpak_scope"] = json!(opened_flatpak_scope(&selected));
             self.as_mut().set_opened(encoded(data));
         }
-        let mut selected = previous;
-        selected.scope = scope;
-        self.as_mut().apply(Ok(Payload::OperationPreview(
-            Operation::Install(selected),
-            None,
-        )));
+        if reviewing {
+            self.as_mut().apply(Ok(Payload::OperationPreview(
+                Operation::Install(selected),
+                None,
+            )));
+        }
     }
     /// Where the login item goes, for tests of the window.
     #[doc(hidden)]
@@ -4602,11 +4619,11 @@ impl ffi::PackageController {
     /// that isn't metered. Cleaning waits for the charger too.
     /// Where Flatpak links install by default: for the whole system, or for
     /// this user.
-    pub fn set_flatpak_links_for_system(mut self: Pin<&mut Self>, system: bool) {
-        self.as_mut().rust_mut().flatpak_links_for_system = system;
+    pub fn set_opened_flatpaks_for_system(mut self: Pin<&mut Self>, system: bool) {
+        self.as_mut().rust_mut().opened_flatpaks_for_system = system;
     }
-    pub fn flatpak_links_for_system(&self) -> bool {
-        self.rust().flatpak_links_for_system
+    pub fn opened_flatpaks_for_system(&self) -> bool {
+        self.rust().opened_flatpaks_for_system
     }
     pub fn set_waits(mut self: Pin<&mut Self>, battery: bool, metered: bool) {
         self.as_mut().rust_mut().waits = Waits { battery, metered };
@@ -6944,10 +6961,9 @@ impl ffi::PackageController {
             // An opened file or link gets its own app page; Install there
             // previews the change.
             Ok(Payload::OpenPackage(mut details)) => {
-                let reference = details.package.id.reference.as_deref();
-                if self.rust().flatpak_links_for_system
+                if self.rust().opened_flatpaks_for_system
                     && details.package.installed_version.is_none()
-                    && reference.is_some_and(|value| value.starts_with("flatpakref:"))
+                    && !opened_flatpak_scope(&details.package.id).is_empty()
                 {
                     details.package.id.scope = Scope::System;
                 }
