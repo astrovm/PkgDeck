@@ -5498,7 +5498,9 @@ fn casks_in_one_brew_show_as_it_reaches_each_one() {
     assert_eq!(now["running"].as_array().unwrap().len(), 1);
     assert_eq!(now["current"], target_row(&second));
     assert_eq!(now["done"], 1);
-    assert_eq!(now["finished"], json!([target_row(&first)]));
+    // Whether it worked is only known when brew ends, so no check mark yet.
+    assert_eq!(now["passed"], json!([target_row(&first)]));
+    assert_eq!(now["finished"], json!([]));
     // Results come when brew ends: the one it moved on from failed.
     state.apply(&Event::Finished {
         operation: operations[0].clone(),
@@ -5511,6 +5513,8 @@ fn casks_in_one_brew_show_as_it_reaches_each_one() {
     let now = snapshot(&state);
     assert_eq!(now["done"], 2);
     assert!(now["running"].as_array().unwrap().is_empty());
+    assert_eq!(now["passed"], json!([target_row(&first)]));
+    assert_eq!(now["finished"], json!([target_row(&second)]));
     let result: Value = serde_json::from_str(&state.batch_result().to_string()).unwrap();
     assert_eq!(result["finished"], json!([target_row(&second)]));
 }
@@ -9473,7 +9477,7 @@ fn update_all_counts_and_follows_each_package_of_a_source() {
     assert_eq!(now["current"], target_row(&beta.id));
     assert_eq!(now["done"], 0);
     assert!(state.observe("==> Upgrading gamma"));
-    assert_eq!(snapshot(&state)["finished"], json!([target_row(&beta.id)]));
+    assert_eq!(snapshot(&state)["passed"], json!([target_row(&beta.id)]));
     // Sources PkgDeck updates one by one report packages directly, by
     // the name people see as well.
     state.apply(&Event::Progress {

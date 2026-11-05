@@ -468,6 +468,8 @@ pub struct Progress {
     /// Every step running now: steps of different sources run at once.
     pub running: Vec<RunningStep>,
     pub finished: Vec<Value>,
+    /// Rows it has moved past, or that failed: no result worth a check mark.
+    pub passed: Vec<Value>,
     pub current_source: Option<String>,
 }
 /// One step of the change that runs now: its package, or the source it
@@ -538,6 +540,9 @@ impl Progress {
         if has(&self.finished) {
             return Some(RowState::Done);
         }
+        if has(&self.passed) {
+            return Some(RowState::Passed);
+        }
         let running = match &self.current {
             Some(current) => identity_of_row_value(current) == identity,
             None => self.current_source.as_deref() == Some(source),
@@ -555,6 +560,8 @@ impl Progress {
 pub enum RowState {
     Queued,
     Running,
+    /// The batch has moved past it, and it isn't known to have worked.
+    Passed,
     Done,
 }
 

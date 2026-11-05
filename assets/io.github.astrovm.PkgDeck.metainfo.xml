@@ -16,6 +16,8 @@
         <ul>
           <li>Homebrew casks you check together update in one go, so you enter your password once, and each row still says how its cask went</li>
           <li>If you cancel while they update, PkgDeck waits for all of them to finish</li>
+          <li>A cask Homebrew skips without an error, such as a disabled one, no longer reads as updated</li>
+          <li>While a batch runs, a row only gets a green check once it's known to have worked</li>
         </ul>
       </description>
     </release>

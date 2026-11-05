@@ -1823,6 +1823,11 @@ fn cask_updates_run_in_one_brew_so_one_password_covers_them() {
     let script = Script {
         answer: Arc::new(move |line| match line {
             "w:brew upgrade --cask -- first second tap/tools/third" => ok(""),
+            "brew info --json=v2 --cask -- first second tap/tools/third" => ok(&cask_versions(&[
+                ("first", "2", "2"),
+                ("second", "2", "2"),
+                ("tap/tools/third", "2", "2"),
+            ])),
             other => (script.answer)(other),
         }),
         ..Script::new(|_| ok(""))
@@ -1838,7 +1843,10 @@ fn cask_updates_run_in_one_brew_so_one_password_covers_them() {
     assert_eq!(results, vec![Ok(OperationOutcome::default()); 3]);
     assert_eq!(
         script.calls(),
-        ["w:brew upgrade --cask -- first second tap/tools/third"]
+        [
+            "w:brew upgrade --cask -- first second tap/tools/third",
+            "brew info --json=v2 --cask -- first second tap/tools/third",
+        ]
     );
     assert_eq!(progress.len(), 1);
 }
@@ -1906,31 +1914,185 @@ fn each_cask_gets_its_own_result_from_one_brew() {
 }
 
 #[test]
-fn casks_brew_never_got_to_are_tried_on_their_own() {
-    // One cask no longer installed stops brew before it updates anything.
-    let script = brew(|line| match line {
-        "w:brew upgrade --cask -- gone other" => {
-            brew_failed("", "Error: Cask 'gone' is not installed.\n")
+fn a_cask_that_stops_brew_is_left_out_so_the_rest_share_one_brew() {
+    // One ticked cask is gone, or its tap is, and brew stops before it
+    // updates anything. Running the rest one by one would ask once each.
+    for (gone, said_by_brew, look) in [
+        (
+            "gone",
+            "Error: Cask 'gone' is not installed.\n",
+            ok(&cask_versions(&[("first", "1", "2"), ("second", "1", "2")])),
+        ),
+        (
+            "tap/tools/gone",
+            "Error: Cask 'gone' is unavailable: '/taps/gone.rb' does not exist.\n",
+            brew_failed("", "Error: Cask 'gone' is unavailable\n"),
+        ),
+    ] {
+        let joined = format!("w:brew upgrade --cask -- {gone} first second");
+        let looked = format!("brew info --json=v2 --cask -- {gone} first second");
+        let stopped = said_by_brew.to_string();
+        let script = brew(move |line| match line {
+            line if line == joined => brew_failed("", &stopped),
+            line if line == looked => look.clone(),
+            "w:brew upgrade --cask -- first second" => ok(""),
+            "brew info --json=v2 --cask -- first second" => {
+                ok(&cask_versions(&[("first", "2", "2"), ("second", "2", "2")]))
+            }
+            other => panic!("unexpected {other}"),
+        });
+        let results = cask_ready(&script)
+            .execute_joined(
+                &[gone, "first", "second"].map(cask_update),
+                &Cancellation::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(said(&results[0]).1, said_by_brew);
+        assert!(results[1].is_ok(), "{:?}", results[1]);
+        assert!(results[2].is_ok(), "{:?}", results[2]);
+        let writes = script
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("w:"))
+            .count();
+        assert_eq!(writes, 2, "{:?}", script.calls());
+    }
+}
+
+#[test]
+fn a_cask_brew_wont_touch_fails_once_with_brews_words() {
+    let pinned = "Error: Not upgrading 1 pinned package:\n  pinned 1\n";
+    let script = brew(move |line| match line {
+        "w:brew upgrade --cask -- pinned other" | "w:brew upgrade --cask -- pinned" => {
+            brew_failed("", pinned)
         }
-        "brew info --json=v2 --cask -- gone other" => ok(&cask_versions(&[("other", "1", "2")])),
-        "w:brew upgrade --cask -- gone" => {
-            brew_failed("", "Error: Cask 'gone' is not installed.\n")
+        "brew info --json=v2 --cask -- pinned other" => {
+            ok(&cask_versions(&[("pinned", "1", "2"), ("other", "2", "2")]))
         }
-        "w:brew upgrade --cask -- other" => ok(""),
+        "brew info --json=v2 --cask -- pinned" => ok(&cask_versions(&[("pinned", "1", "2")])),
         other => panic!("unexpected {other}"),
     });
     let results = cask_ready(&script)
         .execute_joined(
-            &["gone", "other"].map(cask_update),
+            &["pinned", "other"].map(cask_update),
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(said(&results[0]).1, pinned);
+    assert!(results[1].is_ok(), "{:?}", results[1]);
+}
+
+#[test]
+fn a_cask_brew_skipped_without_failing_does_not_read_as_updated() {
+    // brew skips a disabled cask and still exits 0.
+    let left_behind = Err(EngineError::Refused {
+        backend: "homebrew-cask".into(),
+        refusal: Refusal::Explained(
+            "Homebrew didn't update this cask or say why. It's still on version 1.".into(),
+        ),
+    });
+    let script = brew(|line| match line {
+        "w:brew upgrade --cask -- disabled other no-version unknown" => ok(""),
+        "brew info --json=v2 --cask -- disabled other no-version unknown" => {
+            let mut report: serde_json::Value = serde_json::from_str(&cask_versions(&[
+                ("disabled", "1", "2"),
+                ("other", "2", "2"),
+                ("no-version", "1", "2"),
+            ]))
+            .unwrap();
+            report["casks"][2]["version"] = serde_json::Value::Null;
+            ok(&report.to_string())
+        }
+        other => panic!("unexpected {other}"),
+    });
+    let results = cask_ready(&script)
+        .execute_joined(
+            &["disabled", "other", "no-version", "unknown"].map(cask_update),
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(results[0], left_behind);
+    assert!(results[1].is_ok(), "{:?}", results[1]);
+    assert_eq!(results[2], left_behind);
+    // brew said it worked and its list doesn't say otherwise.
+    assert!(results[3].is_ok(), "{:?}", results[3]);
+
+    // The same when it runs on its own, as automatic updates do.
+    let script = brew(|line| match line {
+        "w:brew upgrade --cask -- disabled" => ok("Not upgrading disabled, it is disabled\n"),
+        "brew info --json=v2 --cask -- disabled" => ok(&cask_versions(&[("disabled", "1", "2")])),
+        "w:brew upgrade --cask -- fine" => ok(""),
+        "brew info --json=v2 --cask -- fine" => brew_failed("", "broken"),
+        other => panic!("unexpected {other}"),
+    });
+    let mut casks = cask_ready(&script);
+    let cancel = Cancellation::default();
+    assert_eq!(
+        casks.execute(&cask_update("disabled"), &cancel, &mut |_| {}),
+        left_behind
+    );
+    assert!(casks
+        .execute(&cask_update("fine"), &cancel, &mut |_| {})
+        .is_ok());
+}
+
+#[test]
+fn a_failed_cask_keeps_none_of_the_next_ones_output() {
+    let stderr = "\
+Error: strict: Failure while executing; `/usr/bin/false` exited with 1.
+sudo: no password was provided
+sudo: a password is required
+Warning: Reverting upgrade for Cask locked
+Error: locked: Failure while executing; `/usr/bin/sudo -A -E -- /usr/bin/true` exited with 1. Here's the output:
+sudo: no password was provided
+sudo: a password is required
+";
+    let script = brew(move |line| match line {
+        "w:brew upgrade --cask -- strict locked" => brew_failed("", stderr),
+        "brew info --json=v2 --cask -- strict locked" => ok(&cask_versions(&[
+            ("strict", "1", "2"),
+            ("locked", "1", "2"),
+        ])),
+        other => panic!("unexpected {other}"),
+    });
+    let results = cask_ready(&script)
+        .execute_joined(
+            &["strict", "locked"].map(cask_update),
             &Cancellation::default(),
             &mut |_| {},
         )
         .unwrap();
     assert_eq!(
         said(&results[0]).1,
-        "Error: Cask 'gone' is not installed.\n"
+        "Error: strict: Failure while executing; `/usr/bin/false` exited with 1.\n"
     );
-    assert!(results[1].is_ok(), "{:?}", results[1]);
+    assert!(said(&results[1])
+        .1
+        .ends_with("sudo: a password is required\n"));
+}
+
+#[test]
+fn losing_sight_of_one_brew_still_tells_what_it_finished() {
+    let lost = Err(EngineError::Execution(ExecutionError::Io("read".into())));
+    let script = brew(|line| match line {
+        "w:brew upgrade --cask -- first second" => Err(ExecutionError::Io("read".into())),
+        "brew info --json=v2 --cask -- first second" => {
+            ok(&cask_versions(&[("first", "2", "2"), ("second", "1", "2")]))
+        }
+        other => panic!("unexpected {other}"),
+    });
+    let results = cask_ready(&script)
+        .execute_joined(
+            &["first", "second"].map(cask_update),
+            &Cancellation::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(results[0].is_ok(), "{:?}", results[0]);
+    assert_eq!(results[1], lost);
 }
 
 #[test]
@@ -1940,6 +2102,7 @@ fn casks_are_tried_on_their_own_when_brew_cant_say_how_they_went() {
             "w:brew upgrade --cask -- first second" => brew_failed("", "Error: stopped\n"),
             "brew info --json=v2 --cask -- first second" => look.clone(),
             "w:brew upgrade --cask -- first" => ok(""),
+            "brew info --json=v2 --cask -- first" => look.clone(),
             "w:brew upgrade --cask -- second" => brew_failed("", "Error: its own\n"),
             other => panic!("unexpected {other}"),
         });
@@ -1971,6 +2134,9 @@ fn a_cancel_while_one_brew_runs_keeps_what_it_finished() {
     // Cancelled while it ran, and everything finished.
     let script = brew(move |line| match line {
         "w:brew upgrade --cask -- first second" => deferred(ok("")),
+        "brew info --json=v2 --cask -- first second" => {
+            ok(&cask_versions(&[("first", "2", "2"), ("second", "2", "2")]))
+        }
         other => panic!("unexpected {other}"),
     });
     let results = cask_ready(&script)

@@ -1226,6 +1226,9 @@ fn paint_batch_state(ui: &Ui, icon: Rect, state: model::RowState, palette: &Pale
             theme::paint_icon(ui.painter(), mark, "clock", alpha(palette.muted, 0.8))
         }
         model::RowState::Running => paint_spinner(ui, mark, palette.accent),
+        model::RowState::Passed => {
+            theme::paint_icon(ui.painter(), mark, "installed", alpha(palette.muted, 0.8))
+        }
         model::RowState::Done => {
             theme::paint_icon(ui.painter(), mark, "installed", palette.success)
         }

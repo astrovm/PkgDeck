@@ -826,7 +826,14 @@ impl ProgressState {
             "action": current.map_or("", operation_kind),
             "current": item.or_else(|| current.and_then(package_target)).map(target_row),
             "running": running,
-            "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
+            // A check mark only for what's known to have worked.
+            "finished": self.succeeded.iter().map(target_row).collect::<Vec<_>>(),
+            "passed": self
+                .finished
+                .iter()
+                .filter(|id| !self.succeeded.contains(id))
+                .map(target_row)
+                .collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
     }
