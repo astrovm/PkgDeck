@@ -5550,7 +5550,7 @@ fn apt_local_archive_uses_exact_path_and_revalidates_before_install() {
     std::fs::write(control.join("control"), "Package: pkgdeck-synthetic\nVersion: 1.0\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic fixture\n").unwrap();
     let archive = base.join("Synthetic ñ package.deb");
     assert!(std::process::Command::new("dpkg-deb")
-        .arg("--build")
+        .args(["--build", "--root-owner-group"])
         .arg(base.join("staging"))
         .arg(&archive)
         .status()

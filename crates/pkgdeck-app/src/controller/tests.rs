@@ -387,7 +387,7 @@ fn opening_local_deb_reads_metadata_without_installing_it() {
         .unwrap();
     let archive = base.join("Synthetic package.deb");
     let status = std::process::Command::new("dpkg-deb")
-        .arg("--build")
+        .args(["--build", "--root-owner-group"])
         .arg(base.join("staging"))
         .arg(&archive)
         .status()
