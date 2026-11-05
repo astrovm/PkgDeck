@@ -1189,19 +1189,7 @@ impl<T: Transport> DevTool<T> {
         let id = self.kind.id();
         let output = bytes(id, self.call(&["list", "--json"], cancel, false)?)?;
         let list: PipxList = serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
-        let outdated: std::collections::BTreeMap<String, String> =
-            match self.call(&["list", "--outdated", "--json"], cancel, false) {
-                Ok(result) => serde_json::from_slice(&bytes(id, result)?)
-                    .map(|list: PipxOutdatedList| {
-                        list.data
-                            .packages
-                            .into_iter()
-                            .map(|entry| (entry.package, entry.latest_version))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                Err(_) => std::collections::BTreeMap::new(),
-            };
+        let outdated = self.pipx_outdated(&list.venvs, cancel);
         list.venvs
             .into_values()
             .map(|venv| {
@@ -1218,6 +1206,43 @@ impl<T: Transport> DevTool<T> {
                     main.package_version,
                     Some(candidate),
                 )
+            })
+            .collect()
+    }
+    /// The newest version of each tool. Older pipx (Ubuntu 26.04 has 1.8.0)
+    /// has no `list --outdated`, but each tool's own pip can say. An answer
+    /// that doesn't come leaves the tool looking current, as for other sources.
+    fn pipx_outdated(
+        &self,
+        venvs: &std::collections::BTreeMap<String, PipxVenv>,
+        cancel: &Cancellation,
+    ) -> std::collections::BTreeMap<String, String> {
+        let id = self.kind.id();
+        let read = |args: &[&str]| {
+            let result = self.call(args, cancel, false).ok()?;
+            bytes(id, result).ok()
+        };
+        let all = read(&["list", "--outdated", "--json"])
+            .and_then(|output| serde_json::from_slice::<PipxOutdatedList>(&output).ok());
+        if let Some(all) = all {
+            return all
+                .data
+                .packages
+                .into_iter()
+                .map(|entry| (entry.package, entry.latest_version))
+                .collect();
+        }
+        let project = |name: &str| name.to_ascii_lowercase().replace(['_', '.'], "-");
+        venvs
+            .iter()
+            .filter_map(|(venv, tool)| {
+                let main = &tool.metadata.main_package.package;
+                let args = ["runpip", venv, "list", "--outdated", "--format=json"];
+                let entries: Vec<PipOutdated> = serde_json::from_slice(&read(&args)?).ok()?;
+                let entry = entries
+                    .into_iter()
+                    .find(|entry| project(&entry.name) == project(main))?;
+                Some((main.clone(), entry.latest_version))
             })
             .collect()
     }

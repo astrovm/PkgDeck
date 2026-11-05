@@ -2276,6 +2276,17 @@ impl Transport for DevFixture {
                 }
             }
             ("pipx", Some("list")) => self.list_result(),
+            ("pipx", Some("runpip")) => match &self.pip_outdated {
+                Some(json) => Ok(output(json)),
+                None => Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })),
+            },
             ("uv", Some("tool")) if rendered.get(1).map(String::as_str) == Some("dir") => {
                 match &self.root {
                     Some(root) => Ok(output(format!("{root}\n"))),
@@ -3950,6 +3961,63 @@ fn pip_requires_an_explicit_virtual_environment() {
     });
     assert!(cold.installed(&cancel).is_err());
     assert!(cold.search("tool", &cancel).is_err());
+}
+
+#[test]
+fn pipx_without_list_outdated_still_reports_updates() {
+    let runpip: Vec<String> = ["runpip", "cowsay", "list", "--outdated", "--format=json"]
+        .map(String::from)
+        .into();
+    let read = |pip_outdated: Option<&str>| {
+        let fixture = DevFixture {
+            home: Some("/home/test".into()),
+            version: "1.8.0\n".into(),
+            list: PIPX_LIST.into(),
+            pip_outdated: pip_outdated.map(Into::into),
+            ..DevFixture::default()
+        };
+        let mut backend = DevTool::pipx(fixture.clone());
+        let cancel = Cancellation::default();
+        backend.detect(&cancel).unwrap();
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        (installed.into_iter().next().unwrap(), fixture.calls())
+    };
+    // pip names the project however it's spelled, and lists dependencies too.
+    let (tool, calls) = read(Some(
+        r#"[{"name": "wcwidth", "version": "1", "latest_version": "2"},
+            {"name": "CowSay", "version": "6.0", "latest_version": "6.1"}]"#,
+    ));
+    assert_eq!(tool.update, UpdateAvailability::Available);
+    assert_eq!(tool.candidate_version.as_deref(), Some("6.1"));
+    assert!(
+        calls.iter().any(|(_, args, _)| *args == runpip),
+        "{calls:?}"
+    );
+    // Only a dependency is behind: pipx wouldn't update this tool for it.
+    let (tool, _) = read(Some(
+        r#"[{"name": "wcwidth", "version": "1", "latest_version": "2"}]"#,
+    ));
+    assert_eq!(tool.update, UpdateAvailability::Current);
+    // No answer at all still lists what's installed.
+    for answer in [None, Some("not json")] {
+        let (tool, _) = read(answer);
+        assert_eq!(tool.update, UpdateAvailability::Current);
+        assert_eq!(tool.installed_version.as_deref(), Some("6.0"));
+    }
+    // A pipx that can answer for everything at once isn't asked per tool.
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "1.18.13\n".into(),
+        list: PIPX_LIST.into(),
+        outdated: Some(PIPX_OUTDATED.into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::pipx(fixture.clone());
+    let cancel = Cancellation::default();
+    backend.detect(&cancel).unwrap();
+    backend.installed(&cancel).unwrap();
+    assert!(fixture.calls().iter().all(|(_, args, _)| *args != runpip));
 }
 
 #[test]

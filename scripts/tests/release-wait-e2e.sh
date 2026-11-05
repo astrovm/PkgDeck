@@ -20,7 +20,7 @@ if [[ ${2:-} != --as-user ]]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl unzip xz-utils jq python3-venv ruby build-essential >/dev/null
+        ca-certificates curl unzip xz-utils jq python3-venv pipx ruby build-essential >/dev/null
     # Ubuntu's npm is too old to limit release age, or to update itself.
     node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
     curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
@@ -38,10 +38,9 @@ npm config set ignore-scripts true
 curl -fsSL https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
 curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >/dev/null 2>&1
 curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
-# Ubuntu's pipx is too old to report updates.
+# Ubuntu's pipx has no `list --outdated`. Check it and a current one.
 python3 -m venv "$HOME/pipx-tool"
 "$HOME/pipx-tool/bin/pip" install -q pipx
-ln -s "$HOME/pipx-tool/bin/pipx" "$HOME/.local/bin/pipx"
 
 failures=0
 check() { # what expected actual
@@ -129,24 +128,33 @@ echo "== pip"
 python3 -m venv "$HOME/venv"
 "$HOME/venv/bin/pip" install -q -U pip
 "$HOME/venv/bin/pip" install -q ruff==0.16.0
-(
-    export VIRTUAL_ENV="$HOME/venv"
-    limited pip ruff
-)
+# Not in a subshell: what fails there wouldn't count.
+export VIRTUAL_ENV="$HOME/venv"
+limited pip ruff
+unset VIRTUAL_ENV
 
 # Sources PkgDeck holds back itself. pipx and Bun also get the limit when they
 # install, so naming one stays within it.
-echo "== pipx"
-pipx install -q ruff==0.16.0 >/dev/null 2>&1
-pkd release-wait 30d >/dev/null
-check "pipx: ready before anything" 0 "$(ready_count pipx)"
-check "pipx: waits" 1 "$(waiting_count pipx)"
-pkd --from pipx --yes upgrade >/dev/null 2>&1 || true
-check "pipx: upgrade leaves it" 0.16.0 "$(installed pipx ruff)"
-pkd --from pipx --yes upgrade ruff >/dev/null 2>&1 || true
-differs "pipx: by name stays within the limit" "$(installed pipx ruff)" "$(field pipx ruff candidate_version)"
-pkd release-wait off >/dev/null
-pipx uninstall -q ruff >/dev/null 2>&1 || true
+pipx_case() { # label
+    echo "== $1"
+    pipx install -q ruff==0.16.0 >/dev/null 2>&1
+    pkd release-wait 30d >/dev/null
+    check "pipx: ready before anything" 0 "$(ready_count pipx)"
+    check "pipx: waits" 1 "$(waiting_count pipx)"
+    pkd --from pipx --yes upgrade >/dev/null 2>&1 || true
+    check "pipx: upgrade leaves it" 0.16.0 "$(installed pipx ruff)"
+    pkd --from pipx --yes upgrade ruff >/dev/null 2>&1 || true
+    differs "pipx: by name stays within the limit" "$(installed pipx ruff)" "$(field pipx ruff candidate_version)"
+    pkd release-wait off >/dev/null
+    pkd --from pipx --yes upgrade >/dev/null 2>&1 || true
+    check "pipx: updates with the wait off" 0 "$(ready_count pipx)"
+    pipx uninstall -q ruff >/dev/null 2>&1 || true
+}
+pipx_case "pipx $(pipx --version)"
+system_path=$PATH
+export PATH="$HOME/pipx-tool/bin:$PATH"
+pipx_case "pipx $(pipx --version)"
+export PATH=$system_path
 
 echo "== Bun"
 bun add --global --silent @anthropic-ai/claude-code@2.1.280 >/dev/null 2>&1
