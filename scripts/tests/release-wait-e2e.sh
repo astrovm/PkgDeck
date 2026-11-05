@@ -20,18 +20,24 @@ if [[ ${2:-} != --as-user ]]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl unzip jq nodejs npm python3-venv pipx ruby build-essential >/dev/null
-    npm install -g --silent npm@latest pnpm@latest bun@latest >/dev/null
+        ca-certificates curl unzip xz-utils jq python3-venv pipx ruby build-essential >/dev/null
+    # Ubuntu's npm is too old to limit release age, or to update itself.
+    node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
+    curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
+        tar -xJ --strip-components=1 -C /usr/local
+    npm install -g npm@latest pnpm@latest
+    npm --version
     useradd -m tester
     exec runuser -u tester -- bash /opt/e2e.sh --inside --as-user
 fi
 
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:$PATH"
-export PNPM_HOME="$HOME/.local/share/pnpm" PATH="$HOME/.local/share/pnpm:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
+export PNPM_HOME="$HOME/.local/share/pnpm" PATH="$HOME/.local/share/pnpm/bin:$HOME/.local/share/pnpm:$PATH"
 npm config set prefix "$HOME/.npm-global"
 npm config set ignore-scripts true
 curl -fsSL https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
 curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >/dev/null 2>&1
+curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
 
 failures=0
 check() { # what expected actual

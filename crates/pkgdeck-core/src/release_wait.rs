@@ -537,7 +537,8 @@ mod tests {
             self.fake.search(query, cancel)
         }
         fn set_release_age(&mut self, hours: u32) {
-            self.hours.store(hours, std::sync::atomic::Ordering::Relaxed);
+            self.hours
+                .store(hours, std::sync::atomic::Ordering::Relaxed);
         }
         fn limits_release_age(&mut self, _: &crate::process::Cancellation) -> bool {
             self.limits

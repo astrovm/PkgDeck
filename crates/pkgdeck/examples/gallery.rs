@@ -590,6 +590,35 @@ fn main() {
             app.details = details;
         });
     }
+    // Wait for new releases: the settings, and a clock on what's too new.
+    use pkgdeck::ui::SettingsTab;
+    for (name, size, dark, enabled, text_size) in [
+        ("release-wait-off", [1180.0, 1000.0], false, false, None),
+        ("release-wait-on", [1180.0, 1320.0], false, true, None),
+        ("release-wait-on-dark", [1180.0, 1320.0], true, true, None),
+        (
+            "release-wait-narrow-largest",
+            [620.0, 1800.0],
+            false,
+            true,
+            Some(pkgdeck::settings::TextSize::Larger),
+        ),
+    ] {
+        render(name, size, dark, |app| {
+            offline(app, Page::Settings);
+            app.ui.settings_tab = SettingsTab::Updates;
+            app.release_wait.enabled = enabled;
+            app.release_wait.hours = 72;
+            app.release_wait.skipped = vec!["cargo".into()];
+            if let Some(text_size) = text_size {
+                app.settings.text_size = text_size;
+            }
+        });
+    }
+    render("release-wait-row", [1180.0, 640.0], false, |app| {
+        app.rows[0].waiting_until = Some(pkgdeck_core::release_wait::now() + 20 * 3600);
+        offline(app, Page::Updates);
+    });
     render("updates", [1180.0, 780.0], false, |app| {
         offline(app, Page::Updates);
         let rows: Vec<model::Row> = app
