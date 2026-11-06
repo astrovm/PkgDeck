@@ -12,9 +12,12 @@
   <releases>
     <release version="0.15.0" date="2026-11-05">
       <description>
-        <p>Wait before installing brand new releases, and choose System or User for any Flatpak you open.</p>
+        <p>Wait before installing brand new releases, and choose System or User for any Flatpak.</p>
         <ul>
           <li>Wait for new releases, off by default, holds back versions published too recently, for the time you pick</li>
+          <li>Updates still waiting show a clock instead of a checkbox, and only Update now on their own row installs them</li>
+          <li>Search lets you choose System or User even when only one has the app's repository: installing in the other adds it, and the review says so</li>
+          <li>An app installed in one place and offered in the other stays one row in Search, with the switch</li>
           <li>The page of an opened Flatpak file or link has a System and User switch, and the next one starts with your last choice</li>
           <li>.flatpak files can install for the whole system, not only for you</li>
           <li>A .flatpak file whose app is already installed offers Update, Reinstall or Downgrade beside Launch, also when it's installed for the system</li>

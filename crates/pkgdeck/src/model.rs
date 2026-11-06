@@ -4,6 +4,7 @@
 //! directly.
 
 use pkgdeck_core::backends;
+use pkgdeck_core::package::FLATPAK_NEW_REMOTE;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -1482,6 +1483,21 @@ fn sort_key(row: &Row, column: Column) -> String {
     }
 }
 
+/// Which app and branch a Flatpak row is, whatever its scope. An offer's
+/// reference leaves out the `app/` an installed copy's has, and may say it
+/// adds a repository.
+fn flatpak_app(row: &Row) -> Option<(&str, &str, &str)> {
+    (row.source == "flatpak" && row.is_package()).then(|| {
+        let reference = row.reference.as_deref().unwrap_or_default();
+        let reference = reference
+            .strip_prefix(FLATPAK_NEW_REMOTE)
+            .or_else(|| reference.strip_prefix("app/"))
+            .or_else(|| reference.strip_prefix("runtime/"))
+            .unwrap_or(reference);
+        (row.name.as_str(), row.architecture.as_str(), reference)
+    })
+}
+
 /// The Flatpak group a row merges into: the same app from the same remote
 /// and branch, in another scope.
 pub fn flatpak_group(row: &Row) -> Option<String> {
@@ -1490,10 +1506,71 @@ pub fn flatpak_group(row: &Row) -> Option<String> {
             row.name,
             row.architecture,
             row.remote.clone().unwrap_or_default(),
-            row.reference.clone().unwrap_or_default()
+            row.reference
+                .as_deref()
+                .map(|reference| reference.trim_start_matches(FLATPAK_NEW_REMOTE))
+                .unwrap_or_default()
         ])
         .to_string()
     })
+}
+
+/// The group of a row as shown. Merged with an offer, an installed copy's is
+/// the offer's, as [`flatpak_groups`] decides, and it's the same whichever
+/// of them is chosen or goes away.
+pub fn shown_flatpak_group(rows: &[Row], item: &Item) -> Option<String> {
+    item.variants
+        .iter()
+        .filter(|&&raw| {
+            rows[raw]
+                .remote
+                .as_deref()
+                .is_some_and(|remote| !remote.is_empty())
+        })
+        .find_map(|&raw| flatpak_group(&rows[raw]))
+        .or_else(|| flatpak_group(&rows[item.raw]))
+}
+
+/// The group each row of `items` merges into. An installed copy doesn't say
+/// which repository it came from, so with nothing to merge with, it joins the
+/// offer for the other scope, when there's just the one.
+fn flatpak_groups(rows: &[Row], items: &[Item]) -> HashMap<usize, String> {
+    let mut groups: HashMap<usize, String> = HashMap::new();
+    let mut apps: HashMap<(&str, &str, &str), Vec<usize>> = HashMap::new();
+    for item in items {
+        let row = &rows[item.raw];
+        if let (Some(group), Some(app)) = (flatpak_group(row), flatpak_app(row)) {
+            groups.insert(item.raw, group);
+            apps.entry(app).or_default().push(item.raw);
+        }
+    }
+    for copies in apps.values() {
+        let other_scope =
+            |raw: usize, of: usize| rows[raw].is_flatpak_system() != rows[of].is_flatpak_system();
+        let joins: Vec<(usize, String)> = copies
+            .iter()
+            .filter(|&&raw| rows[raw].remote.as_deref().unwrap_or_default().is_empty())
+            .filter(|&&raw| {
+                !copies
+                    .iter()
+                    .any(|&copy| other_scope(copy, raw) && groups[&copy] == groups[&raw])
+            })
+            .filter_map(|&raw| {
+                let offers: HashSet<&String> = copies
+                    .iter()
+                    .filter(|&&copy| other_scope(copy, raw))
+                    .map(|copy| &groups[copy])
+                    .collect();
+                let mut offers = offers.into_iter();
+                match (offers.next(), offers.next()) {
+                    (Some(offer), None) => Some((raw, offer.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        groups.extend(joins);
+    }
+    groups
 }
 
 /// Sorts `kept` by `key`, then by name and source. Each key is worked out
@@ -1599,39 +1676,49 @@ fn merge_flatpak_scopes(
     items: Vec<Item>,
     choices: Option<&HashMap<String, String>>,
 ) -> Vec<Item> {
-    let mut members: HashMap<String, Vec<usize>> = HashMap::new();
+    let groups = flatpak_groups(rows, &items);
+    let mut members: HashMap<&String, Vec<usize>> = HashMap::new();
     for item in &items {
-        if let Some(group) = flatpak_group(&rows[item.raw]) {
+        if let Some(group) = groups.get(&item.raw) {
             members.entry(group).or_default().push(item.raw);
         }
     }
-    let mut done: HashSet<String> = HashSet::new();
+    let mut done: HashSet<&String> = HashSet::new();
     let mut merged = vec![];
     for item in items {
-        let Some(group) = flatpak_group(&rows[item.raw]) else {
+        let Some(group) = groups.get(&item.raw) else {
             merged.push(item);
             continue;
         };
-        let copies = &members[&group];
+        let copies = &members[group];
         let mixed = copies.iter().any(|&raw| rows[raw].is_flatpak_system())
             && copies.iter().any(|&raw| !rows[raw].is_flatpak_system());
         if !mixed {
             merged.push(item);
             continue;
         }
-        if !done.insert(group.clone()) {
+        if !done.insert(group) {
             continue;
         }
         let mut variants = copies.clone();
         variants.sort_by_key(|&raw| !rows[raw].is_flatpak_system());
         let chosen = choices
-            .and_then(|choices| choices.get(&group))
+            .and_then(|choices| choices.get(group))
             .and_then(|identity| {
                 variants
                     .iter()
                     .find(|&&raw| rows[raw].identity() == *identity)
             })
             .or_else(|| variants.iter().find(|&&raw| rows[raw].is_installed()))
+            // What's set up already before what needs a new repository.
+            .or_else(|| {
+                variants.iter().find(|&&raw| {
+                    !rows[raw]
+                        .reference
+                        .as_deref()
+                        .is_some_and(|reference| reference.starts_with(FLATPAK_NEW_REMOTE))
+                })
+            })
             .copied()
             .unwrap_or(variants[0]);
         merged.push(Item {

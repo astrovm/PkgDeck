@@ -367,14 +367,16 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     if let Some(s) = cols.summary {
         titles.push((Column::Summary, "SUMMARY", s));
     }
-    if let Some(tick) = cols.tick {
-        let rows = app.shown_rows();
-        let selectable: Vec<_> = app
-            .items
-            .iter()
-            .filter_map(|i| rows.get(i.raw))
-            .filter(|row| app.select_all_checks(row))
-            .collect();
+    let rows = app.shown_rows();
+    let selectable: Vec<_> = app
+        .items
+        .iter()
+        .filter_map(|i| rows.get(i.raw))
+        .filter(|row| app.select_all_checks(row))
+        .collect();
+    // With nothing to select, such as when everything's still waiting,
+    // there's no checkbox to select it with.
+    if let Some(tick) = cols.tick.filter(|_| !selectable.is_empty()) {
         let all_checked =
             !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
         let none_checked = selectable.iter().all(|row| !app.row_checked(row));
@@ -394,7 +396,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         response.widget_info(|| {
             let mut info = egui::WidgetInfo::selected(
                 egui::Role::CheckBox,
-                !selectable.is_empty(),
+                true,
                 all_checked,
                 "Select all tasks",
             );
@@ -837,8 +839,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let held = (app.page == Page::Updates && row.has_update())
         .then(|| app.held.iter().find(|held| held.matches(&row)).cloned())
         .flatten();
-    // A release too new to install yet. What's held shows first.
-    let waiting = row.waiting_until().filter(|_| held.is_none());
+    // A release too new to install yet.
+    let waiting = row.waiting_until();
     let mut rect = rect;
     if let Some(group) = &item.group {
         let heading = Rect::from_min_size(
@@ -937,8 +939,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     let compact = width == Width::Compact;
 
-    // Checkboxes on Updates and Clean.
-    if let Some(tick) = cols.tick {
+    // Checkboxes on Updates and Clean. What's still waiting isn't updated
+    // with the others, so it has a clock there instead.
+    if let (Some(tick), Some(until)) = (cols.tick, waiting) {
+        let mark = Rect::from_center_size(tick.center(), Vec2::splat(18.0));
+        waiting_mark(ui, until, mark, id);
+    } else if let Some(tick) = cols.tick {
         let enabled = app.page != Page::Clean || row.batch_cleanable();
         let checked = enabled && app.row_checked(&row);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
@@ -1163,11 +1169,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     // What holds an update back goes beside its button, in the room every
-    // row keeps there, so the versions stay lined up.
+    // row keeps there, so the versions stay lined up. Without a checkbox to
+    // replace, so does the clock.
     let mark = status_mark(x, rect.center().y);
     if let Some(held) = &held {
         held_mark(ui, held, mark, id);
-    } else if let Some(until) = waiting {
+    } else if let Some(until) = waiting.filter(|_| cols.tick.is_none()) {
         waiting_mark(ui, until, mark, id);
     }
     // Divider.
@@ -2129,6 +2136,10 @@ mod grid_tests {
                 found.first().copied().expect("the version was drawn")
             };
             assert_eq!(at("2.5.0"), at("3.5.0"), "{card}");
+            // It has the clock in place of a checkbox: nothing to select.
+            assert!(harness.query_by_label("Select waiting").is_none());
+            assert!(harness.query_by_label("Select ready").is_some());
+            assert!(harness.query_by_label("Select all tasks").is_some());
             // The arrow sits in the middle of its row, as the clock does.
             let arrow = harness.get_by_label("Update ready from APT").rect();
             let row = harness
@@ -2138,6 +2149,13 @@ mod grid_tests {
                 (arrow.center().y - row.center().y).abs() < 0.25,
                 "{card}: arrow {arrow:?}, row {row:?}"
             );
+            // With everything waiting, so does the list's own checkbox.
+            let state = harness.state_mut();
+            state.1.rows.retain(|row| row.name == "waiting");
+            state.1.invalidate();
+            state.1.refresh_items();
+            harness.run_steps(3);
+            assert!(harness.query_by_label("Select all tasks").is_none());
         }
     }
 }

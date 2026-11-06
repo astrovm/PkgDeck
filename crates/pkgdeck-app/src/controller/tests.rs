@@ -764,6 +764,25 @@ fn previews_say_when_a_change_needs_a_second_look() {
     };
     // Installing or updating just that app runs without asking.
     assert_eq!(preview(&install, None)["review"], false);
+    // Adding a repository for it doesn't, and has no Undo: taking the app
+    // away again wouldn't take the repository with it.
+    let mut new_remote = synthetic_package("flatpak", "Synthetic");
+    new_remote.id.remote = Some("only-here".into());
+    new_remote.id.scope = Scope::User { uid: 1 };
+    new_remote.id.reference = Some(format!(
+        "{}org.example.App/x86_64/stable",
+        pkgdeck_core::package::FLATPAK_NEW_REMOTE
+    ));
+    let adding = Operation::Install(new_remote.id.clone());
+    let reviewed = confirmation_preview(&adding, &[new_remote], &[], None);
+    assert_eq!(reviewed["review"], true);
+    // In the notes, which are what an app's page shows of it.
+    assert_eq!(
+        reviewed["notes"][0],
+        "Also adds the only-here repository to User."
+    );
+    assert_eq!(undo_action(&adding), None);
+    assert_eq!(undo_action(&install), Some("remove"));
     assert_eq!(
         preview(&Operation::Upgrade(package.id.clone()), None)["review"],
         false

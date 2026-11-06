@@ -400,6 +400,11 @@ pub trait Transport: Send {
     fn system_flatpak_writable(&self) -> bool {
         true
     }
+    /// The keys a Flatpak repository's signatures are checked with, or
+    /// `None` if they can't be read from here.
+    fn flatpak_remote_keys(&self, _system: bool, _remote: &str) -> Option<Vec<u8>> {
+        None
+    }
     fn repository_editor_available(&self) -> bool {
         false
     }

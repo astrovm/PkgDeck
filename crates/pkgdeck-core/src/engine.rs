@@ -269,6 +269,10 @@ pub trait Backend: Send {
     /// How many hours old a new release must be before this source installs
     /// it, for managers that can limit that themselves. 0 is no limit.
     fn set_release_age(&mut self, _hours: u32) {}
+    /// Offer what a search finds wherever it could go, not only where it's
+    /// set up already. Only someone choosing from a list wants that: a name
+    /// typed into `pkd install` must still find one thing.
+    fn offer_everywhere(&mut self) {}
     /// Whether this source's own list leaves out releases that are too new,
     /// so PkgDeck has nothing to hold back. Checked only while a wait is on.
     fn limits_release_age(&mut self, _cancel: &Cancellation) -> bool {
@@ -624,6 +628,12 @@ impl Engine {
             backend.set_release_age(hours);
         }
         self.release_watch = Some(watch);
+    }
+    /// See [`Backend::offer_everywhere`].
+    pub fn offer_everywhere(&mut self) {
+        for backend in self.backends.values_mut() {
+            backend.offer_everywhere();
+        }
     }
     /// Someone is here to answer one password dialog for all of a batch's
     /// cask updates: run them with one `brew` (see

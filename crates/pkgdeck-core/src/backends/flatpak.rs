@@ -1,5 +1,6 @@
 //! Flatpak apps and runtimes, user and system installations.
 use super::*;
+use crate::package::FLATPAK_NEW_REMOTE;
 
 pub struct Flatpak<T = NativeTransport> {
     pub(super) transport: T,
@@ -9,6 +10,82 @@ pub struct Flatpak<T = NativeTransport> {
     /// Set during an update check, which asks the remotes again. Other
     /// listings, such as Installed, use the summaries Flatpak already has.
     update_check: Option<u64>,
+    /// Search also offers apps in the installation without their repository.
+    offers_everywhere: bool,
+}
+/// A repository as `flatpak remotes` describes it.
+#[derive(Debug, Eq, PartialEq)]
+struct Remote {
+    name: String,
+    title: String,
+    url: String,
+    collection: String,
+    /// Copying it elsewhere keeps what it promises: signed, over HTTPS, with
+    /// nothing limiting what it offers. A filter or subset wouldn't survive
+    /// the copy, and that copy would offer more than this one.
+    copyable: bool,
+}
+impl Remote {
+    /// One line of `flatpak remotes`. Flatpak prints `-` for an empty value
+    /// and may leave off a last one.
+    fn parse(line: &str, has_subset: bool) -> Option<Self> {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let field = |index: usize| {
+            fields
+                .get(index)
+                .map(|value| value.trim())
+                .filter(|value| *value != "-")
+                .unwrap_or_default()
+        };
+        let name = field(0);
+        if !flatpak_id(name) {
+            return None;
+        }
+        let (subset, options) = if has_subset {
+            (field(5), field(6))
+        } else {
+            ("", field(5))
+        };
+        let limited = options
+            .split(',')
+            .any(|option| matches!(option.trim(), "disabled" | "no-gpg-verify" | "no-enumerate"));
+        let url = field(2);
+        Some(Self {
+            name: name.to_owned(),
+            title: field(1).to_owned(),
+            url: url.to_owned(),
+            collection: field(3).to_owned(),
+            copyable: url.starts_with("https://")
+                && field(4).is_empty()
+                && subset.is_empty()
+                && !limited,
+        })
+    }
+    fn same_place(&self, other: &Self) -> bool {
+        self.name == other.name || self.url.trim_end_matches('/') == other.url.trim_end_matches('/')
+    }
+    /// What Flatpak needs to add this repository and install one thing from
+    /// it, in one command and so with one password prompt.
+    fn flatpakref(&self, reference: (&str, &str), runtime: bool, keys: &[u8]) -> String {
+        use base64::Engine as _;
+        let (name, branch) = reference;
+        // Lines are all that separates these values.
+        let title: String = self
+            .title
+            .chars()
+            .filter(|c| !c.is_control() && *c != '\\')
+            .collect();
+        let mut text = format!(
+            "[Flatpak Ref]\nName={name}\nBranch={branch}\nTitle={title}\nUrl={}\nIsRuntime={runtime}\nGPGKey={}\nSuggestRemoteName={}\n",
+            self.url,
+            base64::engine::general_purpose::STANDARD.encode(keys),
+            self.name,
+        );
+        if !self.collection.is_empty() {
+            text.push_str(&format!("CollectionID={}\n", self.collection));
+        }
+        text
+    }
 }
 fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
     let mut parts = reference.split('/');
@@ -22,6 +99,7 @@ impl<T: Transport> Flatpak<T> {
             transport,
             skipped: vec![],
             update_check: None,
+            offers_everywhere: false,
         }
     }
 }
@@ -105,6 +183,287 @@ impl<T: Transport + Sync> Flatpak<T> {
         system: bool,
     ) -> Result<Vec<u8>, EngineError> {
         bytes("flatpak", self.call(args, cancel, false, system)?)
+    }
+    /// What a search finds, and with `everywhere`, also what could be
+    /// installed where its repository isn't set up yet.
+    fn search_offers(
+        &mut self,
+        query: &str,
+        everywhere: bool,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        if query.trim().is_empty() || query.starts_with('-') {
+            return Err(invalid("flatpak", "expected a search term"));
+        }
+        self.skipped.clear();
+        if flatpak_reference(query).is_some() {
+            return self.installed(cancel).map(|packages| {
+                packages
+                    .into_iter()
+                    .filter(|package| package.id.reference.as_deref() == Some(query))
+                    .collect()
+            });
+        }
+        // Local inventory is enough to choose Install versus Remove. Search
+        // must not fetch remote update metadata just to establish this state.
+        // Both catalogs and both inventories are read at once.
+        let this = &*self;
+        let (user, system, user_installed, system_installed) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| this.search_scope(query, cancel, true));
+            let user_installed = scope.spawn(|| this.list(cancel, false, false, &mut vec![]));
+            let system_installed = scope.spawn(|| this.list(cancel, true, false, &mut vec![]));
+            let user = this.search_scope(query, cancel, false);
+            (
+                user,
+                joined(system),
+                joined(user_installed),
+                joined(system_installed),
+            )
+        });
+        // The user catalog is the primary source; a failing system query
+        // (for example, a machine with no system remotes) must not fail
+        // the whole search when user results are available.
+        let mut result = user?;
+        if let Ok(system) = system {
+            result.extend(system);
+        }
+        // Offers in separate installations remain independently selectable.
+        let mut seen = std::collections::BTreeSet::new();
+        result.retain(|package| seen.insert(package.id.clone()));
+        let mut installed = user_installed?;
+        installed.extend(system_installed?);
+        let elsewhere = if everywhere {
+            self.offers_elsewhere(&result, &installed, cancel)
+        } else {
+            vec![]
+        };
+        let mut offers = Vec::new();
+        for offer in result {
+            let matches: Vec<_> =
+                installed
+                    .iter()
+                    .filter(|package| {
+                        package.id.scope == offer.id.scope
+                            && package.id.reference.as_deref().and_then(|reference| {
+                                reference.split_once('/').map(|(_, rest)| rest)
+                            }) == offer.id.reference.as_deref()
+                    })
+                    .collect();
+            if matches.is_empty() {
+                offers.push(offer);
+            } else {
+                for package in matches {
+                    let mut row = offer.clone();
+                    row.id = package.id.clone();
+                    row.installed_version = package.installed_version.clone();
+                    offers.push(row);
+                }
+            }
+        }
+        offers.dedup_by(|a, b| a.id == b.id);
+        offers.extend(elsewhere);
+        Ok(offers)
+    }
+    /// An installation's repositories, disabled ones too.
+    fn remotes(&self, cancel: &Cancellation, system: bool) -> Result<Vec<Remote>, EngineError> {
+        let prefix = if system { "--system" } else { "--user" };
+        let list = |columns: &str| {
+            self.read(
+                &[prefix, "remotes", "--show-disabled", columns],
+                cancel,
+                system,
+            )
+        };
+        // Flatpak learned about subsets in 1.14. Any older one has none.
+        let (output, has_subset) =
+            match list("--columns=name,title,url,collection,filter,subset,options") {
+                Ok(output) => (output, true),
+                Err(_) => (
+                    list("--columns=name,title,url,collection,filter,options")?,
+                    false,
+                ),
+            };
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .filter_map(|line| Remote::parse(line, has_subset))
+            .collect())
+    }
+    /// Offers for the installation without a found app's repository, as long
+    /// as that repository can be copied there safely.
+    fn offers_elsewhere(
+        &self,
+        found: &[Package],
+        installed: &[Package],
+        cancel: &Cancellation,
+    ) -> Vec<Package> {
+        if found.is_empty() {
+            return vec![];
+        }
+        let (Ok(user), Ok(system)) = (self.remotes(cancel, false), self.remotes(cancel, true))
+        else {
+            return vec![];
+        };
+        let copyable = |from: &[Remote], to: &[Remote], from_system: bool| {
+            from.iter()
+                .filter(|remote| {
+                    remote.copyable
+                        && !to.iter().any(|other| other.same_place(remote))
+                        && self
+                            .transport
+                            .flatpak_remote_keys(from_system, &remote.name)
+                            .is_some()
+                })
+                .map(|remote| remote.name.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let to_user = copyable(&system, &user, true);
+        let to_system = if self.transport.system_flatpak_writable() {
+            copyable(&user, &system, false)
+        } else {
+            Default::default()
+        };
+        let user_scope = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        found
+            .iter()
+            .filter_map(|offer| {
+                let (copies, scope) = if offer.id.scope == Scope::System {
+                    (&to_user, user_scope.clone())
+                } else {
+                    (&to_system, Scope::System)
+                };
+                let reference = offer.id.reference.as_deref()?;
+                let there = installed.iter().any(|package| {
+                    package.id.scope == scope
+                        && package
+                            .id
+                            .reference
+                            .as_deref()
+                            .and_then(|installed| installed.split_once('/'))
+                            .is_some_and(|(_, rest)| rest == reference)
+                });
+                (copies.contains(offer.id.remote.as_deref()?) && !there).then(|| {
+                    let mut twin = offer.clone();
+                    twin.id.scope = scope;
+                    twin.id.reference = Some(format!("{FLATPAK_NEW_REMOTE}{reference}"));
+                    twin
+                })
+            })
+            .collect()
+    }
+    /// Installs what a `.flatpakref` describes.
+    fn install_flatpakref(
+        &self,
+        bytes: &[u8],
+        scope: &str,
+        system: bool,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let temporary = std::env::temp_dir().join(format!(
+            "pkgdeck-flatpakref-{}-{}.flatpakref",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|e| invalid("flatpak", e))?;
+        use std::io::Write;
+        let written = file.write_all(bytes);
+        drop(file);
+        let source = temporary.to_string_lossy().into_owned();
+        let result = written
+            .map_err(|error| invalid("flatpak", error))
+            .and_then(|()| {
+                self.call(
+                    &[
+                        scope,
+                        "install",
+                        "--noninteractive",
+                        "--assumeyes",
+                        "--reinstall",
+                        "--from",
+                        &source,
+                    ],
+                    cancel,
+                    true,
+                    system,
+                )
+            });
+        let _ = std::fs::remove_file(&temporary);
+        result
+    }
+    /// Installs an app into the installation without its repository, adding
+    /// that repository as the other installation has it. It's read again
+    /// here: it may have changed since the search.
+    fn install_with_new_remote(
+        &self,
+        id: &PackageId,
+        reference: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let (name, arch, branch) = flatpak_offer_reference(reference)
+            .filter(|(name, arch, _)| *name == id.name && *arch == id.architecture)
+            .ok_or_else(|| invalid("flatpak", "invalid native ref"))?;
+        let (system, scope) = match id.scope {
+            Scope::System => (true, "--system"),
+            Scope::User { uid } if uid == rustix::process::getuid().as_raw() => (false, "--user"),
+            _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
+        };
+        let remote_name = id
+            .remote
+            .as_deref()
+            .filter(|remote| flatpak_id(remote))
+            .ok_or_else(|| invalid("flatpak", "invalid remote"))?;
+        let source_scope = if system { "--user" } else { "--system" };
+        let unavailable = || {
+            invalid(
+                "flatpak",
+                format!("the {remote_name} repository can't be added here anymore"),
+            )
+        };
+        let remote = self
+            .remotes(cancel, !system)?
+            .into_iter()
+            .find(|remote| remote.name == remote_name && remote.copyable)
+            .ok_or_else(unavailable)?;
+        let keys = self
+            .transport
+            .flatpak_remote_keys(!system, remote_name)
+            .ok_or_else(unavailable)?;
+        // Search results don't say whether they're apps or runtimes.
+        let kind_is = |kind: &str| {
+            let full = format!("{kind}/{name}/{arch}/{branch}");
+            self.read(
+                &[source_scope, "remote-info", remote_name, &full],
+                cancel,
+                !system,
+            )
+            .is_ok()
+        };
+        let runtime = !kind_is("app") && kind_is("runtime");
+        let text = remote.flatpakref((name, branch), runtime, &keys);
+        let result = self.install_flatpakref(text.as_bytes(), scope, system, cancel)?;
+        // Without its catalog, the new repository's apps wouldn't show in
+        // searches here. It's fetched as the user and failing changes nothing.
+        let _ = self.call(
+            &[
+                scope,
+                "update",
+                "--appstream",
+                "--noninteractive",
+                remote_name,
+            ],
+            cancel,
+            true,
+            false,
+        );
+        Ok(result)
     }
     /// Remotes Flatpak made for one bundle or local build: disabled, or
     /// never listed. An unreadable list leaves none out.
@@ -452,72 +811,15 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
     fn arm_update_check(&mut self, token: Option<u64>) {
         self.update_check = token;
     }
+    fn offer_everywhere(&mut self) {
+        self.offers_everywhere = true;
+    }
+    /// An exact name is about what's already set up.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.search_offers(name, false, cancel)
+    }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        if query.trim().is_empty() || query.starts_with('-') {
-            return Err(invalid("flatpak", "expected a search term"));
-        }
-        self.skipped.clear();
-        if flatpak_reference(query).is_some() {
-            return self.installed(cancel).map(|packages| {
-                packages
-                    .into_iter()
-                    .filter(|package| package.id.reference.as_deref() == Some(query))
-                    .collect()
-            });
-        }
-        // Local inventory is enough to choose Install versus Remove. Search
-        // must not fetch remote update metadata just to establish this state.
-        // Both catalogs and both inventories are read at once.
-        let this = &*self;
-        let (user, system, user_installed, system_installed) = std::thread::scope(|scope| {
-            let system = scope.spawn(|| this.search_scope(query, cancel, true));
-            let user_installed = scope.spawn(|| this.list(cancel, false, false, &mut vec![]));
-            let system_installed = scope.spawn(|| this.list(cancel, true, false, &mut vec![]));
-            let user = this.search_scope(query, cancel, false);
-            (
-                user,
-                joined(system),
-                joined(user_installed),
-                joined(system_installed),
-            )
-        });
-        // The user catalog is the primary source; a failing system query
-        // (for example, a machine with no system remotes) must not fail
-        // the whole search when user results are available.
-        let mut result = user?;
-        if let Ok(system) = system {
-            result.extend(system);
-        }
-        // Offers in separate installations remain independently selectable.
-        let mut seen = std::collections::BTreeSet::new();
-        result.retain(|package| seen.insert(package.id.clone()));
-        let mut installed = user_installed?;
-        installed.extend(system_installed?);
-        let mut offers = Vec::new();
-        for offer in result {
-            let matches: Vec<_> =
-                installed
-                    .iter()
-                    .filter(|package| {
-                        package.id.scope == offer.id.scope
-                            && package.id.reference.as_deref().and_then(|reference| {
-                                reference.split_once('/').map(|(_, rest)| rest)
-                            }) == offer.id.reference.as_deref()
-                    })
-                    .collect();
-            if matches.is_empty() {
-                offers.push(offer);
-            } else {
-                for package in matches {
-                    let mut row = offer.clone();
-                    row.id = package.id.clone();
-                    row.installed_version = package.installed_version.clone();
-                    offers.push(row);
-                }
-            }
-        }
-        offers.dedup_by(|a, b| a.id == b.id);
-        Ok(offers)
+        self.search_offers(query, self.offers_everywhere, cancel)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
@@ -690,43 +992,21 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                     "Installing Flatpak reference for {}…",
                     id.name
                 )));
-                let temporary = std::env::temp_dir().join(format!(
-                    "pkgdeck-flatpakref-{}-{}.flatpakref",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ));
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)
-                    .map_err(|e| invalid("flatpak", e))?;
-                use std::io::Write;
-                let written = file.write_all(&bytes);
-                drop(file);
-                let source = temporary.to_string_lossy().into_owned();
-                let result = written
-                    .map_err(|error| invalid("flatpak", error))
-                    .and_then(|()| {
-                        self.call(
-                            &[
-                                scope,
-                                "install",
-                                "--noninteractive",
-                                "--assumeyes",
-                                "--reinstall",
-                                "--from",
-                                &source,
-                            ],
-                            cancel,
-                            true,
-                            system,
-                        )
-                    });
-                let _ = std::fs::remove_file(&temporary);
-                let result = result?;
+                let result = self.install_flatpakref(&bytes, scope, system, cancel)?;
+                return Ok(OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred,
+                });
+            }
+            if let Some(reference) = id
+                .reference
+                .as_deref()
+                .and_then(|value| value.strip_prefix(FLATPAK_NEW_REMOTE))
+            {
+                progress(Progress::Message(format!(
+                    "Adding a repository and installing {}…",
+                    id.name
+                )));
+                let result = self.install_with_new_remote(id, reference, cancel)?;
                 return Ok(OperationOutcome {
                     cancellation_deferred: result.cancellation_deferred,
                 });

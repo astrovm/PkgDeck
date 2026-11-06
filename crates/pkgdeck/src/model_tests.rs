@@ -880,6 +880,114 @@ fn visible_rows_sort_by_column_relevance_or_name() {
 }
 
 #[test]
+fn a_flatpak_with_a_repository_in_one_place_still_gets_both_scopes() {
+    let reference = "org.gimp.GIMP/x86_64/stable";
+    let real = |scope: Value| {
+        row(json!({
+            "name": "org.gimp.GIMP", "source": "flatpak", "remote": "only-here",
+            "candidate": "1", "reference": reference, "scope": scope,
+        }))
+    };
+    let twin = |scope: Value| {
+        row(json!({
+            "name": "org.gimp.GIMP", "source": "flatpak", "remote": "only-here",
+            "candidate": "1", "reference": format!("{FLATPAK_NEW_REMOTE}{reference}"), "scope": scope,
+        }))
+    };
+    let options = ViewOptions {
+        page: Some(Page::Search),
+        ..ViewOptions::default()
+    };
+    let user = json!({"user": {"uid": 1}});
+    // System has it: System stays first and chosen.
+    let rows = vec![twin(user.clone()), real(json!("system"))];
+    let items = visible(&rows, &options);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].variants, vec![1, 0]);
+    assert_eq!(items[0].raw, 1);
+    // Only the user has it: System is listed first, but opening the row
+    // doesn't start on what needs a new repository.
+    let rows = vec![real(user), twin(json!("system"))];
+    let items = visible(&rows, &options);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].variants, vec![1, 0]);
+    assert_eq!(items[0].raw, 0);
+    // Picking it is remembered.
+    let choices = HashMap::from([(flatpak_group(&rows[0]).unwrap(), rows[1].identity())]);
+    let chosen = ViewOptions {
+        scope_choices: Some(&choices),
+        ..options
+    };
+    assert_eq!(visible(&rows, &chosen)[0].raw, 1);
+    // Once installed it stays one row, on the installed copy, with either
+    // kind of offer for the other scope.
+    let installed = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak",
+        "installed": "1", "reference": format!("app/{reference}"),
+        "scope": {"user": {"uid": 1}},
+    }));
+    for offer in [real(json!("system")), twin(json!("system"))] {
+        let group = flatpak_group(&offer);
+        let rows = vec![offer, installed.clone()];
+        let items = visible(&rows, &options);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].raw, 1);
+        // Its choice is kept under the offer's group, whichever is chosen.
+        assert_eq!(shown_flatpak_group(&rows, &items[0]), group);
+        let choices = HashMap::from([(group.unwrap(), rows[0].identity())]);
+        let chosen = ViewOptions {
+            scope_choices: Some(&choices),
+            ..options
+        };
+        assert_eq!(visible(&rows, &chosen)[0].raw, 0);
+    }
+    // An installed copy doesn't say where it came from, so two offers for
+    // the other scope leave it on its own.
+    let no_origin = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak", "installed": "1",
+        "reference": format!("app/{reference}"), "scope": {"user": {"uid": 1}},
+    }));
+    let rows = vec![real(json!("system")), no_origin.clone()];
+    let items = visible(&rows, &options);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].raw, 1);
+    assert_eq!(items[0].variants, vec![0, 1]);
+    let other = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak", "remote": "other",
+        "candidate": "1", "reference": reference, "scope": "system",
+    }));
+    let rows = vec![real(json!("system")), other, no_origin.clone()];
+    assert_eq!(visible(&rows, &options).len(), 3);
+    // Nor does it join an offer for its own scope.
+    let rows = vec![real(json!({"user": {"uid": 1}})), no_origin.clone()];
+    assert_eq!(visible(&rows, &options).len(), 2);
+    // Installed in both, they merge with each other, as ever.
+    let system_copy = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak", "installed": "1",
+        "reference": format!("app/{reference}"), "scope": "system",
+    }));
+    let rows = vec![no_origin, system_copy];
+    let items = visible(&rows, &options);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].raw, 1);
+    // A runtime reads the same, and another branch is another row.
+    let runtime = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak",
+        "installed": "1", "reference": format!("runtime/{reference}"),
+        "scope": {"user": {"uid": 1}},
+    }));
+    let rows = vec![real(json!("system")), runtime];
+    assert_eq!(visible(&rows, &options).len(), 1);
+    let beta = row(json!({
+        "name": "org.gimp.GIMP", "source": "flatpak",
+        "installed": "1", "reference": "app/org.gimp.GIMP/x86_64/beta",
+        "scope": {"user": {"uid": 1}},
+    }));
+    let rows = vec![real(json!("system")), beta];
+    assert_eq!(visible(&rows, &options).len(), 2);
+}
+
+#[test]
 fn flatpaks_in_both_scopes_become_one_row() {
     let system = row(
         json!({"name": "org.gimp.GIMP", "source": "flatpak", "remote": "flathub", "installed": "2"}),

@@ -1616,6 +1616,7 @@ impl Natives {
         cancel: &Cancellation,
     ) -> Result<Engine, EngineError> {
         let mut engine = (self.engine)(sources, sources_view, authorization, cancel)?;
+        engine.offer_everywhere();
         if let Some(watch) = (self.release_watch)() {
             engine.set_release_watch(watch);
         }
@@ -2953,6 +2954,8 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
 /// PkgDeck never installs from, such as the macOS Applications inventory.
 fn undo_action(operation: &Operation) -> Option<&'static str> {
     match operation {
+        // Removing the app wouldn't remove the repository it added.
+        Operation::Install(id) if adds_flatpak_remote(id) => None,
         Operation::Install(id) if !pkgdeck_core::backends::never_installs(&id.backend) => {
             Some("remove")
         }
@@ -2970,6 +2973,11 @@ fn undo_action(operation: &Operation) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+fn adds_flatpak_remote(id: &PackageId) -> bool {
+    id.reference
+        .as_deref()
+        .is_some_and(|reference| reference.starts_with(pkgdeck_core::package::FLATPAK_NEW_REMOTE))
 }
 /// Whether a row of `backend` may offer removal. Sources PkgDeck never
 /// installs from, and inventories, remove only when the source catalog
@@ -3907,6 +3915,23 @@ fn confirmation_preview(
     // What follows the name, source and version is worth saying on an app
     // page too, which already shows those.
     let notes_from = summary.len();
+    // A new repository is worth a second look, whatever the app.
+    if let Operation::Install(id) = operation {
+        if adds_flatpak_remote(id) {
+            review = true;
+            let note = format!(
+                "Also adds the {} repository to {}.",
+                id.remote.as_deref().unwrap_or_default(),
+                if id.scope == Scope::System {
+                    "System"
+                } else {
+                    "User"
+                }
+            );
+            lines.push(note.clone());
+            summary.push(note);
+        }
+    }
     let mut other_changes = Vec::new();
     if let Some(plan) = plan {
         let requested_name = match operation {
