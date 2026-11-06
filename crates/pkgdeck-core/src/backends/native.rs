@@ -526,6 +526,9 @@ mod tests {
         assert_eq!(keys("empty"), None);
         std::fs::write(repo.join("real.trustedkeys.gpg"), b"keys").unwrap();
         assert_eq!(keys("real").as_deref(), Some(&b"keys"[..]));
+        // A keyring with many keys still counts.
+        std::fs::write(repo.join("many.trustedkeys.gpg"), vec![7; 64 * 1024]).unwrap();
+        assert_eq!(keys("many").map(|keys| keys.len()), Some(64 * 1024));
         // The last size it allows, and the first it doesn't.
         let limit = usize::try_from(MAX_REMOTE_KEYS).unwrap();
         std::fs::write(repo.join("full.trustedkeys.gpg"), vec![7; limit]).unwrap();
