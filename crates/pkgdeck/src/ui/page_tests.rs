@@ -494,6 +494,22 @@ fn the_homepage_and_an_appimage_folder_open_on_the_desktop() {
 }
 
 #[test]
+fn a_long_homepage_wraps_inside_the_panel() {
+    let row = row("package");
+    let details = Details {
+        homepage: format!("https://example.invalid/{}", "long-path/".repeat(12)),
+        ..fixture_details(&row)
+    };
+    let width = 500.0;
+    let app = app(&row, Page::Installed);
+    let harness = draw_details(app, row, details, width, false, false, false);
+    let link = harness
+        .get_by_label_contains("example.invalid/long-path")
+        .rect();
+    assert!(link.right() <= width, "{link:?}");
+}
+
+#[test]
 fn package_actions_close_and_wait_for_review_or_a_retained_list() {
     let row = row("package");
     for narrow in [false, true] {
