@@ -14,6 +14,9 @@ use eframe::egui::{
 };
 
 pub const CONTROL_HEIGHT: f32 = 36.0;
+/// Where something installs, in the order every control shows it, each with
+/// whether it means the whole system. **User** comes first: it's the default.
+pub const SCOPE_CHOICES: [(&str, bool); 2] = [("User", false), ("System", true)];
 pub const FEEDBACK: f32 = 0.06;
 pub const REVEAL: f32 = 0.12;
 pub const LAYOUT: f32 = 0.17;

@@ -149,12 +149,16 @@ mod native {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{send, Event};
+    use super::{send, Event, EVENTS};
+    use futures_util::{stream, Stream, StreamExt};
     use ksni::blocking::TrayMethods;
+    use std::collections::HashMap;
+    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Once;
+    use zbus::message::{Message, Type};
     use zbus::wire::{OwnedVariant, Variant};
-    use zbus::Connection;
+    use zbus::{Connection, MatchRule, MessageStream};
 
     pub struct Tray {
         pub icon: Vec<ksni::Icon>,
@@ -210,6 +214,8 @@ mod linux {
     }
     pub type Handle = ksni::blocking::Handle<Tray>;
 
+    const PORTAL: &str = "org.freedesktop.portal.Desktop";
+
     /// What the desktop's settings portal last said about movement.
     static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
@@ -217,50 +223,127 @@ mod linux {
         REDUCE_MOTION.load(Ordering::Relaxed)
     }
 
-    /// Reads the desktop's movement setting every few seconds, off the
-    /// window's thread: the portal can take a while to start.
+    /// Draws another frame, which reads the movement setting again.
+    fn wake_window() {
+        if let Ok(guard) = EVENTS.lock() {
+            if let Some((_, wake)) = guard.as_ref() {
+                wake();
+            }
+        }
+    }
+
+    /// Remembers what the portal said, and wakes the window when it's new.
+    pub(super) fn publish_motion(reduced: bool) {
+        if REDUCE_MOTION.swap(reduced, Ordering::Relaxed) != reduced {
+            wake_window();
+        }
+    }
+
+    /// Follows the desktop's movement setting, off the window's thread: the
+    /// portal can take a while to start. Only a lost bus brings it back here.
     pub fn watch_motion() {
         static STARTED: Once = Once::new();
         STARTED.call_once(|| {
             let _ = std::thread::Builder::new()
                 .name("pkgdeck-motion".into())
-                .spawn(|| {
-                    let mut connection = None;
-                    loop {
-                        if connection.is_none() {
-                            connection = zbus::block_on(Connection::session()).ok();
-                        }
-                        let reduced = connection.as_ref().is_some_and(read_motion);
-                        REDUCE_MOTION.store(reduced, Ordering::Relaxed);
-                        std::thread::sleep(super::MOTION_REFRESH);
+                .spawn(|| loop {
+                    if let Ok(connection) = zbus::block_on(Connection::session()) {
+                        zbus::block_on(follow_motion(&connection, &publish_motion));
                     }
+                    std::thread::sleep(super::MOTION_RECONNECT);
                 });
         });
     }
 
-    fn read_motion(connection: &Connection) -> bool {
-        super::MOTION_KEYS.iter().any(|&(namespace, key)| {
-            read(connection, namespace, key)
-                .and_then(|value| super::reduces_motion(key, &value))
-                .unwrap_or(false)
-        })
+    /// Reads the setting once, then again only when the portal says it
+    /// changed or a new portal starts. Ends when the connection does, or
+    /// right after that read if the bus won't send signals, so the caller's
+    /// next try is what keeps the setting up to date.
+    pub(super) async fn follow_motion(connection: &Connection, publish: &dyn Fn(bool)) {
+        // Listen first, so a change during the read isn't missed.
+        let signals = portal_signals(connection).await;
+        if let Some(reduced) = read_motion(connection).await {
+            publish(reduced);
+        }
+        let Ok(signals) = signals else { return };
+        let mut signals = std::pin::pin!(signals);
+        while let Some(message) = signals.next().await {
+            if !message.is_ok_and(|message| asks_for_a_read(&message)) {
+                continue;
+            }
+            if let Some(reduced) = read_motion(connection).await {
+                publish(reduced);
+            }
+        }
     }
 
-    /// One portal setting. `ReadOne` is newer; `Read` wraps the value
-    /// once more.
-    fn read(connection: &Connection, namespace: &str, key: &str) -> Option<super::Setting> {
-        let reply = ["ReadOne", "Read"].into_iter().find_map(|method| {
-            zbus::block_on(connection.call_method(
-                Some("org.freedesktop.portal.Desktop"),
+    async fn portal_signals(
+        connection: &Connection,
+    ) -> zbus::Result<impl Stream<Item = zbus::Result<Message>>> {
+        let changes = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .interface("org.freedesktop.portal.Settings")
+            .member("SettingChanged")
+            .build()?;
+        let owners = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .interface("org.freedesktop.DBus")
+            .member("NameOwnerChanged")
+            .arg(0, PORTAL)
+            .build()?;
+        let queue = NonZeroUsize::new(16);
+        Ok(stream::select(
+            MessageStream::for_match_rule(changes, connection, queue).await?,
+            MessageStream::for_match_rule(owners, connection, queue).await?,
+        ))
+    }
+
+    /// Whether a signal could change the answer. A change to any key reads
+    /// them all: KDE's animation speed only signals `reduced-motion`, so the
+    /// value it carries can't be trusted to keep the others right.
+    fn asks_for_a_read(message: &Message) -> bool {
+        let header = message.header();
+        let body = message.body();
+        match header.member().map(|member| member.as_str()) {
+            Some("SettingChanged") => body
+                .deserialize::<(String, String, OwnedVariant)>()
+                .is_ok_and(|(namespace, key, _)| {
+                    super::MOTION_KEYS.contains(&(namespace.as_str(), key.as_str()))
+                }),
+            // An empty owner means the portal went away.
+            Some("NameOwnerChanged") => body
+                .deserialize::<(String, String, String)>()
+                .is_ok_and(|(_, _, owner)| !owner.is_empty()),
+            _ => false,
+        }
+    }
+
+    /// Whether the portal asks to keep movement down, or `None` when it
+    /// can't say. `ReadAll` takes one call for every key, and a namespace the
+    /// desktop doesn't know is just missing, where `ReadOne` makes KDE's
+    /// portal log a complaint.
+    async fn read_motion(connection: &Connection) -> Option<bool> {
+        let namespaces = super::MOTION_KEYS.map(|(namespace, _)| namespace);
+        let reply = connection
+            .call_method(
+                Some(PORTAL),
                 "/org/freedesktop/portal/desktop",
                 Some("org.freedesktop.portal.Settings"),
-                method,
-                &(namespace, key),
-            ))
-            .ok()
-        })?;
-        let value: OwnedVariant = reply.body().deserialize().ok()?;
-        setting(value.into())
+                "ReadAll",
+                &(namespaces.as_slice(),),
+            )
+            .await
+            .ok()?;
+        let body = reply.body();
+        let mut values: HashMap<String, HashMap<String, OwnedVariant>> = body.deserialize().ok()?;
+        Some(super::MOTION_KEYS.iter().any(|&(namespace, key)| {
+            values
+                .get_mut(namespace)
+                .and_then(|keys| keys.remove(key))
+                .and_then(|value| setting(value.into()))
+                .and_then(|value| super::reduces_motion(key, &value))
+                .unwrap_or(false)
+        }))
     }
 
     /// A portal value as a [`super::Setting`], unwrapped however deep.
@@ -312,8 +395,15 @@ mod linux {
     }
 }
 
-/// How often the desktop's reduce-motion setting is read again.
+/// How often the desktop's reduce-motion setting is read again, where
+/// nothing says when it changes.
+#[cfg(not(target_os = "linux"))]
 const MOTION_REFRESH: Duration = Duration::from_secs(5);
+
+/// How long to wait before connecting to the session bus again after losing
+/// it, or reading again if the bus won't send signals.
+#[cfg(target_os = "linux")]
+const MOTION_RECONNECT: Duration = Duration::from_secs(30);
 
 /// Desktop portal settings that can ask apps to keep movement down: the
 /// standard one, GNOME's and KDE's.
@@ -418,9 +508,15 @@ impl Platform {
         self.motion.set(Some((Instant::now(), reduced)));
     }
 
-    /// Whether the desktop asks apps to keep movement down. Read again
-    /// every few seconds, since it can change while PkgDeck runs.
+    /// Whether the desktop asks apps to keep movement down. It can change
+    /// while PkgDeck runs: Linux hears about it, and elsewhere it's read
+    /// again every few seconds.
     pub fn reduce_motion(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.follows_motion {
+            return linux::reduce_motion();
+        }
+        #[cfg(not(target_os = "linux"))]
         if self.follows_motion
             && self
                 .motion
@@ -429,9 +525,7 @@ impl Platform {
         {
             #[cfg(target_os = "macos")]
             let reduced = native::reduce_motion();
-            #[cfg(target_os = "linux")]
-            let reduced = linux::reduce_motion();
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(not(target_os = "macos"))]
             let reduced = false;
             self.motion.set(Some((Instant::now(), reduced)));
         }
@@ -949,6 +1043,286 @@ mod tests {
         }
     }
 
+    /// A settings portal on a private socket that counts every call.
+    #[cfg(target_os = "linux")]
+    mod fake_portal {
+        use super::Setting;
+        use futures_util::StreamExt;
+        use std::{
+            collections::HashMap,
+            os::unix::net::UnixStream,
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                mpsc, Arc, Mutex,
+            },
+            time::Duration,
+        };
+        use zbus::{connection::Builder, message::Type, wire::Variant, Connection};
+
+        pub type Values = HashMap<String, HashMap<String, Variant<'static>>>;
+
+        pub struct Portal {
+            pub connection: Connection,
+            reads: Arc<AtomicUsize>,
+            values: Arc<Mutex<Values>>,
+            pub broken: Arc<AtomicBool>,
+        }
+
+        impl Portal {
+            /// The portal, and the app's end of the connection to it.
+            pub fn start() -> (Self, Connection) {
+                let (ours, theirs) = UnixStream::pair().unwrap();
+                let server = std::thread::spawn(move || Self::serve(ours, Values::default()));
+                let client = zbus::block_on(Builder::unix_stream(theirs).p2p().build()).unwrap();
+                (server.join().unwrap(), client)
+            }
+
+            /// Answers one client on `stream`, starting with `values`. It also
+            /// answers what a client asks the bus, so it can stand in for one.
+            pub fn serve(stream: UnixStream, values: Values) -> Self {
+                // A client's first call can come right away, so this listens
+                // from before the connection starts reading.
+                let mut calls = zbus::block_on(
+                    Builder::unix_stream(stream)
+                        .server(zbus::Guid::generate())
+                        .p2p()
+                        .build_message_stream(),
+                )
+                .unwrap();
+                let connection = Connection::from(&calls);
+                let portal = Self {
+                    connection: connection.clone(),
+                    reads: Default::default(),
+                    values: Arc::new(Mutex::new(values)),
+                    broken: Default::default(),
+                };
+                let (reads, values, broken) = (
+                    portal.reads.clone(),
+                    portal.values.clone(),
+                    portal.broken.clone(),
+                );
+                std::thread::spawn(move || {
+                    zbus::block_on(async {
+                        while let Some(Ok(call)) = calls.next().await {
+                            if call.message_type() != Type::MethodCall {
+                                continue;
+                            }
+                            let header = call.header();
+                            let member = header.member().map_or("", |name| name.as_str());
+                            let to_the_bus = header
+                                .interface()
+                                .is_some_and(|name| name.as_str() == "org.freedesktop.DBus");
+                            if to_the_bus {
+                                let _ = if member == "Hello" {
+                                    connection.reply(&header, &":1.1").await
+                                } else {
+                                    connection.reply(&header, &()).await
+                                };
+                                continue;
+                            }
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            if member == "ReadAll" && !broken.load(Ordering::SeqCst) {
+                                let answer = values.lock().unwrap().clone();
+                                let _ = connection.reply(&header, &answer).await;
+                            } else {
+                                let _ = connection
+                                    .reply_error(
+                                        &header,
+                                        "org.freedesktop.portal.Error.NotFound",
+                                        &"Requested setting not found",
+                                    )
+                                    .await;
+                            }
+                        }
+                    })
+                });
+                portal
+            }
+
+            pub fn reads(&self) -> usize {
+                self.reads.load(Ordering::SeqCst)
+            }
+
+            /// Changes a value without telling anyone.
+            pub fn set(&self, namespace: &str, key: &str, value: Setting) {
+                let value = match value {
+                    Setting::Flag(on) => Variant::Bool(on),
+                    Setting::Number(n) => Variant::F64(n),
+                    Setting::Text(text) => Variant::from(text),
+                };
+                self.values
+                    .lock()
+                    .unwrap()
+                    .entry(namespace.into())
+                    .or_default()
+                    .insert(key.into(), value);
+            }
+
+            pub fn setting_changed(&self, namespace: &str, key: &str) {
+                zbus::block_on(self.connection.emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Settings",
+                    "SettingChanged",
+                    &(namespace, key, Variant::U32(0)),
+                ))
+                .unwrap();
+            }
+
+            pub fn owner_changed(&self, name: &str, owner: &str) {
+                zbus::block_on(self.connection.emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "NameOwnerChanged",
+                    &(name, "", owner),
+                ))
+                .unwrap();
+            }
+        }
+
+        /// The next value published, which must come soon.
+        pub fn next(published: &mpsc::Receiver<bool>) -> bool {
+            published.recv_timeout(Duration::from_secs(10)).unwrap()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_portal_is_read_once_and_again_only_when_it_says_something_changed() {
+        use fake_portal::{next, Portal};
+        use Setting::*;
+        let quiet = |published: &mpsc::Receiver<bool>| {
+            assert_eq!(
+                published.recv_timeout(std::time::Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+        };
+        let (portal, client) = Portal::start();
+        let (publish, published) = mpsc::channel();
+        let follower = std::thread::spawn(move || {
+            zbus::block_on(linux::follow_motion(&client, &|reduced| {
+                let _ = publish.send(reduced);
+            }));
+        });
+        let appearance = "org.freedesktop.appearance";
+        let kde = "org.kde.kdeglobals.KDE";
+        // One read at the start, of everything at once.
+        assert!(!next(&published));
+        assert_eq!(portal.reads(), 1);
+        // A signal for what PkgDeck reads brings it up to date, with one read.
+        portal.set(appearance, "reduced-motion", Number(1.0));
+        portal.setting_changed(appearance, "reduced-motion");
+        assert!(next(&published));
+        assert_eq!(portal.reads(), 2);
+        // Without a signal, nothing is read, however long it waits.
+        portal.set(appearance, "reduced-motion", Number(0.0));
+        quiet(&published);
+        assert_eq!(portal.reads(), 2);
+        // Other settings changing doesn't read either: the next signal that
+        // matters is the one and only read.
+        portal.setting_changed(appearance, "color-scheme");
+        portal.setting_changed("org.example.other", "reduced-motion");
+        portal.setting_changed(appearance, "reduced-motion");
+        assert!(!next(&published));
+        quiet(&published);
+        assert_eq!(portal.reads(), 3);
+        // KDE only signals `reduced-motion` when its animation speed changes,
+        // so one signal must refresh every key, not just the one it names.
+        portal.set(kde, "AnimationDurationFactor", Text("0".into()));
+        portal.setting_changed(kde, "AnimationDurationFactor");
+        assert!(next(&published));
+        portal.set(kde, "AnimationDurationFactor", Text("0.5".into()));
+        portal.setting_changed(appearance, "reduced-motion");
+        assert!(!next(&published));
+        assert_eq!(portal.reads(), 5);
+        // The portal going away reads nothing, and a failed read keeps what
+        // was known. When a portal appears, it's asked again.
+        portal.set(kde, "AnimationDurationFactor", Text("0".into()));
+        portal.owner_changed("org.freedesktop.portal.Desktop", "");
+        quiet(&published);
+        assert_eq!(portal.reads(), 5);
+        portal
+            .broken
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        portal.owner_changed("org.freedesktop.portal.Desktop", ":1.2");
+        portal.owner_changed("org.example.other", ":1.3");
+        for _ in 0..1000 {
+            if portal.reads() == 6 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(portal.reads(), 6);
+        assert_eq!(published.try_recv(), Err(mpsc::TryRecvError::Empty));
+        portal
+            .broken
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        portal.owner_changed("org.freedesktop.portal.Desktop", ":1.4");
+        assert!(next(&published));
+        assert_eq!(portal.reads(), 7);
+        // A lost connection ends it, so the caller can connect again.
+        zbus::block_on(portal.connection.clone().close()).unwrap();
+        follower.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_watcher_reads_the_portal_on_the_session_bus() {
+        use std::os::unix::net::UnixListener;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+        use zbus::wire::Variant;
+        // The watcher is one for the whole process and uses the real session
+        // bus, so a separate process runs it, with a fake bus as its session.
+        const CHILD: &str = "PKGDECK_TEST_WATCHER";
+        if std::env::var_os(CHILD).is_some() {
+            let mut platform = Platform::start(|| {});
+            platform.follow_system_motion();
+            for _ in 0..1000 {
+                if platform.reduce_motion() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the watcher never read the portal");
+        }
+        let path = std::env::temp_dir().join(format!("pkgdeck-bus-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::the_watcher_reads_the_portal_on_the_session_bus",
+            ])
+            .env(CHILD, "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", path.display()),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let values = fake_portal::Values::from([(
+            "org.freedesktop.appearance".to_string(),
+            std::collections::HashMap::from([("reduced-motion".to_string(), Variant::F64(1.0))]),
+        )]);
+        let portal = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break Some(fake_portal::Portal::serve(stream, values)),
+                // Stopping without connecting fails below.
+                Err(_) if child.try_wait().unwrap().is_some() => break None,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let finished = child.wait().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(finished.success(), "{finished}");
+        assert_eq!(portal.map(|portal| portal.reads()), Some(1));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn portal_values_become_settings() {
@@ -961,7 +1335,7 @@ mod tests {
         assert_eq!(setting(Variant::U32(1)), Some(Number(1.0)));
         assert_eq!(setting(Variant::F64(0.5)), Some(Number(0.5)));
         assert_eq!(setting(Variant::from("0")), Some(Text("0".into())));
-        // `Read` wraps the value once more.
+        // A value can come wrapped more than once.
         let wrapped = Variant::Variant(Box::new(Variant::Variant(Box::new(Variant::U32(1)))));
         assert_eq!(setting(wrapped), Some(Number(1.0)));
         assert_eq!(setting(Variant::I64(1)), None);
@@ -975,13 +1349,46 @@ mod tests {
         assert!(platform.reduce_motion());
         platform.set_system_motion(false);
         assert!(!platform.reduce_motion());
-        // Following reads the desktop now, and keeps that for a while.
-        platform.set_system_motion(true);
-        platform.follow_system_motion();
-        assert!(platform.reduce_motion());
-        platform.motion.set(None);
-        let first = platform.reduce_motion();
-        assert!(platform.motion.get().is_some());
-        assert_eq!(platform.reduce_motion(), first);
+        // Linux hears about changes, and a change wakes the window once. No
+        // real watcher here, so the test doesn't depend on this desktop.
+        #[cfg(target_os = "linux")]
+        {
+            platform.follows_motion = true;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+            let mut heard = false;
+            for reduced in [true, false].into_iter().cycle().take(400) {
+                // Tests start platforms in parallel and the newest one is
+                // woken, so this one tries until it hears the change.
+                let wakes = Arc::new(AtomicUsize::new(0));
+                let woken = wakes.clone();
+                let mut newest = Platform::start(move || {
+                    woken.fetch_add(1, Ordering::Relaxed);
+                });
+                newest.follows_motion = true;
+                linux::publish_motion(reduced);
+                assert_eq!(platform.reduce_motion(), reduced);
+                let after_change = wakes.load(Ordering::Relaxed);
+                linux::publish_motion(reduced);
+                if after_change == 1 && wakes.load(Ordering::Relaxed) == 1 {
+                    heard = true;
+                    break;
+                }
+            }
+            assert!(heard, "the window never heard about the change");
+            linux::publish_motion(false);
+            assert!(!platform.reduce_motion());
+        }
+        // Elsewhere, following reads the desktop now and keeps that a while.
+        #[cfg(not(target_os = "linux"))]
+        {
+            platform.set_system_motion(true);
+            platform.follow_system_motion();
+            assert!(platform.reduce_motion());
+            platform.motion.set(None);
+            let first = platform.reduce_motion();
+            assert!(platform.motion.get().is_some());
+            assert_eq!(platform.reduce_motion(), first);
+        }
     }
 }

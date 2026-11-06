@@ -440,7 +440,7 @@ fn app_page(
                         }
                     }
                 }
-                // System or User, for a Flatpak installed both ways.
+                // User or System, for a Flatpak installed both ways.
                 PageButton::Scope => {
                     if let Some(variants) = scope.clone() {
                         scope_toggle(app, ui, variants, &identity, can_act);
@@ -448,9 +448,9 @@ fn app_page(
                 }
                 // Where an opened Flatpak file or link installs.
                 PageButton::OpenedScope => {
-                    let current = usize::from(opened_scope.as_deref() != Some("system"));
-                    if let Some(index) = scope_switch(ui, current, &row.name, can_act) {
-                        app.choose_opened_flatpak_scope(index == 0);
+                    let system = opened_scope.as_deref() == Some("system");
+                    if let Some(system) = scope_switch(ui, system, &row.name, can_act) {
+                        app.choose_opened_flatpak_scope(system);
                     }
                 }
             };
@@ -618,18 +618,28 @@ fn app_page(
 }
 
 fn scope_toggle(app: &mut App, ui: &mut Ui, variants: Vec<usize>, identity: &str, enabled: bool) {
-    let current = variants
+    let system = variants
         .iter()
-        .position(|&raw| app.rows.get(raw).is_some_and(|r| r.identity() == identity))
-        .unwrap_or(0);
-    if let Some(index) = scope_switch(ui, current, identity, enabled) {
-        app.choose_scope(index);
+        .filter_map(|&raw| app.rows.get(raw))
+        .find(|row| row.identity() == identity)
+        .is_some_and(Row::is_flatpak_system);
+    let Some(wanted) = scope_switch(ui, system, identity, enabled) else {
+        return;
+    };
+    let copy = variants.iter().position(|&raw| {
+        app.rows
+            .get(raw)
+            .is_some_and(|row| row.is_flatpak_system() == wanted)
+    });
+    if let Some(copy) = copy {
+        app.choose_scope(copy);
     }
 }
 
-/// The **System** / **User** switch, which answers the part clicked: 0 for
-/// **System** and 1 for **User**.
-fn scope_switch(ui: &mut Ui, current: usize, identity: &str, enabled: bool) -> Option<usize> {
+/// The **User** / **System** switch. `system` is what's chosen now, and it
+/// answers whether the part clicked, if it's the other one, means System.
+fn scope_switch(ui: &mut Ui, system: bool, identity: &str, enabled: bool) -> Option<bool> {
+    let current = usize::from(SCOPE_CHOICES[1].1 == system);
     let palette = Palette::current(ui.ctx());
     let mut clicked = None;
     let (rect, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
@@ -649,7 +659,7 @@ fn scope_switch(ui: &mut Ui, current: usize, identity: &str, enabled: bool) -> O
         Stroke::new(1.0, palette.line),
         StrokeKind::Inside,
     );
-    for (index, label) in ["System", "User"].into_iter().enumerate() {
+    for (index, (label, value)) in SCOPE_CHOICES.into_iter().enumerate() {
         let part = Rect::from_min_size(
             pos2(rect.left() + index as f32 * half, rect.top()),
             vec2(half, rect.height()),
@@ -685,7 +695,7 @@ fn scope_switch(ui: &mut Ui, current: usize, identity: &str, enabled: bool) -> O
             color,
         );
         if response.clicked() && index != current {
-            clicked = Some(index);
+            clicked = Some(value);
         }
     }
     clicked
@@ -935,6 +945,8 @@ fn body(
                         .trim_start_matches("https://")
                         .trim_start_matches("http://")
                         .trim_end_matches('/');
+                    // A grid cell grows to fit by default, past the panel's edge.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let link = ui.add(egui::Link::new(
                         egui::RichText::new(format!("{shown} ↗")).color(palette.accent),
                     ));

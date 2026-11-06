@@ -86,7 +86,7 @@ What the page shows:
 - Flatpak file (`.flatpak`): the app and its version. Flatpak checks what's
   inside when it installs. Installing again replaces the installed copy,
   so the page can offer **Update**, **Reinstall** or **Downgrade**.
-- Any opened Flatpak, reference or file: choose **System** or **User** on its
+- Any opened Flatpak, reference or file: choose **User** or **System** on its
   page or in the review. The next one starts with the same choice. An app
   that's already installed stays where it is.
 - RPM, Arch, and Snap files: checked by their own package manager.

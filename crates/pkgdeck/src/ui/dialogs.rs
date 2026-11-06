@@ -21,6 +21,33 @@ pub struct AddRepo {
     pub user: bool,
 }
 
+/// A captioned **User** / **System** choice. `system` is what's chosen now,
+/// and it answers whether the other one, when pressed, means System.
+fn scope_buttons(ui: &mut egui::Ui, caption: &str, system: bool) -> Option<bool> {
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        let palette = Palette::current(ui.ctx());
+        ui.label(egui::RichText::new(caption).color(palette.muted));
+        for (label, value) in SCOPE_CHOICES {
+            let current = system == value;
+            let look = if current {
+                Look::Soft(Tone::Accent)
+            } else {
+                Look::Secondary
+            };
+            let response = Button::new(look, label).small().show(ui);
+            // Color alone doesn't tell a screen reader which one is chosen.
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), current, label)
+            });
+            if response.clicked() && !current {
+                chosen = Some(value);
+            }
+        }
+    });
+    chosen
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     confirm(app, ctx);
     open_link(app, ctx);
@@ -29,6 +56,22 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     source_checks(app, ctx);
     setup(app, ctx);
     screenshot(app, ctx);
+}
+
+/// What a dialog shows: `current` while it's open, then the last of it, so it
+/// fades out with what it said instead of going blank.
+fn held<T>(ctx: &egui::Context, id: &str, current: Option<T>) -> T
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    let key = Id::unique((id, "held"));
+    match current {
+        Some(value) => {
+            ctx.data_mut(|data| data.insert_temp(key, value.clone()));
+            value
+        }
+        None => ctx.data(|data| data.get_temp(key)).unwrap_or_default(),
+    }
 }
 
 /// A modal card that fades and grows in. Returns false when it should
@@ -74,6 +117,11 @@ fn modal(
             );
             card.show(ui, |ui| {
                 ui.multiply_opacity(shown);
+                // Fading out, it still looks the same but it's already done:
+                // a second click must not act on it again.
+                if !open {
+                    ui.disable();
+                }
                 ui.set_width(width - 44.0);
                 ui.set_max_height(screen.height() - 80.0);
                 content(ui);
@@ -103,8 +151,14 @@ fn title(ui: &mut Ui, text: &str) -> bool {
 
 fn confirm(app: &mut App, ctx: &egui::Context) {
     let open = app.confirm_open && app.confirmation.is_some();
-    let data = app.confirmation.clone().unwrap_or_default();
-    let text = app.confirmation_text();
+    let (data, text) = held(
+        ctx,
+        "confirm",
+        app.confirmation
+            .clone()
+            .filter(|_| open)
+            .map(|data| (data, app.confirmation_text())),
+    );
     let mut answer: Option<bool> = None;
     let mut scope: Option<bool> = None;
     let mut flipped = app.ui.confirm_details_flipped;
@@ -135,20 +189,10 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
             answer = Some(false);
         }
         if !data.flatpak_scope.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Install for").color(palette.muted));
-                let system = data.flatpak_scope == "system";
-                for (label, value) in [("User", false), ("System", true)] {
-                    let look = if system == value {
-                        Look::Soft(Tone::Accent)
-                    } else {
-                        Look::Secondary
-                    };
-                    if Button::new(look, label).small().show(ui).clicked() && system != value {
-                        scope = Some(value);
-                    }
-                }
-            });
+            let system = data.flatpak_scope == "system";
+            if let Some(value) = scope_buttons(ui, "Install for", system) {
+                scope = Some(value);
+            }
             ui.add_space(6.0);
         }
         let summary = [data.summary.as_str(), data.body.as_str(), text.as_str()]
@@ -661,7 +705,7 @@ fn repo_url_valid(url: &str) -> bool {
 fn add_repository(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.add_repo.is_some();
     let features = app.repositories.features.clone();
-    let mut draft = app.ui.add_repo.clone().unwrap_or_default();
+    let mut draft = held(ctx, "add-repository", app.ui.add_repo.clone());
     let mut close = false;
     let mut submit = false;
     let still = modal(ctx, "add-repository", open, 480.0, |ui| {
@@ -692,19 +736,9 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
             ui.label(egui::RichText::new("Enter an HTTPS .flatpakrepo URL.").color(palette.danger));
         }
         if features.flatpak_user && features.flatpak_system {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("For").color(palette.muted));
-                for (label, user) in [("User", true), ("System", false)] {
-                    let look = if draft.user == user {
-                        Look::Soft(Tone::Accent)
-                    } else {
-                        Look::Secondary
-                    };
-                    if Button::new(look, label).small().show(ui).clicked() {
-                        draft.user = user;
-                    }
-                }
-            });
+            if let Some(system) = scope_buttons(ui, "For", !draft.user) {
+                draft.user = !system;
+            }
         }
         ui.add_space(12.0);
         right(ui, |ui| {
@@ -865,7 +899,7 @@ fn setup(app: &mut App, ctx: &egui::Context) {
 
 fn screenshot(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.screenshot.is_some();
-    let (url, caption) = app.ui.screenshot.clone().unwrap_or_default();
+    let (url, caption) = held(ctx, "screenshot", app.ui.screenshot.clone());
     let mut close = false;
     let screen = ctx.content_rect();
     let still = modal(
@@ -1466,7 +1500,10 @@ mod tests {
     #[test]
     fn the_review_of_an_opened_flatpak_chooses_where_it_installs() {
         use crate::{app::Launch, platform::Platform, settings::Store};
-        use egui_kittest::{kittest::Queryable, Harness};
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
         use pkgdeck_app::controller::ffi::create_synthetic_controller;
         let review = |scope: &str| {
             let (store, settings) = Store::open(None, None);
@@ -1513,6 +1550,17 @@ mod tests {
         ] {
             let mut harness = review(scope);
             assert!(harness.query_by_label("Install for").is_some());
+            let first = harness.get_by_label("User").rect();
+            let second = harness.get_by_label("System").rect();
+            assert!(first.right() <= second.left(), "{first:?} {second:?}");
+            // A screen reader hears which one is chosen.
+            let state = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
+            assert_eq!(state(same), Some(egui::accesskit::Toggled::True), "{scope}");
+            assert_eq!(
+                state(other),
+                Some(egui::accesskit::Toggled::False),
+                "{scope}"
+            );
             let saved = |harness: &egui_kittest::Harness<'static, (bool, App)>| {
                 harness.state().1.settings.opened_flatpaks_for_system
             };
@@ -1718,6 +1766,227 @@ mod tests {
             image
                 .save(std::env::var("PKGDECK_PICKER_PNG").unwrap())
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_review_dialog_needs_a_change_and_to_be_the_one_reviewing_it() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        // A review on the app's page has a change but keeps this dialog shut.
+        for (asked, change, shown) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+            (false, false, false),
+        ] {
+            let (store, settings) = Store::open(None, None);
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                Platform::start(|| {}),
+                Launch::default(),
+            );
+            app.confirm_open = asked;
+            app.confirmation = change.then(|| model::Confirmation {
+                action: "Install".into(),
+                summary: "Install fixture".into(),
+                ..model::Confirmation::default()
+            });
+            let mut harness = Harness::builder()
+                .with_size(vec2(700.0, 600.0))
+                .build_ui_state(
+                    |ui, (ready, app): &mut (bool, App)| {
+                        let ctx = &ui.ctx().clone();
+                        if !*ready {
+                            crate::setup(ctx, std::path::Path::new("/"), None);
+                            set_reduce_motion(ctx, true);
+                            *ready = true;
+                            return;
+                        }
+                        confirm(app, ctx);
+                    },
+                    (false, app),
+                );
+            harness.run_steps(4);
+            assert_eq!(
+                harness.query_by_label("Confirm changes").is_some(),
+                shown,
+                "asked {asked}, change {change}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closing_dialog_keeps_what_it_showed_and_ignores_clicks() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{
+            kittest::{By, NodeT, Queryable},
+            Harness,
+        };
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        type Setup = fn(&mut App);
+        let cases: [(Setup, &str, &str); 3] = [
+            (
+                |app| {
+                    app.confirmation = Some(model::Confirmation {
+                        action: "Install".into(),
+                        summary: "Install fixture".into(),
+                        ..model::Confirmation::default()
+                    });
+                    app.confirm_open = true;
+                },
+                "Cancel",
+                "Install fixture",
+            ),
+            (
+                |app| {
+                    app.ui.add_repo = Some(AddRepo {
+                        name: "fixture".into(),
+                        url: "https://example.invalid/fixture.flatpakrepo".into(),
+                        user: true,
+                    })
+                },
+                "Cancel",
+                "https://example.invalid/fixture.flatpakrepo",
+            ),
+            (
+                |app| {
+                    app.ui.screenshot =
+                        Some(("file:///nonexistent.png".into(), "Fixture caption".into()))
+                },
+                "Close (Esc)",
+                "Fixture caption",
+            ),
+        ];
+        for (setup, close, shown) in cases {
+            let (store, settings) = Store::open(None, None);
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                Platform::start(|| {}),
+                Launch::default(),
+            );
+            setup(&mut app);
+            let mut harness = Harness::builder()
+                .with_size(vec2(1100.0, 800.0))
+                // The fade takes 0.12 s, so frames must be shorter than that.
+                .with_step_dt(1.0 / 120.0)
+                .build_ui_state(
+                    |ui, (ready, app): &mut (bool, App)| {
+                        let ctx = &ui.ctx().clone();
+                        if !*ready {
+                            crate::setup(ctx, std::path::Path::new("/"), None);
+                            *ready = true;
+                            return;
+                        }
+                        show(app, ctx);
+                    },
+                    (false, app),
+                );
+            // Let it finish opening, so closing is what's on screen next.
+            harness.run_steps(60);
+            let showing = |harness: &Harness<'static, (bool, App)>| {
+                harness.query_by_label_contains(shown).is_some()
+                    || harness.query_all(By::new().value(shown)).next().is_some()
+            };
+            assert!(showing(&harness), "{shown}");
+            harness.get_by_label(close).click();
+            harness.step();
+            // The answer reaches the controller, which forgets the change.
+            harness.state_mut().1.confirmation = None;
+            harness.run_steps(2);
+            assert!(showing(&harness), "{shown}");
+            assert!(harness.query_by_label("Apply").is_none(), "{shown}");
+            assert!(
+                harness.get_by_label(close).accesskit_node().is_disabled(),
+                "{shown}"
+            );
+            // Past the fade, nothing is left.
+            harness.run_steps(60);
+            assert!(!showing(&harness), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_new_repository_chooses_user_or_system_and_submits_that_choice() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.repositories = serde_json::from_value(json!({
+            "repositories": [],
+            "features": {"flatpak_user": true, "flatpak_system": true}
+        }))
+        .unwrap();
+        app.ui.add_repo = Some(AddRepo {
+            user: true,
+            ..AddRepo::default()
+        });
+        let mut harness = Harness::builder()
+            .with_size(vec2(700.0, 600.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    let ctx = &ui.ctx().clone();
+                    if !*ready {
+                        crate::setup(ctx, std::path::Path::new("/"), None);
+                        set_reduce_motion(ctx, true);
+                        *ready = true;
+                        return;
+                    }
+                    add_repository(app, ctx);
+                },
+                (false, app),
+            );
+        harness.run_steps(6);
+        let (user, system) = (
+            harness.get_by_label("User").rect(),
+            harness.get_by_label("System").rect(),
+        );
+        assert!(user.right() <= system.left(), "{user:?} {system:?}");
+        let chosen = |harness: &Harness<'static, (bool, App)>| {
+            harness
+                .state()
+                .1
+                .ui
+                .add_repo
+                .as_ref()
+                .map(|draft| draft.user)
+        };
+        harness.get_by_label("System").click();
+        harness.run_steps(4);
+        assert_eq!(chosen(&harness), Some(false));
+        harness.get_by_label("User").click();
+        harness.run_steps(4);
+        assert_eq!(chosen(&harness), Some(true));
+        // With only one place to put it, there's nothing to choose.
+        for (user, system) in [(true, false), (false, true), (false, false)] {
+            let features = &mut harness.state_mut().1.repositories.features;
+            features.flatpak_user = user;
+            features.flatpak_system = system;
+            harness.run_steps(2);
+            assert!(harness.query_by_label("For").is_none(), "{user} {system}");
+            assert!(
+                harness.query_by_label("System").is_none(),
+                "{user} {system}"
+            );
         }
     }
 

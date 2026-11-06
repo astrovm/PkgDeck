@@ -1118,7 +1118,7 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
         parts.push(remote.to_owned());
     }
     if merged_scopes {
-        parts.push("System and user".into());
+        parts.push("User and system".into());
     } else if matches!(row.source.as_str(), "flatpak" | "docker" | "podman") {
         parts.push(
             if row.is_flatpak_system() {

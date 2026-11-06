@@ -515,7 +515,7 @@ fn source_lines_say_where_a_row_comes_from() {
             json!({"source": "flatpak", "reference": "app/x/x86_64/stable"}),
             true
         ),
-        "Flatpak, System and user"
+        "Flatpak, User and system"
     );
     assert_eq!(
         line(
