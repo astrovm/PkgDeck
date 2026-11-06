@@ -21,6 +21,27 @@ pub struct AddRepo {
     pub user: bool,
 }
 
+/// A captioned **User** / **System** choice. `system` is what's chosen now,
+/// and it answers whether the other one, when pressed, means System.
+fn scope_buttons(ui: &mut egui::Ui, caption: &str, system: bool) -> Option<bool> {
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        let palette = Palette::current(ui.ctx());
+        ui.label(egui::RichText::new(caption).color(palette.muted));
+        for (label, value) in SCOPE_CHOICES {
+            let look = if system == value {
+                Look::Soft(Tone::Accent)
+            } else {
+                Look::Secondary
+            };
+            if Button::new(look, label).small().show(ui).clicked() && system != value {
+                chosen = Some(value);
+            }
+        }
+    });
+    chosen
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     confirm(app, ctx);
     open_link(app, ctx);
@@ -135,20 +156,10 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
             answer = Some(false);
         }
         if !data.flatpak_scope.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Install for").color(palette.muted));
-                let system = data.flatpak_scope == "system";
-                for (label, value) in [("User", false), ("System", true)] {
-                    let look = if system == value {
-                        Look::Soft(Tone::Accent)
-                    } else {
-                        Look::Secondary
-                    };
-                    if Button::new(look, label).small().show(ui).clicked() && system != value {
-                        scope = Some(value);
-                    }
-                }
-            });
+            let system = data.flatpak_scope == "system";
+            if let Some(value) = scope_buttons(ui, "Install for", system) {
+                scope = Some(value);
+            }
             ui.add_space(6.0);
         }
         let summary = [data.summary.as_str(), data.body.as_str(), text.as_str()]
@@ -692,19 +703,9 @@ fn add_repository(app: &mut App, ctx: &egui::Context) {
             ui.label(egui::RichText::new("Enter an HTTPS .flatpakrepo URL.").color(palette.danger));
         }
         if features.flatpak_user && features.flatpak_system {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("For").color(palette.muted));
-                for (label, user) in [("User", true), ("System", false)] {
-                    let look = if draft.user == user {
-                        Look::Soft(Tone::Accent)
-                    } else {
-                        Look::Secondary
-                    };
-                    if Button::new(look, label).small().show(ui).clicked() {
-                        draft.user = user;
-                    }
-                }
-            });
+            if let Some(system) = scope_buttons(ui, "For", !draft.user) {
+                draft.user = !system;
+            }
         }
         ui.add_space(12.0);
         right(ui, |ui| {
@@ -1513,6 +1514,9 @@ mod tests {
         ] {
             let mut harness = review(scope);
             assert!(harness.query_by_label("Install for").is_some());
+            let first = harness.get_by_label("User").rect();
+            let second = harness.get_by_label("System").rect();
+            assert!(first.right() <= second.left(), "{first:?} {second:?}");
             let saved = |harness: &egui_kittest::Harness<'static, (bool, App)>| {
                 harness.state().1.settings.opened_flatpaks_for_system
             };
@@ -1719,6 +1723,67 @@ mod tests {
                 .save(std::env::var("PKGDECK_PICKER_PNG").unwrap())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn a_new_repository_chooses_user_or_system_and_submits_that_choice() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.repositories = serde_json::from_value(json!({
+            "repositories": [],
+            "features": {"flatpak_user": true, "flatpak_system": true}
+        }))
+        .unwrap();
+        app.ui.add_repo = Some(AddRepo {
+            user: true,
+            ..AddRepo::default()
+        });
+        let mut harness = Harness::builder()
+            .with_size(vec2(700.0, 600.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    let ctx = &ui.ctx().clone();
+                    if !*ready {
+                        crate::setup(ctx, std::path::Path::new("/"), None);
+                        set_reduce_motion(ctx, true);
+                        *ready = true;
+                        return;
+                    }
+                    add_repository(app, ctx);
+                },
+                (false, app),
+            );
+        harness.run_steps(6);
+        let (user, system) = (
+            harness.get_by_label("User").rect(),
+            harness.get_by_label("System").rect(),
+        );
+        assert!(user.right() <= system.left(), "{user:?} {system:?}");
+        let chosen = |harness: &Harness<'static, (bool, App)>| {
+            harness
+                .state()
+                .1
+                .ui
+                .add_repo
+                .as_ref()
+                .map(|draft| draft.user)
+        };
+        harness.get_by_label("System").click();
+        harness.run_steps(4);
+        assert_eq!(chosen(&harness), Some(false));
+        harness.get_by_label("User").click();
+        harness.run_steps(4);
+        assert_eq!(chosen(&harness), Some(true));
     }
 
     #[test]

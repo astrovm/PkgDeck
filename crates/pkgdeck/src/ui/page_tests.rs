@@ -246,7 +246,7 @@ fn package_headers_show_actions_for_opened_files_and_both_flatpak_scopes() {
         let mut app = app(&row, Page::Installed);
         app.items[0].variants = (0..count).collect();
         let harness = draw(app, row, 700.0, false, false);
-        // The scope selector paints System and User, while the ordinary
+        // The scope selector paints User and System, while the ordinary
         // package header only names its current source and scope.
         let painted = header_geometry(&harness);
         let texts = painted.as_array().unwrap();
@@ -255,7 +255,7 @@ fn package_headers_show_actions_for_opened_files_and_both_flatpak_scopes() {
         let has_merged_label = texts.iter().any(|entry| {
             entry["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("System and user"))
+                .is_some_and(|text| text.contains("User and system"))
         });
         assert_eq!(has_merged_label, count > 1);
     }
@@ -309,8 +309,57 @@ fn an_installed_flatpak_opened_from_a_file_keeps_its_action_beside_launch() {
     assert!(harness.query_by_label("Manage").is_none());
 }
 
+/// Every **User** / **System** choice reads the same way, wherever it is.
+fn assert_user_comes_first(harness: &Harness<'static, (bool, App)>) {
+    let user = harness.get_by_label("User").rect();
+    let system = harness.get_by_label("System").rect();
+    assert!(user.right() <= system.left(), "{user:?} {system:?}");
+}
+
 #[test]
-fn an_opened_flatpak_page_chooses_system_or_user_and_remembers_it() {
+fn a_flatpak_in_both_places_switches_to_the_copy_it_names() {
+    let copy = |scope: Value| -> Row {
+        serde_json::from_value(json!({
+            "kind": "package", "name": "fixture", "source": "flatpak", "remote": "flathub",
+            "scope": scope, "installed": "1.0", "available": true,
+            "capabilities": ["search", "install"]
+        }))
+        .unwrap()
+    };
+    let system = copy(json!("system"));
+    let user = copy(json!({"user": {"uid": 1000}}));
+    for (shown, chosen, other, wanted) in [
+        (&system, "System", "User", &user),
+        (&user, "User", "System", &system),
+    ] {
+        let mut app = app(shown, Page::Installed);
+        app.rows = vec![system.clone(), user.clone()];
+        app.invalidate();
+        app.refresh_items();
+        app.choose(0, true);
+        let start = app.items[0]
+            .variants
+            .iter()
+            .position(|&raw| app.rows[raw].identity() == shown.identity())
+            .unwrap();
+        app.choose_scope(start);
+        let mut harness = draw(app, shown.clone(), 900.0, false, false);
+        assert_user_comes_first(&harness);
+        let state = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
+        assert_eq!(state(chosen), Some(egui::accesskit::Toggled::True));
+        assert_eq!(state(other), Some(egui::accesskit::Toggled::False));
+        harness.get_by_label(other).click();
+        harness.run_steps(4);
+        assert_eq!(
+            harness.state().1.selected.as_deref(),
+            Some(wanted.identity().as_str()),
+            "{other}"
+        );
+    }
+}
+
+#[test]
+fn an_opened_flatpak_page_chooses_user_or_system_and_remembers_it() {
     for (scope, shown) in [("user", true), ("system", true), ("", false)] {
         let mut row = row("package");
         row.source = "flatpak".into();
@@ -336,6 +385,7 @@ fn an_opened_flatpak_page_chooses_system_or_user_and_remembers_it() {
         if !shown {
             continue;
         }
+        assert_user_comes_first(&harness);
         // The part already chosen does nothing; the other one is remembered.
         let (same, other, system) = if scope == "user" {
             ("User", "System", true)
