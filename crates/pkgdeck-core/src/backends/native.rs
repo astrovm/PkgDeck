@@ -532,6 +532,15 @@ mod tests {
         assert_eq!(keys("full").map(|keys| keys.len()), Some(limit));
         std::fs::write(repo.join("huge.trustedkeys.gpg"), vec![7; limit + 1]).unwrap();
         assert_eq!(keys("huge"), None);
+        // Inside a sandbox, that path isn't the installation's.
+        let sandboxed = NativeTransport {
+            host: Host::new(
+                Runtime::Flatpak,
+                [("HOME".into(), base.as_os_str().to_owned())].into(),
+            ),
+            authorization: Authorization::SudoNonInteractive,
+        };
+        assert_eq!(sandboxed.flatpak_remote_keys(false, "real"), None);
         std::fs::remove_dir_all(base).unwrap();
     }
 

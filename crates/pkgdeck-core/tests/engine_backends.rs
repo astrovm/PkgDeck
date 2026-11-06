@@ -187,6 +187,7 @@ fn transport_defaults_refuse_previews_and_grouped_writes() {
         Err(ExecutionError::Disabled(reason)) => assert_eq!(reason, expected),
         other => panic!("expected {expected:?}, got {other:?}"),
     };
+    assert_eq!(Bare.flatpak_remote_keys(false, "x"), None);
     disabled(
         Bare.apt_write_group(&[AptAction::Install("x".into())], &cancel),
         "grouped APT transaction unavailable",
@@ -455,6 +456,15 @@ fn flatpak_search_offers_the_installation_without_the_repository() {
             remote_line("flathub", "https://dl.flathub.org/repo/"),
         )
     };
+    // With nothing found, nothing more is asked.
+    let script = offers_script(
+        String::new(),
+        String::new(),
+        remote_line("only-here", url),
+        String::new(),
+    );
+    assert!(offers_everywhere(&script).is_empty());
+    assert!(!script.calls().iter().any(|line| line.contains(" remotes ")));
     // Only someone choosing from a list gets it, and nobody else pays for
     // the extra questions.
     let script = elsewhere();

@@ -821,12 +821,18 @@ fn previews_say_when_a_change_needs_a_second_look() {
         pkgdeck_core::package::FLATPAK_NEW_REMOTE
     ));
     let adding = Operation::Install(new_remote.id.clone());
-    let reviewed = confirmation_preview(&adding, &[new_remote], &[], None);
+    let reviewed = confirmation_preview(&adding, &[new_remote.clone()], &[], None);
     assert_eq!(reviewed["review"], true);
     // In the notes, which are what an app's page shows of it.
     assert_eq!(
         reviewed["notes"][0],
         "Also adds the only-here repository to User."
+    );
+    new_remote.id.scope = Scope::System;
+    let for_system = Operation::Install(new_remote.id.clone());
+    assert_eq!(
+        confirmation_preview(&for_system, &[new_remote], &[], None)["notes"][0],
+        "Also adds the only-here repository to System."
     );
     assert_eq!(undo_action(&adding), None);
     assert_eq!(undo_action(&install), Some("remove"));
