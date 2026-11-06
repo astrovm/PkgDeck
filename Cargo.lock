@@ -3096,7 +3096,7 @@ dependencies = [
 
 [[package]]
 name = "pkd"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3116,7 +3116,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pkgdeck"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "cc",
  "chrono",
@@ -3142,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-app"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "flate2",
  "pkgdeck-core",
@@ -3156,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-core"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "backhand",
  "base64 0.23.1",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-tools"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "libc",
  "serde_json",
