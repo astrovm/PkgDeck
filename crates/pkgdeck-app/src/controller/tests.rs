@@ -756,6 +756,53 @@ fn appimage_pages_read_change_and_launch_through_the_menu_entry() {
     std::fs::remove_dir_all(data).unwrap();
 }
 #[test]
+fn only_an_opened_flatpak_chooses_where_it_installs() {
+    let id = |backend: &str, reference: &str, scope: Scope| PackageId {
+        backend: backend.into(),
+        name: "org.example.App".into(),
+        architecture: "x86_64".into(),
+        scope,
+        remote: None,
+        reference: Some(reference.into()),
+    };
+    let user = || Scope::User { uid: 1 };
+    let environment = || Scope::Environment {
+        path: "/opt/flatpak".into(),
+    };
+    for reference in ["flatpakref:abc:source", "artifact:flatpak:abc:def:source"] {
+        assert_eq!(
+            opened_flatpak_scope(&id("flatpak", reference, Scope::System)),
+            "system"
+        );
+        assert_eq!(
+            opened_flatpak_scope(&id("flatpak", reference, user())),
+            "user"
+        );
+        assert_eq!(
+            opened_flatpak_scope(&id("flatpak", reference, environment())),
+            ""
+        );
+        // Not from another source, whatever its reference says.
+        assert_eq!(
+            opened_flatpak_scope(&id("apt", reference, Scope::System)),
+            ""
+        );
+    }
+    // Nor from Flatpak's catalog, or a file of another kind.
+    for reference in [
+        "org.example.App/x86_64/stable",
+        "artifact:deb:abc:def:source",
+    ] {
+        assert_eq!(
+            opened_flatpak_scope(&id("flatpak", reference, Scope::System)),
+            ""
+        );
+    }
+    let mut none = id("flatpak", "", Scope::System);
+    none.reference = None;
+    assert_eq!(opened_flatpak_scope(&none), "");
+}
+#[test]
 fn previews_say_when_a_change_needs_a_second_look() {
     let package = synthetic_package("synthetic", "Synthetic");
     let install = Operation::Install(package.id.clone());
@@ -888,6 +935,7 @@ fn flatpak_links_start_where_the_last_one_was_installed() {
     assert!(!controller.opened_flatpaks_for_system());
     assert!(scope_of(&mut controller, &link).starts_with("User"));
     controller.as_mut().set_opened_flatpaks_for_system(true);
+    assert!(controller.opened_flatpaks_for_system());
     assert_eq!(scope_of(&mut controller, &link), "System");
     // The review starts there too.
     controller.as_mut().install_opened();

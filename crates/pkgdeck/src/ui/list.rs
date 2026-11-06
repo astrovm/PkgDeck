@@ -2074,6 +2074,102 @@ mod grid_tests {
         }
     }
 
+    /// The list of `rows` on the Installed page, in a card this wide.
+    fn installed_list(
+        rows: Vec<serde_json::Value>,
+        card: f32,
+    ) -> egui_kittest::Harness<'static, (bool, App)> {
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.page = Page::Installed;
+        app.rows = rows
+            .into_iter()
+            .map(|row| serde_json::from_value(row).unwrap())
+            .collect();
+        app.invalidate();
+        app.refresh_items();
+        let mut harness = Harness::builder()
+            .with_size(vec2(card + 40.0, 500.0))
+            .build_ui_state(
+                move |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                        *ready = true;
+                        return;
+                    }
+                    let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(card, 400.0));
+                    super::list_card(app, ui, rect);
+                },
+                (false, app),
+            );
+        harness.run_steps(3);
+        harness
+    }
+
+    fn installed_row(name: &str, source: &str, version: &str) -> serde_json::Value {
+        json!({
+            "kind": "package", "name": name, "display_name": name, "source": source,
+            "scope": "system", "installed": version, "candidate": version,
+            "update": "current", "available": true, "summary": "Fixture summary",
+            "reference": "example.org/box:latest", "capabilities": ["search", "remove"],
+        })
+    }
+
+    #[test]
+    fn only_containers_can_pull_and_it_sits_beside_the_rows_other_button() {
+        let harness = installed_list(
+            vec![
+                installed_row("box", "docker", "1.0"),
+                installed_row("tool", "apt", "1.0"),
+            ],
+            900.0,
+        );
+        let pulls: Vec<_> = harness.query_all_by_label_contains("Pull ").collect();
+        assert_eq!(pulls.len(), 1);
+        assert!(harness.query_by_label_contains("Pull box").is_some());
+        let pull = pulls[0].rect();
+        assert!(pull.center().x > 800.0, "{pull:?}");
+        // It leaves the row's last button its place.
+        assert!(pull.right() < 20.0 + 900.0 - 38.0, "{pull:?}");
+    }
+
+    #[test]
+    fn a_compact_rows_version_goes_under_its_name_and_takes_half_the_width() {
+        const LONG: &str = "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16.17.18.19.20.21.22.23.24.25.\
+                            26.27.28.29.30.31.32.33.34.35.36.37.38.39.40";
+        let card = 460.0;
+        let harness = installed_list(vec![installed_row("tool", "apt", LONG)], card);
+        fn find<'a>(shape: &'a egui::Shape, starts: &str) -> Option<&'a egui::epaint::TextShape> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with(starts) => Some(text),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, starts)),
+                _ => None,
+            }
+        }
+        let text = |starts: &str| {
+            harness
+                .output()
+                .shapes
+                .iter()
+                .find_map(|clipped| find(&clipped.shape, starts))
+                .expect("it was drawn")
+        };
+        let (name, version) = (text("tool"), text("1.2.3"));
+        assert!(version.pos.y > name.pos.y + 10.0, "{:?}", version.pos);
+        assert!(version.pos.y < name.pos.y + 60.0, "{:?}", version.pos);
+        assert!(
+            version.galley.size().x <= card / 2.0,
+            "{:?}",
+            version.galley.size()
+        );
+    }
+
     #[test]
     fn a_waiting_update_keeps_its_version_lined_up_with_the_others() {
         let update = |name: &str, version: &str, waiting_until: Option<u64>| -> crate::model::Row {
@@ -2139,7 +2235,9 @@ mod grid_tests {
             // It has the clock in place of a checkbox: nothing to select.
             assert!(harness.query_by_label("Select waiting").is_none());
             assert!(harness.query_by_label("Select ready").is_some());
-            assert!(harness.query_by_label("Select all tasks").is_some());
+            // Only wider lists have headings, with their own checkbox.
+            let wide = card > 480.0;
+            assert_eq!(harness.query_by_label("Select all tasks").is_some(), wide);
             // The arrow sits in the middle of its row, as the clock does.
             let arrow = harness.get_by_label("Update ready from APT").rect();
             let row = harness
@@ -2149,6 +2247,9 @@ mod grid_tests {
                 (arrow.center().y - row.center().y).abs() < 0.25,
                 "{card}: arrow {arrow:?}, row {row:?}"
             );
+            // At the row's far end, not somewhere else along it.
+            assert!(row.contains_rect(arrow), "{card}: {arrow:?} in {row:?}");
+            assert!(arrow.right() > row.right() - 40.0, "{card}: {arrow:?}");
             // With everything waiting, so does the list's own checkbox.
             let state = harness.state_mut();
             state.1.rows.retain(|row| row.name == "waiting");

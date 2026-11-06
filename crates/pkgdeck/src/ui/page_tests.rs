@@ -345,6 +345,10 @@ fn an_opened_flatpak_page_chooses_system_or_user_and_remembers_it() {
         let saved = |harness: &Harness<'static, (bool, App)>| {
             harness.state().1.settings.opened_flatpaks_for_system
         };
+        // A screen reader hears which part is chosen.
+        let chosen = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
+        assert_eq!(chosen(same), Some(egui::accesskit::Toggled::True));
+        assert_eq!(chosen(other), Some(egui::accesskit::Toggled::False));
         let before = saved(&harness);
         harness.get_by_label(same).click();
         harness.run_steps(4);
