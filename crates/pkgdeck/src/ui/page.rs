@@ -945,6 +945,8 @@ fn body(
                         .trim_start_matches("https://")
                         .trim_start_matches("http://")
                         .trim_end_matches('/');
+                    // A grid cell grows to fit by default, past the panel's edge.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let link = ui.add(egui::Link::new(
                         egui::RichText::new(format!("{shown} ↗")).color(palette.accent),
                     ));
