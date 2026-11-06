@@ -11017,6 +11017,48 @@ pub(super) const NO_MANAGERS: Natives = Natives {
     release_watch: no_release_watch,
 };
 #[test]
+fn the_engine_jobs_use_offers_everywhere() {
+    static OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct Listening;
+    impl Backend for Listening {
+        fn id(&self) -> &str {
+            "listening"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn offer_everywhere(&mut self) {
+            OFFERED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn engine(
+        _: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = Engine::default();
+        engine.register(Listening)?;
+        Ok(engine)
+    }
+    let natives = Natives {
+        engine,
+        ..NO_MANAGERS
+    };
+    natives
+        .job_engine(
+            &[],
+            false,
+            Authorization::SudoNonInteractive,
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert!(OFFERED.load(std::sync::atomic::Ordering::SeqCst));
+}
+#[test]
 fn sources_are_checked_again_on_request() {
     let mut controller = ffi::create_synthetic_controller(fixture_engine);
     let mut controller = controller.pin_mut();

@@ -75,7 +75,12 @@ impl Transport for Script {
     fn flatpak_unused(&self, _: &Cancellation) -> Reply {
         self.run("flatpak-unused".into())
     }
-    fn flatpak_remote_keys(&self, _: bool, remote: &str) -> Option<Vec<u8>> {
+    fn flatpak_remote_keys(&self, system: bool, remote: &str) -> Option<Vec<u8>> {
+        let place = if system { "system" } else { "user" };
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("keys:{place}:{remote}"));
         let keyless = self.env.contains(&("KEYLESS", remote));
         (!keyless).then(|| b"signing keys".to_vec())
     }
@@ -527,6 +532,65 @@ fn flatpak_search_offers_the_installation_without_the_repository() {
 }
 
 #[test]
+fn flatpak_search_only_counts_the_same_app_there_as_installed() {
+    let arch = std::env::consts::ARCH;
+    let reference = format!("{NEW_REMOTE_APP}/{arch}/stable");
+    let twin = (false, format!("{FLATPAK_NEW_REMOTE}{reference}"));
+    let lists = |system: String, user: String| {
+        let found = offer_line("only-here");
+        let here = remote_line("only-here", "https://example.test/repo/");
+        let flathub = remote_line("flathub", "https://dl.flathub.org/repo/");
+        Script::new(move |asked| {
+            let is_system = asked.contains("--system");
+            if asked.contains(" search ") && is_system {
+                ok(&found)
+            } else if asked.contains(" remotes ") {
+                ok(if is_system { &here } else { &flathub })
+            } else if asked.contains(" list ") {
+                ok(if is_system { &system } else { &user })
+            } else {
+                ok("")
+            }
+        })
+    };
+    let installed = |name: &str| format!("{name}\t{arch}\tstable\t1.0\tApp\tother\t\tApp");
+    // Having it where the repository is leaves the other place free.
+    assert_eq!(
+        offers_everywhere(&lists(installed(NEW_REMOTE_APP), String::new())),
+        [(true, format!("app/{reference}")), twin.clone()]
+    );
+    // Another app there doesn't take its place.
+    assert_eq!(
+        offers_everywhere(&lists(String::new(), installed("org.example.Other"))),
+        [(true, reference), twin]
+    );
+}
+
+#[test]
+fn an_engine_passes_on_offering_everywhere() {
+    let script = || {
+        offers_script(
+            offer_line("only-here"),
+            String::new(),
+            remote_line("only-here", "https://example.test/repo/"),
+            remote_line("flathub", "https://dl.flathub.org/repo/"),
+        )
+    };
+    let found = |asked: bool| {
+        let mut engine = Engine::default();
+        engine.register(Flatpak::new(script())).unwrap();
+        if asked {
+            engine.offer_everywhere();
+        }
+        let report = engine.search_backend("flatpak", "app", &Cancellation::default());
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        report.packages.len()
+    };
+    assert_eq!(found(false), 1);
+    assert_eq!(found(true), 2);
+}
+
+#[test]
 fn flatpak_search_only_offers_repositories_that_stay_as_safe() {
     let reference = format!("{NEW_REMOTE_APP}/{}/stable", std::env::consts::ARCH);
     let alone = [(true, reference.clone())];
@@ -643,7 +707,7 @@ fn flatpak_search_only_offers_repositories_that_stay_as_safe() {
 fn new_remote_install(
     id: &PackageId,
     remotes: &'static str,
-    has_app: bool,
+    kinds: &'static [&'static str],
 ) -> (
     Result<OperationOutcome, EngineError>,
     Script,
@@ -655,7 +719,7 @@ fn new_remote_install(
         if line.contains(" remotes ") {
             ok(remotes)
         } else if line.contains(" remote-info ") {
-            if has_app == line.contains("app/") {
+            if kinds.iter().any(|kind| line.contains(kind)) {
                 ok("")
             } else {
                 exit(1, "No such ref")
@@ -687,7 +751,7 @@ fn flatpak_installs_with_the_repository_it_adds() {
     const REMOTES: &str =
         "only-here\tA \\title\thttps://example.test/repo/\torg.example.Repo\t-\t-";
     // Into the user's: the repository comes from the system's.
-    let (result, script, written) = new_remote_install(&id, REMOTES, true);
+    let (result, script, written) = new_remote_install(&id, REMOTES, &["app/"]);
     result.unwrap();
     use base64::Engine as _;
     let keys = base64::engine::general_purpose::STANDARD.encode(b"signing keys");
@@ -710,11 +774,22 @@ fn flatpak_installs_with_the_repository_it_adds() {
         writes[1],
         "w:flatpak --user update --appstream --noninteractive only-here"
     );
+    // Its keys and what it is come from there too: this side doesn't have it.
+    assert!(
+        calls.contains(&"keys:system:only-here".to_owned()),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|line| line.starts_with("sys:flatpak --system remote-info only-here app/")),
+        "{calls:?}"
+    );
     // Into the system's: one write with the password, and the catalog after
     // it without one.
     let mut system = id.clone();
     system.scope = Scope::System;
-    let (result, script, _) = new_remote_install(&system, REMOTES, true);
+    let (result, script, _) = new_remote_install(&system, REMOTES, &["app/"]);
     result.unwrap();
     let calls = script.calls();
     assert!(calls[0].starts_with("flatpak --user remotes "), "{calls:?}");
@@ -725,23 +800,45 @@ fn flatpak_installs_with_the_repository_it_adds() {
         writes[1],
         "w:flatpak --system update --appstream --noninteractive only-here"
     );
+    assert!(
+        calls.contains(&"keys:user:only-here".to_owned()),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|line| line.starts_with("flatpak --user remote-info only-here app/")),
+        "{calls:?}"
+    );
     // A runtime says so, and a repository without a collection leaves it out.
     let (result, _, written) = new_remote_install(
         &id,
         "only-here\tTitle\thttps://example.test/repo/\t-\t-\t-",
-        false,
+        &["runtime/"],
     );
     result.unwrap();
     let written = written.lock().unwrap();
     assert!(written.contains("IsRuntime=true\n"), "{written}");
     assert!(!written.contains("CollectionID"), "{written}");
+    drop(written);
+    // Only something that's just a runtime says so: with both, it's the app,
+    // and with neither, Flatpak gets to say what's wrong.
+    for kinds in [&["app/", "runtime/"][..], &[]] {
+        let (result, _, written) = new_remote_install(&id, REMOTES, kinds);
+        result.unwrap();
+        let written = written.lock().unwrap();
+        assert!(
+            written.contains("IsRuntime=false\n"),
+            "{kinds:?}: {written}"
+        );
+    }
     // The repository changed since the search: nothing is written.
     for remotes in [
         "other\tTitle\thttps://example.test/repo/\t-\t-\t-",
         "only-here\tTitle\thttp://example.test/repo/\t-\t-\t-",
         "only-here\tTitle\thttps://example.test/repo/\t-\t-\t-\tno-gpg-verify",
     ] {
-        let (result, script, _) = new_remote_install(&id, remotes, true);
+        let (result, script, _) = new_remote_install(&id, remotes, &["app/"]);
         invalid_response(result, "can't be added here anymore");
         assert!(!script.calls().iter().any(|line| line.starts_with("w:")));
     }
@@ -784,7 +881,7 @@ fn flatpak_installs_with_the_repository_it_adds() {
     ] {
         let mut bad = id.clone();
         change(&mut bad);
-        let (result, script, _) = new_remote_install(&bad, REMOTES, true);
+        let (result, script, _) = new_remote_install(&bad, REMOTES, &["app/"]);
         invalid_response(result, reason);
         assert!(script.calls().is_empty(), "{name}");
     }

@@ -880,6 +880,32 @@ fn visible_rows_sort_by_column_relevance_or_name() {
 }
 
 #[test]
+fn a_flatpak_in_both_scopes_stays_where_its_first_copy_was() {
+    let flatpak = |name: &str, scope: Value, summary: &str| {
+        row(json!({
+            "name": name, "source": "flatpak", "remote": "flathub", "candidate": "1",
+            "reference": format!("{name}/x86_64/stable"), "scope": scope, "summary": summary,
+        }))
+    };
+    let rows = vec![
+        flatpak("org.gimp.GIMP", json!("system"), "a"),
+        flatpak("org.other.App", json!("system"), "b"),
+        flatpak("org.gimp.GIMP", json!({"user": {"uid": 1}}), "c"),
+    ];
+    let options = ViewOptions {
+        page: Some(Page::Search),
+        sort: Some((Column::Summary, true)),
+        ..ViewOptions::default()
+    };
+    let items = visible(&rows, &options);
+    assert_eq!(
+        items.iter().map(|item| item.raw).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(items[0].variants, vec![0, 2]);
+}
+
+#[test]
 fn a_flatpak_with_a_repository_in_one_place_still_gets_both_scopes() {
     let reference = "org.gimp.GIMP/x86_64/stable";
     let real = |scope: Value| {

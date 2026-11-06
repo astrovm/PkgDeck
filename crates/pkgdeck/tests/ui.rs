@@ -331,6 +331,46 @@ fn updates_rows_can_be_unchecked() {
 }
 
 #[test]
+fn what_is_still_waiting_gets_no_update_button() {
+    let later = pkgdeck::model::now() + 86_400;
+    let update = |name: &str, waiting_until: Option<i64>| {
+        json!({
+            "kind": "package", "name": name, "display_name": name, "source": "apt",
+            "architecture": "x86_64", "scope": "system", "scope_label": "System",
+            "installed": "1", "candidate": "2", "update": "available",
+            "summary": "Summary", "waiting_until": waiting_until,
+        })
+    };
+    let open = |rows: serde_json::Value| {
+        let mut app = app();
+        app.c().set_rows(rows.to_string().into());
+        app.react();
+        app.page = Page::Updates;
+        app.invalidate();
+        let mut harness = harness(app);
+        harness.run_steps(4);
+        harness
+    };
+    let no_button = |harness: &Harness<'static, (bool, App)>| {
+        assert!(harness.query_by_label("Update all").is_none());
+        assert!(harness.query_by_label("Update").is_none());
+        assert!(harness.query_by_label_contains("Update selected").is_none());
+    };
+    // Everything's waiting: there's nothing to start.
+    let harness = open(json!([update("rack", Some(later))]));
+    no_button(&harness);
+    // With something ready, it's there until that's unchecked too.
+    let mut harness = open(json!([
+        update("rack", Some(later)),
+        update("rainbow", None)
+    ]));
+    assert!(harness.query_by_label("Update all").is_some());
+    harness.get_by_label("Select none").click();
+    harness.run_steps(3);
+    no_button(&harness);
+}
+
+#[test]
 fn updates_that_failed_or_need_the_password_are_marked() {
     let mut app = app();
     app.page = Page::Updates;
