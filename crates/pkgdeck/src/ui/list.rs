@@ -367,14 +367,16 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     if let Some(s) = cols.summary {
         titles.push((Column::Summary, "SUMMARY", s));
     }
-    if let Some(tick) = cols.tick {
-        let rows = app.shown_rows();
-        let selectable: Vec<_> = app
-            .items
-            .iter()
-            .filter_map(|i| rows.get(i.raw))
-            .filter(|row| app.select_all_checks(row))
-            .collect();
+    let rows = app.shown_rows();
+    let selectable: Vec<_> = app
+        .items
+        .iter()
+        .filter_map(|i| rows.get(i.raw))
+        .filter(|row| app.select_all_checks(row))
+        .collect();
+    // With nothing to select, such as when everything's still waiting,
+    // there's no checkbox to select it with.
+    if let Some(tick) = cols.tick.filter(|_| !selectable.is_empty()) {
         let all_checked =
             !selectable.is_empty() && selectable.iter().all(|row| app.row_checked(row));
         let none_checked = selectable.iter().all(|row| !app.row_checked(row));
@@ -394,7 +396,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         response.widget_info(|| {
             let mut info = egui::WidgetInfo::selected(
                 egui::Role::CheckBox,
-                !selectable.is_empty(),
+                true,
                 all_checked,
                 "Select all tasks",
             );
@@ -804,6 +806,12 @@ fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
         .on_hover_text(held.tip());
 }
 
+/// Where a row's status icon goes: centered in the row, left of its buttons,
+/// where `x` is the free space's right edge.
+fn status_mark(x: f32, y: f32) -> Rect {
+    Rect::from_center_size(pos2(x - 17.0, y), Vec2::splat(16.0))
+}
+
 /// The clock on an update too new to install yet.
 fn waiting_mark(ui: &mut Ui, until: u64, rect: Rect, row: Id) {
     let palette = Palette::current(ui.ctx());
@@ -831,8 +839,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let held = (app.page == Page::Updates && row.has_update())
         .then(|| app.held.iter().find(|held| held.matches(&row)).cloned())
         .flatten();
-    // A release too new to install yet. What's held shows first.
-    let waiting = row.waiting_until().filter(|_| held.is_none());
+    // A release too new to install yet.
+    let waiting = row.waiting_until();
     let mut rect = rect;
     if let Some(group) = &item.group {
         let heading = Rect::from_min_size(
@@ -931,8 +939,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     let compact = width == Width::Compact;
 
-    // Checkboxes on Updates and Clean.
-    if let Some(tick) = cols.tick {
+    // Checkboxes on Updates and Clean. What's still waiting isn't updated
+    // with the others, so it has a clock there instead.
+    if let (Some(tick), Some(until)) = (cols.tick, waiting) {
+        let mark = Rect::from_center_size(tick.center(), Vec2::splat(18.0));
+        waiting_mark(ui, until, mark, id);
+    } else if let Some(tick) = cols.tick {
         let enabled = app.page != Page::Clean || row.batch_cleanable();
         let checked = enabled && app.row_checked(&row);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
@@ -1008,15 +1020,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         };
         let width = cols.name.width();
         let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
-        let mut at = pos2(cols.name.left(), top_y + 30.0);
-        if let Some(held) = &held {
-            held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
-            at.x += 20.0;
-        }
-        if let Some(until) = waiting {
-            waiting_mark(ui, until, Rect::from_min_size(at, Vec2::splat(15.0)), id);
-            at.x += 20.0;
-        }
+        let at = pos2(cols.name.left(), top_y + 30.0);
         // No version, no gap before the summary.
         let used = version.size().x;
         let gap = if used > 0.0 { 12.0 } else { 0.0 };
@@ -1041,23 +1045,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         // what it replaces under it.
         if row.has_update() {
             let new = model::new_version(&row);
-            let mut left = v.left();
-            if let Some(held) = &held {
-                let mark = Rect::from_center_size(
-                    pos2(left + 8.0, rect.center().y - 10.0),
-                    Vec2::splat(16.0),
-                );
-                held_mark(ui, held, mark, id);
-                left += 22.0;
-            }
-            if let Some(until) = waiting {
-                let mark = Rect::from_center_size(
-                    pos2(left + 8.0, rect.center().y - 10.0),
-                    Vec2::splat(16.0),
-                );
-                waiting_mark(ui, until, mark, id);
-                left += 22.0;
-            }
+            let left = v.left();
             let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
             painter.galley(
                 pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
@@ -1116,7 +1104,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     // Buttons.
     let mut x = cols.actions.right();
     if let Some(action) = action.filter(|_| !page_open_here) {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(32.0));
         x -= 38.0;
         let enabled = running || (app.can_act() && !retaining);
         // Coloured only on the row in hand, so a long list isn't a wall of
@@ -1161,7 +1149,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     if pull && !running {
-        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
+        let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(32.0));
+        x -= 38.0;
         let mut child = ui.new_child(UiBuilder::new().max_rect(button));
         let tip = format!("Pull {title} from {line}");
         if icon_button(
@@ -1178,6 +1167,15 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             app.c().propose("upgrade".into(), item.raw as i32);
             app.react();
         }
+    }
+    // What holds an update back goes beside its button, in the room every
+    // row keeps there, so the versions stay lined up. Without a checkbox to
+    // replace, so does the clock.
+    let mark = status_mark(x, rect.center().y);
+    if let Some(held) = &held {
+        held_mark(ui, held, mark, id);
+    } else if let Some(until) = waiting.filter(|_| cols.tick.is_none()) {
+        waiting_mark(ui, until, mark, id);
     }
     // Divider.
     painter.line_segment(
@@ -1762,6 +1760,27 @@ mod column_tests {
     }
 
     #[test]
+    fn a_rows_status_mark_stays_clear_of_its_columns_and_button() {
+        for (width, kind) in [
+            (1000.0, Width::Wide),
+            (700.0, Width::Medium),
+            (420.0, Width::Compact),
+        ] {
+            let cols = columns(row(width), kind, Page::Updates, 38.0, Shares::default());
+            let button = cols.actions.right() - 38.0;
+            let mark = status_mark(button, cols.actions.center().y);
+            assert_eq!(mark.center().y, cols.actions.center().y);
+            assert!(mark.right() <= button, "{width}");
+            for column in [Some(cols.name), cols.version, cols.summary]
+                .into_iter()
+                .flatten()
+            {
+                assert!(column.right() < mark.left(), "{width}");
+            }
+        }
+    }
+
+    #[test]
     fn compact_rows_make_room_for_a_second_line() {
         use crate::{app::Launch, platform::Platform, settings::Store};
         let (store, settings) = Store::open(None, None);
@@ -1936,7 +1955,7 @@ mod grid_tests {
     };
     use crate::{model::Page, settings::Style};
     use eframe::egui::{self, pos2, vec2, Rect};
-    use egui_kittest::Harness;
+    use egui_kittest::{kittest::Queryable, Harness};
     use pkgdeck_app::controller::ffi::create_synthetic_controller;
     use serde_json::json;
 
@@ -2041,6 +2060,203 @@ mod grid_tests {
                     "{labels} off-grid edges in the Installed card body, {style:?} at {pixels_per_point} ppp"
                 );
             }
+        }
+    }
+
+    /// Where the text starting with each of `starts` was drawn.
+    fn text_x(shape: &egui::Shape, starts: &str, out: &mut Vec<f32>) {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with(starts) => {
+                out.push(text.pos.x);
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| text_x(s, starts, out)),
+            _ => {}
+        }
+    }
+
+    /// The list of `rows` on the Installed page, in a card this wide.
+    fn installed_list(
+        rows: Vec<serde_json::Value>,
+        card: f32,
+    ) -> egui_kittest::Harness<'static, (bool, App)> {
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.page = Page::Installed;
+        app.rows = rows
+            .into_iter()
+            .map(|row| serde_json::from_value(row).unwrap())
+            .collect();
+        app.invalidate();
+        app.refresh_items();
+        let mut harness = Harness::builder()
+            .with_size(vec2(card + 40.0, 500.0))
+            .build_ui_state(
+                move |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                        *ready = true;
+                        return;
+                    }
+                    let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(card, 400.0));
+                    super::list_card(app, ui, rect);
+                },
+                (false, app),
+            );
+        harness.run_steps(3);
+        harness
+    }
+
+    fn installed_row(name: &str, source: &str, version: &str) -> serde_json::Value {
+        json!({
+            "kind": "package", "name": name, "display_name": name, "source": source,
+            "scope": "system", "installed": version, "candidate": version,
+            "update": "current", "available": true, "summary": "Fixture summary",
+            "reference": "example.org/box:latest", "capabilities": ["search", "remove"],
+        })
+    }
+
+    #[test]
+    fn only_containers_can_pull_and_it_sits_beside_the_rows_other_button() {
+        let harness = installed_list(
+            vec![
+                installed_row("box", "docker", "1.0"),
+                installed_row("tool", "apt", "1.0"),
+            ],
+            900.0,
+        );
+        let pulls: Vec<_> = harness.query_all_by_label_contains("Pull ").collect();
+        assert_eq!(pulls.len(), 1);
+        assert!(harness.query_by_label_contains("Pull box").is_some());
+        let pull = pulls[0].rect();
+        assert!(pull.center().x > 800.0, "{pull:?}");
+        // It leaves the row's last button its place.
+        assert!(pull.right() < 20.0 + 900.0 - 38.0, "{pull:?}");
+    }
+
+    #[test]
+    fn a_compact_rows_version_goes_under_its_name_and_takes_half_the_width() {
+        const LONG: &str = "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16.17.18.19.20.21.22.23.24.25.\
+                            26.27.28.29.30.31.32.33.34.35.36.37.38.39.40";
+        let card = 460.0;
+        let harness = installed_list(vec![installed_row("tool", "apt", LONG)], card);
+        fn find<'a>(shape: &'a egui::Shape, starts: &str) -> Option<&'a egui::epaint::TextShape> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with(starts) => Some(text),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, starts)),
+                _ => None,
+            }
+        }
+        let text = |starts: &str| {
+            harness
+                .output()
+                .shapes
+                .iter()
+                .find_map(|clipped| find(&clipped.shape, starts))
+                .expect("it was drawn")
+        };
+        let (name, version) = (text("tool"), text("1.2.3"));
+        assert!(version.pos.y > name.pos.y + 10.0, "{:?}", version.pos);
+        assert!(version.pos.y < name.pos.y + 60.0, "{:?}", version.pos);
+        assert!(
+            version.galley.size().x <= card / 2.0,
+            "{:?}",
+            version.galley.size()
+        );
+    }
+
+    #[test]
+    fn a_waiting_update_keeps_its_version_lined_up_with_the_others() {
+        let update = |name: &str, version: &str, waiting_until: Option<u64>| -> crate::model::Row {
+            serde_json::from_value(json!({
+                "kind": "package", "name": name, "display_name": name, "source": "apt",
+                "scope": "system", "installed": "1.0", "candidate": version,
+                "update": "available", "available": true, "summary": "Fixture summary",
+                "waiting_until": waiting_until, "capabilities": ["search", "upgrade"],
+            }))
+            .unwrap()
+        };
+        let later = pkgdeck_core::release_wait::now() + 3600;
+        for card in [900.0, 480.0] {
+            let (store, settings) = Store::open(None, None);
+            let mut platform = Platform::start(|| {});
+            platform.record_notifications();
+            platform.record_links();
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                platform,
+                Launch::default(),
+            );
+            app.page = Page::Updates;
+            app.catalog = vec![crate::model::Source {
+                source: "apt".into(),
+                available: true,
+                capabilities: vec!["search".into(), "upgrade".into()],
+                ..crate::model::Source::default()
+            }];
+            app.rows = vec![
+                update("waiting", "2.5.0", Some(later)),
+                update("ready", "3.5.0", None),
+            ];
+            app.invalidate();
+            app.refresh_items();
+            let mut harness = Harness::builder()
+                .with_size(vec2(card + 40.0, 500.0))
+                .build_ui_state(
+                    move |ui, (ready, app): &mut (bool, App)| {
+                        if !*ready {
+                            crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                            *ready = true;
+                            return;
+                        }
+                        let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(card, 400.0));
+                        super::list_card(app, ui, rect);
+                    },
+                    (false, app),
+                );
+            harness.run_steps(3);
+            let at = |version: &str| {
+                let mut found = Vec::new();
+                for clipped in &harness.output().shapes {
+                    text_x(&clipped.shape, version, &mut found);
+                }
+                found.first().copied().expect("the version was drawn")
+            };
+            assert_eq!(at("2.5.0"), at("3.5.0"), "{card}");
+            // It has the clock in place of a checkbox: nothing to select.
+            assert!(harness.query_by_label("Select waiting").is_none());
+            assert!(harness.query_by_label("Select ready").is_some());
+            // Only wider lists have headings, with their own checkbox.
+            let wide = card > 480.0;
+            assert_eq!(harness.query_by_label("Select all tasks").is_some(), wide);
+            // The arrow sits in the middle of its row, as the clock does.
+            let arrow = harness.get_by_label("Update ready from APT").rect();
+            let row = harness
+                .get_by_label_contains("Update available. ready")
+                .rect();
+            assert!(
+                (arrow.center().y - row.center().y).abs() < 0.25,
+                "{card}: arrow {arrow:?}, row {row:?}"
+            );
+            // At the row's far end, not somewhere else along it.
+            assert!(row.contains_rect(arrow), "{card}: {arrow:?} in {row:?}");
+            assert!(arrow.right() > row.right() - 40.0, "{card}: {arrow:?}");
+            // With everything waiting, so does the list's own checkbox.
+            let state = harness.state_mut();
+            state.1.rows.retain(|row| row.name == "waiting");
+            state.1.invalidate();
+            state.1.refresh_items();
+            harness.run_steps(3);
+            assert!(harness.query_by_label("Select all tasks").is_none());
         }
     }
 }

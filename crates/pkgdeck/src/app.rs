@@ -391,17 +391,17 @@ impl App {
         self.c().set_auto_clean(clean, cleaned_at);
         let worktrees = self.settings.auto_clean_worktrees;
         self.c().set_auto_clean_worktrees(worktrees);
-        let system = self.settings.flatpak_links_for_system;
-        self.c().set_flatpak_links_for_system(system);
+        let system = self.settings.opened_flatpaks_for_system;
+        self.c().set_opened_flatpaks_for_system(system);
         self.sync_cleanup_preferences();
     }
 
-    /// Install a Flatpak link for the whole system or this user, and start
-    /// the next link there too.
-    pub fn choose_flatpak_link_scope(&mut self, system: bool) {
+    /// Install an opened Flatpak file or link for the whole system or this
+    /// user, and start the next one there too.
+    pub fn choose_opened_flatpak_scope(&mut self, system: bool) {
         self.c().set_open_flatpak_scope(system);
-        self.c().set_flatpak_links_for_system(system);
-        self.settings.flatpak_links_for_system = system;
+        self.c().set_opened_flatpaks_for_system(system);
+        self.settings.opened_flatpaks_for_system = system;
         self.save_settings();
         self.react();
     }
@@ -919,7 +919,7 @@ impl App {
             ReviewOn::Page(key) => self.page_key().as_ref() == Some(key),
             ReviewOn::Dialog => false,
         };
-        if on_page && data.flatpak_ref_scope.is_empty() {
+        if on_page && data.flatpak_scope.is_empty() {
             self.review_on_page = true;
         } else {
             self.confirm_open = true;
@@ -1145,7 +1145,9 @@ impl App {
                     row.cleanup_opt_in,
                 )
         } else {
-            !self.unchecked.contains(&row.identity())
+            // What's still waiting isn't updated with the others, so it's
+            // never shown as selected.
+            row.waiting_until().is_none() && !self.unchecked.contains(&row.identity())
         }
     }
     pub fn set_row_checked(&mut self, row: &Row, checked: bool) {
@@ -1158,6 +1160,7 @@ impl App {
                 checked,
             );
             self.sync_cleanup_preferences();
+        } else if row.waiting_until().is_some() {
         } else if checked {
             self.unchecked.remove(&row.identity());
         } else {
@@ -1176,7 +1179,9 @@ impl App {
                 },
                 row.cleanup_opt_in,
             );
-        (self.page != Page::Clean || row.batch_cleanable()) && !(waits && !self.row_checked(row))
+        row.waiting_until().is_none()
+            && (self.page != Page::Clean || row.batch_cleanable())
+            && !(waits && !self.row_checked(row))
     }
     pub fn set_all_checked(&mut self, checked: bool) {
         let rows: Vec<_> = self
@@ -1594,7 +1599,7 @@ impl App {
         };
         let raw = item.raw;
         let identity = self.rows[raw].identity();
-        let group = flatpak_group(&self.rows[raw]);
+        let group = shown_flatpak_group(&self.rows, item);
         if let Some(group) = group.clone().filter(|_| item.variants.len() > 1) {
             self.scope_choices.insert(group, identity.clone());
         }
@@ -1669,7 +1674,7 @@ impl App {
             if let Some(index) = self
                 .items
                 .iter()
-                .position(|item| flatpak_group(&rows[item.raw]).as_ref() == Some(&group))
+                .position(|item| shown_flatpak_group(rows, item).as_ref() == Some(&group))
             {
                 let open = self.page_open;
                 self.selected = None;
@@ -1705,7 +1710,7 @@ impl App {
             return;
         };
         let identity = self.rows[raw].identity();
-        if let Some(group) = flatpak_group(&self.rows[raw]) {
+        if let Some(group) = shown_flatpak_group(&self.rows, &item) {
             self.scope_choices.insert(group, identity.clone());
         }
         self.items_stale = true;
@@ -1820,30 +1825,15 @@ impl App {
         self.react();
     }
 
-    /// How many updates the Updates button would run. Update all leaves out
-    /// what's still waiting, and so does Update selected unless that's all
-    /// that's checked: then it's what the person asked for.
+    /// How many updates the Updates button would run: the checked ones,
+    /// which never include what's still waiting.
     pub fn updates_to_run(&self) -> usize {
         let rows = self.shown_rows();
-        let packages: Vec<&Row> = self
-            .items
+        self.items
             .iter()
             .filter_map(|item| rows.get(item.raw))
-            .filter(|row| row.is_package())
-            .collect();
-        let checked: Vec<&&Row> = packages
-            .iter()
-            .filter(|row| !self.unchecked.contains(&row.identity()))
-            .collect();
-        let ready = checked
-            .iter()
-            .filter(|row| row.waiting_until().is_none())
-            .count();
-        if ready > 0 || checked.len() == packages.len() {
-            ready
-        } else {
-            checked.len()
-        }
+            .filter(|row| row.is_package() && self.row_checked(row))
+            .count()
     }
 
     /// Update all, or the checked ones.
@@ -1861,7 +1851,7 @@ impl App {
             .items
             .iter()
             .map(|item| &rows[item.raw])
-            .filter(|row| row.is_package() && !self.unchecked.contains(&row.identity()))
+            .filter(|row| row.is_package() && self.row_checked(row))
             .collect();
         let identities: Vec<Value> = checked.iter().map(|row| row.identity_value()).collect();
         self.active_rows = checked.iter().map(|row| row.identity()).collect();

@@ -75,6 +75,13 @@ impl Transport for Script {
     fn flatpak_unused(&self, _: &Cancellation) -> Reply {
         self.run("flatpak-unused".into())
     }
+    fn flatpak_remote_keys(&self, _: bool, remote: &str) -> Option<Vec<u8>> {
+        let keyless = self.env.contains(&("KEYLESS", remote));
+        (!keyless).then(|| b"signing keys".to_vec())
+    }
+    fn system_flatpak_writable(&self) -> bool {
+        !self.env.iter().any(|(name, _)| *name == "READ_ONLY_SYSTEM")
+    }
     fn env(&self, name: &str) -> Option<OsString> {
         self.env
             .iter()
@@ -180,6 +187,7 @@ fn transport_defaults_refuse_previews_and_grouped_writes() {
         Err(ExecutionError::Disabled(reason)) => assert_eq!(reason, expected),
         other => panic!("expected {expected:?}, got {other:?}"),
     };
+    assert_eq!(Bare.flatpak_remote_keys(false, "x"), None);
     disabled(
         Bare.apt_write_group(&[AptAction::Install("x".into())], &cancel),
         "grouped APT transaction unavailable",
@@ -393,6 +401,409 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+const NEW_REMOTE_APP: &str = "org.example.App";
+fn offer_line(remote: &str) -> String {
+    format!("App\tAn app\t{NEW_REMOTE_APP}\t1.0\tstable\t{remote}")
+}
+fn remote_line(name: &str, url: &str) -> String {
+    format!("{name}\tA title\t{url}\t-\t-\t-")
+}
+/// `found` is what the system's catalog finds, `user_found` the user's, and
+/// each installation has the repositories listed for it.
+fn offers_script(found: String, user_found: String, system: String, user: String) -> Script {
+    Script::new(move |line| {
+        let is_system = line.contains("--system");
+        if line.contains(" search ") {
+            ok(if is_system { &found } else { &user_found })
+        } else if line.contains(" remotes ") {
+            ok(if is_system { &system } else { &user })
+        } else {
+            ok("")
+        }
+    })
+}
+fn scopes_and_references(offers: &[Package]) -> Vec<(bool, String)> {
+    offers
+        .iter()
+        .map(|offer| {
+            (
+                offer.id.scope == Scope::System,
+                offer.id.reference.clone().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+fn offers_everywhere(script: &Script) -> Vec<(bool, String)> {
+    let mut flatpak = Flatpak::new(script.clone());
+    flatpak.offer_everywhere();
+    let offers = flatpak.search("app", &Cancellation::default()).unwrap();
+    scopes_and_references(&offers)
+}
+
+#[test]
+fn flatpak_search_offers_the_installation_without_the_repository() {
+    let cancel = Cancellation::default();
+    let reference = format!("{NEW_REMOTE_APP}/{}/stable", std::env::consts::ARCH);
+    let new_remote = format!("{FLATPAK_NEW_REMOTE}{reference}");
+    let url = "https://example.test/repo/";
+    let elsewhere = || {
+        offers_script(
+            offer_line("only-here"),
+            String::new(),
+            remote_line("only-here", url),
+            remote_line("flathub", "https://dl.flathub.org/repo/"),
+        )
+    };
+    // With nothing found, nothing more is asked.
+    let script = offers_script(
+        String::new(),
+        String::new(),
+        remote_line("only-here", url),
+        String::new(),
+    );
+    assert!(offers_everywhere(&script).is_empty());
+    assert!(!script.calls().iter().any(|line| line.contains(" remotes ")));
+    // Only someone choosing from a list gets it, and nobody else pays for
+    // the extra questions.
+    let script = elsewhere();
+    let mut flatpak = Flatpak::new(script.clone());
+    assert_eq!(
+        scopes_and_references(&flatpak.search("app", &cancel).unwrap()),
+        [(true, reference.clone())]
+    );
+    assert!(!script.calls().iter().any(|line| line.contains(" remotes ")));
+    // An exact name finds what's set up already, even with it on.
+    let mut flatpak = Flatpak::new(elsewhere());
+    flatpak.offer_everywhere();
+    assert_eq!(
+        scopes_and_references(&flatpak.lookup(NEW_REMOTE_APP, &cancel).unwrap()),
+        [(true, reference.clone())]
+    );
+    // System to user.
+    assert_eq!(
+        offers_everywhere(&elsewhere()),
+        [(true, reference.clone()), (false, new_remote.clone())]
+    );
+    // It keeps the repository's name, so it merges with what it copies.
+    let mut flatpak = Flatpak::new(elsewhere());
+    flatpak.offer_everywhere();
+    let offers = flatpak.search("app", &cancel).unwrap();
+    assert_eq!(offers[1].id.remote.as_deref(), Some("only-here"));
+    assert_eq!(offers[1].candidate_version.as_deref(), Some("1.0"));
+    // Its page finds it too.
+    let details = flatpak.details(&offers[1].id, &cancel).unwrap();
+    assert_eq!(details.package.id, offers[1].id);
+    // User to system, unless this machine can't write there.
+    let upward = || {
+        offers_script(
+            String::new(),
+            offer_line("only-here"),
+            String::new(),
+            remote_line("only-here", url),
+        )
+    };
+    assert_eq!(
+        offers_everywhere(&upward()),
+        [(false, reference.clone()), (true, new_remote.clone())]
+    );
+    assert_eq!(
+        offers_everywhere(&upward().with_env("READ_ONLY_SYSTEM", "1")),
+        [(false, reference.clone())]
+    );
+    // Both installations have it: nothing to add.
+    let line = remote_line("only-here", url);
+    let both = offers_script(
+        offer_line("only-here"),
+        offer_line("only-here"),
+        line.clone(),
+        line,
+    );
+    assert_eq!(
+        offers_everywhere(&both),
+        [(false, reference.clone()), (true, reference.clone())]
+    );
+}
+
+#[test]
+fn flatpak_search_only_offers_repositories_that_stay_as_safe() {
+    let reference = format!("{NEW_REMOTE_APP}/{}/stable", std::env::consts::ARCH);
+    let alone = [(true, reference.clone())];
+    let url = "https://example.test/repo/";
+    let with = |system: &str, user: &str| {
+        offers_script(
+            offer_line("only-here"),
+            String::new(),
+            system.to_owned(),
+            user.to_owned(),
+        )
+    };
+    let line = remote_line("only-here", url);
+    let flathub = remote_line("flathub", "https://dl.flathub.org/repo/");
+    // What must not be copied.
+    for system in [
+        "only-here\tA title\thttp://example.test/repo/\t-\t-\t-".to_string(),
+        "only-here\tA title\tfile:///srv/repo\t-\t-\t-".to_string(),
+        "only-here\tA title\toci+https://example.test/\t-\t-\t-".to_string(),
+        "only-here\tA title\t\t-\t-\t-".to_string(),
+        format!("only-here\tA title\t{url}\t-\t/etc/filter\t-"),
+        format!("only-here\tA title\t{url}\t-\t-\tverified"),
+        format!("only-here\tA title\t{url}\t-\t-\t-\tno-gpg-verify"),
+        format!("only-here\tA title\t{url}\t-\t-\t-\tsystem,disabled"),
+        format!("only-here\tA title\t{url}\t-\t-\t-\tno-enumerate"),
+    ] {
+        assert_eq!(
+            offers_everywhere(&with(&system, &flathub)),
+            alone,
+            "{system}"
+        );
+    }
+    // Empty values read like `-`.
+    let blank = format!("only-here\t\t{url}\t\t\t\t");
+    assert_eq!(offers_everywhere(&with(&blank, &flathub)).len(), 2);
+    // A malformed name isn't one.
+    let odd = format!("--danger\tA title\t{url}\t-\t-\t-");
+    assert_eq!(offers_everywhere(&with(&odd, &flathub)), alone);
+    // Keys it can't read.
+    assert_eq!(
+        offers_everywhere(&with(&line, &flathub).with_env("KEYLESS", "only-here")),
+        alone
+    );
+    // Already there: disabled, or under another name with or without a slash.
+    for user in [
+        "only-here\tOther\thttps://other.test/\t-\t-\t-\tdisabled".to_string(),
+        remote_line("other", url),
+        remote_line("other", url.trim_end_matches('/')),
+    ] {
+        assert_eq!(offers_everywhere(&with(&line, &user)), alone, "{user}");
+    }
+    // Installed there already.
+    let arch = std::env::consts::ARCH;
+    let installed = format!("{NEW_REMOTE_APP}\t{arch}\tstable\t1.0\tApp\tother\t\tApp");
+    let found = offer_line("only-here");
+    let script = {
+        let (line, flathub) = (line.clone(), flathub.clone());
+        Script::new(move |asked| {
+            let is_system = asked.contains("--system");
+            if asked.contains(" search ") && is_system {
+                ok(&found)
+            } else if asked.contains(" remotes ") {
+                ok(if is_system { &line } else { &flathub })
+            } else if asked.contains(" list ") && !is_system {
+                ok(&installed)
+            } else {
+                ok("")
+            }
+        })
+    };
+    assert_eq!(offers_everywhere(&script), alone);
+    // A list it can't read offers nothing more.
+    let found = offer_line("only-here");
+    let script = Script::new(move |asked| {
+        if asked.contains(" search ") && asked.contains("--system") {
+            ok(&found)
+        } else if asked.contains(" remotes ") {
+            exit(1, "")
+        } else {
+            ok("")
+        }
+    });
+    assert_eq!(offers_everywhere(&script), alone);
+    // Flatpak before 1.14 has no subset column, and so no subsets.
+    let found = offer_line("only-here");
+    let old = move |system: &'static str| {
+        let found = found.clone();
+        Script::new(move |asked| {
+            let is_system = asked.contains("--system");
+            if asked.contains("subset") {
+                exit(1, "Unknown column: subset")
+            } else if asked.contains(" search ") && is_system {
+                ok(&found)
+            } else if asked.contains(" remotes ") && is_system {
+                ok(system)
+            } else {
+                ok("")
+            }
+        })
+    };
+    assert_eq!(
+        offers_everywhere(&old("only-here\tA\thttps://example.test/\t-\t-")).len(),
+        2
+    );
+    assert_eq!(
+        offers_everywhere(&old(
+            "only-here\tA\thttps://example.test/\t-\t-\tno-gpg-verify"
+        )),
+        alone
+    );
+}
+
+/// The `.flatpakref` a scripted install was given, and the script.
+fn new_remote_install(
+    id: &PackageId,
+    remotes: &'static str,
+    has_app: bool,
+) -> (
+    Result<OperationOutcome, EngineError>,
+    Script,
+    Arc<Mutex<String>>,
+) {
+    let written = Arc::new(Mutex::new(String::new()));
+    let keep = written.clone();
+    let script = Script::new(move |line| {
+        if line.contains(" remotes ") {
+            ok(remotes)
+        } else if line.contains(" remote-info ") {
+            if has_app == line.contains("app/") {
+                ok("")
+            } else {
+                exit(1, "No such ref")
+            }
+        } else {
+            if let Some((_, path)) = line.split_once("--from ") {
+                *keep.lock().unwrap() = std::fs::read_to_string(path).unwrap();
+            }
+            ok("")
+        }
+    });
+    let mut flatpak = Flatpak::new(script.clone());
+    let result = run(&mut flatpak, &Operation::Install(id.clone()));
+    (result, script, written)
+}
+
+#[test]
+fn flatpak_installs_with_the_repository_it_adds() {
+    let arch = std::env::consts::ARCH;
+    let uid = rustix::process::getuid().as_raw();
+    let mut id = PackageId {
+        backend: "flatpak".into(),
+        name: NEW_REMOTE_APP.into(),
+        architecture: arch.into(),
+        scope: Scope::User { uid },
+        remote: Some("only-here".into()),
+        reference: Some(format!("{FLATPAK_NEW_REMOTE}{NEW_REMOTE_APP}/{arch}/beta")),
+    };
+    const REMOTES: &str =
+        "only-here\tA \\title\thttps://example.test/repo/\torg.example.Repo\t-\t-";
+    // Into the user's: the repository comes from the system's.
+    let (result, script, written) = new_remote_install(&id, REMOTES, true);
+    result.unwrap();
+    use base64::Engine as _;
+    let keys = base64::engine::general_purpose::STANDARD.encode(b"signing keys");
+    assert_eq!(
+        *written.lock().unwrap(),
+        format!(
+            "[Flatpak Ref]\nName={NEW_REMOTE_APP}\nBranch=beta\nTitle=A title\nUrl=https://example.test/repo/\nIsRuntime=false\nGPGKey={keys}\nSuggestRemoteName=only-here\nCollectionID=org.example.Repo\n"
+        )
+    );
+    let calls = script.calls();
+    assert!(
+        calls[0].starts_with("sys:flatpak --system remotes "),
+        "{calls:?}"
+    );
+    let writes: Vec<&String> = calls.iter().filter(|line| line.starts_with("w:")).collect();
+    assert_eq!(writes.len(), 2, "{calls:?}");
+    assert!(writes[0]
+        .starts_with("w:flatpak --user install --noninteractive --assumeyes --reinstall --from "));
+    assert_eq!(
+        writes[1],
+        "w:flatpak --user update --appstream --noninteractive only-here"
+    );
+    // Into the system's: one write with the password, and the catalog after
+    // it without one.
+    let mut system = id.clone();
+    system.scope = Scope::System;
+    let (result, script, _) = new_remote_install(&system, REMOTES, true);
+    result.unwrap();
+    let calls = script.calls();
+    assert!(calls[0].starts_with("flatpak --user remotes "), "{calls:?}");
+    let writes: Vec<&String> = calls.iter().filter(|line| line.starts_with("w:")).collect();
+    assert_eq!(writes.len(), 2, "{calls:?}");
+    assert!(writes[0].starts_with("w:sys:flatpak --system install "));
+    assert_eq!(
+        writes[1],
+        "w:flatpak --system update --appstream --noninteractive only-here"
+    );
+    // A runtime says so, and a repository without a collection leaves it out.
+    let (result, _, written) = new_remote_install(
+        &id,
+        "only-here\tTitle\thttps://example.test/repo/\t-\t-\t-",
+        false,
+    );
+    result.unwrap();
+    let written = written.lock().unwrap();
+    assert!(written.contains("IsRuntime=true\n"), "{written}");
+    assert!(!written.contains("CollectionID"), "{written}");
+    // The repository changed since the search: nothing is written.
+    for remotes in [
+        "other\tTitle\thttps://example.test/repo/\t-\t-\t-",
+        "only-here\tTitle\thttp://example.test/repo/\t-\t-\t-",
+        "only-here\tTitle\thttps://example.test/repo/\t-\t-\t-\tno-gpg-verify",
+    ] {
+        let (result, script, _) = new_remote_install(&id, remotes, true);
+        invalid_response(result, "can't be added here anymore");
+        assert!(!script.calls().iter().any(|line| line.starts_with("w:")));
+    }
+    // Neither does a package that doesn't add up.
+    let name = id.name.clone();
+    for (change, reason) in [
+        (
+            (|id: &mut PackageId| id.name = "org.example.Other".into()) as fn(&mut PackageId),
+            "invalid native ref",
+        ),
+        (
+            |id: &mut PackageId| id.architecture = "riscv".into(),
+            "invalid native ref",
+        ),
+        (
+            |id: &mut PackageId| id.reference = Some(format!("{FLATPAK_NEW_REMOTE}--bad/x/y")),
+            "invalid native ref",
+        ),
+        (
+            |id: &mut PackageId| id.remote = Some("--bad".into()),
+            "invalid remote",
+        ),
+        (|id: &mut PackageId| id.remote = None, "invalid remote"),
+        (
+            |id: &mut PackageId| {
+                id.scope = Scope::User {
+                    uid: rustix::process::getuid().as_raw() + 1,
+                }
+            },
+            "invalid Flatpak scope",
+        ),
+        (
+            |id: &mut PackageId| {
+                id.scope = Scope::Environment {
+                    path: "/opt/flatpak".into(),
+                }
+            },
+            "invalid Flatpak scope",
+        ),
+    ] {
+        let mut bad = id.clone();
+        change(&mut bad);
+        let (result, script, _) = new_remote_install(&bad, REMOTES, true);
+        invalid_response(result, reason);
+        assert!(script.calls().is_empty(), "{name}");
+    }
+    // Keys it can't read any more.
+    id.scope = Scope::User { uid };
+    let script = Script::new(|line| {
+        if line.contains(" remotes ") {
+            ok(REMOTES)
+        } else {
+            ok("")
+        }
+    })
+    .with_env("KEYLESS", "only-here");
+    let mut flatpak = Flatpak::new(script.clone());
+    invalid_response(
+        run(&mut flatpak, &Operation::Install(id)),
+        "can't be added here anymore",
+    );
+    assert!(!script.calls().iter().any(|line| line.starts_with("w:")));
 }
 
 #[test]
@@ -1586,8 +1997,7 @@ fn flatpak_update_checks_and_bundle_scopes() {
         flatpak.installed(&cancel),
         Err(EngineError::Execution(ExecutionError::Disabled(_)))
     ));
-    // Bundles are imported for the current user; the reviewed identity
-    // cannot be moved to the system installation.
+    // A bundle installs where the person chose: this user or the system.
     let base = temp_dir("system-bundle");
     let bundle = base.join("synthetic.flatpak");
     std::fs::write(
@@ -1598,7 +2008,42 @@ fn flatpak_update_checks_and_bundle_scopes() {
     let mut id = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel)
         .unwrap()
         .id;
+    let user = id.scope.clone();
+    for (scope, flag) in [
+        (user, "--user install"),
+        (Scope::System, "--system install"),
+    ] {
+        id.scope = scope;
+        let script = Script::new(|_| ok(""));
+        let mut flatpak = Flatpak::new(script.clone());
+        run(&mut flatpak, &Operation::Install(id.clone())).unwrap();
+        let calls = script.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains(flag), "{calls:?}");
+        assert!(calls[0].contains("--bundle"), "{calls:?}");
+        // Only the system installation runs with the password.
+        assert_eq!(calls[0].starts_with("w:sys:"), id.scope == Scope::System);
+    }
+    // Nowhere else, and never before the file is checked.
+    let uid = rustix::process::getuid().as_raw();
+    for scope in [
+        Scope::User { uid: uid + 1 },
+        Scope::Environment {
+            path: "/opt/flatpak".into(),
+        },
+    ] {
+        id.scope = scope;
+        let script = Script::new(|_| ok(""));
+        let mut flatpak = Flatpak::new(script.clone());
+        invalid_response(
+            run(&mut flatpak, &Operation::Install(id.clone())),
+            "invalid Flatpak scope",
+        );
+        assert!(script.calls().is_empty());
+    }
+    // The file itself still has to be the one that was reviewed.
     id.scope = Scope::System;
+    id.name = "org.example.Other".into();
     let script = Script::new(|_| ok(""));
     let mut flatpak = Flatpak::new(script.clone());
     invalid_response(

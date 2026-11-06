@@ -615,10 +615,15 @@ fn main() {
             }
         });
     }
-    render("release-wait-row", [1180.0, 640.0], false, |app| {
-        app.rows[0].waiting_until = Some(pkgdeck_core::release_wait::now() + 20 * 3600);
-        offline(app, Page::Updates);
-    });
+    for (name, size) in [
+        ("release-wait-row", [1180.0, 640.0]),
+        ("release-wait-row-narrow", [640.0, 640.0]),
+    ] {
+        render(name, size, false, |app| {
+            app.rows[0].waiting_until = Some(pkgdeck_core::release_wait::now() + 20 * 3600);
+            offline(app, Page::Updates);
+        });
+    }
     render("updates", [1180.0, 780.0], false, |app| {
         offline(app, Page::Updates);
         let rows: Vec<model::Row> = app

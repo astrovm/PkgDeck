@@ -491,6 +491,9 @@ pub fn rank_search_matches(packages: &mut [Package], query: &str) {
         )
     });
 }
+/// Starts the reference of a Flatpak offered in an installation that doesn't
+/// have its repository yet: installing it adds that repository there too.
+pub const FLATPAK_NEW_REMOTE: &str = "new-remote:";
 /// Explicit-install placeholders are not catalog matches and must not be
 /// advertised by GUI/CLI search. An empty native version is still metadata.
 pub fn unverified_search_offer(package: &Package) -> bool {

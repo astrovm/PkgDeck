@@ -1616,6 +1616,7 @@ impl Natives {
         cancel: &Cancellation,
     ) -> Result<Engine, EngineError> {
         let mut engine = (self.engine)(sources, sources_view, authorization, cancel)?;
+        engine.offer_everywhere();
         if let Some(watch) = (self.release_watch)() {
             engine.set_release_watch(watch);
         }
@@ -1868,7 +1869,7 @@ pub struct Controller {
     opened_package: Option<Package>,
     /// Flatpak links install for the whole system unless the app is
     /// already installed: the last choice in their review.
-    flatpak_links_for_system: bool,
+    opened_flatpaks_for_system: bool,
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
@@ -2037,7 +2038,7 @@ impl Default for Controller {
             opened: QString::default(),
             appimage_data: None,
             opened_package: None,
-            flatpak_links_for_system: false,
+            opened_flatpaks_for_system: false,
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
@@ -2953,6 +2954,8 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
 /// PkgDeck never installs from, such as the macOS Applications inventory.
 fn undo_action(operation: &Operation) -> Option<&'static str> {
     match operation {
+        // Removing the app wouldn't remove the repository it added.
+        Operation::Install(id) if adds_flatpak_remote(id) => None,
         Operation::Install(id) if !pkgdeck_core::backends::never_installs(&id.backend) => {
             Some("remove")
         }
@@ -2970,6 +2973,11 @@ fn undo_action(operation: &Operation) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+fn adds_flatpak_remote(id: &PackageId) -> bool {
+    id.reference
+        .as_deref()
+        .is_some_and(|reference| reference.starts_with(pkgdeck_core::package::FLATPAK_NEW_REMOTE))
 }
 /// Whether a row of `backend` may offer removal. Sources PkgDeck never
 /// installs from, and inventories, remove only when the source catalog
@@ -3818,6 +3826,10 @@ fn confirmation_preview(
         }
         _ => false,
     }) {
+        if let Some(word) = replacing_action(operation, package) {
+            title = word.to_owned();
+            lines[0] = lines[0].replacen("Install", word, 1);
+        }
         title = format!(
             "{} {}",
             title,
@@ -3855,7 +3867,7 @@ fn confirmation_preview(
             &package.candidate_version,
         ) {
             (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
-            (Operation::Install(_), _, Some(new)) => summary.push(new.clone()),
+            (Operation::Install(_), None, Some(new)) => summary.push(new.clone()),
             (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
             (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
             _ => {}
@@ -3903,6 +3915,23 @@ fn confirmation_preview(
     // What follows the name, source and version is worth saying on an app
     // page too, which already shows those.
     let notes_from = summary.len();
+    // A new repository is worth a second look, whatever the app.
+    if let Operation::Install(id) = operation {
+        if adds_flatpak_remote(id) {
+            review = true;
+            let note = format!(
+                "Also adds the {} repository to {}.",
+                id.remote.as_deref().unwrap_or_default(),
+                if id.scope == Scope::System {
+                    "System"
+                } else {
+                    "User"
+                }
+            );
+            lines.push(note.clone());
+            summary.push(note);
+        }
+    }
     let mut other_changes = Vec::new();
     if let Some(plan) = plan {
         let requested_name = match operation {
@@ -4025,23 +4054,60 @@ fn confirmation_preview(
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
     }
-    let flatpak_ref_scope = match operation {
+    let flatpak_scope = match operation {
+        // An installed copy stays where it is.
         Operation::Install(id)
-            if id.backend == "flatpak"
-                && id
-                    .reference
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("flatpakref:")) =>
+            if !packages
+                .iter()
+                .any(|package| package.id == *id && package.installed_version.is_some()) =>
         {
-            match &id.scope {
-                Scope::System => "system",
-                Scope::User { .. } => "user",
-                _ => "",
-            }
+            opened_flatpak_scope(id)
         }
         _ => "",
     };
-    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope, "icon": icon, "review": review || !flatpak_ref_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_scope": flatpak_scope, "icon": icon, "review": review || !flatpak_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+}
+/// What installing `package` really does when a copy of it is already
+/// there, as an opened file or link can: **Update**, **Reinstall** or
+/// **Downgrade**.
+fn replacing_action(operation: &Operation, package: &Package) -> Option<&'static str> {
+    package.installed_version.as_ref()?;
+    matches!(operation, Operation::Install(id) if *id == package.id)
+        .then(|| pkgdeck_core::installed_copy::action(package))
+        .filter(|word| !word.is_empty())
+}
+/// A finished install that replaced the opened app's copy says what it did.
+/// It has no Undo: removing the app wouldn't bring the old version back.
+fn note_replaced_copy(notice: &mut Value, job: &Job, opened: Option<&Package>) {
+    let Some(package) = opened else {
+        return;
+    };
+    let word = job
+        .operations()
+        .iter()
+        .find_map(|operation| replacing_action(operation, package));
+    let Some(word) = word.filter(|_| notice["kind"] == "success") else {
+        return;
+    };
+    notice["undo"] = json!(false);
+    notice["undo_action"] = json!("");
+    if let Some(title) = notice["title"].as_str() {
+        notice["title"] = json!(title.replacen("Install", word, 1));
+    }
+}
+/// Where a Flatpak opened from a file or link installs, as the word its
+/// **User** / **System** choice shows. Empty for anything else, and for
+/// a scope Flatpak can't be told to install into.
+fn opened_flatpak_scope(id: &PackageId) -> &'static str {
+    let opened = id.backend == "flatpak"
+        && id.reference.as_deref().is_some_and(|value| {
+            value.starts_with("flatpakref:") || value.starts_with("artifact:flatpak:")
+        });
+    match &id.scope {
+        Scope::System if opened => "system",
+        Scope::User { .. } if opened => "user",
+        _ => "",
+    }
 }
 /// The app page of an opened file or link: the `details` shape, plus where
 /// it came from and what its button does.
@@ -4088,6 +4154,11 @@ fn opened_page(details: &PackageDetails, action: &str) -> Value {
         "action": action,
         "launchable": package.installed_version.is_some() && launchable_flatpak(package),
         "runnable": runnable_file(package).is_some(),
+        "flatpak_scope": if package.installed_version.is_none() {
+            opened_flatpak_scope(&package.id)
+        } else {
+            ""
+        },
     })
 }
 /// An AppImage file that isn't installed yet, which can still start from
@@ -4422,6 +4493,7 @@ impl ffi::PackageController {
             version
         };
         data["launchable"] = json!(launchable_flatpak(&package));
+        data["flatpak_scope"] = json!("");
         // The installed copy starts instead.
         data["runnable"] = json!(false);
         self.as_mut().set_opened(encoded(data));
@@ -4430,19 +4502,18 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().opened_package = None;
         self.as_mut().set_opened(QString::default());
     }
+    /// Choose where the opened Flatpak installs: from its page, or from the
+    /// review of its install, which then shows the new place.
     pub fn set_open_flatpak_scope(mut self: Pin<&mut Self>, system: bool) {
-        let Some(Job::Write(Operation::Install(previous), None)) = &self.rust().pending else {
-            return;
+        let previous = match (&self.rust().pending, &self.rust().opened_package) {
+            (Some(Job::Write(Operation::Install(id), None)), _) => id.clone(),
+            (None, Some(package)) => package.id.clone(),
+            _ => return,
         };
-        if previous.backend != "flatpak"
-            || !previous
-                .reference
-                .as_deref()
-                .is_some_and(|value| value.starts_with("flatpakref:"))
-        {
+        let reviewing = self.rust().pending.is_some();
+        if opened_flatpak_scope(&previous).is_empty() {
             return;
         }
-        let previous = previous.clone();
         let scope = if system {
             Scope::System
         } else {
@@ -4458,7 +4529,7 @@ impl ffi::PackageController {
             let Some(package) = rust
                 .packages
                 .iter_mut()
-                .find(|package| package.id == previous)
+                .find(|package| package.id == previous && package.installed_version.is_none())
             else {
                 return;
             };
@@ -4469,24 +4540,27 @@ impl ffi::PackageController {
                 opened.id.scope = scope.clone();
             }
         }
+        let mut selected = previous;
+        selected.scope = scope;
         if self
             .rust()
             .opened_package
             .as_ref()
-            .is_some_and(|p| p.id.scope == scope)
+            .is_some_and(|p| p.id == selected)
         {
             let mut data: Value =
                 serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
-            data["package"]["scope"] = json!(scope);
-            data["package"]["scope_label"] = json!(scope_label(&scope));
+            data["package"]["scope"] = json!(selected.scope);
+            data["package"]["scope_label"] = json!(scope_label(&selected.scope));
+            data["flatpak_scope"] = json!(opened_flatpak_scope(&selected));
             self.as_mut().set_opened(encoded(data));
         }
-        let mut selected = previous;
-        selected.scope = scope;
-        self.as_mut().apply(Ok(Payload::OperationPreview(
-            Operation::Install(selected),
-            None,
-        )));
+        if reviewing {
+            self.as_mut().apply(Ok(Payload::OperationPreview(
+                Operation::Install(selected),
+                None,
+            )));
+        }
     }
     /// Where the login item goes, for tests of the window.
     #[doc(hidden)]
@@ -4602,11 +4676,11 @@ impl ffi::PackageController {
     /// that isn't metered. Cleaning waits for the charger too.
     /// Where Flatpak links install by default: for the whole system, or for
     /// this user.
-    pub fn set_flatpak_links_for_system(mut self: Pin<&mut Self>, system: bool) {
-        self.as_mut().rust_mut().flatpak_links_for_system = system;
+    pub fn set_opened_flatpaks_for_system(mut self: Pin<&mut Self>, system: bool) {
+        self.as_mut().rust_mut().opened_flatpaks_for_system = system;
     }
-    pub fn flatpak_links_for_system(&self) -> bool {
-        self.rust().flatpak_links_for_system
+    pub fn opened_flatpaks_for_system(&self) -> bool {
+        self.rust().opened_flatpaks_for_system
     }
     pub fn set_waits(mut self: Pin<&mut Self>, battery: bool, metered: bool) {
         self.as_mut().rust_mut().waits = Waits { battery, metered };
@@ -6944,10 +7018,9 @@ impl ffi::PackageController {
             // An opened file or link gets its own app page; Install there
             // previews the change.
             Ok(Payload::OpenPackage(mut details)) => {
-                let reference = details.package.id.reference.as_deref();
-                if self.rust().flatpak_links_for_system
+                if self.rust().opened_flatpaks_for_system
                     && details.package.installed_version.is_none()
-                    && reference.is_some_and(|value| value.starts_with("flatpakref:"))
+                    && !opened_flatpak_scope(&details.package.id).is_empty()
                 {
                     details.package.id.scope = Scope::System;
                 }
@@ -8207,6 +8280,11 @@ impl ffi::PackageController {
                                         write_notice(&job, &result, self.rust().sudo, &names)
                                     })
                             };
+                            note_replaced_copy(
+                                &mut notice,
+                                &job,
+                                self.rust().opened_package.as_ref(),
+                            );
                             let batch_output =
                                 std::mem::take(&mut self.as_mut().rust_mut().failure_output);
                             let retry = if notice["kind"] == "error" {

@@ -585,7 +585,17 @@ fn stage_with_host(
     {
         return Err(invalid("package file changed since preview"));
     }
-    let current = inspect_staged(&staged, source, kind, cancel, host)?;
+    let mut current = inspect_staged(&staged, source, kind, cancel, host)?;
+    if kind == Kind::Flatpak {
+        // The file doesn't say where it installs: the person chose, or an
+        // installed copy decided.
+        if !matches!(&id.scope, Scope::System)
+            && !matches!(&id.scope, Scope::User { uid } if *uid == rustix::process::getuid().as_raw())
+        {
+            return Err(invalid("invalid Flatpak installation scope"));
+        }
+        current.id.scope = id.scope.clone();
+    }
     if current.id != *id {
         return Err(invalid("package identity changed since preview"));
     }
@@ -609,6 +619,49 @@ mod tests {
         let path = base.join(name);
         fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[test]
+    fn a_flatpak_bundle_stages_for_either_installation_only() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-artifact-bundle-scope-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("Demo.flatpak");
+        fs::write(
+            &file,
+            crate::flatpak_bundle::tests::app(
+                "app/org.example.Synthetic/x86_64/stable",
+                Some("1.0"),
+            ),
+        )
+        .unwrap();
+        let cancel = Cancellation::default();
+        let host = Host::current();
+        let package = inspect(file.to_str().unwrap(), &cancel).unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        assert_eq!(package.id.scope, Scope::User { uid });
+        let mut system = package.id.clone();
+        system.scope = Scope::System;
+        for id in [&package.id, &system] {
+            assert!(stage_with_host(id, &cancel, &host).unwrap().is_some());
+        }
+        for scope in [
+            Scope::User { uid: uid + 1 },
+            Scope::Environment {
+                path: "/opt/flatpak".into(),
+            },
+        ] {
+            let mut other = package.id.clone();
+            other.scope = scope;
+            assert!(stage_with_host(&other, &cancel, &host).is_err());
+        }
+        // Everything else about the file still has to match.
+        let mut renamed = system;
+        renamed.name = "org.example.Other".into();
+        assert!(stage_with_host(&renamed, &cancel, &host).is_err());
+        fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn routes_only_named_package_files() {

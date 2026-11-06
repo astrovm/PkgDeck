@@ -134,10 +134,10 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
         if title(ui, "Confirm changes") {
             answer = Some(false);
         }
-        if !data.flatpak_ref_scope.is_empty() {
+        if !data.flatpak_scope.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Install for").color(palette.muted));
-                let system = data.flatpak_ref_scope == "system";
+                let system = data.flatpak_scope == "system";
                 for (label, value) in [("User", false), ("System", true)] {
                     let look = if system == value {
                         Look::Soft(Tone::Accent)
@@ -261,7 +261,7 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
     });
     app.ui.confirm_details_flipped = flipped && open;
     if let Some(system) = scope {
-        app.choose_flatpak_link_scope(system);
+        app.choose_opened_flatpak_scope(system);
     }
     if open && !still && answer.is_none() {
         answer = Some(false);
@@ -1461,6 +1461,69 @@ mod tests {
         assert!(!app.ui.setup_open);
         assert!(!app.settings.auto_update && !app.settings.auto_clean);
         assert!(app.settings.setup_asked);
+    }
+
+    #[test]
+    fn the_review_of_an_opened_flatpak_chooses_where_it_installs() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+        let review = |scope: &str| {
+            let (store, settings) = Store::open(None, None);
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                Platform::start(|| {}),
+                Launch::default(),
+            );
+            app.confirmation = Some(model::Confirmation {
+                action: "Install".into(),
+                flatpak_scope: scope.into(),
+                ..model::Confirmation::default()
+            });
+            app.confirm_open = true;
+            let mut harness = Harness::builder()
+                .with_size(vec2(700.0, 600.0))
+                .build_ui_state(
+                    |ui, (ready, app): &mut (bool, App)| {
+                        if !*ready {
+                            crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                            set_reduce_motion(ui.ctx(), true);
+                            *ready = true;
+                            return;
+                        }
+                        confirm(app, &ui.ctx().clone());
+                    },
+                    (false, app),
+                );
+            harness.run_steps(4);
+            harness
+        };
+        // Nothing to choose for anything else.
+        let harness = review("");
+        assert!(harness.query_by_label("Install for").is_none());
+        assert!(harness.query_by_label("System").is_none());
+        // Pressing what's chosen changes nothing; the other one is saved.
+        for (scope, same, other, system) in [
+            ("user", "User", "System", true),
+            ("system", "System", "User", false),
+        ] {
+            let mut harness = review(scope);
+            assert!(harness.query_by_label("Install for").is_some());
+            let saved = |harness: &egui_kittest::Harness<'static, (bool, App)>| {
+                harness.state().1.settings.opened_flatpaks_for_system
+            };
+            let before = saved(&harness);
+            harness.get_by_label(same).click();
+            harness.run_steps(4);
+            assert_eq!(saved(&harness), before, "{scope}");
+            harness.get_by_label(other).click();
+            harness.run_steps(4);
+            assert_eq!(saved(&harness), system, "{scope}");
+        }
     }
 
     fn flat_shapes(harness: &egui_kittest::Harness<'_, (bool, App)>) -> Vec<egui::Shape> {

@@ -762,7 +762,7 @@ fn confirmations_show_on_the_page_in_a_dialog_or_run_alone() {
     app.c().set_confirmation("".into());
     app.react();
     app.c().set_confirmation_data(
-        json!({"action": "Install", "flatpak_ref_scope": "user"})
+        json!({"action": "Install", "flatpak_scope": "user"})
             .to_string()
             .into(),
     );
@@ -1356,19 +1356,37 @@ fn what_is_still_waiting_stays_out_of_the_count_and_update_all() {
     assert_eq!(app.background.available, 1);
     assert_eq!(app.updates_to_run(), 1);
 
-    // Checked with something ready, it stays out.
-    let b = app.rows[1].clone();
+    // It's never selected: not at first, not when asked, not by Select all.
     let a = app.rows[0].clone();
+    let b = app.rows[1].clone();
+    assert!(app.row_checked(&a));
+    assert!(!app.row_checked(&b));
+    assert!(!app.select_all_checks(&b));
+    app.set_row_checked(&b, true);
+    assert!(!app.row_checked(&b));
+    assert!(app.unchecked.is_empty());
+    app.set_all_checked(true);
+    assert!(!app.row_checked(&b));
+    assert_eq!(app.updates_to_run(), 1);
+    // With what's ready unchecked, nothing runs.
+    app.set_row_checked(&a, false);
+    assert_eq!(app.updates_to_run(), 0);
+    app.upgrade_updates();
+    assert!(app.active_rows.is_empty());
+    // Update selected runs what's checked, and never what's waiting.
     let c = row("c", json!({"candidate": "4", "update": "available"}));
     rows(&mut app, json!([ready, waiting, c]));
     let c_row = app.rows[2].clone();
-    app.set_row_checked(&c_row, false);
     assert_eq!(app.updates_to_run(), 1);
-    // Checked alone, it's what the person asked for.
-    app.set_row_checked(&a, false);
-    assert_eq!(app.updates_to_run(), 1);
-    app.set_row_checked(&b, false);
-    assert_eq!(app.updates_to_run(), 0);
+    assert!(!app.row_checked(&a));
+    app.upgrade_updates();
+    assert_eq!(app.active_rows, HashSet::from([c_row.identity()]));
+    app.active_rows.clear();
+    app.confirm(false);
+    // Once it's ready, it's selected like the others.
+    let mut now_ready = b;
+    now_ready.waiting_until = None;
+    assert!(app.row_checked(&now_ready));
 
     // With only that left, Update all has nothing to run and starts nothing.
     let mut app = self::app();
@@ -1964,13 +1982,13 @@ fn the_last_flatpak_link_scope_is_saved_and_starts_the_next_link() {
         Platform::start(|| {}),
         Launch::default(),
     );
-    assert!(!app.ctl.flatpak_links_for_system());
-    app.choose_flatpak_link_scope(true);
-    assert!(app.ctl.flatpak_links_for_system());
-    assert!(app.store.saved().flatpak_links_for_system);
+    assert!(!app.ctl.opened_flatpaks_for_system());
+    app.choose_opened_flatpak_scope(true);
+    assert!(app.ctl.opened_flatpaks_for_system());
+    assert!(app.store.saved().opened_flatpaks_for_system);
     // The next start reads it back and tells the controller.
     let (store, settings) = Store::open(Some(dir.clone()), None);
-    assert!(settings.flatpak_links_for_system);
+    assert!(settings.opened_flatpaks_for_system);
     let mut again = App::with_controller(
         create_synthetic_controller(empty),
         settings,
@@ -1978,10 +1996,10 @@ fn the_last_flatpak_link_scope_is_saved_and_starts_the_next_link() {
         Platform::start(|| {}),
         Launch::default(),
     );
-    assert!(again.ctl.flatpak_links_for_system());
-    again.choose_flatpak_link_scope(false);
-    assert!(!again.ctl.flatpak_links_for_system());
-    assert!(!again.store.saved().flatpak_links_for_system);
+    assert!(again.ctl.opened_flatpaks_for_system());
+    again.choose_opened_flatpak_scope(false);
+    assert!(!again.ctl.opened_flatpaks_for_system());
+    assert!(!again.store.saved().opened_flatpaks_for_system);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

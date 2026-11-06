@@ -1205,15 +1205,19 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
     match app.page {
         Page::Updates => {
             let rows = app.shown_rows();
+            // What's still waiting has a clock, not a checkbox.
+            let selectable = |row: &model::Row| row.is_package() && row.waiting_until().is_none();
             let total = app
                 .items
                 .iter()
-                .filter(|i| rows[i.raw].is_package())
+                .filter(|i| selectable(&rows[i.raw]))
                 .count();
             let unchecked = app
                 .items
                 .iter()
-                .filter(|i| app.unchecked.contains(&rows[i.raw].identity()))
+                .filter(|i| {
+                    selectable(&rows[i.raw]) && app.unchecked.contains(&rows[i.raw].identity())
+                })
                 .count();
             let checked = total - unchecked;
             let to_run = app.updates_to_run();
@@ -1224,15 +1228,10 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             } else {
                 format!("Update selected ({to_run})")
             };
-            let tooltip = if to_run == 0 {
-                "These are still waiting. The arrow on a row updates it now."
-            } else {
-                "Ctrl+Shift+U"
-            };
             if checked > 0
                 && Button::new(Look::Primary, &label)
                     .icon("updates")
-                    .tooltip(tooltip)
+                    .tooltip("Ctrl+Shift+U")
                     .enabled(to_run > 0 && !app.checking_updates && !(app.busy && !app.writing))
                     .show(ui)
                     .clicked()

@@ -84,6 +84,8 @@ pub(super) fn flatpak_installation(
     Some(data.join("flatpak"))
 }
 
+/// Far more than any repository's keys.
+const MAX_REMOTE_KEYS: u64 = 1024 * 1024;
 /// Locale settings that change translated names and descriptions.
 pub(super) fn locale_key(var: impl Fn(&str) -> Option<OsString>) -> Vec<String> {
     ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
@@ -242,6 +244,21 @@ impl Transport for NativeTransport {
     }
     fn system_flatpak_writable(&self) -> bool {
         self.host.system_flatpak_available()
+    }
+    fn flatpak_remote_keys(&self, system: bool, remote: &str) -> Option<Vec<u8>> {
+        use std::io::Read;
+        if !self.host.runtime.sees_host_files() {
+            return None;
+        }
+        let installation = flatpak_installation(system, |name| self.host.var(name))?;
+        let file = installation.join(format!("repo/{remote}.trustedkeys.gpg"));
+        let mut keys = Vec::new();
+        std::fs::File::open(file)
+            .ok()?
+            .take(MAX_REMOTE_KEYS + 1)
+            .read_to_end(&mut keys)
+            .ok()?;
+        (!keys.is_empty() && keys.len() as u64 <= MAX_REMOTE_KEYS).then_some(keys)
     }
     fn repository_editor_available(&self) -> bool {
         self.host.source_editor_available(self.authorization)
@@ -493,6 +510,38 @@ mod tests {
             ),
             authorization: Authorization::SudoNonInteractive,
         }
+    }
+
+    #[test]
+    fn flatpak_remote_keys_come_from_the_installations_own_file() {
+        let base = temp_dir("keys");
+        let bin = base.join("bin");
+        let repo = base.join(".local/share/flatpak/repo");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let native = transport(&bin, &base);
+        let keys = |remote: &str| native.flatpak_remote_keys(false, remote);
+        assert_eq!(keys("missing"), None);
+        std::fs::write(repo.join("empty.trustedkeys.gpg"), b"").unwrap();
+        assert_eq!(keys("empty"), None);
+        std::fs::write(repo.join("real.trustedkeys.gpg"), b"keys").unwrap();
+        assert_eq!(keys("real").as_deref(), Some(&b"keys"[..]));
+        // The last size it allows, and the first it doesn't.
+        let limit = usize::try_from(MAX_REMOTE_KEYS).unwrap();
+        std::fs::write(repo.join("full.trustedkeys.gpg"), vec![7; limit]).unwrap();
+        assert_eq!(keys("full").map(|keys| keys.len()), Some(limit));
+        std::fs::write(repo.join("huge.trustedkeys.gpg"), vec![7; limit + 1]).unwrap();
+        assert_eq!(keys("huge"), None);
+        // Inside a sandbox, that path isn't the installation's.
+        let sandboxed = NativeTransport {
+            host: Host::new(
+                Runtime::Flatpak,
+                [("HOME".into(), base.as_os_str().to_owned())].into(),
+            ),
+            authorization: Authorization::SudoNonInteractive,
+        };
+        assert_eq!(sandboxed.flatpak_remote_keys(false, "real"), None);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
