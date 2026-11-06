@@ -15,6 +15,7 @@
         <p>User and System no longer swap places between screens.</p>
         <ul>
           <li>A long homepage link wraps inside the app page instead of running past its edge</li>
+          <li>PkgDeck no longer asks the desktop for its animation setting every 5 seconds: it reads it once and waits to hear about changes</li>
           <li>Every choice between User and System shows User first, on an app's page and in its dialogs</li>
           <li>A closing dialog keeps what it showed until it's gone, instead of going blank</li>
         </ul>

@@ -572,6 +572,8 @@ impl App {
                 self.open_page(Page::Updates);
             }
             Event::Permission(_) => {}
+            // Waking the window was the point: the next frame reads it.
+            Event::MotionChanged => {}
         }
     }
 
