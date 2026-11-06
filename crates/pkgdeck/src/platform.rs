@@ -1059,7 +1059,7 @@ mod tests {
         };
         use zbus::{connection::Builder, message::Type, wire::Variant, Connection};
 
-        type Values = HashMap<String, HashMap<String, Variant<'static>>>;
+        pub type Values = HashMap<String, HashMap<String, Variant<'static>>>;
 
         pub struct Portal {
             pub connection: Connection,
@@ -1072,21 +1072,28 @@ mod tests {
             /// The portal, and the app's end of the connection to it.
             pub fn start() -> (Self, Connection) {
                 let (ours, theirs) = UnixStream::pair().unwrap();
-                let server = std::thread::spawn(move || {
-                    zbus::block_on(
-                        Builder::unix_stream(ours)
-                            .server(zbus::Guid::generate())
-                            .p2p()
-                            .build(),
-                    )
-                    .unwrap()
-                });
+                let server = std::thread::spawn(move || Self::serve(ours, Values::default()));
                 let client = zbus::block_on(Builder::unix_stream(theirs).p2p().build()).unwrap();
-                let connection = server.join().unwrap();
+                (server.join().unwrap(), client)
+            }
+
+            /// Answers one client on `stream`, starting with `values`. It also
+            /// answers what a client asks the bus, so it can stand in for one.
+            pub fn serve(stream: UnixStream, values: Values) -> Self {
+                // A client's first call can come right away, so this listens
+                // from before the connection starts reading.
+                let mut calls = zbus::block_on(
+                    Builder::unix_stream(stream)
+                        .server(zbus::Guid::generate())
+                        .p2p()
+                        .build_message_stream(),
+                )
+                .unwrap();
+                let connection = Connection::from(&calls);
                 let portal = Self {
                     connection: connection.clone(),
                     reads: Default::default(),
-                    values: Default::default(),
+                    values: Arc::new(Mutex::new(values)),
                     broken: Default::default(),
                 };
                 let (reads, values, broken) = (
@@ -1096,17 +1103,25 @@ mod tests {
                 );
                 std::thread::spawn(move || {
                     zbus::block_on(async {
-                        let mut calls = zbus::MessageStream::from(&connection);
                         while let Some(Ok(call)) = calls.next().await {
                             if call.message_type() != Type::MethodCall {
                                 continue;
                             }
-                            reads.fetch_add(1, Ordering::SeqCst);
                             let header = call.header();
-                            let read_all = header
-                                .member()
-                                .is_some_and(|name| name.as_str() == "ReadAll");
-                            if read_all && !broken.load(Ordering::SeqCst) {
+                            let member = header.member().map_or("", |name| name.as_str());
+                            let to_the_bus = header
+                                .interface()
+                                .is_some_and(|name| name.as_str() == "org.freedesktop.DBus");
+                            if to_the_bus {
+                                let _ = if member == "Hello" {
+                                    connection.reply(&header, &":1.1").await
+                                } else {
+                                    connection.reply(&header, &()).await
+                                };
+                                continue;
+                            }
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            if member == "ReadAll" && !broken.load(Ordering::SeqCst) {
                                 let answer = values.lock().unwrap().clone();
                                 let _ = connection.reply(&header, &answer).await;
                             } else {
@@ -1121,7 +1136,7 @@ mod tests {
                         }
                     })
                 });
-                (portal, client)
+                portal
             }
 
             pub fn reads(&self) -> usize {
@@ -1177,6 +1192,12 @@ mod tests {
     fn the_portal_is_read_once_and_again_only_when_it_says_something_changed() {
         use fake_portal::{next, Portal};
         use Setting::*;
+        let quiet = |published: &mpsc::Receiver<bool>| {
+            assert_eq!(
+                published.recv_timeout(std::time::Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+        };
         let (portal, client) = Portal::start();
         let (publish, published) = mpsc::channel();
         let follower = std::thread::spawn(move || {
@@ -1196,10 +1217,7 @@ mod tests {
         assert_eq!(portal.reads(), 2);
         // Without a signal, nothing is read, however long it waits.
         portal.set(appearance, "reduced-motion", Number(0.0));
-        assert_eq!(
-            published.recv_timeout(std::time::Duration::from_millis(300)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        );
+        quiet(&published);
         assert_eq!(portal.reads(), 2);
         // Other settings changing doesn't read either: the next signal that
         // matters is the one and only read.
@@ -1207,6 +1225,7 @@ mod tests {
         portal.setting_changed("org.example.other", "reduced-motion");
         portal.setting_changed(appearance, "reduced-motion");
         assert!(!next(&published));
+        quiet(&published);
         assert_eq!(portal.reads(), 3);
         // KDE only signals `reduced-motion` when its animation speed changes,
         // so one signal must refresh every key, not just the one it names.
@@ -1221,6 +1240,8 @@ mod tests {
         // was known. When a portal appears, it's asked again.
         portal.set(kde, "AnimationDurationFactor", Text("0".into()));
         portal.owner_changed("org.freedesktop.portal.Desktop", "");
+        quiet(&published);
+        assert_eq!(portal.reads(), 5);
         portal
             .broken
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1243,6 +1264,63 @@ mod tests {
         // A lost connection ends it, so the caller can connect again.
         zbus::block_on(portal.connection.clone().close()).unwrap();
         follower.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_watcher_reads_the_portal_on_the_session_bus() {
+        use std::os::unix::net::UnixListener;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+        use zbus::wire::Variant;
+        // The watcher is one for the whole process and uses the real session
+        // bus, so a separate process runs it, with a fake bus as its session.
+        const CHILD: &str = "PKGDECK_TEST_WATCHER";
+        if std::env::var_os(CHILD).is_some() {
+            let mut platform = Platform::start(|| {});
+            platform.follow_system_motion();
+            for _ in 0..1000 {
+                if platform.reduce_motion() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the watcher never read the portal");
+        }
+        let path = std::env::temp_dir().join(format!("pkgdeck-bus-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::the_watcher_reads_the_portal_on_the_session_bus",
+            ])
+            .env(CHILD, "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", path.display()),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let values = fake_portal::Values::from([(
+            "org.freedesktop.appearance".to_string(),
+            std::collections::HashMap::from([("reduced-motion".to_string(), Variant::F64(1.0))]),
+        )]);
+        let portal = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break Some(fake_portal::Portal::serve(stream, values)),
+                // Stopping without connecting fails below.
+                Err(_) if child.try_wait().unwrap().is_some() => break None,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let finished = child.wait().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(finished.success(), "{finished}");
+        assert_eq!(portal.map(|portal| portal.reads()), Some(1));
     }
 
     #[cfg(target_os = "linux")]

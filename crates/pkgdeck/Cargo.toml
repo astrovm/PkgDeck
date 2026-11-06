@@ -37,7 +37,7 @@ x11rb = { version = "=0.14.0", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Lets tests run a fake settings portal on a private socket, with no bus.
-zbus = { version = "=6.2.1", default-features = false, features = ["default-rt", "p2p"] }
+zbus = { version = "=6.2.1", default-features = false, features = ["default-rt", "bus-impl"] }
 
 [build-dependencies]
 cc = "=1.11.0"
