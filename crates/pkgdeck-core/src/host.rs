@@ -3343,6 +3343,7 @@ mod boundary_tests {
                 .code,
             Some(1)
         );
+        assert_eq!(answer(sudo, "exit 1").unwrap().code, Some(1));
         assert_eq!(answer(sudo, "exit 127").unwrap().code, Some(127));
         assert_eq!(answer(sudo, "exit 3").unwrap().code, Some(3));
         std::fs::remove_dir_all(root).unwrap();
