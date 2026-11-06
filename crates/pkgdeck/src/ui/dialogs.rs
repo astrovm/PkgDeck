@@ -29,12 +29,18 @@ fn scope_buttons(ui: &mut egui::Ui, caption: &str, system: bool) -> Option<bool>
         let palette = Palette::current(ui.ctx());
         ui.label(egui::RichText::new(caption).color(palette.muted));
         for (label, value) in SCOPE_CHOICES {
-            let look = if system == value {
+            let current = system == value;
+            let look = if current {
                 Look::Soft(Tone::Accent)
             } else {
                 Look::Secondary
             };
-            if Button::new(look, label).small().show(ui).clicked() && system != value {
+            let response = Button::new(look, label).small().show(ui);
+            // Color alone doesn't tell a screen reader which one is chosen.
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), current, label)
+            });
+            if response.clicked() && !current {
                 chosen = Some(value);
             }
         }
@@ -1494,7 +1500,10 @@ mod tests {
     #[test]
     fn the_review_of_an_opened_flatpak_chooses_where_it_installs() {
         use crate::{app::Launch, platform::Platform, settings::Store};
-        use egui_kittest::{kittest::Queryable, Harness};
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
         use pkgdeck_app::controller::ffi::create_synthetic_controller;
         let review = |scope: &str| {
             let (store, settings) = Store::open(None, None);
@@ -1544,6 +1553,14 @@ mod tests {
             let first = harness.get_by_label("User").rect();
             let second = harness.get_by_label("System").rect();
             assert!(first.right() <= second.left(), "{first:?} {second:?}");
+            // A screen reader hears which one is chosen.
+            let state = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
+            assert_eq!(state(same), Some(egui::accesskit::Toggled::True), "{scope}");
+            assert_eq!(
+                state(other),
+                Some(egui::accesskit::Toggled::False),
+                "{scope}"
+            );
             let saved = |harness: &egui_kittest::Harness<'static, (bool, App)>| {
                 harness.state().1.settings.opened_flatpaks_for_system
             };
@@ -1959,6 +1976,18 @@ mod tests {
         harness.get_by_label("User").click();
         harness.run_steps(4);
         assert_eq!(chosen(&harness), Some(true));
+        // With only one place to put it, there's nothing to choose.
+        for (user, system) in [(true, false), (false, true), (false, false)] {
+            let features = &mut harness.state_mut().1.repositories.features;
+            features.flatpak_user = user;
+            features.flatpak_system = system;
+            harness.run_steps(2);
+            assert!(harness.query_by_label("For").is_none(), "{user} {system}");
+            assert!(
+                harness.query_by_label("System").is_none(),
+                "{user} {system}"
+            );
+        }
     }
 
     #[test]

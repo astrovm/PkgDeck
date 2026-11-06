@@ -348,6 +348,12 @@ fn a_flatpak_in_both_places_switches_to_the_copy_it_names() {
         let state = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
         assert_eq!(state(chosen), Some(egui::accesskit::Toggled::True));
         assert_eq!(state(other), Some(egui::accesskit::Toggled::False));
+        // Drawing it chooses nothing, and neither does the part already chosen.
+        let selected = |harness: &Harness<'static, (bool, App)>| harness.state().1.selected.clone();
+        assert_eq!(selected(&harness), Some(shown.identity()));
+        harness.get_by_label(chosen).click();
+        harness.run_steps(4);
+        assert_eq!(selected(&harness), Some(shown.identity()));
         harness.get_by_label(other).click();
         harness.run_steps(4);
         assert_eq!(
@@ -399,6 +405,8 @@ fn an_opened_flatpak_page_chooses_user_or_system_and_remembers_it() {
         let chosen = |label: &str| harness.get_by_label(label).accesskit_node().toggled();
         assert_eq!(chosen(same), Some(egui::accesskit::Toggled::True));
         assert_eq!(chosen(other), Some(egui::accesskit::Toggled::False));
+        // Drawing it chooses nothing.
+        assert!(!saved(&harness));
         let before = saved(&harness);
         harness.get_by_label(same).click();
         harness.run_steps(4);
