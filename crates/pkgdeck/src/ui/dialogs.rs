@@ -1753,6 +1753,59 @@ mod tests {
     }
 
     #[test]
+    fn the_review_dialog_needs_a_change_and_to_be_the_one_reviewing_it() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        // A review on the app's page has a change but keeps this dialog shut.
+        for (asked, change, shown) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+            (false, false, false),
+        ] {
+            let (store, settings) = Store::open(None, None);
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                Platform::start(|| {}),
+                Launch::default(),
+            );
+            app.confirm_open = asked;
+            app.confirmation = change.then(|| model::Confirmation {
+                action: "Install".into(),
+                summary: "Install fixture".into(),
+                ..model::Confirmation::default()
+            });
+            let mut harness = Harness::builder()
+                .with_size(vec2(700.0, 600.0))
+                .build_ui_state(
+                    |ui, (ready, app): &mut (bool, App)| {
+                        let ctx = &ui.ctx().clone();
+                        if !*ready {
+                            crate::setup(ctx, std::path::Path::new("/"), None);
+                            set_reduce_motion(ctx, true);
+                            *ready = true;
+                            return;
+                        }
+                        confirm(app, ctx);
+                    },
+                    (false, app),
+                );
+            harness.run_steps(4);
+            assert_eq!(
+                harness.query_by_label("Confirm changes").is_some(),
+                shown,
+                "asked {asked}, change {change}"
+            );
+        }
+    }
+
+    #[test]
     fn a_closing_dialog_keeps_what_it_showed_and_ignores_clicks() {
         use crate::{app::Launch, platform::Platform, settings::Store};
         use egui_kittest::{
