@@ -258,7 +258,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         // mas asks for the Mac password through sudo, which needs a terminal.
         EngineError::Execution(E::AuthorizationDenied) if backend == Some("mas") => "App Store updates need your Mac password, which mas can only ask for in a terminal. PkgDeck opened the App Store's Updates page so you can update there, or run `pkd upgrade --from mas` in Terminal.".into(),
         EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. The sudo option needs a recent sudo login in the same terminal.".into(),
-        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, then try again.".into(),
+        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck didn't get administrator access, so nothing was changed. If no password prompt appeared, make sure your desktop's prompt is running.".into(),
         EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
         EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
