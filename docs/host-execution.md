@@ -119,7 +119,8 @@ path, so a program you could replace never gets it. The helper writes the
 rule itself, as root, for the user who ran pkexec. The CI test only grants
 other permissions on a throwaway runner. Desktop password prompts
 are checked by hand before each release. pkexec exit codes 126 and 127 are
-reported as "cancelled" and "denied". See the
+reported as "cancelled" and "denied" for every privileged command. KDE's prompt
+gives 127 when it's closed too. See the
 [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html).
 
 ## Locks, cancelling, and failures

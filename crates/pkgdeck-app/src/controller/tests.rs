@@ -3746,6 +3746,7 @@ fn finished_changes_explain_what_happened() {
     assert!(sudo["detail"].as_str().unwrap().contains("sudo login"));
     for (error, expected) in [
         (E::AuthorizationCancelled, "prompt was closed"),
+        (E::AuthorizationDenied, "so nothing was changed"),
         (E::LockBusy, "Another package manager is running"),
         (E::Interrupted, "interrupted"),
         (

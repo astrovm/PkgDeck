@@ -374,15 +374,8 @@ fn completion(code: Option<i32>, message: &str) -> Completion {
     }
 }
 #[test]
-fn apt_failures_preserve_authorization_lock_and_interruption_meaning() {
+fn apt_failures_preserve_lock_and_interruption_meaning() {
     for (code, message, expected) in [
-        (Some(126), "", ExecutionError::AuthorizationCancelled),
-        (Some(127), "", ExecutionError::AuthorizationDenied),
-        (
-            Some(1),
-            "sudo: a password is required",
-            ExecutionError::AuthorizationDenied,
-        ),
         (
             Some(100),
             "E: Could not get lock /var/lib/dpkg/lock-frontend",

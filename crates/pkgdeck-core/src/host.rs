@@ -1946,7 +1946,10 @@ impl Host {
         host.env
             .insert("PATH".into(), "/usr/sbin:/usr/bin:/sbin:/bin".into());
         let command = host.command(Path::new(program), &prefixed)?;
-        process::run(command, Limits::default(), cancel, true)
+        administrator_access(
+            process::run(command, Limits::default(), cancel, true)?,
+            authorization,
+        )
     }
 }
 
@@ -2791,13 +2794,29 @@ impl AptAction {
     }
 }
 
+/// Whether a privileged program got to run at all. pkexec exits with 126 for
+/// a dismissed dialog and 127 when it's not authorized, which is also what
+/// KDE's agent gives for a closed dialog. `sudo -n` exits with 1 and says so.
+fn administrator_access(
+    result: Completion,
+    authorization: Authorization,
+) -> Result<Completion, ExecutionError> {
+    match (authorization, result.code) {
+        (Authorization::Polkit, Some(126)) => Err(ExecutionError::AuthorizationCancelled),
+        (Authorization::Polkit, Some(127)) => Err(ExecutionError::AuthorizationDenied),
+        (Authorization::SudoNonInteractive, Some(1))
+            if String::from_utf8_lossy(&result.stderr).contains("sudo:") =>
+        {
+            Err(ExecutionError::AuthorizationDenied)
+        }
+        _ => Ok(result),
+    }
+}
+
 pub fn classify_apt(result: Completion) -> Result<Completion, ExecutionError> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     match result.code {
         Some(0) => Ok(result),
-        Some(126) => Err(ExecutionError::AuthorizationCancelled),
-        Some(127) => Err(ExecutionError::AuthorizationDenied),
-        _ if stderr.contains("sudo:") => Err(ExecutionError::AuthorizationDenied),
         _ if stderr.contains("Could not get lock") || stderr.contains("Unable to acquire") => {
             Err(ExecutionError::LockBusy)
         }
@@ -3279,6 +3298,54 @@ mod boundary_tests {
         executable(&bin.join("docker"), "exec /usr/bin/podman \"$@\"");
         assert!(host.docker_is_podman_shim());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_commands_say_when_they_never_got_administrator_access() {
+        let root = scratch("privileged-access");
+        let script = root.join("answer");
+        let answer = |authorization, reply: &str| {
+            std::fs::write(&script, format!("#!/bin/sh\n{reply}\n")).unwrap();
+            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+            std::fs::set_permissions(&script, permissions).unwrap();
+            let mut host = host(Runtime::Flatpak, &[]);
+            host.set_bridge_for_tests(&script);
+            host.privileged(
+                Path::new("/usr/bin/flatpak"),
+                &["--system".into()],
+                authorization,
+                &Cancellation::default(),
+            )
+        };
+        let polkit = Authorization::Polkit;
+        let sudo = Authorization::SudoNonInteractive;
+        // pkexec's own exit codes. KDE's agent gives 127 for a closed dialog
+        // too, the same as for three wrong passwords.
+        assert_eq!(
+            answer(polkit, "exit 126"),
+            Err(ExecutionError::AuthorizationCancelled)
+        );
+        assert_eq!(
+            answer(polkit, "exit 127"),
+            Err(ExecutionError::AuthorizationDenied)
+        );
+        assert_eq!(
+            answer(sudo, "echo 'sudo: a password is required' >&2; exit 1"),
+            Err(ExecutionError::AuthorizationDenied)
+        );
+        // What the program itself answers stays for its caller to read.
+        assert_eq!(answer(polkit, "exit 0").unwrap().code, Some(0));
+        assert_eq!(
+            answer(polkit, "echo 'sudo: not ours' >&2; exit 1")
+                .unwrap()
+                .code,
+            Some(1)
+        );
+        assert_eq!(answer(sudo, "exit 127").unwrap().code, Some(127));
+        assert_eq!(answer(sudo, "exit 3").unwrap().code, Some(3));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
