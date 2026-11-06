@@ -15,6 +15,7 @@
         <p>User and System no longer swap places between screens.</p>
         <ul>
           <li>Every choice between User and System shows User first, on an app's page and in its dialogs</li>
+          <li>A closing dialog keeps what it showed until it's gone, instead of going blank</li>
         </ul>
       </description>
     </release>
