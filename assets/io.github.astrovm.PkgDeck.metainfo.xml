@@ -14,6 +14,7 @@
       <description>
         <p>User and System no longer swap places between screens.</p>
         <ul>
+          <li>A long homepage link wraps inside the app page instead of running past its edge</li>
           <li>Every choice between User and System shows User first, on an app's page and in its dialogs</li>
         </ul>
       </description>
