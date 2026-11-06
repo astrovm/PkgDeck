@@ -75,6 +75,15 @@ grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
+# A fresh checkout gets its target mount point from the script. Podman would
+# create it as a mapped user, which keeps native builds out of the checkout.
+fresh="$work/fresh"
+mkdir -p "$fresh/scripts" "$fresh/containers"
+cp scripts/container.sh scripts/setup-dev.sh scripts/dev-env.sh scripts/prune-container-caches.sh "$fresh/scripts/"
+cp containers/development.Containerfile "$fresh/containers/"
+cp rust-toolchain.toml "$fresh/"
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" "$fresh/scripts/container.sh" development --exec true
+[[ -d $fresh/target ]]
 # Size limit uses apparent bytes, so sparse files exercise the real boundary.
 mkdir -p "$work/cache/target" "$work/cache/cargo"
 touch "$work/cache/cargo/keep"
