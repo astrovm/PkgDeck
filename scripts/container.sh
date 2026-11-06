@@ -96,6 +96,9 @@ if [[ "$kind" == development ]]; then
         interactive=(-it)
     fi
     if [[ "${1:-}" == --build-cli ]]; then command=(cargo build --locked -p pkd -p pkgdeck-tools); fi
+    # Podman would otherwise create this mount point as the container's root,
+    # a mapped user that then keeps native builds out of the checkout.
+    mkdir -p target
     # No host HOME, credentials, daemon sockets, or package database is mounted.
     # The `[@]+` form keeps an empty array from being an unbound variable: the
     # default macOS bash is 3.2, where set -u rejects "${interactive[@]}".
