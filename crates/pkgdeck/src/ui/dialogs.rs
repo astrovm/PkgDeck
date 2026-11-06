@@ -52,6 +52,22 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     screenshot(app, ctx);
 }
 
+/// What a dialog shows: `current` while it's open, then the last of it, so it
+/// fades out with what it said instead of going blank.
+fn held<T>(ctx: &egui::Context, id: &str, current: Option<T>) -> T
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    let key = Id::unique((id, "held"));
+    match current {
+        Some(value) => {
+            ctx.data_mut(|data| data.insert_temp(key, value.clone()));
+            value
+        }
+        None => ctx.data(|data| data.get_temp(key)).unwrap_or_default(),
+    }
+}
+
 /// A modal card that fades and grows in. Returns false when it should
 /// close (Esc or a click outside).
 fn modal(
@@ -95,6 +111,11 @@ fn modal(
             );
             card.show(ui, |ui| {
                 ui.multiply_opacity(shown);
+                // Fading out, it still looks the same but it's already done:
+                // a second click must not act on it again.
+                if !open {
+                    ui.disable();
+                }
                 ui.set_width(width - 44.0);
                 ui.set_max_height(screen.height() - 80.0);
                 content(ui);
@@ -124,8 +145,14 @@ fn title(ui: &mut Ui, text: &str) -> bool {
 
 fn confirm(app: &mut App, ctx: &egui::Context) {
     let open = app.confirm_open && app.confirmation.is_some();
-    let data = app.confirmation.clone().unwrap_or_default();
-    let text = app.confirmation_text();
+    let (data, text) = held(
+        ctx,
+        "confirm",
+        app.confirmation
+            .clone()
+            .filter(|_| open)
+            .map(|data| (data, app.confirmation_text())),
+    );
     let mut answer: Option<bool> = None;
     let mut scope: Option<bool> = None;
     let mut flipped = app.ui.confirm_details_flipped;
@@ -672,7 +699,7 @@ fn repo_url_valid(url: &str) -> bool {
 fn add_repository(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.add_repo.is_some();
     let features = app.repositories.features.clone();
-    let mut draft = app.ui.add_repo.clone().unwrap_or_default();
+    let mut draft = held(ctx, "add-repository", app.ui.add_repo.clone());
     let mut close = false;
     let mut submit = false;
     let still = modal(ctx, "add-repository", open, 480.0, |ui| {
@@ -866,7 +893,7 @@ fn setup(app: &mut App, ctx: &egui::Context) {
 
 fn screenshot(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.screenshot.is_some();
-    let (url, caption) = app.ui.screenshot.clone().unwrap_or_default();
+    let (url, caption) = held(ctx, "screenshot", app.ui.screenshot.clone());
     let mut close = false;
     let screen = ctx.content_rect();
     let still = modal(
@@ -1722,6 +1749,101 @@ mod tests {
             image
                 .save(std::env::var("PKGDECK_PICKER_PNG").unwrap())
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_closing_dialog_keeps_what_it_showed_and_ignores_clicks() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{
+            kittest::{By, NodeT, Queryable},
+            Harness,
+        };
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        type Setup = fn(&mut App);
+        let cases: [(Setup, &str, &str); 3] = [
+            (
+                |app| {
+                    app.confirmation = Some(model::Confirmation {
+                        action: "Install".into(),
+                        summary: "Install fixture".into(),
+                        ..model::Confirmation::default()
+                    });
+                    app.confirm_open = true;
+                },
+                "Cancel",
+                "Install fixture",
+            ),
+            (
+                |app| {
+                    app.ui.add_repo = Some(AddRepo {
+                        name: "fixture".into(),
+                        url: "https://example.invalid/fixture.flatpakrepo".into(),
+                        user: true,
+                    })
+                },
+                "Cancel",
+                "https://example.invalid/fixture.flatpakrepo",
+            ),
+            (
+                |app| {
+                    app.ui.screenshot =
+                        Some(("file:///nonexistent.png".into(), "Fixture caption".into()))
+                },
+                "Close (Esc)",
+                "Fixture caption",
+            ),
+        ];
+        for (setup, close, shown) in cases {
+            let (store, settings) = Store::open(None, None);
+            let mut app = App::with_controller(
+                create_synthetic_controller(|_, _, _, _| {
+                    Ok(pkgdeck_core::engine::Engine::default())
+                }),
+                settings,
+                store,
+                Platform::start(|| {}),
+                Launch::default(),
+            );
+            setup(&mut app);
+            let mut harness = Harness::builder()
+                .with_size(vec2(1100.0, 800.0))
+                // The fade takes 0.12 s, so frames must be shorter than that.
+                .with_step_dt(1.0 / 120.0)
+                .build_ui_state(
+                    |ui, (ready, app): &mut (bool, App)| {
+                        let ctx = &ui.ctx().clone();
+                        if !*ready {
+                            crate::setup(ctx, std::path::Path::new("/"), None);
+                            *ready = true;
+                            return;
+                        }
+                        show(app, ctx);
+                    },
+                    (false, app),
+                );
+            // Let it finish opening, so closing is what's on screen next.
+            harness.run_steps(60);
+            let showing = |harness: &Harness<'static, (bool, App)>| {
+                harness.query_by_label_contains(shown).is_some()
+                    || harness.query_all(By::new().value(shown)).next().is_some()
+            };
+            assert!(showing(&harness), "{shown}");
+            harness.get_by_label(close).click();
+            harness.step();
+            // The answer reaches the controller, which forgets the change.
+            harness.state_mut().1.confirmation = None;
+            harness.run_steps(2);
+            assert!(showing(&harness), "{shown}");
+            assert!(harness.query_by_label("Apply").is_none(), "{shown}");
+            assert!(
+                harness.get_by_label(close).accesskit_node().is_disabled(),
+                "{shown}"
+            );
+            // Past the fade, nothing is left.
+            harness.run_steps(60);
+            assert!(!showing(&harness), "{shown}");
         }
     }
 
