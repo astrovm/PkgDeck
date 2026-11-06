@@ -25,8 +25,6 @@ pub enum Event {
     NotificationClicked,
     /// macOS let PkgDeck post its own notifications, or stopped letting it.
     Permission(bool),
-    /// The desktop changed whether it asks to keep movement down.
-    MotionChanged,
 }
 
 type Wake = Box<dyn Fn() + Send>;
@@ -151,7 +149,7 @@ mod native {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{send, Event};
+    use super::{send, Event, EVENTS};
     use futures_util::{stream, Stream, StreamExt};
     use ksni::blocking::TrayMethods;
     use std::collections::HashMap;
@@ -225,10 +223,19 @@ mod linux {
         REDUCE_MOTION.load(Ordering::Relaxed)
     }
 
+    /// Draws another frame, which reads the movement setting again.
+    fn wake_window() {
+        if let Ok(guard) = EVENTS.lock() {
+            if let Some((_, wake)) = guard.as_ref() {
+                wake();
+            }
+        }
+    }
+
     /// Remembers what the portal said, and wakes the window when it's new.
     pub(super) fn publish_motion(reduced: bool) {
         if REDUCE_MOTION.swap(reduced, Ordering::Relaxed) != reduced {
-            send(Event::MotionChanged);
+            wake_window();
         }
     }
 
@@ -1269,23 +1276,23 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             platform.follows_motion = true;
-            let motion_events = |platform: &mut Platform| {
-                platform
-                    .events()
-                    .into_iter()
-                    .filter(|event| *event == Event::MotionChanged)
-                    .count()
-            };
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
             let mut heard = false;
             for reduced in [true, false].into_iter().cycle().take(400) {
-                // Tests start platforms in parallel and the newest one hears
-                // the events, so this one tries until it hears them.
-                let mut newest = Platform::start(|| {});
+                // Tests start platforms in parallel and the newest one is
+                // woken, so this one tries until it hears the change.
+                let wakes = Arc::new(AtomicUsize::new(0));
+                let woken = wakes.clone();
+                let mut newest = Platform::start(move || {
+                    woken.fetch_add(1, Ordering::Relaxed);
+                });
                 newest.follows_motion = true;
                 linux::publish_motion(reduced);
                 assert_eq!(platform.reduce_motion(), reduced);
+                let after_change = wakes.load(Ordering::Relaxed);
                 linux::publish_motion(reduced);
-                if motion_events(&mut newest) == 1 {
+                if after_change == 1 && wakes.load(Ordering::Relaxed) == 1 {
                     heard = true;
                     break;
                 }
