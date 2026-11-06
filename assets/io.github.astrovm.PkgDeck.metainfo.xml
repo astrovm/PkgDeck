@@ -10,6 +10,14 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.15.2" date="2026-11-06">
+      <description>
+        <p>User and System no longer swap places between screens.</p>
+        <ul>
+          <li>Every choice between User and System shows User first, on an app's page and in its dialogs</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.15.1" date="2026-11-06">
       <description>
         <p>Closing the password prompt no longer looks like the package manager broke.</p>
