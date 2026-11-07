@@ -95,25 +95,34 @@ fn writable(path: &Path) {
 }
 
 /// Bytes in base 1000, as people read sizes: "820 bytes", "4.2 MB",
-/// "31 MB".
+/// "31 MB". A size that rounds up to 1000 moves to the next unit, so
+/// 999,950 bytes is "1.0 MB", never "1000 KB".
 pub fn size(bytes: u64) -> String {
     if bytes < 1000 {
         return format!("{bytes} bytes");
     }
-    let mut value = bytes as f64;
-    let mut unit = "bytes";
-    for next in ["KB", "MB", "GB", "TB"] {
-        if value < 1000.0 {
-            break;
+    let bytes = u128::from(bytes);
+    // Halves round up, with whole numbers so no float rounding is involved.
+    let shown = |scale: u128| {
+        (
+            (bytes * 10 + scale / 2) / scale,
+            (bytes + scale / 2) / scale,
+        )
+    };
+    let text = |scale: u128, unit: &str| {
+        let (tenths, whole) = shown(scale);
+        if tenths < 100 {
+            format!("{}.{} {unit}", tenths / 10, tenths % 10)
+        } else {
+            format!("{whole} {unit}")
         }
-        value /= 1000.0;
-        unit = next;
+    };
+    for (scale, unit) in [(1_000, "KB"), (1_000_000, "MB"), (1_000_000_000, "GB")] {
+        if shown(scale).1 < 1000 {
+            return text(scale, unit);
+        }
     }
-    if value < 10.0 {
-        format!("{value:.1} {unit}")
-    } else {
-        format!("{value:.0} {unit}")
-    }
+    text(1_000_000_000_000, "TB")
 }
 
 /// A size as tools print it: `1.2GB`, `512.3 MB`, `4kB`, `0B`, `1.5GiB`.
@@ -205,6 +214,39 @@ mod tests {
         assert!(empty(&outside.join("keep")).is_err());
         fs::remove_dir_all(&root).unwrap();
         fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[test]
+    fn sizes_print_rounded_in_the_unit_they_round_to() {
+        let mut wrong = vec![];
+        for (bytes, text) in [
+            (0, "0 bytes"),
+            (999, "999 bytes"),
+            (1_000, "1.0 KB"),
+            (1_049, "1.0 KB"),
+            (1_050, "1.1 KB"),
+            (9_949, "9.9 KB"),
+            (9_950, "10 KB"),
+            (10_000, "10 KB"),
+            (820_000, "820 KB"),
+            (999_499, "999 KB"),
+            // These round up to 1000 KB, which is 1.0 MB.
+            (999_500, "1.0 MB"),
+            (999_950, "1.0 MB"),
+            (999_999, "1.0 MB"),
+            (1_000_000, "1.0 MB"),
+            (4_200_000, "4.2 MB"),
+            (31_000_000, "31 MB"),
+            (999_999_999, "1.0 GB"),
+            (1_000_000_000_000, "1.0 TB"),
+            (999_999_999_999_999, "1000 TB"),
+            (u64::MAX, "18446744 TB"),
+        ] {
+            if size(bytes) != text {
+                wrong.push(format!("{bytes} bytes: {} instead of {text}", size(bytes)));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
