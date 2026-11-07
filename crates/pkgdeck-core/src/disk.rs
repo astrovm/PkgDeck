@@ -218,8 +218,7 @@ mod tests {
 
     #[test]
     fn sizes_print_rounded_in_the_unit_they_round_to() {
-        let mut wrong = vec![];
-        for (bytes, text) in [
+        let cases = [
             (0, "0 bytes"),
             (999, "999 bytes"),
             (1_000, "1.0 KB"),
@@ -241,12 +240,17 @@ mod tests {
             (1_000_000_000_000, "1.0 TB"),
             (999_999_999_999_999, "1000 TB"),
             (u64::MAX, "18446744 TB"),
-        ] {
-            if size(bytes) != text {
-                wrong.push(format!("{bytes} bytes: {} instead of {text}", size(bytes)));
-            }
-        }
-        assert!(wrong.is_empty(), "{wrong:#?}");
+        ];
+        // One comparison, so a failure shows every wrong size at once.
+        let printed: Vec<(u64, String)> = cases
+            .iter()
+            .map(|&(bytes, _)| (bytes, size(bytes)))
+            .collect();
+        let expected: Vec<(u64, String)> = cases
+            .iter()
+            .map(|&(bytes, text)| (bytes, text.to_owned()))
+            .collect();
+        assert_eq!(printed, expected);
     }
 
     #[test]
