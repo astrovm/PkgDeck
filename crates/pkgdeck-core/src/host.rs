@@ -322,11 +322,33 @@ mod askpass_tests {
         }
         let binary = contents.join("MacOS/askpass-test");
         fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
-        let output = Command::new(binary).args([
-            "--exact",
-            "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
-            "--nocapture",
-        ]).env(REENTRY, &root).output().unwrap();
+        // Another test's fork can still hold the just-copied binary open for
+        // writing, which makes exec fail with "Text file busy". It clears at
+        // once, so ask again instead of failing the test.
+        let run = || {
+            Command::new(&binary).args([
+                "--exact",
+                "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
+                "--nocapture",
+            ]).env(REENTRY, &root).output()
+        };
+        let busy = |result: &std::io::Result<std::process::Output>| {
+            result.as_ref().err().map(std::io::Error::kind)
+                == Some(std::io::ErrorKind::ExecutableFileBusy)
+        };
+        let output = std::iter::repeat_with(|| {
+            let result = run();
+            std::thread::sleep(std::time::Duration::from_millis(if busy(&result) {
+                20
+            } else {
+                0
+            }));
+            result
+        })
+        .take(50)
+        .find(|result| !busy(result))
+        .expect("the copied binary stayed busy")
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
         let transcript = format!(
             "{}{}",
