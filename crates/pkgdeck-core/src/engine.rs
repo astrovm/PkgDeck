@@ -2436,6 +2436,58 @@ mod apt_upgrade_tests {
     }
 
     #[test]
+    fn a_remembered_apt_plan_is_what_the_update_is_checked_against() {
+        let cancel = Cancellation::default();
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        // A worker that was handed the reviewed plan runs the matching update.
+        let (mut engine, log) = lists_engine(Ok(()), false);
+        engine.remember_apt_upgrade_plan(empty_plan());
+        assert_eq!(engine.execute(&op, &cancel, &mut |_| {}), Ok(Default::default()));
+        assert!(log.lock().unwrap().contains(&format!("run {op:?}")));
+        // A different reviewed plan changed, so nothing runs.
+        let (mut engine, log) = lists_engine(Ok(()), false);
+        let mut reviewed = empty_plan();
+        reviewed.preview = "another transaction".into();
+        engine.remember_apt_upgrade_plan(reviewed);
+        let refused = Err(EngineError::Refused {
+            backend: "apt".into(),
+            refusal: Refusal::PlanChanged,
+        });
+        assert_eq!(engine.execute(&op, &cancel, &mut |_| {}), refused);
+        assert!(!log.lock().unwrap().contains(&format!("run {op:?}")));
+        // So does an update nobody reviewed.
+        let (mut engine, log) = lists_engine(Ok(()), false);
+        assert_eq!(engine.execute(&op, &cancel, &mut |_| {}), refused);
+        assert!(!log.lock().unwrap().contains(&format!("run {op:?}")));
+    }
+
+    #[test]
+    fn upgrade_only_mode_keeps_changes_that_are_not_updates_away_from_the_runner() {
+        let cancel = Cancellation::default();
+        let install = [Operation::Install(apt_id("one"))];
+        // Reviewed: the change goes ahead.
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let results = engine.execute_batch(&install, &cancel, &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert!(!log.lock().unwrap().is_empty());
+        // Upgrade-only: refused before anything runs.
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        engine.set_batch_mode(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let results = engine.execute_batch(&install, &cancel, &mut |_| {});
+        assert!(
+            matches!(
+                results.as_slice(),
+                [Err(EngineError::Execution(ExecutionError::Invalid(reason)))]
+                    if reason.contains("only refresh sources and update every package")
+            ),
+            "{results:?}"
+        );
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn grouped_apt_updates_refresh_once_and_a_single_one_uses_the_batch() {
         let cancel = Cancellation::default();
         let (mut engine, log) = lists_engine(Ok(()), true);
@@ -2936,6 +2988,51 @@ mod operation_plan_tests {
             Ok(OperationOutcome::default())
         }
     }
+    #[test]
+    fn a_plan_handed_to_a_fresh_engine_is_checked_before_the_write() {
+        let cancel = Cancellation::default();
+        let operation = Operation::Install(PackageId {
+            backend: "fixture".into(),
+            name: "anonymous".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        });
+        // The plan the person reviewed, from the engine that previewed it.
+        let mut previewer = Engine::default();
+        previewer
+            .register(PlannedFixture {
+                reads: 0,
+                drift: true,
+                writes: Arc::new(AtomicUsize::new(0)),
+            })
+            .unwrap();
+        let reviewed = previewer
+            .plan_operation(&operation, &cancel)
+            .unwrap()
+            .unwrap();
+        // The worker engine reads a different transaction by then.
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut worker = Engine::default();
+        worker
+            .register(PlannedFixture {
+                reads: 1,
+                drift: true,
+                writes: writes.clone(),
+            })
+            .unwrap();
+        worker.remember_operation_plan(reviewed);
+        assert_eq!(
+            worker.execute(&operation, &cancel, &mut |_| {}),
+            Err(EngineError::Refused {
+                backend: "fixture".into(),
+                refusal: Refusal::PlanChanged,
+            })
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn changed_single_operation_plan_blocks_write() {
         let cancel = Cancellation::default();
