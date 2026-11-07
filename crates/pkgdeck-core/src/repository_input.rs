@@ -804,4 +804,271 @@ mod tests {
         );
         fs::remove_dir_all(base).unwrap();
     }
+
+    #[test]
+    fn names_are_short_plain_and_never_start_with_a_dash() {
+        let long = "a".repeat(129);
+        let longest = "a".repeat(128);
+        // (name, allowed by safe_name, allowed by safe_repo_name)
+        let rows = [
+            ("", false, false),
+            (long.as_str(), false, false),
+            (longest.as_str(), true, true),
+            ("-x", false, false),
+            ("a/b", false, false),
+            ("a b", false, false),
+            ("a;b", false, false),
+            ("../x", false, false),
+            ("a:b", false, true),
+            ("flathub", true, true),
+            ("a.b_c-d9", true, true),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter(|(name, plain, repo)| safe_name(name) != *plain || safe_repo_name(name) != *repo)
+            .map(|(name, _, _)| name.chars().take(12).collect::<String>())
+            .collect();
+        assert!(wrong.is_empty(), "wrong answers for {wrong:?}");
+    }
+
+    #[test]
+    fn every_trust_rule_alone_refuses_a_repository_file() {
+        const KEY: &str = "GPGKey=c3ludGhldGlj\n";
+        let flatpak = |header: &str, name: &str, url: &str, key: &str| {
+            format!("{header}\nName={name}\nUrl={url}\n{key}")
+        };
+        let good_flatpak = flatpak(
+            "[Flatpak Repo]",
+            "synthetic",
+            "https://example.invalid/repo",
+            KEY,
+        );
+        assert!(validate("flatpakrepo", &good_flatpak).is_ok());
+        let rows = [
+            // Only the header is missing: the fields alone are not a definition.
+            (
+                "flatpakrepo",
+                flatpak("[Other]", "synthetic", "https://example.invalid/repo", KEY),
+                "missing header",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "-synthetic",
+                    "https://example.invalid/repo",
+                    KEY,
+                ),
+                "name starts with a dash",
+            ),
+            (
+                "flatpakrepo",
+                flatpak("[Flatpak Repo]", "a/b", "https://example.invalid/repo", KEY),
+                "name with a slash",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "http://example.invalid/repo",
+                    KEY,
+                ),
+                "plain http",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "https://example.invalid/repo",
+                    "",
+                ),
+                "no signing key",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "https://example.invalid/repo",
+                    "GPGKey=\n",
+                ),
+                "empty signing key",
+            ),
+            (
+                "flatpakrepo",
+                format!("{good_flatpak}Name=second\n"),
+                "two names",
+            ),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter(|(suffix, text, _)| validate(suffix, text).is_ok())
+            .map(|(_, _, why)| *why)
+            .collect();
+        assert!(wrong.is_empty(), "accepted: {wrong:?}");
+
+        // APT one-line files: each line must be a deb line with signed-by and
+        // HTTPS, and a single bad line spoils the whole file.
+        let good = "deb [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main";
+        assert!(validate("list", good).is_ok());
+        assert!(validate(
+            "list",
+            "# comment\n\ndeb-src [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main\n"
+        )
+        .is_ok());
+        assert!(validate("list", &good.replace("signed-by", "Signed-By")).is_ok());
+        let lines = [
+            (
+                "rpm [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main",
+                "not a deb line",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg] http://example.invalid/r stable main",
+                "plain http",
+            ),
+            ("deb https://example.invalid/r stable main", "no signed-by"),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg trusted=yes] https://example.invalid/r stable main",
+                "trusted=yes",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg TRUSTED=YES] https://example.invalid/r stable main",
+                "TRUSTED=YES",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg allow-insecure=yes] https://example.invalid/r stable main",
+                "allow-insecure=yes",
+            ),
+            ("", "nothing but comments"),
+        ];
+        let wrong: Vec<_> = lines
+            .iter()
+            .filter(|(line, _)| validate("list", line).is_ok())
+            .map(|(_, why)| *why)
+            .collect();
+        assert!(wrong.is_empty(), "accepted: {wrong:?}");
+        assert!(validate("list", &format!("{good}\ndeb https://example.invalid/r stable main")).is_err());
+
+        // DNF sections: one rule broken each, with a safe name and a good key.
+        let section = |locations: &str, check: &str| format!("{locations}\n{check}");
+        assert!(validate_repo_section(
+            "ok",
+            &section("baseurl=https://example.invalid/r", "gpgcheck=1")
+        )
+        .is_ok());
+        for (name, body, why) in [
+            (
+                "ok",
+                section("baseurl=http://example.invalid/r", "gpgcheck=1"),
+                "plain http",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=0"),
+                "gpgcheck off",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", ""),
+                "no gpgcheck",
+            ),
+            (
+                "bad name",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1"),
+                "unsafe section name",
+            ),
+            (
+                "-ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1"),
+                "section name starts with a dash",
+            ),
+            (
+                "ok",
+                section("", "gpgcheck=1"),
+                "no location",
+            ),
+            (
+                "ok",
+                section(
+                    "baseurl=https://example.invalid/r\nbaseurl=https://example.invalid/s",
+                    "gpgcheck=1",
+                ),
+                "two base urls",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1\ngpgkey="),
+                "empty gpgkey",
+            ),
+        ] {
+            assert!(
+                validate_repo_section(name, &body).is_err(),
+                "accepted: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_valid_file_is_not_the_one_that_was_reviewed() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-repository-swapped-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let tools = |tool: &str| {
+            let dir = base.join(tool);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(tool), "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(dir.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
+            let mut env = BTreeMap::new();
+            env.insert(OsString::from("PATH"), dir.as_os_str().to_os_string());
+            Host::new(Runtime::Native, env)
+        };
+        let cancel = Cancellation::default();
+        let changed = |result: Result<(), EngineError>| {
+            matches!(
+                result,
+                Err(EngineError::InvalidResponse { reason, .. })
+                    if reason == "repository file changed since preview"
+            )
+        };
+
+        // Another file that is just as valid, with the same name and backend.
+        let repo = base.join("synthetic.flatpakrepo");
+        let file = |url: &str| {
+            format!("[Flatpak Repo]\nName=synthetic\nUrl={url}\nGPGKey=c3ludGhldGlj\n")
+        };
+        fs::write(&repo, file("https://example.invalid/reviewed")).unwrap();
+        let host = tools("flatpak");
+        let import = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
+        fs::write(&repo, file("https://example.invalid/swapped")).unwrap();
+        let fresh = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
+        assert_eq!((&fresh.backend, &fresh.name), (&import.backend, &import.name));
+        assert!(changed(apply_with_host(
+            &import,
+            Authorization::Polkit,
+            &cancel,
+            &host
+        )));
+
+        // The same bytes, but another package manager would now install them.
+        let dnf_repo = base.join("synthetic.repo");
+        fs::write(
+            &dnf_repo,
+            "[synthetic]\nbaseurl=https://example.invalid/repo\ngpgcheck=1\n",
+        )
+        .unwrap();
+        let import = inspect_with_host(dnf_repo.to_str().unwrap(), &cancel, &tools("dnf")).unwrap();
+        assert_eq!(import.backend, "dnf");
+        assert!(changed(apply_with_host(
+            &import,
+            Authorization::Polkit,
+            &cancel,
+            &tools("zypper")
+        )));
+        fs::remove_dir_all(base).unwrap();
+    }
 }
