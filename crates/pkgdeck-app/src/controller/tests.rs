@@ -1594,7 +1594,6 @@ fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
             failures: vec![failure.clone()],
             successful_sources: vec!["apt".into()],
         })));
-    assert!(*controller.upgradable());
     assert_eq!(upgrade_plan(&controller.rust().packages).len(), 1);
     let apt_checked = controller.rust().last_success["apt"];
 
@@ -1606,7 +1605,6 @@ fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
             successful_sources: vec![],
         },
     )));
-    assert!(*controller.upgradable());
     assert_eq!(controller.rust().packages, vec![package("apt")]);
     assert_eq!(controller.rust().last_success["apt"], apt_checked);
     controller.as_mut().apply(Ok(Payload::UpgradePreview(
@@ -2396,7 +2394,6 @@ fn an_older_write_never_replaces_a_newer_one() {
         rows: "[]".into(),
         status: status.into(),
         report_state: String::new(),
-        upgradable: false,
         updates_view: false,
     };
     assert!(write_view(&path, stored("Installed", "newer"), 2, &written));
@@ -2433,7 +2430,6 @@ fn a_closed_window_keeps_no_sections_in_memory_and_gets_them_back() {
         rows: "[]".into(),
         status: "kept".into(),
         report_state: String::new(),
-        upgradable: false,
         updates_view: false,
     };
     let written = std::sync::Mutex::new(std::collections::HashMap::new());
@@ -2494,7 +2490,7 @@ fn a_damaged_or_older_store_is_ignored() {
     let key = cache_key("Installed", "", &[], false);
     for text in [
             "not json".to_owned(),
-            json!({"version": "0.0.1", "views": [{"key": key, "packages": [], "cleanup": [], "rows": "[]", "status": "", "report_state": "", "upgradable": false, "updates_view": false}]}).to_string(),
+            json!({"version": "0.0.1", "views": [{"key": key, "packages": [], "cleanup": [], "rows": "[]", "status": "", "report_state": "", "updates_view": false}]}).to_string(),
         ] {
             let path = dir.path().join("views.json");
             std::fs::write(&path, text).unwrap();
@@ -5221,7 +5217,6 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
         .unwrap();
     controller.as_mut().rust_mut().queued = None;
     controller.as_mut().rust_mut().updates_view = true;
-    controller.as_mut().set_upgradable(true);
     for action in ["install", "remove"] {
         controller.as_mut().propose(action.into(), 0);
         assert!(controller.rust().pending.is_none());
@@ -5268,7 +5263,6 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
         .to_string()
         .contains("Restart or shut down"));
     assert!(!controller.rust().packages.is_empty());
-    assert!(!*controller.upgradable());
 }
 #[test]
 fn container_pull_is_explicit_and_requires_a_stored_tag() {
@@ -7876,7 +7870,6 @@ fn cached_view(name: &str) -> CachedView {
         rows: format!(r#"[{{"name":"{name}"}}]"#).as_str().into(),
         status: "cached".into(),
         report_state: r#"{"phase":"cached"}"#.into(),
-        upgradable: false,
         updates_view: false,
     }
 }
