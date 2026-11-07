@@ -59,7 +59,9 @@ modules:
       - /include
     sources:
       - type: archive
-        url: https://deb.debian.org/debian/pool/main/a/apt/apt_3.3.3.tar.xz
+        # snapshot.debian.org keeps every upload. The live pool drops a version
+        # as soon as a newer one lands, which made this URL return 404.
+        url: https://snapshot.debian.org/archive/debian/20260814T202212Z/pool/main/a/apt/apt_3.3.3.tar.xz
         sha256: 1c06b4a145d6117917c390c79fe7d27d9d92ee922101134ad6446717b0a1c28f
   # The AppImage updater every Linux build ships, pinned like
   # scripts/appimage-updater.sh. PkgDeck finds it at /app/lib/pkgdeck.
