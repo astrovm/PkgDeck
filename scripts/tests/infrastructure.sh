@@ -176,6 +176,7 @@ grep -Fxq $'2\thead-stacked\to/r' "$work/output"
 cat >"$work/bin/gh" <<'GH'
 #!/bin/bash
 printf '%s\n' "$*" >>"$GH_CALLS"
+for argument in "$@"; do [[ $argument == body=* ]] && printf '%s' "${argument#body=}" >"${GH_BODY:-/dev/null}"; done
 [[ $* == *--paginate* ]] && cat "$GH_OLD"
 exit 0
 GH
@@ -201,6 +202,21 @@ comment '' true
 rm "$results/missed.txt"
 comment 99
 grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
+# A list too long for one comment is cut after a whole row, with the code fence
+# closed and the rest left to the full report; the run page keeps all of it.
+for n in $(seq 1 4000); do printf 'crates/pkgdeck-core/src/long.rs:%d:9: replace f with g\n' "$n"; done >"$results/missed.txt"
+: >"$work/summary"
+env PATH="$work/bin:$PATH" GH_CALLS="$work/calls" GH_OLD=/dev/null GH_BODY="$work/body" GITHUB_REPOSITORY=o/r PR=7 RUN=https://run \
+    GITHUB_STEP_SUMMARY="$work/summary" scripts/mutants-comment.sh "$results"
+(( $(wc -c <"$work/body") <= 60000 ))
+(( $(grep -c '^```$' "$work/body") == 2 ))
+grep -q '^Showing [0-9]* of 4000\. The rest is in the \[full report\](https://run)\.$' "$work/body"
+shown=$(grep -c 'long\.rs:' "$work/body")
+(( shown > 1000 && shown < 4000 ))
+# The last row shown is a whole one.
+grep -B1 '^```$' "$work/body" | tail -n 2 | head -n 1 | grep -q '^crates/pkgdeck-core/src/long\.rs:[0-9]*:9: replace f with g$'
+(( $(grep -c 'long\.rs:' "$work/summary") == 4000 ))
+rm "$results/missed.txt"
 # Nothing to mutate leaves no results at all, which is the same as all caught.
 rm -r "$results"
 comment 99

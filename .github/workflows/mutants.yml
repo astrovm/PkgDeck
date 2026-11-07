@@ -14,6 +14,9 @@ on:
       - Cargo.lock
       - .cargo/mutants.toml
       - scripts/mutants.sh
+      - scripts/mutants-comment.sh
+      - scripts/mutants-post.sh
+      - scripts/mutants-post.test.sh
       - .github/workflows/mutants.yml
   schedule:
     - cron: '0 5 * * 6'
@@ -105,7 +108,7 @@ jobs:
           QUARTER: ${{ inputs.quarter }}
         run: |
           if [[ $EVENT == pull_request ]]; then
-            if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh .github/workflows/mutants.yml; then
+            if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh scripts/mutants-post.sh scripts/mutants-post.test.sh .github/workflows/mutants.yml; then
               echo "The setup didn't change."
             else
               echo 'parts=[0]' >> "$GITHUB_OUTPUT"
@@ -163,6 +166,10 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test the report poster
+        run: bash scripts/mutants-post.test.sh
       - name: Download results
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -179,11 +186,19 @@ jobs:
           missed=$(cat results/*/missed.txt 2>/dev/null | sort -u || true)
           timeouts=$(cat results/*/timeout.txt 2>/dev/null | sort -u || true)
           parts=$(jq -r 'map(tostring) | join(", ")' <<< "$PARTS")
-          issue=$(gh issue list --state open --search 'in:title "Missed mutants"' --json number --jq '.[0].number // empty')
+          # A part that died (a lost runner, a cancelled job) uploads nothing.
+          lost=$(jq -r '.[]' <<< "$PARTS" | while read -r part; do
+            [[ -d results/mutants-part-$part ]] || printf '%s, ' "$part"
+          done)
+          lost=${lost%, }
           {
             echo "Parts $parts of 64: [run]($RUN), jobs $JOBS."
             echo
-            if [[ -z $missed && -z $timeouts ]]; then
+            if [[ -n $lost ]]; then
+              echo "**No results from part $lost:** its job failed, so its mutants are not in this list. See the run."
+              echo
+            fi
+            if [[ -z $missed && -z $timeouts && -z $lost ]]; then
               echo 'Every mutant in these parts was caught.'
             fi
             if [[ -n $missed ]]; then
@@ -200,9 +215,16 @@ jobs:
               echo '```'
             fi
           } > report.md
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n $issue ]]; then
-            gh issue comment "$issue" --body-file report.md
-          elif [[ -n $missed || -n $timeouts ]]; then
-            gh issue create --title 'Missed mutants' --body-file report.md
+          # A step summary is limited to 1 MiB; the issue gets the whole report.
+          if (( $(wc -c < report.md) > 1000000 )); then
+            head -c 1000000 report.md | sed '$d' > summary.md
+            # Close a code fence the cut left open.
+            if (( $(grep -c '^```$' summary.md) % 2 )); then echo '```' >> summary.md; fi
+            echo "Cut at 1 MB. The whole report is in the issue and in the part artifacts of [the run]($RUN)." >> summary.md
+            cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          has_findings=false
+          if [[ -n $missed || -n $timeouts || -n $lost ]]; then has_findings=true; fi
+          scripts/mutants-post.sh report.md "$has_findings"
