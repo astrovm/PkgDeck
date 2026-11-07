@@ -14901,8 +14901,10 @@ fn preloaded_updates_keep_only_the_rows_with_an_update() {
     current.update = UpdateAvailability::Current;
     let mut unknown = synthetic_package("unknown", "Unknown");
     unknown.update = UpdateAvailability::Unknown;
-    let mut report = PackageReport::default();
-    report.packages = vec![current, waiting.clone(), unknown];
+    let report = PackageReport {
+        packages: vec![current, waiting.clone(), unknown],
+        ..PackageReport::default()
+    };
     controller.as_mut().warm_inventory(report, true);
     let kept = |key| match &controller.rust().prefetched.get(&key).unwrap().1 {
         Payload::Packages(report) => report
