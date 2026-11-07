@@ -825,7 +825,9 @@ mod tests {
         ];
         let wrong: Vec<_> = rows
             .iter()
-            .filter(|(name, plain, repo)| safe_name(name) != *plain || safe_repo_name(name) != *repo)
+            .filter(|(name, plain, repo)| {
+                safe_name(name) != *plain || safe_repo_name(name) != *repo
+            })
             .map(|(name, _, _)| name.chars().take(12).collect::<String>())
             .collect();
         assert!(wrong.is_empty(), "wrong answers for {wrong:?}");
@@ -949,7 +951,11 @@ mod tests {
             .map(|(_, why)| *why)
             .collect();
         assert!(wrong.is_empty(), "accepted: {wrong:?}");
-        assert!(validate("list", &format!("{good}\ndeb https://example.invalid/r stable main")).is_err());
+        assert!(validate(
+            "list",
+            &format!("{good}\ndeb https://example.invalid/r stable main")
+        )
+        .is_err());
 
         // DNF sections: one rule broken each, with a safe name and a good key.
         let section = |locations: &str, check: &str| format!("{locations}\n{check}");
@@ -984,11 +990,7 @@ mod tests {
                 section("baseurl=https://example.invalid/r", "gpgcheck=1"),
                 "section name starts with a dash",
             ),
-            (
-                "ok",
-                section("", "gpgcheck=1"),
-                "no location",
-            ),
+            ("ok", section("", "gpgcheck=1"), "no location"),
             (
                 "ok",
                 section(
@@ -1012,10 +1014,8 @@ mod tests {
 
     #[test]
     fn a_different_valid_file_is_not_the_one_that_was_reviewed() {
-        let base = std::env::temp_dir().join(format!(
-            "pkgdeck-repository-swapped-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-repository-swapped-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let tools = |tool: &str| {
@@ -1038,15 +1038,17 @@ mod tests {
 
         // Another file that is just as valid, with the same name and backend.
         let repo = base.join("synthetic.flatpakrepo");
-        let file = |url: &str| {
-            format!("[Flatpak Repo]\nName=synthetic\nUrl={url}\nGPGKey=c3ludGhldGlj\n")
-        };
+        let file =
+            |url: &str| format!("[Flatpak Repo]\nName=synthetic\nUrl={url}\nGPGKey=c3ludGhldGlj\n");
         fs::write(&repo, file("https://example.invalid/reviewed")).unwrap();
         let host = tools("flatpak");
         let import = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
         fs::write(&repo, file("https://example.invalid/swapped")).unwrap();
         let fresh = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
-        assert_eq!((&fresh.backend, &fresh.name), (&import.backend, &import.name));
+        assert_eq!(
+            (&fresh.backend, &fresh.name),
+            (&import.backend, &import.name)
+        );
         assert!(changed(apply_with_host(
             &import,
             Authorization::Polkit,
