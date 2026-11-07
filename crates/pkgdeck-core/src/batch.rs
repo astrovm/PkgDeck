@@ -1958,10 +1958,58 @@ mod tests {
     }
 
     #[test]
+    fn system_file_snap_and_app_data_cleanups_each_take_their_own_path() {
+        use crate::package::CleanupId;
+        let clean = |backend: &str, key: &str| {
+            protected_commands(&Operation::Clean(CleanupId {
+                backend: backend.into(),
+                key: key.into(),
+            }))
+        };
+        // System files: the journal is trimmed with journalctl, every other
+        // task is a fixed `find ... -delete`, and an unknown task is refused.
+        let journal = clean("system-files", "journal").unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].program, "/usr/bin/journalctl");
+        assert!(journal[0].args[0].starts_with("--vacuum-time="));
+        let dumps = clean("system-files", "coredumps").unwrap();
+        assert_eq!(dumps.len(), 1);
+        assert_eq!(dumps[0].program, "/usr/bin/find");
+        assert_eq!(dumps[0].args.last().map(String::as_str), Some("-delete"));
+        assert!(clean("system-files", "everything").is_err());
+        // Snap: one `snap remove` per disabled revision, nothing for a key
+        // that isn't a list of them.
+        let snaps = clean("snap", "disabled-revisions:core22=1380,firefox=x5").unwrap();
+        assert_eq!(
+            snaps,
+            vec![
+                ProtectedCommand::new(
+                    "snap",
+                    ["remove", "core22", "--revision=1380"].map(str::to_owned)
+                ),
+                ProtectedCommand::new(
+                    "snap",
+                    ["remove", "firefox", "--revision=x5"].map(str::to_owned)
+                ),
+            ]
+        );
+        assert!(clean("snap", "disabled-revisions:../etc=1").is_err());
+        assert!(clean("snap", "other").is_err());
+        // App data goes to the person's own Trash, never through root: not
+        // even for Snap, which has a root cleanup of its own.
+        for backend in ["flatpak", "snap"] {
+            for key in ["data:org.example.Test", "leftover:example"] {
+                assert!(clean(backend, key).unwrap().is_empty(), "{backend} {key}");
+            }
+        }
+        assert!(clean("system-files", "data:org.example.Test").is_err());
+    }
+
+    #[test]
     fn firmware_device_ids_are_exactly_forty_hex_digits() {
         let upgrade = |name: &str| protected_commands(&Operation::Upgrade(id("fwupd", name)));
         assert!(upgrade(&"a".repeat(40)).is_ok());
-        assert!(upgrade(&"0123456789abcdefABCDEF0123456789abcdef01".to_owned()).is_ok());
+        assert!(upgrade("0123456789abcdefABCDEF0123456789abcdef01").is_ok());
         for bad in [
             "-".repeat(40),
             "--assume-yes--assume-yes--assume-yes--ass".to_owned(),
