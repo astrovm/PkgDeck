@@ -2115,6 +2115,19 @@ mod tests {
         // An operation outside the plan, or a command past its end.
         assert!(!approved.start(&commands, "apt", 4, 0));
         assert!(!approved.start(&commands, "apt", 0, 2));
+        // The same holds with nothing else in the way: its lane is idle and
+        // it is next in line, yet there is no third command to start.
+        let mut done = Approved {
+            next: vec![0; commands.len()],
+            lanes: Default::default(),
+            failed: None,
+        };
+        assert!(done.start(&commands, "apt", 0, 0));
+        finish(&mut done, "apt", 0);
+        assert!(done.start(&commands, "apt", 0, 1));
+        finish(&mut done, "apt", 0);
+        assert_eq!(done.next[0], 2);
+        assert!(!done.start(&commands, "apt", 0, 2));
         // Once a command failed, none start.
         fresh.failed = Some(invalid("failed"));
         assert!(!fresh.start(&commands, "dnf", 0, 0));
