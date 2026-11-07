@@ -171,6 +171,22 @@ done
 # The stacked pull request is the one named, not the one below it.
 expect_code 0 env PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r scripts/merged-pr.sh stacked
 grep -Fxq $'2\thead-stacked\to/r' "$work/output"
+# A test that allocates forever must abort, not take the runner down with it.
+if command -v prlimit >/dev/null; then
+    limit_repo="$work/mutants-limit"
+    mkdir -p "$limit_repo/scripts" "$work/limit-bin"
+    cp scripts/mutants.sh "$limit_repo/scripts/"
+    : >"$limit_repo/scripts/dev-env.sh"
+    printf '[toolchain]\nchannel = "1.0.0"\n' >"$limit_repo/rust-toolchain.toml"
+    cat >"$work/limit-bin/cargo" <<'CARGO'
+#!/bin/bash
+if [[ $1 == mutants && $2 == --version ]]; then echo "cargo-mutants 27.1.0"; exit 0; fi
+env | grep '_RUNNER=' >"$RUNNER_ENV"
+CARGO
+    chmod +x "$work/limit-bin/cargo"
+    env -u CI PATH="$work/limit-bin:$PATH" RUNNER_ENV="$work/runner-env" "$limit_repo/scripts/mutants.sh" shard 0/64
+    grep -q 'prlimit --as=8589934592$' "$work/runner-env"
+fi
 # Mutation results keep one comment on the pull request, gone once every
 # mutant is caught, through a synthetic GitHub API.
 cat >"$work/bin/gh" <<'GH'
