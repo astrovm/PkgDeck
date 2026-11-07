@@ -2444,7 +2444,10 @@ mod apt_upgrade_tests {
         // A worker that was handed the reviewed plan runs the matching update.
         let (mut engine, log) = lists_engine(Ok(()), false);
         engine.remember_apt_upgrade_plan(empty_plan());
-        assert_eq!(engine.execute(&op, &cancel, &mut |_| {}), Ok(Default::default()));
+        assert_eq!(
+            engine.execute(&op, &cancel, &mut |_| {}),
+            Ok(Default::default())
+        );
         assert!(log.lock().unwrap().contains(&format!("run {op:?}")));
         // A different reviewed plan changed, so nothing runs.
         let (mut engine, log) = lists_engine(Ok(()), false);
