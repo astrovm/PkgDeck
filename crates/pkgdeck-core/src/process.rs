@@ -494,13 +494,36 @@ mod tests {
         }
     }
 
+    /// What a test shell does until it is stopped: it ends by itself after
+    /// about a minute, so one whose test was killed (a mutant that made it
+    /// hang) cannot go on forking `sleep` forever. A weekly mutation run
+    /// once lost its runner to a dozen of those.
+    const LINGER: &str = "n=0; while [ $n -lt 3000 ]; do sleep 0.01; n=$((n+1)); done";
+
+    /// The folder of marker files for a shell a test starts. When the test
+    /// ends, even on a failed assertion, it kills the shell's process group
+    /// (its id is in `pid`, if the shell wrote it) and deletes the folder.
+    struct Shell(std::path::PathBuf);
+
+    impl Drop for Shell {
+        fn drop(&mut self) {
+            let pid = std::fs::read_to_string(self.0.join("pid")).ok();
+            let pid = pid.and_then(|pid| pid.trim().parse().ok());
+            if let Some(pid) = pid.and_then(rustix::process::Pid::from_raw) {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A read stopped once it's ready, in a fresh folder for its marker
     /// files, and how long it took to answer after the stop.
-    fn stopped_read(name: &str, script: &str) -> (std::path::PathBuf, Duration) {
+    fn stopped_read(name: &str, script: &str) -> (Shell, Duration) {
         let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ready = dir.join("ready");
+        let shell = Shell(dir.clone());
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script, "sh"]).arg(&dir);
         let thread = std::thread::spawn(move || {
@@ -518,43 +541,43 @@ mod tests {
         });
         let (result, elapsed) = thread.join().unwrap();
         assert_eq!(result, Err(ExecutionError::Cancelled));
-        (dir, elapsed)
+        (shell, elapsed)
     }
 
     #[test]
     fn a_stopped_read_is_asked_to_exit_before_it_is_killed() {
         // A program gets the chance to clean up before it is killed.
-        let (dir, _) = stopped_read(
+        let (shell, _) = stopped_read(
             "terminated",
             // It prints while stopping, as grok did: a closed pipe would
             // kill it before it gets to its marker.
-            "trap 'echo stopping; echo stopping >&2; : > \"$1/terminated\"; exit 0' TERM; \
-             : > \"$1/ready\"; \
-             while :; do sleep 0.01; done",
+            &format!(
+                "trap 'echo stopping; echo stopping >&2; : > \"$1/terminated\"; exit 0' TERM; \
+                 echo $$ > \"$1/pid\"; : > \"$1/ready\"; {LINGER}"
+            ),
         );
         // The trap runs beside the answer. Its marker can only appear if it
         // ran before the SIGKILL that follows the grace.
-        assert!(wait_for(Duration::from_secs(5), || dir
+        assert!(wait_for(Duration::from_secs(5), || shell
+            .0
             .join("terminated")
             .exists()));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_stopped_read_that_ignores_sigterm_is_still_killed() {
-        let (dir, elapsed) = stopped_read(
+        let (shell, elapsed) = stopped_read(
             "ignores-term",
-            "trap '' TERM; echo $$ > \"$1/pid\"; : > \"$1/ready\"; while :; do sleep 0.01; done",
+            &format!("trap '' TERM; echo $$ > \"$1/pid\"; : > \"$1/ready\"; {LINGER}"),
         );
         // The read answers at once; the kill follows after the grace.
         assert!(elapsed < STOP_GRACE, "{elapsed:?}");
-        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        let pid = std::fs::read_to_string(shell.0.join("pid")).unwrap();
         let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
         // Signal 0 only asks whether it is still there; macOS has no /proc.
         let alive = || rustix::process::test_kill_process(pid).is_ok();
         assert!(alive());
         assert!(wait_for(Duration::from_secs(5), || !alive()));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
