@@ -1594,7 +1594,6 @@ fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
             failures: vec![failure.clone()],
             successful_sources: vec!["apt".into()],
         })));
-    assert!(*controller.upgradable());
     assert_eq!(upgrade_plan(&controller.rust().packages).len(), 1);
     let apt_checked = controller.rust().last_success["apt"];
 
@@ -1606,7 +1605,6 @@ fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
             successful_sources: vec![],
         },
     )));
-    assert!(*controller.upgradable());
     assert_eq!(controller.rust().packages, vec![package("apt")]);
     assert_eq!(controller.rust().last_success["apt"], apt_checked);
     controller.as_mut().apply(Ok(Payload::UpgradePreview(
@@ -2396,7 +2394,6 @@ fn an_older_write_never_replaces_a_newer_one() {
         rows: "[]".into(),
         status: status.into(),
         report_state: String::new(),
-        upgradable: false,
         updates_view: false,
     };
     assert!(write_view(&path, stored("Installed", "newer"), 2, &written));
@@ -2433,7 +2430,6 @@ fn a_closed_window_keeps_no_sections_in_memory_and_gets_them_back() {
         rows: "[]".into(),
         status: "kept".into(),
         report_state: String::new(),
-        upgradable: false,
         updates_view: false,
     };
     let written = std::sync::Mutex::new(std::collections::HashMap::new());
@@ -2494,7 +2490,7 @@ fn a_damaged_or_older_store_is_ignored() {
     let key = cache_key("Installed", "", &[], false);
     for text in [
             "not json".to_owned(),
-            json!({"version": "0.0.1", "views": [{"key": key, "packages": [], "cleanup": [], "rows": "[]", "status": "", "report_state": "", "upgradable": false, "updates_view": false}]}).to_string(),
+            json!({"version": "0.0.1", "views": [{"key": key, "packages": [], "cleanup": [], "rows": "[]", "status": "", "report_state": "", "updates_view": false}]}).to_string(),
         ] {
             let path = dir.path().join("views.json");
             std::fs::write(&path, text).unwrap();
@@ -5221,7 +5217,6 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
         .unwrap();
     controller.as_mut().rust_mut().queued = None;
     controller.as_mut().rust_mut().updates_view = true;
-    controller.as_mut().set_upgradable(true);
     for action in ["install", "remove"] {
         controller.as_mut().propose(action.into(), 0);
         assert!(controller.rust().pending.is_none());
@@ -5268,7 +5263,6 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
         .to_string()
         .contains("Restart or shut down"));
     assert!(!controller.rust().packages.is_empty());
-    assert!(!*controller.upgradable());
 }
 #[test]
 fn container_pull_is_explicit_and_requires_a_stored_tag() {
@@ -7876,7 +7870,6 @@ fn cached_view(name: &str) -> CachedView {
         rows: format!(r#"[{{"name":"{name}"}}]"#).as_str().into(),
         status: "cached".into(),
         report_state: r#"{"phase":"cached"}"#.into(),
-        upgradable: false,
         updates_view: false,
     }
 }
@@ -14835,4 +14828,131 @@ fn confirmations_say_what_the_trash_can_bring_back() {
             pkgdeck_core::disk::size(2_001_000)
         )
     );
+}
+
+#[test]
+fn update_all_is_offered_on_the_updates_page_only_however_it_loaded() {
+    let mut controller = ffi::create_synthetic_controller(fixture_engine);
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().prefetch.clear();
+    let offered = |controller: &mut Pin<&mut ffi::PackageController>| {
+        controller.as_mut().rust_mut().pending = None;
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        let started = controller.rust().pending.is_some() || controller.rust().worker.is_some();
+        controller.as_mut().rust_mut().pending = None;
+        started
+    };
+    // Read from the managers.
+    for (view, expected) in [("Updates", true), ("Installed", false), ("Updates", true)] {
+        controller
+            .as_mut()
+            .load(view.into(), "".into(), "".into(), false, true);
+        settle(&mut controller);
+        assert!(
+            !controller.rust().packages.is_empty(),
+            "{view} listed nothing"
+        );
+        assert_eq!(controller.rust().updates_view, expected, "{view}");
+        assert_eq!(offered(&mut controller), expected, "{view}");
+        settle(&mut controller);
+    }
+    // Shown at once from a preloaded section.
+    for (view, expected) in [
+        ("Installed", false),
+        ("Updates", true),
+        ("Installed", false),
+    ] {
+        let mut report = PackageReport::default();
+        report.packages.push(fixture_row());
+        let key = cache_key(view, "", &[], false);
+        controller.as_mut().rust_mut().view_cache.expire();
+        controller
+            .as_mut()
+            .rust_mut()
+            .prefetched
+            .insert(key.clone(), (Instant::now(), Payload::Packages(report)));
+        controller
+            .as_mut()
+            .load(view.into(), "".into(), "".into(), false, false);
+        assert!(
+            !controller.rust().prefetched.contains_key(&key),
+            "{view} was not taken from the preload"
+        );
+        assert_eq!(controller.rust().updates_view, expected, "{view} preloaded");
+        assert_eq!(offered(&mut controller), expected, "{view} preloaded");
+        settle(&mut controller);
+    }
+}
+
+#[test]
+fn preloaded_updates_keep_only_the_rows_with_an_update() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let mut waiting = synthetic_package("waiting", "Waiting");
+    waiting.update = UpdateAvailability::Available;
+    let mut current = synthetic_package("current", "Current");
+    current.update = UpdateAvailability::Current;
+    let mut unknown = synthetic_package("unknown", "Unknown");
+    unknown.update = UpdateAvailability::Unknown;
+    let report = PackageReport {
+        packages: vec![current, waiting.clone(), unknown],
+        ..PackageReport::default()
+    };
+    controller.as_mut().warm_inventory(report, true);
+    let kept = |key| match &controller.rust().prefetched.get(&key).unwrap().1 {
+        Payload::Packages(report) => report
+            .packages
+            .iter()
+            .map(|p| p.id.name.clone())
+            .collect::<Vec<_>>(),
+        _ => panic!("not a package list"),
+    };
+    assert_eq!(kept(cache_key("Updates", "", &[], false)), ["waiting"]);
+    // Installed keeps everything.
+    assert_eq!(
+        kept(cache_key("Installed", "", &[], false)),
+        ["current", "waiting", "unknown"]
+    );
+}
+
+#[test]
+fn the_full_details_of_the_open_package_land_in_the_pane_and_the_cache() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let package = synthetic_package("fixture", "Fixture");
+    controller.as_mut().rust_mut().packages = vec![package.clone()];
+    controller.as_mut().rust_mut().selected = Some(package.id.clone());
+    controller.as_mut().set_details("{}".into());
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Reply::Done(Ok(Payload::Details(Box::new(
+            PackageDetails {
+                package: package.clone(),
+                description: "Full description from the lookup".into(),
+                homepage: None,
+                dependencies: vec!["libsynthetic".into()],
+                data: None,
+            },
+        )))))
+        .unwrap();
+    controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+        handle: thread::spawn(|| {}),
+        receiver,
+        cancel: Cancellation::default(),
+        id: package.id.clone(),
+    });
+    controller.as_mut().poll();
+    let details = controller.details().to_string();
+    assert!(
+        details.contains("Full description from the lookup"),
+        "{details}"
+    );
+    assert!(details.contains("libsynthetic"), "{details}");
+    assert!(controller
+        .rust()
+        .detail_cache
+        .get(&package.id)
+        .is_some_and(|cached| cached
+            .to_string()
+            .contains("Full description from the lookup")));
 }

@@ -930,12 +930,19 @@ mod tests {
 
     /// Waits for a background thread, yielding before each check.
     /// Its retry test covers waiting even when real loads finish immediately.
+    /// A load that never finishes fails the test after a minute, so a
+    /// mutated catalog cannot keep a mutation run busy until its timeout.
     fn settle(done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             std::thread::yield_now();
             if done() {
                 return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background load never finished"
+            );
         }
     }
 

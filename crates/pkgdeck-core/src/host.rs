@@ -322,11 +322,31 @@ mod askpass_tests {
         }
         let binary = contents.join("MacOS/askpass-test");
         fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
-        let output = Command::new(binary).args([
-            "--exact",
-            "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
-            "--nocapture",
-        ]).env(REENTRY, &root).output().unwrap();
+        // Another test's fork can still hold the just-copied binary open for
+        // writing, which makes exec fail with "Text file busy". It clears at
+        // once, so ask again instead of failing the test.
+        let run = || {
+            Command::new(&binary).args([
+                "--exact",
+                "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
+                "--nocapture",
+            ]).env(REENTRY, &root).output()
+        };
+        let busy = |result: &std::io::Result<std::process::Output>| {
+            result.as_ref().err().map(std::io::Error::kind)
+                == Some(std::io::ErrorKind::ExecutableFileBusy)
+        };
+        let output = std::iter::repeat_with(|| {
+            let result = run();
+            std::thread::sleep(std::time::Duration::from_millis(
+                u64::from(busy(&result)) * 20,
+            ));
+            result
+        })
+        .take(50)
+        .find(|result| !busy(result))
+        .expect("the copied binary stayed busy")
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
         let transcript = format!(
             "{}{}",
@@ -525,6 +545,47 @@ mod repository_install_tests {
                 .is_err()
         );
         std::fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn each_bad_repository_install_argument_is_refused_on_its_own() {
+        let folder = std::env::temp_dir().join(format!("pkgdeck-repo-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("synthetic.sources");
+        std::fs::write(&file, b"synthetic source").unwrap();
+        // A relative path that does name a file, so only "relative" is wrong.
+        let relative = Path::new("Cargo.toml");
+        assert!(relative.is_file() && !relative.is_absolute());
+        let digest = "0123456789abcdef".repeat(4);
+        assert!(repository_install_args(&file, "apt", "sources", &digest).is_ok());
+        let slash = format!("{}/", "a".repeat(63));
+        let rows = [
+            (relative, digest.as_str(), "relative path"),
+            (folder.as_path(), digest.as_str(), "folder, not a file"),
+            (
+                &folder.join("missing.sources"),
+                digest.as_str(),
+                "file that is not there",
+            ),
+            (file.as_path(), &digest[..63], "63 hex digits"),
+            (file.as_path(), &format!("{digest}0"), "65 hex digits"),
+            (file.as_path(), slash.as_str(), "64 characters with a slash"),
+            (file.as_path(), &"g".repeat(64), "64 characters, not hex"),
+            (file.as_path(), "", "no digest"),
+        ];
+        let accepted: Vec<_> = rows
+            .iter()
+            .filter(|(path, digest, _)| {
+                repository_install_args(path, "apt", "sources", digest).is_ok()
+            })
+            .map(|(_, _, why)| *why)
+            .collect();
+        assert!(accepted.is_empty(), "accepted: {accepted:?}");
+        // A digest that could leave the folder never reaches the destination.
+        let escape = format!("../{}", "a".repeat(61));
+        assert_eq!(escape.len(), 64);
+        assert!(repository_install_args(&file, "apt", "sources", &escape).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn reviewed_repository_write_passes_only_fixed_install_arguments() {

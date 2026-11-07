@@ -77,14 +77,24 @@ fn invalid(reason: impl Into<String>) -> ExecutionError {
 /// The helper's entry point: a reviewed batch, an upgrade-only batch, or
 /// saving or removing the approval.
 pub fn run_runner(args: &[OsString]) -> Result<(), ExecutionError> {
+    dispatch(args, batch::serve, save_rule)
+}
+/// Picks what the helper does for these exact arguments. The two actions are
+/// passed in so a test can see which one ran, since every one of them stops
+/// at the same root check when tests run as a normal user.
+fn dispatch(
+    args: &[OsString],
+    serve: impl FnOnce(BatchMode) -> Result<(), ExecutionError>,
+    save: impl FnOnce(bool) -> Result<(), ExecutionError>,
+) -> Result<(), ExecutionError> {
     match args {
-        [] => batch::serve(BatchMode::Reviewed),
-        [flag] if flag == UPGRADE_ONLY => batch::serve(BatchMode::UpgradeOnly { removals: false }),
+        [] => serve(BatchMode::Reviewed),
+        [flag] if flag == UPGRADE_ONLY => serve(BatchMode::UpgradeOnly { removals: false }),
         [flag, removals] if flag == UPGRADE_ONLY && removals == ALLOW_REMOVALS => {
-            batch::serve(BatchMode::UpgradeOnly { removals: true })
+            serve(BatchMode::UpgradeOnly { removals: true })
         }
-        [flag] if flag == GRANT => save_rule(true),
-        [flag] if flag == REVOKE => save_rule(false),
+        [flag] if flag == GRANT => save(true),
+        [flag] if flag == REVOKE => save(false),
         _ => Err(invalid("unknown runner arguments")),
     }
 }
@@ -602,6 +612,77 @@ mod tests {
             let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
             assert_eq!(run_runner(&args), Err(invalid("host runner requires root")));
         }
+    }
+
+    #[test]
+    fn each_exact_argument_list_runs_only_its_own_action() {
+        use std::cell::RefCell;
+        let reviewed = BatchMode::Reviewed;
+        let upgrade = |removals| BatchMode::UpgradeOnly { removals };
+        // (arguments, what should run). None means refused with nothing run.
+        let table: Vec<(Vec<&str>, Option<String>)> = vec![
+            (vec![], Some(format!("serve {reviewed:?}"))),
+            (
+                vec![UPGRADE_ONLY],
+                Some(format!("serve {:?}", upgrade(false))),
+            ),
+            (
+                vec![UPGRADE_ONLY, ALLOW_REMOVALS],
+                Some(format!("serve {:?}", upgrade(true))),
+            ),
+            (vec![GRANT], Some("save true".into())),
+            (vec![REVOKE], Some("save false".into())),
+            // Near misses: none may grant, revoke or serve.
+            (vec![ALLOW_REMOVALS], None),
+            (vec![ALLOW_REMOVALS, UPGRADE_ONLY], None),
+            (vec![UPGRADE_ONLY, UPGRADE_ONLY], None),
+            (vec![UPGRADE_ONLY, "extra"], None),
+            (vec![UPGRADE_ONLY, ALLOW_REMOVALS, "extra"], None),
+            (vec![GRANT, REVOKE], None),
+            (vec![REVOKE, GRANT], None),
+            (vec![GRANT, GRANT], None),
+            (vec![GRANT, ALLOW_REMOVALS], None),
+            (vec![REVOKE, ALLOW_REMOVALS], None),
+            (vec!["--other"], None),
+            (vec!["--upgrade-only=1"], None),
+            (vec![""], None),
+            (vec!["--other", "--other"], None),
+        ];
+        for (args, expected) in table {
+            let ran = RefCell::new(Vec::new());
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            let result = dispatch(
+                &args,
+                |mode| {
+                    ran.borrow_mut().push(format!("serve {mode:?}"));
+                    Ok(())
+                },
+                |grant| {
+                    ran.borrow_mut().push(format!("save {grant}"));
+                    Ok(())
+                },
+            );
+            let ran = ran.into_inner();
+            match expected {
+                Some(action) => {
+                    assert_eq!(ran, vec![action], "{args:?}");
+                    assert_eq!(result, Ok(()), "{args:?}");
+                }
+                None => {
+                    assert!(ran.is_empty(), "{args:?} ran {ran:?}");
+                    assert_eq!(result, Err(invalid("unknown runner arguments")), "{args:?}");
+                }
+            }
+        }
+        // What the action returns comes back unchanged.
+        assert_eq!(
+            dispatch(&[], |_| Err(invalid("serve failed")), |_| Ok(())),
+            Err(invalid("serve failed"))
+        );
+        assert_eq!(
+            dispatch(&[GRANT.into()], |_| Ok(()), |_| Err(invalid("save failed"))),
+            Err(invalid("save failed"))
+        );
     }
 
     fn named(code: i32, name: &str) -> io::Result<Output> {

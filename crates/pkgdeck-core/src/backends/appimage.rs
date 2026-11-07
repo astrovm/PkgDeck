@@ -3852,6 +3852,48 @@ esac
     }
 
     #[test]
+    fn only_a_file_named_like_a_pkgdeck_copy_is_removed_as_managed() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("data/pkgdeck/appimages");
+        fs::create_dir_all(&root).unwrap();
+        let mut backend = AppImage::new(root.clone(), base.join("data/applications"), 1000);
+        let cancel = Cancellation::default();
+        let hex = "0123456789abcdef".repeat(4);
+        let good = format!("pkgdeck-{hex}.AppImage");
+        assert_eq!(good.len(), 81);
+        assert!(AppImage::managed_name(&good));
+        let bad = [
+            ("x".repeat(81), "81 bytes of anything"),
+            (format!("xkgdeck-{hex}.AppImage"), "wrong prefix"),
+            (format!("pkgdeck-{hex}.AppImagx"), "wrong suffix"),
+            (format!("pkgdeck-{}.AppImage", "g".repeat(64)), "not hex"),
+            (
+                format!("pkgdeck-{}.AppImage", &hex[..63]),
+                "one digit short",
+            ),
+            (format!("pkgdeck-{hex}0.AppImage"), "one digit long"),
+        ];
+        for (name, why) in &bad {
+            assert!(!AppImage::managed_name(name), "managed: {why}");
+            // A file with that name sits in the folder; removing it as a
+            // managed copy would delete it.
+            fs::write(root.join(name), b"not ours").unwrap();
+            let mut id = backend.installed_id(&hex, "x86_64");
+            id.name = name.clone();
+            assert!(
+                backend
+                    .execute(&Operation::Remove(id), &cancel, &mut |_| {})
+                    .is_err(),
+                "removed: {why}"
+            );
+            assert!(root.join(name).exists(), "deleted: {why}");
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn imports_reviewed_https_appimage_without_executing_it() {
         use std::os::unix::fs::PermissionsExt;

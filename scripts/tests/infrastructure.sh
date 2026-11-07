@@ -171,11 +171,28 @@ done
 # The stacked pull request is the one named, not the one below it.
 expect_code 0 env PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r scripts/merged-pr.sh stacked
 grep -Fxq $'2\thead-stacked\to/r' "$work/output"
+# A test that allocates forever must abort, not take the runner down with it.
+if command -v prlimit >/dev/null; then
+    limit_repo="$work/mutants-limit"
+    mkdir -p "$limit_repo/scripts" "$work/limit-bin"
+    cp scripts/mutants.sh "$limit_repo/scripts/"
+    : >"$limit_repo/scripts/dev-env.sh"
+    printf '[toolchain]\nchannel = "1.0.0"\n' >"$limit_repo/rust-toolchain.toml"
+    cat >"$work/limit-bin/cargo" <<'CARGO'
+#!/bin/bash
+if [[ $1 == mutants && $2 == --version ]]; then echo "cargo-mutants 27.1.0"; exit 0; fi
+env | grep '_RUNNER=' >"$RUNNER_ENV"
+CARGO
+    chmod +x "$work/limit-bin/cargo"
+    env -u CI PATH="$work/limit-bin:$PATH" RUNNER_ENV="$work/runner-env" "$limit_repo/scripts/mutants.sh" shard 0/64
+    grep -q 'prlimit --as=8589934592$' "$work/runner-env"
+fi
 # Mutation results keep one comment on the pull request, gone once every
 # mutant is caught, through a synthetic GitHub API.
 cat >"$work/bin/gh" <<'GH'
 #!/bin/bash
 printf '%s\n' "$*" >>"$GH_CALLS"
+for argument in "$@"; do [[ $argument == body=* ]] && printf '%s' "${argument#body=}" >"${GH_BODY:-/dev/null}"; done
 [[ $* == *--paginate* ]] && cat "$GH_OLD"
 exit 0
 GH
@@ -201,6 +218,21 @@ comment '' true
 rm "$results/missed.txt"
 comment 99
 grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
+# A list too long for one comment is cut after a whole row, with the code fence
+# closed and the rest left to the full report; the run page keeps all of it.
+for n in $(seq 1 4000); do printf 'crates/pkgdeck-core/src/long.rs:%d:9: replace f with g\n' "$n"; done >"$results/missed.txt"
+: >"$work/summary"
+env PATH="$work/bin:$PATH" GH_CALLS="$work/calls" GH_OLD=/dev/null GH_BODY="$work/body" GITHUB_REPOSITORY=o/r PR=7 RUN=https://run \
+    GITHUB_STEP_SUMMARY="$work/summary" scripts/mutants-comment.sh "$results"
+(( $(wc -c <"$work/body") <= 60000 ))
+(( $(grep -c '^```$' "$work/body") == 2 ))
+grep -q '^Showing [0-9]* of 4000\. The rest is in the \[full report\](https://run)\.$' "$work/body"
+shown=$(grep -c 'long\.rs:' "$work/body")
+(( shown > 1000 && shown < 4000 ))
+# The last row shown is a whole one.
+grep -B1 '^```$' "$work/body" | tail -n 2 | head -n 1 | grep -q '^crates/pkgdeck-core/src/long\.rs:[0-9]*:9: replace f with g$'
+(( $(grep -c 'long\.rs:' "$work/summary") == 4000 ))
+rm "$results/missed.txt"
 # Nothing to mutate leaves no results at all, which is the same as all caught.
 rm -r "$results"
 comment 99
