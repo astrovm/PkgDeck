@@ -2006,6 +2006,48 @@ mod tests {
     }
 
     #[test]
+    fn system_managers_install_remove_and_upgrade_with_their_own_verb() {
+        for (backend, install, remove, upgrade) in [
+            ("dnf", "install", "remove", "upgrade"),
+            ("pacman", "-S", "-Rns", "-Sy"),
+            ("zypper", "install", "remove", "update"),
+            ("snap", "install", "remove", "refresh"),
+        ] {
+            for (operation, verb) in [
+                (Operation::Install(id(backend, "synthetic")), install),
+                (Operation::Remove(id(backend, "synthetic")), remove),
+                (Operation::Upgrade(id(backend, "synthetic")), upgrade),
+            ] {
+                let mut commands = protected_commands(&operation).unwrap();
+                assert_eq!(commands.len(), 1, "{operation:?}");
+                let command = commands.pop().unwrap();
+                assert!(
+                    command.args.iter().any(|arg| arg == verb),
+                    "{backend}: {operation:?} should use {verb}, got {:?}",
+                    command.args
+                );
+                assert_eq!(
+                    command.args.last().map(String::as_str),
+                    Some("synthetic"),
+                    "{backend}: {operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_system_flatpak_app_reference_is_installed_as_an_app() {
+        let mut app = id("flatpak", "org.example.App");
+        app.reference = Some("app/org.example.App/amd64/stable".into());
+        let command = protected_commands(&Operation::Install(app))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(command.args.contains(&"--app".into()), "{:?}", command.args);
+        assert!(!command.args.contains(&"--runtime".into()));
+    }
+
+    #[test]
     fn firmware_device_ids_are_exactly_forty_hex_digits() {
         let upgrade = |name: &str| protected_commands(&Operation::Upgrade(id("fwupd", name)));
         assert!(upgrade(&"a".repeat(40)).is_ok());
