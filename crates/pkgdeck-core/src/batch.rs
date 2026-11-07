@@ -1874,6 +1874,210 @@ mod tests {
         assert!(!command.args.contains(&"--app".into()));
     }
 
+    fn flatpak_id(name: &str, architecture: &str, reference: Option<&str>) -> PackageId {
+        PackageId {
+            backend: "flatpak".into(),
+            name: name.into(),
+            architecture: architecture.into(),
+            scope: Scope::System,
+            remote: None,
+            reference: reference.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn flatpak_identity_and_reference_are_checked_one_field_at_a_time() {
+        const NAME: &str = "org.example.Test";
+        // User-scoped Flatpak has no entry in the elevated plan: Ok and empty.
+        let allowed = |id| matches!(protected_commands(&Operation::Install(id)), Ok(commands) if !commands.is_empty());
+        for reference in [
+            None,
+            Some("app/org.example.Test/x86_64/stable"),
+            Some("runtime/org.example.Test/x86_64/stable"),
+            Some("org.example.Test/x86_64/stable"),
+        ] {
+            assert!(
+                allowed(flatpak_id(NAME, "x86_64", reference)),
+                "{reference:?}"
+            );
+        }
+        // Each of these is wrong in exactly one way.
+        for (name, arch, reference) in [
+            ("--x", "x86_64", None),
+            ("", "x86_64", None),
+            (NAME, "--x", None),
+            (NAME, "", None),
+            // A different name with the right architecture, and the reverse.
+            (NAME, "x86_64", Some("app/evil/x86_64/stable")),
+            (NAME, "x86_64", Some("app/org.example.Test/aarch64/stable")),
+            (NAME, "x86_64", Some("evil/x86_64/stable")),
+            (NAME, "x86_64", Some("org.example.Test/aarch64/stable")),
+            (NAME, "x86_64", Some("evil/aarch64/stable")),
+            // Wrong kind, bad branch, wrong number of fields.
+            (NAME, "x86_64", Some("other/org.example.Test/x86_64/stable")),
+            (NAME, "x86_64", Some("app/org.example.Test/x86_64/--x")),
+            (NAME, "x86_64", Some("org.example.Test/x86_64/--x")),
+            (NAME, "x86_64", Some("x86_64/stable")),
+            (
+                NAME,
+                "x86_64",
+                Some("app/org.example.Test/x86_64/stable/extra"),
+            ),
+        ] {
+            assert!(
+                !allowed(flatpak_id(name, arch, reference)),
+                "{name} {arch} {reference:?}"
+            );
+        }
+        let mut user = flatpak_id(NAME, "x86_64", None);
+        user.scope = Scope::User { uid: 1000 };
+        assert!(!allowed(user));
+    }
+
+    #[test]
+    fn only_the_system_flatpak_cleanup_becomes_a_root_command() {
+        use crate::package::CleanupId;
+        let clean = |backend: &str, key: &str| {
+            protected_commands(&Operation::Clean(CleanupId {
+                backend: backend.into(),
+                key: key.into(),
+            }))
+            .unwrap()
+        };
+        let commands = clean("flatpak", "unused-system");
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].args.contains(&"--unused".to_owned()));
+        for (backend, key) in [
+            ("npm", "cache"),
+            ("flatpak", "other"),
+            ("flatpak", "unused"),
+            ("npm", "unused-system"),
+        ] {
+            assert!(clean(backend, key).is_empty(), "{backend} {key}");
+        }
+    }
+
+    #[test]
+    fn system_file_snap_and_app_data_cleanups_each_take_their_own_path() {
+        use crate::package::CleanupId;
+        let clean = |backend: &str, key: &str| {
+            protected_commands(&Operation::Clean(CleanupId {
+                backend: backend.into(),
+                key: key.into(),
+            }))
+        };
+        // System files: the journal is trimmed with journalctl, every other
+        // task is a fixed `find ... -delete`, and an unknown task is refused.
+        let journal = clean("system-files", "journal").unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].program, "/usr/bin/journalctl");
+        assert!(journal[0].args[0].starts_with("--vacuum-time="));
+        let dumps = clean("system-files", "coredumps").unwrap();
+        assert_eq!(dumps.len(), 1);
+        assert_eq!(dumps[0].program, "/usr/bin/find");
+        assert_eq!(dumps[0].args.last().map(String::as_str), Some("-delete"));
+        assert!(clean("system-files", "everything").is_err());
+        // Snap: one `snap remove` per disabled revision, nothing for a key
+        // that isn't a list of them.
+        let snaps = clean("snap", "disabled-revisions:core22=1380,firefox=x5").unwrap();
+        assert_eq!(
+            snaps,
+            vec![
+                ProtectedCommand::new(
+                    "snap",
+                    ["remove", "core22", "--revision=1380"].map(str::to_owned)
+                ),
+                ProtectedCommand::new(
+                    "snap",
+                    ["remove", "firefox", "--revision=x5"].map(str::to_owned)
+                ),
+            ]
+        );
+        assert!(clean("snap", "disabled-revisions:../etc=1").is_err());
+        assert!(clean("snap", "other").is_err());
+        // App data goes to the person's own Trash, never through root: not
+        // even for Snap, which has a root cleanup of its own.
+        for backend in ["flatpak", "snap"] {
+            for key in ["data:org.example.Test", "leftover:example"] {
+                assert!(clean(backend, key).unwrap().is_empty(), "{backend} {key}");
+            }
+        }
+        assert!(clean("system-files", "data:org.example.Test").is_err());
+    }
+
+    #[test]
+    fn firmware_device_ids_are_exactly_forty_hex_digits() {
+        let upgrade = |name: &str| protected_commands(&Operation::Upgrade(id("fwupd", name)));
+        assert!(upgrade(&"a".repeat(40)).is_ok());
+        assert!(upgrade("0123456789abcdefABCDEF0123456789abcdef01").is_ok());
+        for bad in [
+            "-".repeat(40),
+            "--assume-yes--assume-yes--assume-yes--ass".to_owned(),
+            "a".repeat(39),
+            "a".repeat(41),
+            "abc".to_owned(),
+            String::new(),
+            format!("{}g", "a".repeat(39)),
+        ] {
+            assert!(upgrade(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_is_approved_once_in_order_and_one_at_a_time_per_lane() {
+        let command = || ProtectedCommand::new("apt-get", ["update".to_owned()]);
+        // Operation 0 has two commands, the others one each.
+        let commands = vec![
+            vec![command(), command()],
+            vec![command()],
+            vec![command()],
+            vec![command()],
+        ];
+        let mut approved = Approved {
+            next: vec![0; commands.len()],
+            lanes: Default::default(),
+            failed: None,
+        };
+        let finish = |approved: &mut Approved, key, operation| {
+            approved.lanes.insert(key, (operation, false));
+        };
+        // Steps run in order: the second command first is refused.
+        assert!(!approved.start(&commands, "apt", 0, 1));
+        assert!(approved.start(&commands, "apt", 0, 0));
+        // Nothing else starts in the lane while it runs, but another lane may.
+        assert!(!approved.start(&commands, "apt", 0, 1));
+        assert!(!approved.start(&commands, "apt", 1, 0));
+        assert!(approved.start(&commands, "dnf", 3, 0));
+        finish(&mut approved, "apt", 0);
+        // A finished command cannot be requested again.
+        assert!(!approved.start(&commands, "apt", 0, 0));
+        // The next step of the same operation can follow.
+        assert!(approved.start(&commands, "apt", 0, 1));
+        assert_eq!(approved.next, vec![2, 0, 0, 1]);
+        finish(&mut approved, "apt", 0);
+        // A later operation follows an earlier one in its lane, and an
+        // earlier one cannot start after a later one.
+        assert!(approved.start(&commands, "apt", 2, 0));
+        finish(&mut approved, "apt", 2);
+        assert!(!approved.start(&commands, "apt", 1, 0));
+        let mut fresh = Approved {
+            next: vec![0; commands.len()],
+            lanes: Default::default(),
+            failed: None,
+        };
+        assert!(fresh.start(&commands, "apt", 1, 0));
+        finish(&mut fresh, "apt", 1);
+        assert!(fresh.start(&commands, "apt", 2, 0));
+        finish(&mut fresh, "apt", 2);
+        assert!(!fresh.start(&commands, "apt", 0, 0));
+        // An operation outside the plan, or a command past its end.
+        assert!(!approved.start(&commands, "apt", 4, 0));
+        assert!(!approved.start(&commands, "apt", 0, 2));
+        // Once a command failed, none start.
+        fresh.failed = Some(invalid("failed"));
+        assert!(!fresh.start(&commands, "dnf", 0, 0));
+    }
+
     #[test]
     fn authorization_protocol_rejects_empty_restarts_and_out_of_plan_indices() {
         let recorder = Recorder::default();
