@@ -2152,13 +2152,15 @@ done"#;
     #[test]
     fn ending_a_session_stops_a_runner_that_would_keep_going() {
         let pid = std::env::temp_dir().join(format!("pkgdeck-lingering-{}", std::process::id()));
-        // It ignores the end of its input, and TERM.
+        // It ignores the end of its input, and TERM. It ends by itself after
+        // two minutes, for a test killed before it could stop it, and the
+        // guard below stops it when the test fails.
         let script = format!(
             r#"trap '' TERM
 printf '%s' $$ >'{}'
 IFS= read -r start
 printf '%s\n' '{{"type":"ready","protocol":3}}'
-while :; do sleep 1 </dev/null >/dev/null 2>&1; done"#,
+n=0; while [ $n -lt 120 ]; do sleep 1 </dev/null >/dev/null 2>&1; n=$((n+1)); done"#,
             pid.display()
         );
         let mut child = Command::new("/bin/sh");
@@ -2171,14 +2173,18 @@ while :; do sleep 1 </dev/null >/dev/null 2>&1; done"#,
         let runner = fs::read_to_string(&pid).unwrap();
         let _ = fs::remove_file(&pid);
         let runner = rustix::process::Pid::from_raw(runner.parse().unwrap()).unwrap();
+        struct Stop(rustix::process::Pid);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = rustix::process::kill_process(self.0, rustix::process::Signal::KILL);
+            }
+        }
+        // One still running is stopped when the test ends, even by a failure.
+        let _stop = Stop(runner);
         let alive = || rustix::process::test_kill_process(runner).is_ok();
         assert!(alive());
         drop(scope);
-        // One still running is stopped before the test fails.
-        let kill = || rustix::process::kill_process(runner, rustix::process::Signal::KILL);
-        let lingering = alive();
-        let _ = lingering.then(kill);
-        assert!(!lingering);
+        assert!(!alive());
     }
 
     #[test]
