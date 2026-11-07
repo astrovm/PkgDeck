@@ -38,7 +38,7 @@ fn https_url(value: &str, suffix: &str) -> bool {
     !authority.is_empty()
         && !authority.contains('@')
         && !authority.contains('#')
-        && !value.bytes().any(|b| b.is_ascii_whitespace() || b < 0x20)
+        && !value.bytes().any(|b| b <= 0x20 || b == 0x7f)
         && path
             .split(['?', '#'])
             .next()
@@ -395,6 +395,17 @@ mod tests {
         assert!(verified_source(&package.id, &cancel).is_err());
         assert!(!https_url(
             "https://user@example.org/app.flatpakref",
+            ".flatpakref"
+        ));
+        // Whitespace and every control character, DEL included, would reach
+        // curl inside its one URL argument; artifact::https_source refuses them too.
+        for byte in (0u8..=0x20).chain([0x7f]) {
+            let url = format!("https://example.org/a{}b.flatpakref", byte as char);
+            assert!(!https_url(&url, ".flatpakref"), "byte {byte:#04x}");
+            assert!(!crate::artifact::https_source(&url), "byte {byte:#04x}");
+        }
+        assert!(https_url(
+            "https://example.org/a~b.flatpakref",
             ".flatpakref"
         ));
         fs::remove_dir_all(base).unwrap();
