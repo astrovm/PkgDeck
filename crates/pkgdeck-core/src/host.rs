@@ -338,11 +338,9 @@ mod askpass_tests {
         };
         let output = std::iter::repeat_with(|| {
             let result = run();
-            std::thread::sleep(std::time::Duration::from_millis(if busy(&result) {
-                20
-            } else {
-                0
-            }));
+            std::thread::sleep(std::time::Duration::from_millis(
+                u64::from(busy(&result)) * 20,
+            ));
             result
         })
         .take(50)
