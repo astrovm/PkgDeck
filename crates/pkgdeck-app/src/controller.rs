@@ -7462,7 +7462,6 @@ impl ffi::PackageController {
                 self.set_status("Repositories loaded.".into());
             }
             Ok(Payload::Sources(sources)) => {
-                self.as_mut().rust_mut().catalog_checked = true;
                 let rows: Vec<_> = sources.iter().map(source_row).collect();
                 let failures: Vec<_> = rows
                     .iter()
@@ -7481,7 +7480,7 @@ impl ffi::PackageController {
                     "phase": phase, "failures": failures, "last_success": last_success,
                     "checked_at": epoch_seconds()
                 })));
-                self.as_mut().set_source_catalog(encoded(&rows));
+                self.as_mut().adopt_source_catalog(&rows);
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
@@ -7608,6 +7607,16 @@ impl ffi::PackageController {
     pub fn recheck_sources(mut self: Pin<&mut Self>) {
         self.as_mut().forget_catalog();
         self.check_sources();
+    }
+    /// Shows sources read by a load or a preload, and counts them as
+    /// checked. Not while a check runs: it was asked for after they were
+    /// read, so its answer is the newer one and must not be dropped.
+    fn adopt_source_catalog(mut self: Pin<&mut Self>, rows: &[Value]) {
+        if self.rust().catalog_worker.is_some() {
+            return;
+        }
+        self.as_mut().set_source_catalog(encoded(rows));
+        self.as_mut().rust_mut().catalog_checked = true;
     }
     /// Lets the next check run. One running already stays the only one.
     fn forget_catalog(mut self: Pin<&mut Self>) {
@@ -7835,8 +7844,7 @@ impl ffi::PackageController {
                         Reply::Done(Ok(payload)) => {
                             if let Payload::Sources(sources) = &payload {
                                 let rows: Vec<_> = sources.iter().map(source_row).collect();
-                                self.as_mut().set_source_catalog(encoded(rows));
-                                self.as_mut().rust_mut().catalog_checked = true;
+                                self.as_mut().adopt_source_catalog(&rows);
                             }
                             self.as_mut()
                                 .rust_mut()
@@ -7960,8 +7968,7 @@ impl ffi::PackageController {
                 let _ = worker.handle.join();
                 if !self.rust().catalog_checked {
                     let rows: Vec<_> = sources.iter().map(source_row).collect();
-                    self.as_mut().set_source_catalog(encoded(rows));
-                    self.as_mut().rust_mut().catalog_checked = true;
+                    self.as_mut().adopt_source_catalog(&rows);
                 }
             }
         }
@@ -8170,8 +8177,7 @@ impl ffi::PackageController {
                                 if let Job::Load(view, query) = &job {
                                     if let Payload::Sources(sources) = &payload {
                                         let rows: Vec<_> = sources.iter().map(source_row).collect();
-                                        self.as_mut().set_source_catalog(encoded(rows));
-                                        self.as_mut().rust_mut().catalog_checked = true;
+                                        self.as_mut().adopt_source_catalog(&rows);
                                     }
                                     let key = cache_key(
                                         view,

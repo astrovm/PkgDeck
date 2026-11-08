@@ -4870,8 +4870,59 @@ fn source_catalog_check_is_lazy_and_single_flight() {
         std::thread::sleep(Duration::from_millis(1));
         controller.as_mut().poll();
     }
+    assert!(controller.rust().catalog_checked);
     let catalog: Value = serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
     assert_eq!(catalog[0]["check_failed"], true);
+}
+
+#[test]
+fn an_older_preload_does_not_replace_a_recheck_in_flight() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    // No other preloads start, so only this one can land.
+    controller.as_mut().set_window_open(false);
+    // The person asked to check the sources again, and it is still running.
+    let (release, wait) = mpsc::channel::<()>();
+    controller.as_mut().begin_catalog_check(move |_| {
+        let _ = wait.recv();
+        vec![Source {
+            backend: "apt".into(),
+            capabilities: vec![Capability::Search],
+            availability: Ok(Availability::Available),
+        }]
+    });
+    // A preload of the sources that started before it ends first, with the
+    // failure the recheck was asked for.
+    let older = Source {
+        backend: "apt".into(),
+        capabilities: vec![Capability::Search],
+        availability: Err(EngineError::Execution(ExecutionError::Invalid(
+            "apt broke".into(),
+        ))),
+    };
+    let preload = fake_prefetch(
+        "Sources",
+        "sources".into(),
+        vec![Reply::Done(Ok(Payload::Sources(vec![older])))],
+        false,
+    );
+    while !preload.handle.is_finished() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    controller.as_mut().rust_mut().prefetch_worker = Some(preload);
+    controller.as_mut().poll();
+    assert!(controller.rust().prefetch_worker.is_none());
+    assert!(!controller.rust().catalog_checked);
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !controller.rust().catalog_checked && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+        controller.as_mut().poll();
+    }
+    assert!(controller.rust().catalog_checked);
+    let catalog: Value = serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+    assert_eq!(catalog[0]["availability_kind"], "available");
+    assert_eq!(catalog[0]["check_failed"], false);
 }
 
 #[test]
