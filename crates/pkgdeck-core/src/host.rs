@@ -1922,7 +1922,7 @@ impl Host {
                 command,
                 Limits {
                     timeout,
-                    ..Limits::default()
+                    output_bytes: Limits::default().output_bytes,
                 },
                 cancel,
                 false,
@@ -3457,6 +3457,32 @@ mod boundary_tests {
         assert!(
             String::from_utf8_lossy(&result.stdout).ends_with("/usr/sbin/softwareupdate --list\n")
         );
+        // Those two folders stand in only for their own manager.
+        assert!(matches!(
+            host.system_manager("synthetic", &[], &Cancellation::default(), false, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "synthetic not found"
+        ));
+        // Writes run each manager from its own system folder.
+        for (manager, path) in [
+            ("apk", "/sbin/apk"),
+            ("port", "/opt/local/bin/port"),
+            ("softwareupdate", "/usr/sbin/softwareupdate"),
+        ] {
+            let result = host
+                .system_manager(
+                    manager,
+                    &["synthetic".into()],
+                    &Cancellation::default(),
+                    true,
+                    Authorization::SudoNonInteractive,
+                )
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains(&format!(" {path} synthetic")),
+                "{manager}: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

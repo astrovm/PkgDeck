@@ -627,6 +627,8 @@ mod tests {
         fs::write(&source, vec![b'a'; MAX_BYTES + 1]).unwrap();
         assert!(source_bytes(source.to_str().unwrap(), &cancel, &host).is_err());
         assert!(validate("flatpakrepo", "").is_err());
+        // A file that is fine but for a NUL byte is still refused.
+        assert!(validate("sources", "Types: deb\nURIs: https://example.invalid/repo\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/example.gpg\n\0").is_err());
         assert!(validate("flatpakrepo", "[Flatpak Repo]\nName=synthetic\nUrl=https://example.invalid/repo\nGPGKey=key\nGPGKey=other\n").is_err());
         assert!(validate(
             "repo",
@@ -781,6 +783,18 @@ mod tests {
         .unwrap();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert_eq!(import.description, "https://example.invalid/metalink");
+        // Each section is checked on its own lines only, so two good ones
+        // with the same keys pass.
+        let (_, name, url) = super::validate(
+            "repo",
+            "[first]\nbaseurl=https://example.invalid/one\ngpgcheck=1\n[second]\nbaseurl=https://example.invalid/two\ngpgcheck=1\n[third]\nbaseurl=https://example.invalid/three\ngpgcheck=1\n",
+            &host,
+        )
+        .unwrap();
+        assert_eq!(
+            (name.as_str(), url.as_str()),
+            ("first", "https://example.invalid/one")
+        );
         assert!(super::validate("unknown", "synthetic", &host).is_err());
         assert!(
             inspect_with_host(base.join("unknown.txt").to_str().unwrap(), &cancel, &host).is_err()

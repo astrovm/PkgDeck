@@ -7601,6 +7601,15 @@ fn turned_off_waits_let_updates_run_and_cleaning_ignores_metered() {
     assert!(cleans(on_metered, true));
     assert!(!cleans(on_battery, true));
     assert!(cleans(on_battery, false));
+    // A full day after the last clean is soon enough.
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+    controller
+        .as_mut()
+        .set_auto_clean(true, epoch_seconds() - 24 * 60 * 60);
+    controller.as_mut().schedule_auto_clean();
+    assert!(controller.rust().validated_confirmed.is_some());
 }
 #[test]
 fn automatic_updates_wait_for_power_and_builds_then_check_again() {

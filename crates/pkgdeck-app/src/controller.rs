@@ -4814,7 +4814,10 @@ impl ffi::PackageController {
             metered: false,
             ..rust.waits
         };
-        if (natives.hold)(&(natives.host)(), waits) == Some(Hold::Battery) {
+        if !matches!(
+            (natives.hold)(&(natives.host)(), waits),
+            None | Some(Hold::Build)
+        ) {
             return;
         }
         let job = Job::AutoClean {

@@ -1683,7 +1683,7 @@ impl AppImage {
             command,
             Limits {
                 timeout: std::time::Duration::from_secs(60),
-                ..Limits::default()
+                output_bytes: Limits::default().output_bytes,
             },
             cancel,
             false,
