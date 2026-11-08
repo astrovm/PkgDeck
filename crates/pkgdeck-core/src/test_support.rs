@@ -60,3 +60,48 @@ fn finish(path: &Path, output: &Output) -> io::Result<()> {
     }
     Err(io::Error::other(message))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pkgdeck-test-support-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_written_executable_runs() {
+        let dir = scratch("runs");
+        let script = dir.join("script");
+        write_executable(&script, "#!/bin/sh\necho written\n").unwrap();
+        let copy = dir.join("copy");
+        copy_executable(&script, &copy).unwrap();
+        for program in [&script, &copy] {
+            let output = Command::new(program).output().unwrap();
+            assert_eq!(output.stdout, b"written\n");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_names_the_file_and_says_why() {
+        let dir = scratch("fails");
+        let missing = dir.join("missing").join("script");
+        let error = write_executable(&missing, "#!/bin/sh\n").unwrap_err();
+        let message = error.to_string();
+        assert!(message.starts_with(&format!("writing {}: exit status: ", missing.display())));
+        // The shell's own reason follows, and names the file again.
+        let path = missing.display().to_string();
+        assert_eq!(message.matches(&path).count(), 2, "{message}");
+        let error = copy_executable(dir.join("absent"), dir.join("copy")).unwrap_err();
+        assert!(error.to_string().contains("absent"), "{error}");
+        assert!(!dir.join("copy").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
