@@ -3477,11 +3477,9 @@ mod boundary_tests {
                     Authorization::SudoNonInteractive,
                 )
                 .unwrap();
-            assert!(
-                String::from_utf8_lossy(&result.stdout).contains(&format!(" {path} synthetic")),
-                "{manager}: {}",
-                String::from_utf8_lossy(&result.stdout)
-            );
+            let ran = String::from_utf8_lossy(&result.stdout);
+            let want = format!(" {path} synthetic");
+            assert!(ran.contains(&want), "{manager}: {ran}");
         }
         fs::remove_dir_all(root).unwrap();
     }
