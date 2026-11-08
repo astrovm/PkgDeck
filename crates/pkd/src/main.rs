@@ -87,7 +87,6 @@ fn doctor_with(
 mod tests {
     use super::*;
     use pkgdeck_core::host::{Host, Runtime};
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn doctor_lists_found_managers_and_fails_when_the_machine_cannot_be_read() {
@@ -96,8 +95,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let script = |name: &str, body: &str| {
             let path = root.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            pkgdeck_core::test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+                .unwrap();
             path
         };
         script("brew", "exit 0");

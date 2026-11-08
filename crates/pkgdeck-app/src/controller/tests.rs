@@ -172,7 +172,6 @@ fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
 }
 #[test]
 fn direct_https_links_route_to_their_native_previews() {
-    use std::os::unix::fs::PermissionsExt;
     let base = std::env::var_os("PKGDECK_OPEN_LINK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -189,8 +188,7 @@ fn direct_https_links_route_to_their_native_previews() {
                 .map(|byte| format!("\\{byte:03o}"))
                 .collect();
         let script = format!("#!/bin/sh\nout=''\nfor arg; do\n  if [ \"$previous\" = '--output' ]; then out=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \"$arg\" in\n  *.flatpakref) printf '[Flatpak Ref]\\nName=org.example.Synthetic\\nUrl=https://example.invalid/repo\\n' ;;\n  *.flatpakrepo) printf '[Flatpak Repo]\\nName=synthetic\\nUrl=https://example.invalid/repo\\nGPGKey=c3ludGhldGlj\\n' ;;\n  *.flatpak) printf '{bundle}' > \"$out\" ;;\nesac\n");
-        std::fs::write(&curl, script).unwrap();
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        pkgdeck_core::test_support::write_executable(&curl, script).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -306,7 +304,6 @@ fn opening_repository_file_previews_before_any_write() {
 }
 #[test]
 fn confirmed_flatpak_repository_reaches_the_native_manager() {
-    use std::os::unix::fs::PermissionsExt;
     let base = std::env::var_os("PKGDECK_CONTROLLER_REPO_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -316,7 +313,7 @@ fn confirmed_flatpak_repository_reaches_the_native_manager() {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let flatpak = base.join("flatpak");
-        std::fs::write(
+        pkgdeck_core::test_support::write_executable(
             &flatpak,
             format!(
                 "#!/bin/sh\ncase \"$*\" in\n *remote-add*) printf 'added' > '{}' ;;\nesac\n",
@@ -324,7 +321,6 @@ fn confirmed_flatpak_repository_reaches_the_native_manager() {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -609,7 +605,7 @@ fn appimage_pages_read_change_and_launch_through_the_menu_entry() {
     let name = format!("pkgdeck-{digest}.AppImage");
     let file = root.join(&name);
     let record = data.join("record");
-    std::fs::write(
+    pkgdeck_core::test_support::write_executable(
         &file,
         format!(
             "#!/bin/sh\nprintf '%s|%s\\n' \"$GREETING\" \"$*\" > '{}'\n",
@@ -617,8 +613,6 @@ fn appimage_pages_read_change_and_launch_through_the_menu_entry() {
         ),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
     let entry = applications.join(format!("pkgdeck-{digest}.desktop"));
     std::fs::write(
         &entry,

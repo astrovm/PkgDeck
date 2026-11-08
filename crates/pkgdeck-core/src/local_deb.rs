@@ -372,7 +372,6 @@ mod tests {
     }
     #[test]
     fn reviewed_archives_are_read_through_dpkg_deb_and_staged_unchanged() {
-        use std::os::unix::fs::PermissionsExt;
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-local-deb-host-{}-{}",
             std::process::id(),
@@ -383,7 +382,7 @@ mod tests {
         ));
         fs::create_dir_all(&base).unwrap();
         let tool = base.join("dpkg-deb");
-        fs::write(
+        crate::test_support::write_executable(
             &tool,
             format!(
                 "#!/bin/sh\ndir='{}'\n[ -e \"$dir/fail\" ] && exit 2\n/bin/cat \"$dir/control\"\n[ -e \"$dir/mutate\" ] && printf x >> \"$2\"\nexit 0\n",
@@ -391,7 +390,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
         let control = |text: &str| fs::write(base.join("control"), text).unwrap();
         control("Package: synthetic\nVersion: 1.0\nArchitecture: all\nDescription: Synthetic\n");
         let archive = base.join("synthetic.deb");

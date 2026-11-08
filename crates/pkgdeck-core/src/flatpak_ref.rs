@@ -291,7 +291,6 @@ pub fn verified_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn remote_reference_reads_bounded_https_without_following_redirects() {
@@ -304,7 +303,7 @@ mod tests {
         let reference =
             b"[Flatpak Ref]\nName=org.example.Remote\nUrl=https://example.invalid/repo\n";
         fs::write(base.join("reference"), reference).unwrap();
-        fs::write(
+        crate::test_support::write_executable(
             &script,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/bin/cat '{}'\n",
@@ -313,7 +312,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         let host = Host::new(
             crate::host::Runtime::Native,
             [(OsString::from("PATH"), base.as_os_str().to_os_string())]
@@ -335,7 +333,7 @@ mod tests {
         assert!(reference_bytes("https://example.invalid/a.txt", &cancel, &host).is_err());
         assert!(reference_bytes("http://example.invalid/a.flatpakref", &cancel, &host).is_err());
         assert!(reference_bytes("https://example.invalid", &cancel, &host).is_err());
-        fs::write(&script, "#!/bin/sh\nexit 22\n").unwrap();
+        crate::test_support::write_executable(&script, "#!/bin/sh\nexit 22\n").unwrap();
         assert!(reference_bytes(url, &cancel, &host).is_err());
         let cancelled = Cancellation::default();
         cancelled.cancel();

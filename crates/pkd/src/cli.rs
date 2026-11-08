@@ -1562,17 +1562,15 @@ mod tests {
     use super::*;
     #[test]
     fn repository_cli_scopes_validation_and_confirmation() {
-        use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("pkgdeck-repos-cli-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         // Lists one remote per installation; changes succeed silently.
         let flatpak = root.join("flatpak");
-        std::fs::write(
+        pkgdeck_core::test_support::write_executable(
             &flatpak,
             "#!/bin/sh\ncase \"$*\" in *remotes*) printf 'fixture\\tFixture\\thttps://example.invalid\\t1\\t\\n' ;; esac\n",
         )
         .unwrap();
-        std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
         let transport = pkgdeck_core::backends::NativeTransport {
             host: Host::new(
                 pkgdeck_core::host::Runtime::Native,

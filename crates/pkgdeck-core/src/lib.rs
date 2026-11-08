@@ -42,3 +42,8 @@ pub mod backends;
 
 pub mod repositories;
 pub mod repository_input;
+
+/// Writers for test executables. On for this crate's unit tests, and for
+/// every other crate's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

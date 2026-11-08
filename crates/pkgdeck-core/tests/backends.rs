@@ -5639,7 +5639,6 @@ fn flatpak_bundle_install_uses_a_private_reviewed_file() {
 
 #[test]
 fn local_archives_use_exact_native_managers() {
-    use std::os::unix::fs::PermissionsExt;
     let base = std::env::var_os("PKGDECK_ARTIFACT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -5656,8 +5655,7 @@ fn local_archives_use_exact_native_managers() {
             ("snap", "printf 'name: synthetic-snap\\nversion: 1.0\\nsummary: Synthetic Snap\\n'"),
         ] {
             let script = base.join(name);
-            std::fs::write(&script, format!("#!/bin/sh\n{response}\n")).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            pkgdeck_core::test_support::write_executable(&script, format!("#!/bin/sh\n{response}\n")).unwrap();
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([

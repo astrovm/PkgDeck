@@ -421,7 +421,6 @@ mod tests {
     use super::*;
     use crate::host::Runtime;
     use std::collections::BTreeMap;
-    use std::os::unix::fs::PermissionsExt;
     fn validate(suffix: &str, text: &str) -> Result<(String, String, String), EngineError> {
         super::validate(suffix, text, &Host::current())
     }
@@ -508,8 +507,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let dnf = base.join("dnf");
-        fs::write(&dnf, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&dnf, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&dnf, "#!/bin/sh\nexit 0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -547,16 +545,11 @@ mod tests {
         )
         .unwrap();
         let curl = base.join("curl");
-        let pending_curl = base.join("curl.pending");
-        fs::write(
-            &pending_curl,
+        crate::test_support::write_executable(
+            &curl,
             format!("#!/bin/sh\n/bin/cat '{}'\n", content.display()),
         )
         .unwrap();
-        // Publish the executable after closing its writer so parallel tests
-        // never try to run a script while its inode is still being written.
-        fs::set_permissions(&pending_curl, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::rename(&pending_curl, &curl).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -585,7 +578,7 @@ mod tests {
         fs::write(&source, contents).unwrap();
         let record = base.join("record");
         let flatpak = base.join("flatpak");
-        fs::write(
+        crate::test_support::write_executable(
             &flatpak,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nfor arg; do :; done\n/bin/cat \"$arg\" >> '{}'\n",
@@ -594,7 +587,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -675,7 +667,7 @@ mod tests {
         fs::write(base.join("dnf"), "").unwrap();
         let record = base.join("record");
         let bridge = base.join("spawn");
-        fs::write(
+        crate::test_support::write_executable(
             &bridge,
             format!(
                 "#!/bin/sh\ncase \"$*\" in *' /usr/bin/test '*) exit 0 ;; esac\necho \"$@\" >> '{}'\n[ -e '{}' ] || exit 0\nexit 3\n",
@@ -684,7 +676,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let mut host = Host::new(Runtime::Flatpak, env);
@@ -752,8 +743,7 @@ mod tests {
         cancelled.cancel();
         let base = std::env::temp_dir().join(format!("pkgdeck-repo-cancel-{}", std::process::id()));
         fs::create_dir_all(&base).unwrap();
-        fs::write(base.join("curl"), "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(base.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(base.join("curl"), "#!/bin/sh\nexit 0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -781,8 +771,7 @@ mod tests {
         let cancel = Cancellation::default();
         assert!(inspect_with_host(source.to_str().unwrap(), &cancel, &host).is_err());
         let zypper = base.join("zypper");
-        fs::write(&zypper, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&zypper, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&zypper, "#!/bin/sh\nexit 0\n").unwrap();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert_eq!(import.backend, "zypper");
         fs::write(
@@ -797,8 +786,7 @@ mod tests {
             inspect_with_host(base.join("unknown.txt").to_str().unwrap(), &cancel, &host).is_err()
         );
         let curl = base.join("curl");
-        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&curl, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(
             inspect_with_host("https://example.invalid/synthetic.repo", &cancel, &host).is_err()
         );
@@ -1021,8 +1009,7 @@ mod tests {
         let tools = |tool: &str| {
             let dir = base.join(tool);
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(tool), "#!/bin/sh\nexit 0\n").unwrap();
-            fs::set_permissions(dir.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_executable(dir.join(tool), "#!/bin/sh\nexit 0\n").unwrap();
             let mut env = BTreeMap::new();
             env.insert(OsString::from("PATH"), dir.as_os_str().to_os_string());
             Host::new(Runtime::Native, env)

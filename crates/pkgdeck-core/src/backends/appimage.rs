@@ -2532,7 +2532,7 @@ mod tests {
         // An older runtime starts unpacked without FUSE 2.
         let mut bytes = fs::read(&file).unwrap();
         bytes.extend_from_slice(b"libfuse.so.2");
-        fs::write(&file, bytes).unwrap();
+        crate::test_support::write_executable(&file, bytes).unwrap();
         backend.fuse2 = Some(false);
         assert_eq!(
             backend.run_command(&file, uid).unwrap().environment,
@@ -2576,7 +2576,7 @@ mod tests {
         let file = root.join(&id.name);
         let record = base.join("record");
         // An older runtime names libfuse.so.2, which it loads to mount itself.
-        fs::write(
+        crate::test_support::write_executable(
             &file,
             format!(
                 "#!/bin/sh\n# libfuse.so.2\nprintf '%s\\n' \"$APPIMAGE_EXTRACT_AND_RUN\" > '{}'\n",
@@ -2584,7 +2584,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             applications.join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
             format!(
@@ -2593,15 +2592,9 @@ mod tests {
             ),
         )
         .unwrap();
-        // A script written a moment ago may still be busy; try again.
         let launch = |backend: &AppImage| {
             let _ = fs::remove_file(&record);
-            (0..200)
-                .map(|_| backend.launch(&id))
-                .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
-                .find(Result::is_ok)
-                .unwrap()
-                .unwrap();
+            backend.launch(&id).unwrap();
             (0..200)
                 .find_map(|_| {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -3056,7 +3049,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn fake_curl(dir: &Path) -> PathBuf {
         let curl = dir.join("curl");
-        fs::write(
+        crate::test_support::write_executable(
             &curl,
             format!(
                 r#"#!/bin/sh
@@ -3088,7 +3081,6 @@ esac
             ),
         )
         .unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(dir.join("status"), "200").unwrap();
         fs::write(dir.join("etag"), "\"v1\"").unwrap();
         curl
@@ -3272,8 +3264,7 @@ esac
         assert_eq!(listed[0].update, UpdateAvailability::Unknown);
         // Cancelling while the list is read stops the whole answer.
         let slow = server.join("slow-curl");
-        fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
         backend.curl = Some(slow);
         let interrupted = Cancellation::default();
         let signal = interrupted.clone();
@@ -3656,7 +3647,7 @@ esac
         let base = test_base("spawn");
         let record = base.join("record");
         let program = base.join("program");
-        fs::write(
+        crate::test_support::write_executable(
             &program,
             format!(
                 "#!/bin/sh\nprintf '%s|%s\\n' \"$GREETING\" \"$*\" > '{}'\n",
@@ -3664,25 +3655,12 @@ esac
             ),
         )
         .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let command = desktop_exec::Command {
             environment: vec![("GREETING".into(), "hi".into())],
             program: program.display().to_string(),
             arguments: vec!["--flag".into(), "%U".into()],
         };
-        // A script written a moment ago can still be open in a process
-        // another test is starting ("Text file busy"); try again.
-        let spawn = |command: &desktop_exec::Command, bridge: Option<&Path>| {
-            (0..200)
-                .map(|_| desktop_exec::spawn(command, bridge))
-                .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
-                .find(|result| {
-                    result.as_ref().err().map(std::io::Error::kind)
-                        != Some(std::io::ErrorKind::ExecutableFileBusy)
-                })
-                .unwrap()
-        };
-        spawn(&command, None).unwrap();
+        desktop_exec::spawn(&command, None).unwrap();
         let wait = || {
             (0..200)
                 .find_map(|_| {
@@ -3697,7 +3675,7 @@ esac
         // From a Flatpak, flatpak-spawn starts it on the host.
         fs::remove_file(&record).unwrap();
         let bridge = base.join("flatpak-spawn");
-        fs::write(
+        crate::test_support::write_executable(
             &bridge,
             format!(
                 "#!/bin/sh\nprintf '%s|%s\\n' \"${{GREETING:-}}\" \"$*\" > '{}'\n",
@@ -3705,8 +3683,7 @@ esac
             ),
         )
         .unwrap();
-        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
-        spawn(&command, Some(&bridge)).unwrap();
+        desktop_exec::spawn(&command, Some(&bridge)).unwrap();
         assert_eq!(
             wait(),
             format!("|--host --env=GREETING=hi {} --flag\n", program.display())
@@ -3777,10 +3754,9 @@ esac
 
     #[cfg(target_os = "linux")]
     fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let updater = base.join("updater");
         let calls = base.join("updater-calls");
-        fs::write(
+        crate::test_support::write_executable(
             &updater,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nexit {status}\n",
@@ -3788,7 +3764,6 @@ esac
             ),
         )
         .unwrap();
-        fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();
         (updater, calls)
     }
 
@@ -3896,7 +3871,6 @@ esac
     #[test]
     #[cfg(target_os = "linux")]
     fn imports_reviewed_https_appimage_without_executing_it() {
-        use std::os::unix::fs::PermissionsExt;
         let base = std::env::var_os("PKGDECK_REMOTE_APPIMAGE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -3908,8 +3882,7 @@ esac
             let image = base.join("payload");
             type2(&image);
             let curl = base.join("curl");
-            fs::write(&curl, format!("#!/bin/sh\nfor arg; do\n if [ \"$previous\" = '--output' ]; then output=\"$arg\"; fi\n previous=\"$arg\"\ndone\n/bin/cp '{}' \"$output\"\n", image.display())).unwrap();
-            fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_executable(&curl, format!("#!/bin/sh\nfor arg; do\n if [ \"$previous\" = '--output' ]; then output=\"$arg\"; fi\n previous=\"$arg\"\ndone\n/bin/cp '{}' \"$output\"\n", image.display())).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "backends::appimage::tests::imports_reviewed_https_appimage_without_executing_it", "--nocapture"])
                 .env("PKGDECK_REMOTE_APPIMAGE_CHILD", "1")
@@ -4257,7 +4230,7 @@ esac
             .unwrap()
             .contains(&external.id.name));
         fs::write(&calls, "").unwrap();
-        fs::write(
+        crate::test_support::write_executable(
             &updater,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n[ \"$2\" != --check-for-update ]\n",
@@ -4276,7 +4249,7 @@ esac
             .unwrap();
         assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 18);
 
-        fs::write(&updater, "#!/bin/sh\nexit 9\n").unwrap();
+        crate::test_support::write_executable(&updater, "#!/bin/sh\nexit 9\n").unwrap();
         assert!(backend
             .execute(&Operation::Upgrade(managed.id), &cancel, &mut |_| {})
             .is_err());
@@ -4710,7 +4683,7 @@ esac
             .contains("--check-for-update"));
         let original = fs::read(&source).unwrap();
         // Current files stay out of Updates even though metadata is present.
-        fs::write(&updater, "#!/bin/sh\nexit 0\n").unwrap();
+        crate::test_support::write_executable(&updater, "#!/bin/sh\nexit 0\n").unwrap();
         assert!(backend
             .installed(&cancel)
             .unwrap()
@@ -4741,7 +4714,7 @@ esac
         assert!(!probes.contains("--overwrite"));
         // Failed network/probe operations must never become Current or Available,
         // and never hide the installed AppImages.
-        fs::write(
+        crate::test_support::write_executable(
             &updater,
             "#!/bin/sh\necho 'error: unavailable source' >&2\nexit 2\n",
         )
@@ -4758,8 +4731,7 @@ esac
             .iter()
             .all(|package| package.update == UpdateAvailability::Unknown));
         // Cancellation applies to the read-only check, including while it runs.
-        fs::write(&updater, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&updater, "#!/bin/sh\nexec sleep 30\n").unwrap();
         let interrupted = Cancellation::default();
         let signal = interrupted.clone();
         let thread = std::thread::spawn(move || {

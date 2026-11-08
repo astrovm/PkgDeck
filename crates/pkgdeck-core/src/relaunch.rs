@@ -449,17 +449,16 @@ mod tests {
     fn host_links_are_read_through_the_spawn_helper() {
         let dir = scratch("host");
         let spawn = dir.join("spawn");
-        fs::write(
+        crate::test_support::write_executable(
             &spawn,
             "#!/bin/sh\n[ \"$1 $2\" = '--host readlink' ] && echo \"$3-target\"\n",
         )
         .unwrap();
-        fs::set_permissions(&spawn, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert_eq!(
             host_link(&spawn, Path::new("/x/active")),
             Some(PathBuf::from("/x/active-target"))
         );
-        fs::write(&spawn, "#!/bin/sh\nexit 1\n").unwrap();
+        crate::test_support::write_executable(&spawn, "#!/bin/sh\nexit 1\n").unwrap();
         assert_eq!(host_link(&spawn, Path::new("/x/active")), None);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -486,14 +485,9 @@ mod tests {
         let dir = scratch("spawn");
         let marker = dir.join("started");
         let program = dir.join("program");
-        fs::write(
+        crate::test_support::write_executable(
             &program,
             format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display()),
-        )
-        .unwrap();
-        fs::set_permissions(
-            &program,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
         .unwrap();
         let install = Install::detect(&env(&[]), None, &program).unwrap();

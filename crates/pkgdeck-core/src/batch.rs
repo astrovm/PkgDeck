@@ -2708,13 +2708,11 @@ done"#;
 
     #[test]
     fn user_owned_packaged_runners_are_available_to_every_linux_format() {
-        use std::os::unix::fs::PermissionsExt;
         let root =
             std::env::temp_dir().join(format!("pkgdeck-bundled-runner-{}", std::process::id()));
         let runner = root.join("libexec/pkgdeck-host-runner");
         fs::create_dir_all(runner.parent().unwrap()).unwrap();
-        fs::write(&runner, b"synthetic runner").unwrap();
-        fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&runner, b"synthetic runner").unwrap();
         for runtime in [Runtime::Native, Runtime::AppImage, Runtime::Snap] {
             assert_eq!(
                 find_runner(runtime, &root.join("bin/pkd"), ""),
@@ -2727,8 +2725,7 @@ done"#;
             .join("files");
         let flatpak_runner = files.join("libexec/pkgdeck-host-runner");
         fs::create_dir_all(flatpak_runner.parent().unwrap()).unwrap();
-        fs::write(&flatpak_runner, b"synthetic runner").unwrap();
-        fs::set_permissions(&flatpak_runner, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&flatpak_runner, b"synthetic runner").unwrap();
         assert_eq!(
             find_runner(
                 Runtime::Flatpak,
@@ -2742,41 +2739,29 @@ done"#;
 
     #[test]
     fn appimage_launches_its_bundled_runner_from_a_fresh_mount() {
-        use std::os::unix::fs::PermissionsExt;
         let root =
             std::env::temp_dir().join(format!("pkgdeck-appimage-runner-{}", std::process::id()));
         let launcher = root.join("AppRun");
         let runner = root.join("usr/libexec/pkgdeck-host-runner");
         fs::create_dir_all(runner.parent().unwrap()).unwrap();
-        fs::write(
+        crate::test_support::write_executable(
             &launcher,
             include_str!("../../../packaging/appimage/AppRun"),
         )
         .unwrap();
-        fs::write(&runner, b"#!/bin/sh\nprintf 'runner:%s\n' \"$APPDIR\"\n").unwrap();
-        for path in [&launcher, &runner] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_support::write_executable(
+            &runner,
+            b"#!/bin/sh\nprintf 'runner:%s\n' \"$APPDIR\"\n",
+        )
+        .unwrap();
         assert_eq!(
             appimage_launcher(&launcher),
             Some(fs::canonicalize(&launcher).unwrap())
         );
-        // Another test's fork can still hold a just-written script open,
-        // which makes exec fail with "Text file busy". It clears at once.
-        let run = || Command::new(&launcher).arg("--batch-runner").output();
-        let busy = |result: &std::io::Result<std::process::Output>| {
-            result.as_ref().err().map(std::io::Error::kind)
-                == Some(std::io::ErrorKind::ExecutableFileBusy)
-        };
-        let output = std::iter::repeat_with(|| {
-            let result = run();
-            std::thread::sleep(Duration::from_millis(if busy(&result) { 20 } else { 0 }));
-            result
-        })
-        .take(50)
-        .find(|result| !busy(result))
-        .expect("the script stayed busy")
-        .unwrap();
+        let output = Command::new(&launcher)
+            .arg("--batch-runner")
+            .output()
+            .unwrap();
         assert!(output.status.success());
         assert_eq!(
             output.stdout,

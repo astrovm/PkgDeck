@@ -1360,9 +1360,8 @@ mod tests {
         let _ = fs::remove_file(bin.join("git"));
         std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
         let ps = bin.join("ps");
-        fs::write(&ps, format!("#!/bin/sh\nprintf '{processes}'\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&ps, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&ps, format!("#!/bin/sh\nprintf '{processes}'\n"))
+            .unwrap();
         bin
     }
     fn host(home: &Path, bin: &Path, extra: &[(&str, &Path)]) -> Host {
@@ -1777,7 +1776,7 @@ mod tests {
         let refusing = home.join("refusing");
         fs::create_dir_all(&refusing).unwrap();
         let real = Host::current().resolve("git").unwrap().expect("git");
-        fs::write(
+        crate::test_support::write_executable(
             refusing.join("git"),
             format!(
                 "#!/bin/sh\ncase \"$3 $4\" in 'worktree remove'|'worktree prune') echo 'fatal: it is busy' >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
@@ -1785,8 +1784,7 @@ mod tests {
             ),
         )
         .unwrap();
-        mode(&refusing.join("git"), 0o755);
-        fs::copy(bin.join("ps"), refusing.join("ps")).unwrap();
+        crate::test_support::copy_executable(bin.join("ps"), refusing.join("ps")).unwrap();
         let mut refused = projects(&home, &refusing, vec![repo.clone()], 7);
         let error = refused.execute(&clean, &cancel, &mut ignore).unwrap_err();
         assert!(
@@ -2111,15 +2109,13 @@ mod tests {
     /// Swaps the `git` the backend finds for one that runs `rules` first.
     /// A rule sees Git's arguments: `$2` is the folder, `$3` the command.
     fn git_with_rules(bin: &Path, rules: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let real = Host::current().resolve("git").unwrap().expect("git");
         let _ = fs::remove_file(bin.join("git"));
-        fs::write(
+        crate::test_support::write_executable(
             bin.join("git"),
             format!("#!/bin/sh\n{rules}\nexec '{}' \"$@\"\n", real.display()),
         )
         .unwrap();
-        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -2209,7 +2205,7 @@ mod tests {
         let bin = tools(&home, "");
         let real = Host::current().resolve("git").unwrap().expect("git");
         fs::remove_file(bin.join("git")).unwrap();
-        fs::write(
+        crate::test_support::write_executable(
             bin.join("git"),
             format!(
                 "#!/bin/sh\nif [ \"$3 $4\" = 'worktree remove' ] && [ \"$5\" != --force ]; then echo saved >> \"$5/tracked\"; fi\nexec '{}' \"$@\"\n",
@@ -2217,8 +2213,6 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
         let mut backend = projects(&home, &bin, vec![repo], 7);
         let cancel = Cancellation::default();
         let item = backend.cleanup(&cancel).unwrap().remove(0);
@@ -2253,7 +2247,7 @@ mod tests {
         let bin = tools(&home, "");
         let real = Host::current().resolve("git").unwrap().expect("git");
         fs::remove_file(bin.join("git")).unwrap();
-        fs::write(
+        crate::test_support::write_executable(
             bin.join("git"),
             format!(
                 "#!/bin/sh\ncase \"$3 $*\" in worktree*/.trees/b) echo 'error: noise' >&2; echo 'fatal: b is busy' >&2; echo \"use 'remove -f -f' to override\" >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
@@ -2261,8 +2255,6 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
         let mut backend = projects(&home, &bin, vec![repo.clone()], 7);
         let cancel = Cancellation::default();
         let item = backend.cleanup(&cancel).unwrap().remove(0);

@@ -466,13 +466,12 @@ mod tests {
 
     #[test]
     fn sudo_prompt_uses_a_cached_login_or_asks_once() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("pkd-sudo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = |name: &str, script: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            pkgdeck_core::test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n"))
+                .unwrap();
             path
         };
         let live = Live::new(false);

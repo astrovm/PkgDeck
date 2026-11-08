@@ -78,6 +78,12 @@ fn stable_bytes(path: &Path) -> Vec<u8> {
         String::from_utf8_lossy(&last)
     );
 }
+
+/// Same writer as `pkgdeck-core`. This crate does not depend on it: `fixture`
+/// is library code, so a dev-dependency feature would not be on for `cargo build`.
+/// Public so both writers stay live here; only `write_executable` is called.
+#[path = "../../pkgdeck-core/src/test_support.rs"]
+pub mod test_support;
 #[track_caller]
 fn until(mut predicate: impl FnMut() -> bool, seconds: u64) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -87,9 +93,8 @@ fn until(mut predicate: impl FnMut() -> bool, seconds: u64) {
     }
 }
 fn fixture(batch: bool) -> Temp {
-    use std::os::unix::fs::PermissionsExt;
     let dir = Temp::new();
-    fs::write(
+    test_support::write_executable(
         dir.0.join("brew"),
         if batch {
             include_str!("../../pkd/tests/fixtures/brew_batch.sh")
@@ -98,7 +103,6 @@ fn fixture(batch: bool) -> Temp {
         },
     )
     .unwrap();
-    fs::set_permissions(dir.0.join("brew"), fs::Permissions::from_mode(0o755)).unwrap();
     dir
 }
 fn invocation(args: &[String], dir: &Path) -> Vec<String> {
@@ -570,7 +574,7 @@ pub fn gui_lifecycle(args: &[String]) {
     fs::write(dir.0.join("fail"), "").unwrap();
     gui.search("fixture");
     fs::remove_file(dir.0.join("fail")).unwrap();
-    fs::write(dir.0.join("brew"), "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+    test_support::write_executable(dir.0.join("brew"), "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
     gui.xdo(&["key", "--clearmodifiers", "ctrl+r"]);
     sleep(Duration::from_millis(300));
     gui.key("Escape");

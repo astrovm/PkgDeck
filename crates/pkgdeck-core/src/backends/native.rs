@@ -475,7 +475,7 @@ impl Transport for NativeTransport {
 mod tests {
     use super::*;
     use crate::host::Runtime;
-    use std::{os::unix::fs::PermissionsExt, path::Path};
+    use std::path::Path;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -489,13 +489,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
-    /// An executable shell script, renamed into place so no writer still
-    /// holds it open when it runs.
     fn script(path: &Path, body: &str) {
-        let staging = path.with_extension("staging");
-        std::fs::write(&staging, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(staging, path).unwrap();
+        crate::test_support::write_executable(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     }
     /// A transport whose host sees only `bin` on PATH and `home` as HOME.
     fn transport(bin: &Path, home: &Path) -> NativeTransport {

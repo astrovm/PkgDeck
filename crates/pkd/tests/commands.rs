@@ -2,7 +2,6 @@ use serde_json::Value;
 use std::{
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -18,8 +17,8 @@ impl Fixture {
         ));
         fs::create_dir_all(&path).unwrap();
         let brew = path.join("brew");
-        fs::write(&brew, include_str!("fixtures/brew.sh")).unwrap();
-        fs::set_permissions(brew, fs::Permissions::from_mode(0o755)).unwrap();
+        pkgdeck_core::test_support::write_executable(&brew, include_str!("fixtures/brew.sh"))
+            .unwrap();
         Self(path)
     }
     fn command(&self) -> Command {
@@ -190,7 +189,7 @@ fn mixed_read_only_and_writable_sources_keep_writes_and_confirmation() {
 fn container_images_keep_stable_ids_and_friendly_cli_names() {
     let fixture = Fixture::new();
     let docker = fixture.0.join("docker");
-    fs::write(
+    pkgdeck_core::test_support::write_executable(
         &docker,
         r#"#!/bin/sh
 case "$1" in
@@ -201,7 +200,6 @@ esac
 "#,
     )
     .unwrap();
-    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
         .env("PATH", &fixture.0)
         .env("HOME", &fixture.0)
@@ -282,7 +280,7 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
 fn native_search_uses_installed_inventory_for_package_actions() {
     let fixture = Fixture::new();
     let executable = fixture.0.join("dnf");
-    fs::write(&executable, r#"#!/bin/sh
+    pkgdeck_core::test_support::write_executable(&executable, r#"#!/bin/sh
 case " $* " in
   *" --installed "*)
     if [ -f "$HOME/installed" ]; then
@@ -294,7 +292,6 @@ case " $* " in
     ;;
 esac
 "#).unwrap();
-    fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     let search = || {
         let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
             .env("PATH", &fixture.0)
@@ -333,7 +330,7 @@ esac
 fn repositories_use_selected_scope_and_require_noninteractive_consent() {
     let fixture = Fixture::new();
     let flatpak = fixture.0.join("flatpak");
-    fs::write(
+    pkgdeck_core::test_support::write_executable(
         &flatpak,
         r#"#!/bin/sh
 case "$*" in
@@ -343,7 +340,6 @@ esac
 "#,
     )
     .unwrap();
-    fs::set_permissions(flatpak, fs::Permissions::from_mode(0o755)).unwrap();
     let command = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pkd"));
         command

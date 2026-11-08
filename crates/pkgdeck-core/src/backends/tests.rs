@@ -118,17 +118,12 @@ fn flatpak_apps_start_from_the_installation_they_are_in() {
     std::fs::create_dir_all(&base).unwrap();
     let program = base.join("flatpak");
     let record = base.join("arguments");
-    std::fs::write(
+    crate::test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{0}.tmp' '{0}'\n",
             record.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(
-        &program,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
     )
     .unwrap();
     start_flatpak(
@@ -618,8 +613,7 @@ fn the_native_transport_refreshes_indexes_as_the_user() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let fetch = root.join("fetch");
-    std::fs::write(&fetch, "#!/bin/sh\necho fetched\n").unwrap();
-    std::fs::set_permissions(&fetch, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&fetch, "#!/bin/sh\necho fetched\n").unwrap();
     let native = NativeTransport {
         host: Host::new(
             crate::host::Runtime::Native,

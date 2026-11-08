@@ -654,10 +654,8 @@ mod tests {
 
     /// A shell script in a fresh folder, run as a stand-in for a tool.
     fn tool(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         path
     }
 

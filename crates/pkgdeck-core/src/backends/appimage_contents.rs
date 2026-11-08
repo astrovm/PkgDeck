@@ -386,7 +386,7 @@ pub(super) mod fixture {
         writer.write(&mut image).unwrap();
         let mut bytes = runtime();
         bytes.extend_from_slice(image.get_ref());
-        std::fs::write(path, bytes).unwrap();
+        crate::test_support::write_executable(path, bytes).unwrap();
     }
 
     /// A DwarFS AppImage, made with mkdwarfs 0.12.4 from `demo.desktop`
@@ -395,7 +395,7 @@ pub(super) mod fixture {
     pub fn dwarf(path: &Path) {
         let mut bytes = runtime();
         bytes.extend_from_slice(include_bytes!("fixtures/demo.dwarfs"));
-        std::fs::write(path, bytes).unwrap();
+        crate::test_support::write_executable(path, bytes).unwrap();
     }
 }
 

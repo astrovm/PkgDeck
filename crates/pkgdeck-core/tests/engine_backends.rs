@@ -1829,17 +1829,15 @@ fn update_listings_propagate_cancellation_and_tolerate_failure() {
 /// process whose PATH holds only a synthetic `snap`.
 #[test]
 fn snap_archives_stop_when_the_assertion_is_not_acknowledged() {
-    use std::os::unix::fs::PermissionsExt;
     let Some(base) = std::env::var_os("PKGDECK_ENGINE_SNAP_DIR").map(std::path::PathBuf::from)
     else {
         let base = temp_dir("snap");
         let snap = base.join("snap");
-        std::fs::write(
+        pkgdeck_core::test_support::write_executable(
             &snap,
             "#!/bin/sh\nprintf 'name: synthetic-snap\\nversion: 1.0\\nsummary: Synthetic\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&snap, std::fs::Permissions::from_mode(0o755)).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

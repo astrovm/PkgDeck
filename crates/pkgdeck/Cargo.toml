@@ -44,6 +44,7 @@ cc = "=1.11.0"
 
 [dev-dependencies]
 egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }
+pkgdeck-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
