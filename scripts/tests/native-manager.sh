@@ -16,11 +16,12 @@ case "$backend" in
     pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; writers=/usr/bin/pacman ;;
     zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='sed -i "s|http://|https://|g" /etc/zypp/repos.d/*.repo; zypper --non-interactive install sudo'; query='rpm -q jq'; writers=/usr/bin/zypper
         # download.opensuse.org's redirector can time out for minutes, or
-        # point at a file a mirror lacks; each retry uses another of the
-        # mirrors that serve the same repositories, so one down mirror
-        # can't fail every try.
+        # send a file to a mirror that doesn't have it yet while a snapshot
+        # is published. The first retry reads from openSUSE's own server,
+        # which serves every file its index lists; the second from another
+        # mirror, in case that server is the one down.
         # shellcheck disable=SC2016 # expands in the container
-        fallback='host=$(echo mirrorcache-eu.opensuse.org mirrorcache-us.opensuse.org | cut -d" " -f"$attempt"); sed -i -E "s#://(download|mirrorcache[a-z-]*)[.]opensuse[.]org/#://$host/#" /etc/zypp/repos.d/*.repo' ;;
+        fallback='host=$(echo downloadcontent.opensuse.org mirrorcache-eu.opensuse.org | cut -d" " -f"$attempt"); sed -i -E "s#://(download|downloadcontent|mirrorcache[a-z-]*)[.]opensuse[.]org/#://$host/#" /etc/zypp/repos.d/*.repo' ;;
     apk) image=docker.io/library/alpine:latest; bootstrap='apk add bash sudo'; query='apk info -e jq'; writers=/sbin/apk; adduser='adduser -D pkgdeck-test' ;;
     # XBPS must update itself before it installs anything else. The image has
     # no /etc/shadow, which sudo's PAM account check needs.
