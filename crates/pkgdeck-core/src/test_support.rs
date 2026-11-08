@@ -30,8 +30,9 @@ pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> i
     let written = stdin.write_all(contents.as_ref());
     drop(stdin);
     let output = child.wait_with_output()?;
-    written?;
-    finish(path, &output)
+    // A writer that failed stops reading, so its reason comes first.
+    finish(path, &output)?;
+    written
 }
 
 /// Copies `from` to `to` and marks the copy executable (`0o755`).
@@ -93,7 +94,10 @@ mod tests {
     fn a_failed_write_names_the_file_and_says_why() {
         let dir = scratch("fails");
         let missing = dir.join("missing").join("script");
-        let error = write_executable(&missing, "#!/bin/sh\n").unwrap_err();
+        // Bigger than a pipe holds, so the shell is gone before it is all
+        // sent: its exit status is still the reason given.
+        let contents = format!("#!/bin/sh\n{}", "#".repeat(1 << 20));
+        let error = write_executable(&missing, contents).unwrap_err();
         let message = error.to_string();
         assert!(message.starts_with(&format!("writing {}: exit status: ", missing.display())));
         // The shell's own reason follows, and names the file again.
