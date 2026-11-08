@@ -195,7 +195,7 @@ mod tests {
             assert_eq!(compare(right, left), expected.reverse(), "{right} {left}");
         }
     }
-    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     fn id(backend: &str, name: &str, scope: Scope) -> PackageId {
         PackageId {
@@ -214,7 +214,7 @@ mod tests {
         let _ = fs::remove_dir_all(base);
         fs::create_dir_all(base).unwrap();
         let tool = base.join(name);
-        fs::write(
+        crate::test_support::write_executable(
             &tool,
             format!(
                 "#!/bin/sh\nfor arg; do printf '%s\\n' \"$arg\"; done > \"${{0%/*}}/args\"\n\
@@ -222,7 +222,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         Host::new(Runtime::Native, env)
@@ -353,7 +352,7 @@ mod tests {
         };
         // This flatpak only has a system copy of `tool`.
         let host = host(&base, "flatpak", "", 0);
-        fs::write(
+        crate::test_support::write_executable(
             base.join("flatpak"),
             "#!/bin/sh\n[ \"$1\" = --system ] && printf 'tool\\t1.2.2\\n'\nexit 0\n",
         )

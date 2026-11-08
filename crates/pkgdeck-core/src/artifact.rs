@@ -607,7 +607,6 @@ mod tests {
     use super::*;
     use crate::host::Runtime;
     use std::collections::BTreeMap;
-    use std::os::unix::fs::PermissionsExt;
     #[cfg(target_os = "linux")]
     use std::process::Command;
     fn fixture_host(base: &Path) -> Host {
@@ -617,8 +616,7 @@ mod tests {
     }
     fn tool(base: &Path, name: &str, script: &str) {
         let path = base.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     }
     #[test]
     fn a_flatpak_bundle_stages_for_either_installation_only() {

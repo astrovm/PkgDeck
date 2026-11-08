@@ -130,6 +130,13 @@ pub fn claim(
 mod tests {
     use super::*;
 
+    /// The socket file a crashed PkgDeck leaves. A datagram socket answers
+    /// no stream connection, even while another test's fork briefly holds
+    /// its descriptor; a dropped listener would accept one then.
+    fn stale_socket(path: &Path) {
+        drop(std::os::unix::net::UnixDatagram::bind(path).unwrap());
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pkgdeck-open-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -222,7 +229,7 @@ mod tests {
         );
         drop(listener);
         // A crashed copy's socket answers no knock.
-        drop(UnixListener::bind(&path).unwrap());
+        stale_socket(&path);
         assert!(!knock(&path));
         assert!(claim(&path, "", true, || {}).unwrap().is_some());
     }
@@ -230,7 +237,7 @@ mod tests {
     #[test]
     fn a_stale_socket_is_replaced() {
         let path = temp("stale");
-        drop(UnixListener::bind(&path).unwrap());
+        stale_socket(&path);
         assert!(path.exists());
         let listener = claim(&path, "", false, || {}).unwrap();
         assert!(listener.is_some());

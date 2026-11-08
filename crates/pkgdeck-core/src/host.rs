@@ -258,7 +258,6 @@ mod askpass_tests {
     use super::*;
     #[test]
     fn bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt() {
-        use std::os::unix::fs::PermissionsExt;
         const REENTRY: &str = "PKGDECK_ASKPASS_TEST_BUNDLE";
         if let Some(root) = std::env::var_os(REENTRY).map(PathBuf::from) {
             let host = Host::new(
@@ -317,16 +316,19 @@ mod askpass_tests {
             (fake, "#!/bin/sh\nprintf 'dialog\\n' >> \"$HOME/dialogs\"\nprintf '%s\\n' \"$HOMEBREW_PKGDECK_ASKPASS_DIR\" > \"$HOME/scope\"\nexit 1\n".into()),
             (root.join("bin/brew"), "#!/bin/sh\nif [ -n \"$SUDO_ASKPASS\" ]; then\nfor step in 1 2 3; do \"$SUDO_ASKPASS\" >/dev/null 2>&1 || :; done\nfi\nprintf 'completed\\n'\n".into()),
         ] {
-            fs::write(&path, script).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_executable(&path, script).unwrap();
         }
         let binary = contents.join("MacOS/askpass-test");
-        fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
-        let output = Command::new(binary).args([
-            "--exact",
-            "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
-            "--nocapture",
-        ]).env(REENTRY, &root).output().unwrap();
+        crate::test_support::copy_executable(std::env::current_exe().unwrap(), &binary).unwrap();
+        let output = Command::new(&binary)
+            .args([
+                "--exact",
+                "host::askpass_tests::bundled_brew_calls_share_cancellation_but_reads_and_automatic_writes_never_prompt",
+                "--nocapture",
+            ])
+            .env(REENTRY, &root)
+            .output()
+            .unwrap();
         fs::remove_dir_all(root).unwrap();
         let transcript = format!(
             "{}{}",
@@ -492,7 +494,6 @@ fn repository_install_args(
 #[cfg(test)]
 mod repository_install_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn repository_destinations_are_fixed_and_content_addressed() {
         let source =
@@ -525,6 +526,47 @@ mod repository_install_tests {
                 .is_err()
         );
         std::fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn each_bad_repository_install_argument_is_refused_on_its_own() {
+        let folder = std::env::temp_dir().join(format!("pkgdeck-repo-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("synthetic.sources");
+        std::fs::write(&file, b"synthetic source").unwrap();
+        // A relative path that does name a file, so only "relative" is wrong.
+        let relative = Path::new("Cargo.toml");
+        assert!(relative.is_file() && !relative.is_absolute());
+        let digest = "0123456789abcdef".repeat(4);
+        assert!(repository_install_args(&file, "apt", "sources", &digest).is_ok());
+        let slash = format!("{}/", "a".repeat(63));
+        let rows = [
+            (relative, digest.as_str(), "relative path"),
+            (folder.as_path(), digest.as_str(), "folder, not a file"),
+            (
+                &folder.join("missing.sources"),
+                digest.as_str(),
+                "file that is not there",
+            ),
+            (file.as_path(), &digest[..63], "63 hex digits"),
+            (file.as_path(), &format!("{digest}0"), "65 hex digits"),
+            (file.as_path(), slash.as_str(), "64 characters with a slash"),
+            (file.as_path(), &"g".repeat(64), "64 characters, not hex"),
+            (file.as_path(), "", "no digest"),
+        ];
+        let accepted: Vec<_> = rows
+            .iter()
+            .filter(|(path, digest, _)| {
+                repository_install_args(path, "apt", "sources", digest).is_ok()
+            })
+            .map(|(_, _, why)| *why)
+            .collect();
+        assert!(accepted.is_empty(), "accepted: {accepted:?}");
+        // A digest that could leave the folder never reaches the destination.
+        let escape = format!("../{}", "a".repeat(61));
+        assert_eq!(escape.len(), 64);
+        assert!(repository_install_args(&file, "apt", "sources", &escape).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn reviewed_repository_write_passes_only_fixed_install_arguments() {
@@ -586,15 +628,12 @@ mod repository_install_tests {
         let source = root.join("synthetic.ymp");
         let record = root.join("record");
         let executable = root.join("OneClickInstallUI");
-        let prepared = root.join("OneClickInstallUI.tmp");
         std::fs::write(&source, b"<metapackage/>").unwrap();
-        std::fs::write(
-            &prepared,
+        crate::test_support::write_executable(
+            &executable,
             format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", record.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(prepared, &executable).unwrap();
         let host = Host::new(Runtime::Native, BTreeMap::new());
         let cancel = Cancellation::default();
         let installed = Path::new("/usr/sbin/OneClickInstallUI").exists()
@@ -1883,7 +1922,7 @@ impl Host {
                 command,
                 Limits {
                     timeout,
-                    ..Limits::default()
+                    output_bytes: Limits::default().output_bytes,
                 },
                 cancel,
                 false,
@@ -2186,8 +2225,6 @@ mod flatpak_bridge_tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
-    #[cfg(target_os = "linux")]
-    use std::os::unix::fs::PermissionsExt;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2407,8 +2444,7 @@ mod flatpak_bridge_tests {
         std::fs::create_dir(&directory).unwrap();
         let executable = |name: &str| {
             let path = directory.join(name);
-            std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_executable(&path, b"#!/bin/sh\nexit 0\n").unwrap();
             path
         };
         executable("apt-get");
@@ -2576,8 +2612,7 @@ mod flatpak_bridge_tests {
 
         let path =
             std::env::temp_dir().join(format!("pkgdeck-flatpak-spawn-{}", std::process::id()));
-        fs::write(&path, b"#!/bin/sh\nexit 7\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, b"#!/bin/sh\nexit 7\n").unwrap();
         assert!(flatpak_host_environment_from(&crate::portal::fake(&path)).is_none());
         fs::remove_file(path).unwrap();
         let missing = crate::portal::fake(Path::new("/missing-flatpak-spawn"));
@@ -2588,7 +2623,7 @@ mod flatpak_bridge_tests {
 #[cfg(test)]
 mod docker_shim_tests {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     fn host_with_bin(entries: &[(&str, &str)]) -> (Host, PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -2602,8 +2637,7 @@ mod docker_shim_tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         for (name, body) in entries {
             let path = root.join("bin").join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_support::write_executable(&path, body).unwrap();
         }
         let mut env = BTreeMap::new();
         env.insert("PATH".into(), root.join("bin").into());
@@ -2829,7 +2863,7 @@ pub fn classify_apt(result: Completion) -> Result<Completion, ExecutionError> {
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     fn scratch(name: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -2845,8 +2879,7 @@ mod boundary_tests {
     }
     fn executable(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     }
     fn host(runtime: Runtime, env: &[(&str, &Path)]) -> Host {
         Host::new(
@@ -3291,8 +3324,7 @@ mod boundary_tests {
         assert!(host.docker_is_podman_shim());
         fs::remove_file(bin.join("docker")).unwrap();
         // A large binary is never read as a script.
-        fs::write(bin.join("docker"), vec![b'#'; 70_000]).unwrap();
-        fs::set_permissions(bin.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(bin.join("docker"), vec![b'#'; 70_000]).unwrap();
         assert!(!host.docker_is_podman_shim());
         fs::remove_file(bin.join("podman")).unwrap();
         executable(&bin.join("docker"), "exec /usr/bin/podman \"$@\"");
@@ -3306,10 +3338,8 @@ mod boundary_tests {
         let root = scratch("privileged-access");
         let script = root.join("answer");
         let answer = |authorization, reply: &str| {
-            std::fs::write(&script, format!("#!/bin/sh\n{reply}\n")).unwrap();
-            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-            std::fs::set_permissions(&script, permissions).unwrap();
+            crate::test_support::write_executable(&script, format!("#!/bin/sh\n{reply}\n"))
+                .unwrap();
             let mut host = host(Runtime::Flatpak, &[]);
             host.set_bridge_for_tests(&script);
             host.privileged(
@@ -3427,6 +3457,30 @@ mod boundary_tests {
         assert!(
             String::from_utf8_lossy(&result.stdout).ends_with("/usr/sbin/softwareupdate --list\n")
         );
+        // Those two folders stand in only for their own manager.
+        assert!(matches!(
+            host.system_manager("synthetic", &[], &Cancellation::default(), false, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "synthetic not found"
+        ));
+        // Writes run each manager from its own system folder.
+        for (manager, path) in [
+            ("apk", "/sbin/apk"),
+            ("port", "/opt/local/bin/port"),
+            ("softwareupdate", "/usr/sbin/softwareupdate"),
+        ] {
+            let result = host
+                .system_manager(
+                    manager,
+                    &["synthetic".into()],
+                    &Cancellation::default(),
+                    true,
+                    Authorization::SudoNonInteractive,
+                )
+                .unwrap();
+            let ran = String::from_utf8_lossy(&result.stdout);
+            let want = format!(" {path} synthetic");
+            assert!(ran.contains(&want), "{manager}: {ran}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

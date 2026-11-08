@@ -20,5 +20,8 @@ flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 [lints]
 workspace = true
 
+[dev-dependencies]
+pkgdeck-core = { workspace = true, features = ["test-support"] }
+
 [dev-dependencies.pkgdeck-tools]
 path = "../pkgdeck-tools"

@@ -755,8 +755,7 @@ mod tests {
         let second = temp.0.join("second/tool");
         let third = temp.0.join("third/tool");
         let fourth = temp.0.join("fourth/tool");
-        fs::write(&second, b"not run").unwrap();
-        fs::set_permissions(&second, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&second, b"not run").unwrap();
         symlink(&second, &first).unwrap();
         symlink("missing", &third).unwrap();
         symlink("tool", &fourth).unwrap();
@@ -818,8 +817,7 @@ mod tests {
         fs::create_dir(&bin).unwrap();
         let link = bin.join("fixture");
         let target = temp.0.join("fixture-target");
-        fs::write(&target, b"never run").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&target, b"never run").unwrap();
         symlink(&target, &link).unwrap();
         let records = Fixture(BTreeMap::from([
             (link.clone(), vec![("apt".into(), "shim:amd64".into())]),
@@ -880,8 +878,7 @@ mod tests {
         let bin = temp.0.join("bin");
         fs::create_dir(&bin).unwrap();
         let path = bin.join("fixture");
-        fs::write(&path, b"never executed").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, b"never executed").unwrap();
         let result = inspect_native(
             &host(&bin.display().to_string()),
             "fixture",
@@ -900,8 +897,7 @@ mod tests {
     fn inspection_cancellation_and_uninstalled_owner_records_stay_explicit() {
         let temp = Temp::new();
         let executable = temp.0.join("fixture");
-        fs::write(&executable, b"never executed").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&executable, b"never executed").unwrap();
         let host = host(&temp.0.display().to_string());
         let owners = Fixture(BTreeMap::from([(
             executable,
@@ -984,8 +980,7 @@ mod tests {
         );
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         // In a sandbox, a link that resolves inside the sandbox names itself.
-        fs::write(temp.0.join("real"), b"never executed").unwrap();
-        fs::set_permissions(temp.0.join("real"), fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(temp.0.join("real"), b"never executed").unwrap();
         symlink(temp.0.join("real"), bin.join("tool")).unwrap();
         let sandboxed = flatpak_host(&bin, Path::new("/usr/bin/true"));
         let report = inspect_with(&sandboxed, "tool", &[], &source, &cancel).unwrap();
@@ -1021,15 +1016,13 @@ mod tests {
         let bin = temp.0.join("bin");
         fs::create_dir(&bin).unwrap();
         let tool = bin.join("tool");
-        fs::write(&tool, b"never executed").unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&tool, b"never executed").unwrap();
         let bridge = temp.0.join("spawn");
-        fs::write(
+        crate::test_support::write_executable(
             &bridge,
             "#!/bin/sh\ncase \"$*\" in\n  */usr/bin/dpkg-query*) echo \"apt-tool: $tool\" ;;\n  */usr/bin/rpm*) echo 'tool|x86_64' ;;\n  */usr/bin/pacman*) echo pacman-tool ;;\nesac\n",
         )
         .unwrap();
-        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
         let mut dnf = package("dnf", "tool", "tool");
         dnf.id.architecture = "x86_64".into();
         let report = inspect_native(

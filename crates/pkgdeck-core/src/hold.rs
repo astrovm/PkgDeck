@@ -654,10 +654,8 @@ mod tests {
 
     /// A shell script in a fresh folder, run as a stand-in for a tool.
     fn tool(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         path
     }
 
@@ -882,14 +880,14 @@ mod tests {
 
     #[test]
     fn a_running_compiler_holds_updates() {
-        // A program named like a compiler, as ps lists it.
-        let dir = std::env::temp_dir().join(format!("pkgdeck-rustc-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let rustc = dir.join("rustc");
-        let _ = fs::remove_file(&rustc);
-        std::os::unix::fs::symlink("/bin/sleep", &rustc).unwrap();
-        let mut child = std::process::Command::new(&rustc)
-            .arg("30")
+        // A program named like a compiler, as ps lists it. A shell that
+        // waits on its input, renamed through argv[0]: a symlink to a
+        // multicall binary such as uutils' sleep would refuse the name.
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg0("/opt/pkgdeck-test/bin/rustc")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let host = Host::current();
@@ -900,7 +898,6 @@ mod tests {
         let held = (building(&host), current(&host, nothing_else));
         child.kill().unwrap();
         child.wait().unwrap();
-        fs::remove_dir_all(&dir).unwrap();
         assert!(held.0);
         // Builds count whatever else is turned off.
         assert_eq!(held.1, Some(Hold::Build));

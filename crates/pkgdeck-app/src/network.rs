@@ -76,17 +76,16 @@ fn fetch_with(curl: &Path, url: &str, cancel: &Cancellation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
 
     /// A curl that prints `body`, then exits with `code` after `delay`.
     fn fake(dir: &Path, name: &str, body: &str, code: i32, delay: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        fs::write(
+        pkgdeck_core::test_support::write_executable(
             &path,
             format!("#!/bin/sh\nprintf '%s' \"$*\" > '{}.args'\nprintf '%s' '{body}'\nsleep {delay}\nexit {code}\n", path.display()),
         )
         .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
 
@@ -125,8 +124,8 @@ mod tests {
         let failed = fake(&temp.0, "failed", "partial", 22, "0");
         assert_eq!(fetch_with(&failed, "https://example.invalid/", &cancel), "");
         let binary = temp.0.join("binary");
-        fs::write(&binary, "#!/bin/sh\nprintf '\\377\\376'\n").unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        pkgdeck_core::test_support::write_executable(&binary, "#!/bin/sh\nprintf '\\377\\376'\n")
+            .unwrap();
         assert_eq!(fetch_with(&binary, "https://example.invalid/", &cancel), "");
         assert_eq!(
             fetch_with(&temp.0.join("missing"), "https://example.invalid/", &cancel),
@@ -134,20 +133,18 @@ mod tests {
         );
         // Too big: cut at 2 MB and dropped.
         let big = temp.0.join("big");
-        fs::write(
+        pkgdeck_core::test_support::write_executable(
             &big,
             "#!/bin/sh\nhead -c 2097153 /dev/zero | tr '\\0' 'a'\n",
         )
         .unwrap();
-        fs::set_permissions(&big, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(fetch_with(&big, "https://example.invalid/", &cancel), "");
         let largest = temp.0.join("largest");
-        fs::write(
+        pkgdeck_core::test_support::write_executable(
             &largest,
             "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\0' 'a'\n",
         )
         .unwrap();
-        fs::set_permissions(&largest, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             fetch_with(&largest, "https://example.invalid/", &cancel).len(),
             LIMIT

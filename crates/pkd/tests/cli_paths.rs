@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{symlink, PermissionsExt},
+    os::unix::fs::symlink,
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -28,8 +28,7 @@ impl Fixture {
     fn executable(&self, name: &str, body: &str) -> PathBuf {
         let path = self.0.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        pkgdeck_core::test_support::write_executable(&path, body).unwrap();
         path
     }
     fn command(&self) -> Command {

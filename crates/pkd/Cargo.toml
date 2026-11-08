@@ -16,5 +16,8 @@ clap_complete.workspace = true
 unicode-width.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 
+[dev-dependencies]
+pkgdeck-core = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

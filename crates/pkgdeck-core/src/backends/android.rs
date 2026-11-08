@@ -314,6 +314,79 @@ mod tests {
     }
 
     #[test]
+    fn names_that_climb_or_hide_never_reach_a_delete() {
+        let home = scratch("guards");
+        let sdk = home.join(if cfg!(target_os = "macos") {
+            "Library/Android/sdk"
+        } else {
+            "Android/Sdk"
+        });
+        let avds = home.join(".android/avd");
+        let host = host(&home, &[]);
+        let cancel = Cancellation::default();
+        // Real folders at every place a bad name would walk to.
+        for folder in [
+            "system-images/a/b",
+            "system-images/a/.hidden",
+            "system-images/a/b/c/d",
+            "system-images/b",
+        ] {
+            fs::create_dir_all(sdk.join(folder)).unwrap();
+        }
+        let victims = [
+            sdk.join("system-images/a/b"),
+            sdk.join("system-images/a/.hidden"),
+            sdk.join("system-images/b"),
+            sdk.clone(),
+        ];
+        for image in [
+            "a/../b",
+            "../../..",
+            "a//b",
+            "a/b/",
+            "/a/b",
+            "a/.hidden",
+            ".x/a/b",
+            "a/b",
+            "a/b/c/d",
+            "a",
+            "",
+        ] {
+            assert!(
+                image_item(&host, image, &cancel).is_none(),
+                "offered {image:?}"
+            );
+        }
+        // Emulator names: the entry and folder exist, so only the name is wrong.
+        write(&avds.join(".hidden.ini"), "path=/nowhere\n");
+        fs::create_dir_all(avds.join(".hidden.avd")).unwrap();
+        fs::create_dir_all(avds.join(".avd")).unwrap();
+        write(&avds.join(".ini"), "path=/nowhere\n");
+        write(&avds.join("sub/x.ini"), "path=/nowhere\n");
+        write(&avds.join("y.ini"), "path=/nowhere\n");
+        fs::create_dir_all(avds.join("x")).unwrap();
+        for name in [".hidden", "", "sub/x", "x/../y", "../avd/y"] {
+            assert!(broken(&host, name).is_none(), "offered {name:?}");
+            assert!(avd_item(&host, name, &cancel).is_none());
+            assert!(remove(&host, &format!("android-avd:{name}")).is_err());
+        }
+        for victim in victims {
+            assert!(victim.exists(), "{victim:?} is gone");
+        }
+        for victim in [
+            avds.join(".hidden.ini"),
+            avds.join(".hidden.avd"),
+            avds.join(".avd"),
+            avds.join(".ini"),
+            avds.join("sub/x.ini"),
+            avds.join("y.ini"),
+        ] {
+            assert!(victim.exists(), "{victim:?} is gone");
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn images_no_emulator_uses_and_broken_emulators_are_offered_and_deleted() {
         let home = scratch("offer");
         let sdk = home.join(if cfg!(target_os = "macos") {

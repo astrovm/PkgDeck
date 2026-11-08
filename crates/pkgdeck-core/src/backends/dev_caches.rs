@@ -653,14 +653,9 @@ mod tests {
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         // A Gradle build, and the compiler it started.
-        fs::write(
+        crate::test_support::write_executable(
             bin.join("ps"),
             "#!/bin/sh\nprintf '10 1 java org.gradle.launcher.GradleMain build\\n11 10 javac Main.java\\n'\n",
-        )
-        .unwrap();
-        fs::set_permissions(
-            bin.join("ps"),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
         .unwrap();
         fill(&root.join(".gradle/caches"), 2 * 1024 * 1024);

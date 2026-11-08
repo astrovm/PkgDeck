@@ -15,16 +15,21 @@ case "$backend" in
     dnf) image=registry.fedoraproject.org/fedora:45; bootstrap='dnf -y install sudo'; query='rpm -q jq'; writers=/usr/bin/dnf ;;
     pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; writers=/usr/bin/pacman ;;
     zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='sed -i "s|http://|https://|g" /etc/zypp/repos.d/*.repo; zypper --non-interactive install sudo'; query='rpm -q jq'; writers=/usr/bin/zypper
-        # download.opensuse.org's redirector can time out for minutes; its
-        # regional mirror serves the same repositories.
-        fallback='sed -i "s|download.opensuse.org|mirrorcache-us.opensuse.org|g" /etc/zypp/repos.d/*.repo' ;;
+        # download.opensuse.org's redirector can time out for minutes, or
+        # send a file to a mirror that doesn't have it yet while a snapshot
+        # is published. The first retry reads from openSUSE's own server,
+        # which serves every file its index lists; the second from another
+        # mirror, in case that server is the one down.
+        # shellcheck disable=SC2016 # expands in the container
+        fallback='host=$(echo downloadcontent.opensuse.org mirrorcache-eu.opensuse.org | cut -d" " -f"$attempt"); sed -i -E "s#://(download|downloadcontent|mirrorcache[a-z-]*)[.]opensuse[.]org/#://$host/#" /etc/zypp/repos.d/*.repo' ;;
     apk) image=docker.io/library/alpine:latest; bootstrap='apk add bash sudo'; query='apk info -e jq'; writers=/sbin/apk; adduser='adduser -D pkgdeck-test' ;;
     # XBPS must update itself before it installs anything else. The image has
     # no /etc/shadow, which sudo's PAM account check needs.
     xbps) image=ghcr.io/void-linux/void-glibc:latest; bootstrap='xbps-install -Syu xbps && xbps-install -yu && xbps-install -y bash sudo shadow'; query='xbps-query jq >/dev/null'; writers='/usr/bin/xbps-install, /usr/bin/xbps-remove'; adduser='pwconv && useradd -m pkgdeck-test'
-        # repo-default.voidlinux.org can time out for minutes; Void's German
-        # mirror serves the same repository.
-        fallback='mkdir -p /etc/xbps.d && sed "s|repo-default.voidlinux.org|repo-de.voidlinux.org|g" /usr/share/xbps.d/00-repository-main.conf >/etc/xbps.d/00-repository-main.conf' ;;
+        # repo-default.voidlinux.org can time out for minutes; each retry
+        # uses another mirror of the same repository.
+        # shellcheck disable=SC2016 # expands in the container
+        fallback='host=$(echo repo-de.voidlinux.org repo-fastly.voidlinux.org | cut -d" " -f"$attempt"); mkdir -p /etc/xbps.d && sed "s|repo-default.voidlinux.org|$host|g" /usr/share/xbps.d/00-repository-main.conf >/etc/xbps.d/00-repository-main.conf' ;;
     *) echo "Expected dnf, pacman, zypper, apk, or xbps" >&2; exit 2 ;;
 esac
 
@@ -68,6 +73,7 @@ script="
     for attempt in 1 2 3; do
         if (eval "$1"); then break; fi
         [ "$attempt" = 3 ] && exit 1
+        # The fallback reads $attempt (1 or 2) to pick its next mirror.
         eval "$3"
         sleep 15
     done

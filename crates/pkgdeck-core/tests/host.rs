@@ -48,8 +48,7 @@ impl Fixture {
     }
     fn executable(&self, name: &str) -> PathBuf {
         let path = self.0.join(name);
-        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        pkgdeck_core::test_support::write_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
         path
     }
 }
@@ -557,8 +556,11 @@ fn venv_pip_with_sets_variables_for_that_run_only() {
     let venv = fixture.0.join("venv");
     fs::create_dir_all(venv.join("bin")).unwrap();
     let python = venv.join("bin/python");
-    fs::write(&python, "#!/bin/sh\nprintf %s \"$PIP_UPLOADED_PRIOR_TO\"\n").unwrap();
-    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    pkgdeck_core::test_support::write_executable(
+        &python,
+        "#!/bin/sh\nprintf %s \"$PIP_UPLOADED_PRIOR_TO\"\n",
+    )
+    .unwrap();
     fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     let host = Host::new(
         Runtime::Native,

@@ -559,9 +559,8 @@ mod repository_file_tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let flatpak = root.join("flatpak");
-        std::fs::write(&flatpak, "#!/bin/sh\necho 'not a remote row'\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&flatpak, "#!/bin/sh\necho 'not a remote row'\n")
+            .unwrap();
         let transport = NativeTransport {
             host: Host::new(
                 crate::host::Runtime::Native,

@@ -31,9 +31,21 @@ positioned-io = { version = "=0.3.5", default-features = false }
 zbus = { version = "=6.2.1", default-features = false, features = ["default-rt"] }
 futures-lite = "=2.6.1"
 
+[features]
+# Exposes [`test_support`] so other crates' tests, and this crate's
+# integration tests, can write executables. Unit tests see it through
+# `cfg(test)` either way. Empty: it only compiles that module.
+test-support = []
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # A fake Flatpak portal on a private connection.
 zbus = { version = "=6.2.1", default-features = false, features = ["default-rt", "p2p"] }
+
+[dev-dependencies]
+# Depends back on this package with `test-support`, so feature unification
+# turns the module on while integration tests build. A dev-dependency cycle
+# is allowed; production builds never follow it.
+pkgdeck-core-test-support = { path = "test-support" }
 
 [lints]
 workspace = true

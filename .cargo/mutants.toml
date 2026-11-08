@@ -1,3 +1,5 @@
 # cargo-mutants settings, used by scripts/mutants.sh.
-# Screenshot tooling and build scripts aren't app behavior.
-exclude_globs = ["crates/*/examples/**", "crates/*/build.rs"]
+# Screenshot tooling and build scripts aren't app behavior. pkgdeck-tools
+# drives the acceptance runs: only E2E reaches it, and mutation testing runs
+# fast tests only.
+exclude_globs = ["crates/*/examples/**", "crates/*/build.rs", "crates/pkgdeck-tools/**"]

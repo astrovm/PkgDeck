@@ -1792,14 +1792,13 @@ mod tests {
             path
         }
         fn script(&self, name: &str, text: &str) -> PathBuf {
-            let path = self.write(name, text);
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = self.0.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::test_support::write_executable(&path, text).unwrap();
             path
         }
         fn native(&self) -> NativeStandalone {
-            // The curl shim is invariant, so install it once before any spawn:
-            // rewriting an executable right before executing it trips an
-            // ETXTBSY race under parallel test churn (see tests/host.rs).
+            // The curl shim does not change, so install it once.
             self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh|*/uninstall.sh) cat \"$HOME/installer\";; *.yml) cat \"$HOME/channel\";; *) cat \"$HOME/release\";; esac\n");
             NativeStandalone {
                 host: Host::new(
@@ -3182,8 +3181,9 @@ mod tests {
         // Each check refuses before anything runs, so a bare Mach-O header
         // stands in for a tool.
         let binary = |temp: &Temp, path: &str| {
-            let path = temp.write(path, [0xcf, 0xfa, 0xed, 0xfe]);
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = temp.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::test_support::write_executable(&path, [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
             path
         };
         // Claude's settings must be a readable, bounded UTF-8 file.

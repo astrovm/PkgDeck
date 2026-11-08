@@ -248,16 +248,12 @@ mod tests {
         let dir = temp("download");
         // A stand-in for curl that writes its URL to the --output file.
         let curl = dir.join("curl");
-        std::fs::write(
+        pkgdeck_core::test_support::write_executable(
             &curl,
             "#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\nout=$2; shift 3\n\
              case \"$1\" in *fail*) exit 22;; esac\necho \"$1\" >> \"$out.count\"; printf %s \"$1\" > \"$out\"\n",
         )
         .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         let cache = dir.join("cache");
         let loader = WebLoader::with_curl(Some(cache.clone()), curl.clone());
         let ctx = egui::Context::default();

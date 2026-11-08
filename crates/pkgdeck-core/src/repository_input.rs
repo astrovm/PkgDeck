@@ -421,7 +421,6 @@ mod tests {
     use super::*;
     use crate::host::Runtime;
     use std::collections::BTreeMap;
-    use std::os::unix::fs::PermissionsExt;
     fn validate(suffix: &str, text: &str) -> Result<(String, String, String), EngineError> {
         super::validate(suffix, text, &Host::current())
     }
@@ -508,8 +507,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let dnf = base.join("dnf");
-        fs::write(&dnf, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&dnf, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&dnf, "#!/bin/sh\nexit 0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -547,16 +545,11 @@ mod tests {
         )
         .unwrap();
         let curl = base.join("curl");
-        let pending_curl = base.join("curl.pending");
-        fs::write(
-            &pending_curl,
+        crate::test_support::write_executable(
+            &curl,
             format!("#!/bin/sh\n/bin/cat '{}'\n", content.display()),
         )
         .unwrap();
-        // Publish the executable after closing its writer so parallel tests
-        // never try to run a script while its inode is still being written.
-        fs::set_permissions(&pending_curl, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::rename(&pending_curl, &curl).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -585,7 +578,7 @@ mod tests {
         fs::write(&source, contents).unwrap();
         let record = base.join("record");
         let flatpak = base.join("flatpak");
-        fs::write(
+        crate::test_support::write_executable(
             &flatpak,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nfor arg; do :; done\n/bin/cat \"$arg\" >> '{}'\n",
@@ -594,7 +587,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -635,6 +627,8 @@ mod tests {
         fs::write(&source, vec![b'a'; MAX_BYTES + 1]).unwrap();
         assert!(source_bytes(source.to_str().unwrap(), &cancel, &host).is_err());
         assert!(validate("flatpakrepo", "").is_err());
+        // A file that is fine but for a NUL byte is still refused.
+        assert!(validate("sources", "Types: deb\nURIs: https://example.invalid/repo\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/example.gpg\n\0").is_err());
         assert!(validate("flatpakrepo", "[Flatpak Repo]\nName=synthetic\nUrl=https://example.invalid/repo\nGPGKey=key\nGPGKey=other\n").is_err());
         assert!(validate(
             "repo",
@@ -675,7 +669,7 @@ mod tests {
         fs::write(base.join("dnf"), "").unwrap();
         let record = base.join("record");
         let bridge = base.join("spawn");
-        fs::write(
+        crate::test_support::write_executable(
             &bridge,
             format!(
                 "#!/bin/sh\ncase \"$*\" in *' /usr/bin/test '*) exit 0 ;; esac\necho \"$@\" >> '{}'\n[ -e '{}' ] || exit 0\nexit 3\n",
@@ -684,7 +678,6 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let mut host = Host::new(Runtime::Flatpak, env);
@@ -752,8 +745,7 @@ mod tests {
         cancelled.cancel();
         let base = std::env::temp_dir().join(format!("pkgdeck-repo-cancel-{}", std::process::id()));
         fs::create_dir_all(&base).unwrap();
-        fs::write(base.join("curl"), "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(base.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(base.join("curl"), "#!/bin/sh\nexit 0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);
@@ -781,8 +773,7 @@ mod tests {
         let cancel = Cancellation::default();
         assert!(inspect_with_host(source.to_str().unwrap(), &cancel, &host).is_err());
         let zypper = base.join("zypper");
-        fs::write(&zypper, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&zypper, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&zypper, "#!/bin/sh\nexit 0\n").unwrap();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert_eq!(import.backend, "zypper");
         fs::write(
@@ -792,16 +783,295 @@ mod tests {
         .unwrap();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert_eq!(import.description, "https://example.invalid/metalink");
+        // Each section is checked on its own lines only, so two good ones
+        // with the same keys pass.
+        let (_, name, url) = super::validate(
+            "repo",
+            "[first]\nbaseurl=https://example.invalid/one\ngpgcheck=1\n[second]\nbaseurl=https://example.invalid/two\ngpgcheck=1\n[third]\nbaseurl=https://example.invalid/three\ngpgcheck=1\n",
+            &host,
+        )
+        .unwrap();
+        assert_eq!(
+            (name.as_str(), url.as_str()),
+            ("first", "https://example.invalid/one")
+        );
         assert!(super::validate("unknown", "synthetic", &host).is_err());
         assert!(
             inspect_with_host(base.join("unknown.txt").to_str().unwrap(), &cancel, &host).is_err()
         );
         let curl = base.join("curl");
-        fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&curl, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(
             inspect_with_host("https://example.invalid/synthetic.repo", &cancel, &host).is_err()
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn names_are_short_plain_and_never_start_with_a_dash() {
+        let long = "a".repeat(129);
+        let longest = "a".repeat(128);
+        // (name, allowed by safe_name, allowed by safe_repo_name)
+        let rows = [
+            ("", false, false),
+            (long.as_str(), false, false),
+            (longest.as_str(), true, true),
+            ("-x", false, false),
+            ("a/b", false, false),
+            ("a b", false, false),
+            ("a;b", false, false),
+            ("../x", false, false),
+            ("a:b", false, true),
+            ("flathub", true, true),
+            ("a.b_c-d9", true, true),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter(|(name, plain, repo)| {
+                safe_name(name) != *plain || safe_repo_name(name) != *repo
+            })
+            .map(|(name, _, _)| name.chars().take(12).collect::<String>())
+            .collect();
+        assert!(wrong.is_empty(), "wrong answers for {wrong:?}");
+    }
+
+    #[test]
+    fn every_trust_rule_alone_refuses_a_repository_file() {
+        const KEY: &str = "GPGKey=c3ludGhldGlj\n";
+        let flatpak = |header: &str, name: &str, url: &str, key: &str| {
+            format!("{header}\nName={name}\nUrl={url}\n{key}")
+        };
+        let good_flatpak = flatpak(
+            "[Flatpak Repo]",
+            "synthetic",
+            "https://example.invalid/repo",
+            KEY,
+        );
+        assert!(validate("flatpakrepo", &good_flatpak).is_ok());
+        let rows = [
+            // Only the header is missing: the fields alone are not a definition.
+            (
+                "flatpakrepo",
+                flatpak("[Other]", "synthetic", "https://example.invalid/repo", KEY),
+                "missing header",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "-synthetic",
+                    "https://example.invalid/repo",
+                    KEY,
+                ),
+                "name starts with a dash",
+            ),
+            (
+                "flatpakrepo",
+                flatpak("[Flatpak Repo]", "a/b", "https://example.invalid/repo", KEY),
+                "name with a slash",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "http://example.invalid/repo",
+                    KEY,
+                ),
+                "plain http",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "https://example.invalid/repo",
+                    "",
+                ),
+                "no signing key",
+            ),
+            (
+                "flatpakrepo",
+                flatpak(
+                    "[Flatpak Repo]",
+                    "synthetic",
+                    "https://example.invalid/repo",
+                    "GPGKey=\n",
+                ),
+                "empty signing key",
+            ),
+            (
+                "flatpakrepo",
+                format!("{good_flatpak}Name=second\n"),
+                "two names",
+            ),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter(|(suffix, text, _)| validate(suffix, text).is_ok())
+            .map(|(_, _, why)| *why)
+            .collect();
+        assert!(wrong.is_empty(), "accepted: {wrong:?}");
+
+        // APT one-line files: each line must be a deb line with signed-by and
+        // HTTPS, and a single bad line spoils the whole file.
+        let good = "deb [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main";
+        assert!(validate("list", good).is_ok());
+        assert!(validate(
+            "list",
+            "# comment\n\ndeb-src [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main\n"
+        )
+        .is_ok());
+        assert!(validate("list", &good.replace("signed-by", "Signed-By")).is_ok());
+        let lines = [
+            (
+                "rpm [signed-by=/etc/apt/keyrings/k.gpg] https://example.invalid/r stable main",
+                "not a deb line",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg] http://example.invalid/r stable main",
+                "plain http",
+            ),
+            ("deb https://example.invalid/r stable main", "no signed-by"),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg trusted=yes] https://example.invalid/r stable main",
+                "trusted=yes",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg TRUSTED=YES] https://example.invalid/r stable main",
+                "TRUSTED=YES",
+            ),
+            (
+                "deb [signed-by=/etc/apt/keyrings/k.gpg allow-insecure=yes] https://example.invalid/r stable main",
+                "allow-insecure=yes",
+            ),
+            ("", "nothing but comments"),
+        ];
+        let wrong: Vec<_> = lines
+            .iter()
+            .filter(|(line, _)| validate("list", line).is_ok())
+            .map(|(_, why)| *why)
+            .collect();
+        assert!(wrong.is_empty(), "accepted: {wrong:?}");
+        assert!(validate(
+            "list",
+            &format!("{good}\ndeb https://example.invalid/r stable main")
+        )
+        .is_err());
+
+        // DNF sections: one rule broken each, with a safe name and a good key.
+        let section = |locations: &str, check: &str| format!("{locations}\n{check}");
+        assert!(validate_repo_section(
+            "ok",
+            &section("baseurl=https://example.invalid/r", "gpgcheck=1")
+        )
+        .is_ok());
+        for (name, body, why) in [
+            (
+                "ok",
+                section("baseurl=http://example.invalid/r", "gpgcheck=1"),
+                "plain http",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=0"),
+                "gpgcheck off",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", ""),
+                "no gpgcheck",
+            ),
+            (
+                "bad name",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1"),
+                "unsafe section name",
+            ),
+            (
+                "-ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1"),
+                "section name starts with a dash",
+            ),
+            ("ok", section("", "gpgcheck=1"), "no location"),
+            (
+                "ok",
+                section(
+                    "baseurl=https://example.invalid/r\nbaseurl=https://example.invalid/s",
+                    "gpgcheck=1",
+                ),
+                "two base urls",
+            ),
+            (
+                "ok",
+                section("baseurl=https://example.invalid/r", "gpgcheck=1\ngpgkey="),
+                "empty gpgkey",
+            ),
+        ] {
+            assert!(
+                validate_repo_section(name, &body).is_err(),
+                "accepted: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_valid_file_is_not_the_one_that_was_reviewed() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-repository-swapped-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let tools = |tool: &str| {
+            let dir = base.join(tool);
+            fs::create_dir_all(&dir).unwrap();
+            crate::test_support::write_executable(dir.join(tool), "#!/bin/sh\nexit 0\n").unwrap();
+            let mut env = BTreeMap::new();
+            env.insert(OsString::from("PATH"), dir.as_os_str().to_os_string());
+            Host::new(Runtime::Native, env)
+        };
+        let cancel = Cancellation::default();
+        let changed = |result: Result<(), EngineError>| {
+            matches!(
+                result,
+                Err(EngineError::InvalidResponse { reason, .. })
+                    if reason == "repository file changed since preview"
+            )
+        };
+
+        // Another file that is just as valid, with the same name and backend.
+        let repo = base.join("synthetic.flatpakrepo");
+        let file =
+            |url: &str| format!("[Flatpak Repo]\nName=synthetic\nUrl={url}\nGPGKey=c3ludGhldGlj\n");
+        fs::write(&repo, file("https://example.invalid/reviewed")).unwrap();
+        let host = tools("flatpak");
+        let import = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
+        fs::write(&repo, file("https://example.invalid/swapped")).unwrap();
+        let fresh = inspect_with_host(repo.to_str().unwrap(), &cancel, &host).unwrap();
+        assert_eq!(
+            (&fresh.backend, &fresh.name),
+            (&import.backend, &import.name)
+        );
+        assert!(changed(apply_with_host(
+            &import,
+            Authorization::Polkit,
+            &cancel,
+            &host
+        )));
+
+        // The same bytes, but another package manager would now install them.
+        let dnf_repo = base.join("synthetic.repo");
+        fs::write(
+            &dnf_repo,
+            "[synthetic]\nbaseurl=https://example.invalid/repo\ngpgcheck=1\n",
+        )
+        .unwrap();
+        let import = inspect_with_host(dnf_repo.to_str().unwrap(), &cancel, &tools("dnf")).unwrap();
+        assert_eq!(import.backend, "dnf");
+        assert!(changed(apply_with_host(
+            &import,
+            Authorization::Polkit,
+            &cancel,
+            &tools("zypper")
+        )));
         fs::remove_dir_all(base).unwrap();
     }
 }

@@ -220,7 +220,6 @@ pub mod ffi {
         busy, set_busy, on_busy_changed: bool;
         writing, set_writing, on_writing_changed: bool;
         reading, set_reading, on_reading_changed: bool;
-        upgradable, set_upgradable, on_upgradable_changed: bool;
         needs_poll, set_needs_poll, on_needs_poll_changed: bool;
         refreshing, set_refreshing, on_refreshing_changed: bool;
     }
@@ -1891,7 +1890,6 @@ pub struct Controller {
     busy: bool,
     writing: bool,
     reading: bool,
-    upgradable: bool,
     needs_poll: bool,
     refreshing: bool,
     updates_view: bool,
@@ -2057,7 +2055,6 @@ impl Default for Controller {
             busy: false,
             writing: false,
             reading: false,
-            upgradable: false,
             // Sections preload from startup, which poll() starts.
             needs_poll: true,
             refreshing: false,
@@ -3434,7 +3431,6 @@ struct CachedView {
     rows: QString,
     status: QString,
     report_state: QString,
-    upgradable: bool,
     updates_view: bool,
 }
 impl ViewCache {
@@ -3490,7 +3486,6 @@ struct StoredView {
     rows: String,
     status: String,
     report_state: String,
-    upgradable: bool,
     updates_view: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3546,7 +3541,6 @@ impl ViewStore {
                         rows: view.rows.as_str().into(),
                         status: view.status.as_str().into(),
                         report_state: view.report_state.as_str().into(),
-                        upgradable: view.upgradable,
                         updates_view: view.updates_view,
                     },
                 )
@@ -4820,7 +4814,10 @@ impl ffi::PackageController {
             metered: false,
             ..rust.waits
         };
-        if (natives.hold)(&(natives.host)(), waits) == Some(Hold::Battery) {
+        if !matches!(
+            (natives.hold)(&(natives.host)(), waits),
+            None | Some(Hold::Build)
+        ) {
             return;
         }
         let job = Job::AutoClean {
@@ -6176,7 +6173,6 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().failures = cached.failures;
                 self.as_mut().rust_mut().sources = cached.sources;
                 self.as_mut().rust_mut().updates_view = cached.updates_view;
-                self.as_mut().set_upgradable(cached.upgradable);
                 self.as_mut().set_rows(cached.rows);
                 self.as_mut().set_details("{}".into());
                 self.as_mut().set_report_state(cached.report_state);
@@ -6210,16 +6206,12 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().rust_mut().failures.clear();
                 self.as_mut().apply(Ok(payload));
-                let upgradable =
-                    view == "Updates" && !upgrade_plan(&self.rust().packages).is_empty();
-                self.as_mut().set_upgradable(upgradable);
                 // The rows were read when the preload finished, not now.
                 self.as_mut().set_checked_at(epoch_seconds_at(loaded));
                 self.as_mut().stash_current_at(key.clone(), loaded);
             }
             if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
                 let stale = cached.stale();
-                self.as_mut().set_upgradable(cached.upgradable);
                 self.as_mut().rust_mut().updates_view = cached.updates_view;
                 self.as_mut().rust_mut().source_filter = sources;
                 self.as_mut().rust_mut().sudo = sudo;
@@ -6268,7 +6260,6 @@ impl ffi::PackageController {
                 return;
             }
         }
-        self.as_mut().set_upgradable(false);
         self.as_mut().rust_mut().updates_view = view == "Updates";
         self.as_mut().rust_mut().source_filter = sources;
         self.as_mut().rust_mut().sudo = sudo;
@@ -6450,7 +6441,6 @@ impl ffi::PackageController {
             rows: self.rust().rows.clone(),
             status: self.rust().status.clone(),
             report_state: self.rust().report_state.clone(),
-            upgradable: self.rust().upgradable,
             updates_view: self.rust().updates_view,
         };
         let mut this = self;
@@ -6464,7 +6454,6 @@ impl ffi::PackageController {
                     rows: view.rows.to_string(),
                     status: view.status.to_string(),
                     report_state: view.report_state.to_string(),
-                    upgradable: view.upgradable,
                     updates_view: view.updates_view,
                 });
             }
@@ -7372,13 +7361,6 @@ impl ffi::PackageController {
             }
             Ok(Payload::Packages(report)) => {
                 let sudo = self.rust().sudo;
-                // Only the terminal report enables the upgrade action.
-                // Partial rows and failures can still change while reading.
-                if self.rust().worker.is_none() {
-                    let upgradable =
-                        self.rust().updates_view && !upgrade_plan(&report.packages).is_empty();
-                    self.as_mut().set_upgradable(upgradable);
-                }
                 let loading = self.rust().worker.is_some();
                 self.as_mut().set_package_report_state(&report, loading);
                 let failure_rows: Vec<_> = report.failures.iter().map(|failure| {
@@ -7483,7 +7465,6 @@ impl ffi::PackageController {
                 self.set_status("Repositories loaded.".into());
             }
             Ok(Payload::Sources(sources)) => {
-                self.as_mut().rust_mut().catalog_checked = true;
                 let rows: Vec<_> = sources.iter().map(source_row).collect();
                 let failures: Vec<_> = rows
                     .iter()
@@ -7502,7 +7483,7 @@ impl ffi::PackageController {
                     "phase": phase, "failures": failures, "last_success": last_success,
                     "checked_at": epoch_seconds()
                 })));
-                self.as_mut().set_source_catalog(encoded(&rows));
+                self.as_mut().adopt_source_catalog(&rows);
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
@@ -7571,7 +7552,6 @@ impl ffi::PackageController {
             }
             Ok(Payload::Written(outcome)) => {
                 crate::metadata::invalidate();
-                self.as_mut().set_upgradable(false);
                 self.as_mut().rust_mut().invalidate_prefetch();
                 self.as_mut().rust_mut().engine_scope = None;
                 self.as_mut().rust_mut().invalidate_details();
@@ -7630,6 +7610,16 @@ impl ffi::PackageController {
     pub fn recheck_sources(mut self: Pin<&mut Self>) {
         self.as_mut().forget_catalog();
         self.check_sources();
+    }
+    /// Shows sources read by a load or a preload, and counts them as
+    /// checked. Not while a check runs: it was asked for after they were
+    /// read, so its answer is the newer one and must not be dropped.
+    fn adopt_source_catalog(mut self: Pin<&mut Self>, rows: &[Value]) {
+        if self.rust().catalog_worker.is_some() {
+            return;
+        }
+        self.as_mut().set_source_catalog(encoded(rows));
+        self.as_mut().rust_mut().catalog_checked = true;
     }
     /// Lets the next check run. One running already stays the only one.
     fn forget_catalog(mut self: Pin<&mut Self>) {
@@ -7857,8 +7847,7 @@ impl ffi::PackageController {
                         Reply::Done(Ok(payload)) => {
                             if let Payload::Sources(sources) = &payload {
                                 let rows: Vec<_> = sources.iter().map(source_row).collect();
-                                self.as_mut().set_source_catalog(encoded(rows));
-                                self.as_mut().rust_mut().catalog_checked = true;
+                                self.as_mut().adopt_source_catalog(&rows);
                             }
                             self.as_mut()
                                 .rust_mut()
@@ -7982,8 +7971,7 @@ impl ffi::PackageController {
                 let _ = worker.handle.join();
                 if !self.rust().catalog_checked {
                     let rows: Vec<_> = sources.iter().map(source_row).collect();
-                    self.as_mut().set_source_catalog(encoded(rows));
-                    self.as_mut().rust_mut().catalog_checked = true;
+                    self.as_mut().adopt_source_catalog(&rows);
                 }
             }
         }
@@ -8192,8 +8180,7 @@ impl ffi::PackageController {
                                 if let Job::Load(view, query) = &job {
                                     if let Payload::Sources(sources) = &payload {
                                         let rows: Vec<_> = sources.iter().map(source_row).collect();
-                                        self.as_mut().set_source_catalog(encoded(rows));
-                                        self.as_mut().rust_mut().catalog_checked = true;
+                                        self.as_mut().adopt_source_catalog(&rows);
                                     }
                                     let key = cache_key(
                                         view,

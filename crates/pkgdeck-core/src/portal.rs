@@ -445,14 +445,12 @@ pub(crate) fn fake(bridge: &Path) -> Portal {
 /// `flatpak-spawn` options the fake portal adds.
 #[cfg(test)]
 pub(crate) fn fake_bridge(dir: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let bridge = dir.join("spawn");
-    std::fs::write(
+    crate::test_support::write_executable(
         &bridge,
         "#!/bin/sh\nwhile [ \"${1#--}\" != \"$1\" ]; do\n  case \"$1\" in --env=*) export \"${1#--env=}\";; esac\n  shift\ndone\nexec \"$@\"\n",
     )
     .unwrap();
-    std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
     bridge
 }
 
