@@ -40,7 +40,7 @@ x11rb = { version = "=0.14.0", default-features = false }
 zbus = { version = "=6.2.1", default-features = false, features = ["default-rt", "bus-impl"] }
 
 [build-dependencies]
-cc = "=1.11.0"
+cc = "=1.11.1"
 
 [dev-dependencies]
 egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }
