@@ -1805,6 +1805,48 @@ fn system_manager_queries_validate_names_and_exit_codes() {
 }
 
 #[test]
+fn held_snaps_list_no_update() {
+    // Measured with snapd 2.78: `snap refresh --hold=1h hello-world` marks
+    // it held, `snap refresh --list` still lists it, and `snap refresh`
+    // says "All snaps up to date".
+    let script = Script::new(|line| match line {
+        "snap list" => ok(
+            "Name         Version  Rev  Tracking       Publisher    Notes\n\
+             hello-world  6.3      27   -              canonical**  held\n\
+             firefox      150.0    9113 latest/stable  mozilla**    -\n\
+             core22       20261001 2955 latest/stable  canonical**  base,held\n",
+        ),
+        "snap refresh --list" => ok("Name         Version  Rev   Size    Publisher    Notes\n\
+             hello-world  6.4      29    20.5kB  canonical**  -\n\
+             firefox      151.0    9200  300MB   mozilla**    -\n\
+             core22       20261101 3000  70MB    canonical**  base\n"),
+        _ => failed(1),
+    });
+    let installed = manager("snap", script)
+        .installed(&Cancellation::default())
+        .unwrap();
+    let update = |name: &str| {
+        let package = installed
+            .iter()
+            .find(|package| package.id.name == name)
+            .unwrap();
+        (package.update.clone(), package.candidate_version.clone())
+    };
+    assert_eq!(
+        update("firefox"),
+        (UpdateAvailability::Available, Some("151.0".into()))
+    );
+    // A held snap stays on the version it has.
+    for (held, version) in [("hello-world", "6.3"), ("core22", "20261001")] {
+        assert_eq!(
+            update(held),
+            (UpdateAvailability::Current, Some(version.into())),
+            "{held}"
+        );
+    }
+}
+
+#[test]
 fn update_listings_propagate_cancellation_and_tolerate_failure() {
     let cancel = Cancellation::default();
     let listing = |updates: fn() -> Reply| {

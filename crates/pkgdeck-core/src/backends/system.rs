@@ -261,8 +261,6 @@ pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
         .filter(|revisions| !revisions.is_empty())
 }
 
-/// Revisions `snap list --all` marks disabled, with their versions: what
-/// Snap keeps to go back to after an update.
 /// Every installed snap by name, from `snap list --all`.
 fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
     listing
@@ -273,6 +271,28 @@ fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// Snaps `snap list` marks held (`snap refresh --hold`). A full refresh
+/// leaves them alone, but `snap refresh --list` still lists their updates.
+fn held_snaps(listing: &str) -> std::collections::BTreeSet<String> {
+    listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            // Name Version Rev Tracking Publisher Notes
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let [name, _, _, _, _, notes] = fields.as_slice() else {
+                return None;
+            };
+            notes
+                .split(',')
+                .any(|note| note == "held")
+                .then(|| (*name).to_owned())
+        })
+        .collect()
+}
+
+/// Revisions `snap list --all` marks disabled, with their versions: what
+/// Snap keeps to go back to after an update.
 fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
     listing
         .lines()
@@ -395,7 +415,7 @@ impl<T: Transport> SystemManager<T> {
         if matches!(self.kind, ManagerKind::Zypper) {
             return Ok(zypper_updates(&text));
         }
-        Ok(text
+        let mut updates: BTreeMap<String, String> = text
             .lines()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
@@ -426,7 +446,17 @@ impl<T: Transport> SystemManager<T> {
                 }
                 .map(|(name, version)| (name.to_owned(), version))
             })
-            .collect())
+            .collect();
+        // A held snap's update isn't one: Update all leaves it alone, like
+        // the packages pacman.conf ignores.
+        if matches!(self.kind, ManagerKind::Snap) && !updates.is_empty() {
+            let listing = self.call(vec!["list".into()], cancel, false)?;
+            let listing = String::from_utf8_lossy(&bytes("snap", listing)?).into_owned();
+            for name in held_snaps(&listing) {
+                updates.remove(&name);
+            }
+        }
+        Ok(updates)
     }
     fn valid_name(&self, name: &str) -> bool {
         !name.is_empty()
