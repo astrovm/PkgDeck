@@ -63,7 +63,10 @@ if [[ "$mode" == containers ]]; then
     exit 0
 fi
 if [[ "$engine" == podman ]]; then
-    stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
+    # The run in the container times each of its stages, so the run as a
+    # whole has no limit (0) of its own. One limit for all of them cut off
+    # a full run that had to build from a cold cache.
+    PKGDECK_STAGE_TIMEOUT=0 stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
     exit 0
 fi
 # The shared checks (format, infrastructure, the APT helper) run once per
