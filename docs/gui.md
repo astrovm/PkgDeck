@@ -159,8 +159,10 @@ other sources still appear as they answer.
   skip it once it failed twice, so a run without network doesn't hold it
   back. Its row's arrow tries it again, and once it works the warning goes
   away. When it's the only update left, **Update all** tries it too. An
-  update stopped by a cancel, the password prompt, PkgDeck's system helper
-  or a shutdown isn't skipped.
+  update stopped by a cancel, the password prompt, PkgDeck's system helper,
+  a package manager that couldn't start or a shutdown isn't skipped. APT and
+  Pacman install some updates together in one step. When one of those fails
+  because of the update itself, the others in that step are skipped too.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
 - With **Wait for new releases** on, an update too new to install yet shows a

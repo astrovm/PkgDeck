@@ -274,9 +274,9 @@ fn grouped_apt_changes_are_rechecked_right_before_the_transaction() {
         }
     });
     assert_eq!(results.len(), 2);
-    for result in &results {
-        refused(result, Refusal::PlanChanged);
-    }
+    refused(&results[0], Refusal::PlanChanged);
+    // Its partner in the transaction doesn't run either, with no blame.
+    refused(&results[1], Refusal::PartnerFailed { blamed: false });
     assert_eq!(finished, 2);
     assert_eq!(writes.load(Ordering::SeqCst), 0);
 }
@@ -376,6 +376,22 @@ fn a_changed_change_in_a_batch_leaves_the_rest_to_run() {
     assert!(results[0].as_ref().unwrap_err().blames_change());
     refused(&results[1], Refusal::PartnerFailed { blamed: true });
     assert!(results[1].as_ref().unwrap_err().blames_change());
+
+    // The same when the change passes its first check and fails the one
+    // right before its transaction runs.
+    let (first, second) = (apt_install("one"), apt_install("two"));
+    let apt = Fixture {
+        stable_reads: 2,
+        explains: true,
+        ..Fixture::new("apt", APT)
+    };
+    let apt_writes = apt.writes.clone();
+    let mut engine = authorized(apt);
+    engine.plan_operation(&first, &cancel).unwrap();
+    let results = engine.execute_batch(&[first, second], &cancel, &mut |_| {});
+    assert!(results[0].as_ref().unwrap_err().blames_change());
+    refused(&results[1], Refusal::PartnerFailed { blamed: true });
+    assert_eq!(apt_writes.load(Ordering::SeqCst), 0);
 }
 
 #[test]

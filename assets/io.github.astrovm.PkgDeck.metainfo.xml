@@ -19,6 +19,8 @@
           <li>A snap held with snap refresh --hold no longer shows an update that Update all never makes</li>
           <li>A Flatpak masked with flatpak mask, or an extension of one, no longer shows an update that Update all never makes</li>
           <li>An Alpine package pinned in /etc/apk/world, or a package DNF 4 versionlock holds back, no longer shows an update either</li>
+          <li>An Alpine package from a tagged repository, like scanelf@edge, shows its update</li>
+          <li>When one Homebrew cask changed since you reviewed it, the other casks in the run still update</li>
           <li>Updates that failed because of the password prompt or the system helper are tried again</li>
           <li>Updates that an older PkgDeck marked as failed are tried again</li>
           <li>Automatic updates skip an update only after it failed twice, so a run without network doesn't hold it back</li>

@@ -125,6 +125,7 @@ impl std::fmt::Display for EngineError {
 }
 /// Why PkgDeck stopped a change. Each one is a sentence people can read.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(from = "RefusalJson", into = "RefusalJson")]
 pub enum Refusal {
     /// The source would now do something other than what was reviewed.
     PlanChanged,
@@ -142,6 +143,45 @@ pub enum Refusal {
     Building,
     /// PkgDeck's own explanation, already a full sentence.
     Explained(String),
+}
+/// [`Refusal`] in `pkd --json`, the shape schema version 1 gave it. A
+/// partner's blame only decides what PkgDeck remembers as failed, so it
+/// stays out: `"PartnerFailed"` reads back as not blamed.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum RefusalJson {
+    PlanChanged,
+    CleanupChanged,
+    NotUnattended,
+    NeedsReview,
+    PartnerFailed,
+    Building,
+    Explained(String),
+}
+impl From<Refusal> for RefusalJson {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::PlanChanged => Self::PlanChanged,
+            Refusal::CleanupChanged => Self::CleanupChanged,
+            Refusal::NotUnattended => Self::NotUnattended,
+            Refusal::NeedsReview => Self::NeedsReview,
+            Refusal::PartnerFailed { .. } => Self::PartnerFailed,
+            Refusal::Building => Self::Building,
+            Refusal::Explained(sentence) => Self::Explained(sentence),
+        }
+    }
+}
+impl From<RefusalJson> for Refusal {
+    fn from(refusal: RefusalJson) -> Self {
+        match refusal {
+            RefusalJson::PlanChanged => Self::PlanChanged,
+            RefusalJson::CleanupChanged => Self::CleanupChanged,
+            RefusalJson::NotUnattended => Self::NotUnattended,
+            RefusalJson::NeedsReview => Self::NeedsReview,
+            RefusalJson::PartnerFailed => Self::PartnerFailed { blamed: false },
+            RefusalJson::Building => Self::Building,
+            RefusalJson::Explained(sentence) => Self::Explained(sentence),
+        }
+    }
 }
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2131,26 +2171,48 @@ impl Engine {
                     .and_then(|()| self.preflight(member, cancel))
             })
             .collect::<Vec<_>>();
-        let joined = rechecked.into_iter().find_map(Result::err).map_or_else(
-            || {
-                self.ready(backend, operation.capability(), cancel)
-                    .and_then(|manager| {
-                        manager
-                            .execute_joined(&operations[index..end], cancel, &mut |progress| {
-                                events(Event::Progress {
-                                    operation: operation.clone(),
-                                    progress,
-                                });
-                            })
-                            .ok_or_else(|| EngineError::InvalidResponse {
-                                backend: backend.into(),
-                                reason: "grouped operation unavailable".into(),
-                            })
-                    })
-            },
-            Err,
-        );
-        let results = joined.unwrap_or_else(|error| vec![Err(error); end - index]);
+        let members = &operations[index..end];
+        let results = if rechecked.iter().all(Result::is_ok) {
+            self.join(operation, members, cancel, events)
+        } else if crate::batch::group_end(operations, index) >= end {
+            // One transaction: it runs whole or not at all. A member that
+            // passed its check fails with its partner, and with its blame.
+            let blamed = rechecked
+                .iter()
+                .any(|checked| checked.as_ref().is_err_and(EngineError::blames_change));
+            rechecked
+                .into_iter()
+                .zip(members)
+                .map(|(checked, member)| {
+                    Err(checked.err().unwrap_or_else(|| EngineError::Refused {
+                        backend: member.backend().into(),
+                        refusal: Refusal::PartnerFailed { blamed },
+                    }))
+                })
+                .collect()
+        } else {
+            // Joined only to share a password (cask updates): each one
+            // that passed its check runs, whatever happened to the others.
+            let ready: Vec<Operation> = members
+                .iter()
+                .zip(&rechecked)
+                .filter(|(_, checked)| checked.is_ok())
+                .map(|(member, _)| member.clone())
+                .collect();
+            let mut ran = if ready.is_empty() {
+                vec![]
+            } else {
+                self.join(&ready[0], &ready, cancel, events)
+            }
+            .into_iter();
+            rechecked
+                .into_iter()
+                .map(|checked| match checked {
+                    Ok(()) => ran.next().unwrap_or(Err(EngineError::Cancelled)),
+                    Err(error) => Err(error),
+                })
+                .collect()
+        };
         crate::cache::invalidate(backend);
         operations[index..end]
             .iter()
@@ -2163,6 +2225,32 @@ impl Engine {
                 result
             })
             .collect()
+    }
+
+    /// Runs `members` together, with progress shown on `operation`.
+    fn join(
+        &mut self,
+        operation: &Operation,
+        members: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        let backend = operation.backend();
+        self.ready(backend, operation.capability(), cancel)
+            .and_then(|manager| {
+                manager
+                    .execute_joined(members, cancel, &mut |progress| {
+                        events(Event::Progress {
+                            operation: operation.clone(),
+                            progress,
+                        });
+                    })
+                    .ok_or_else(|| EngineError::InvalidResponse {
+                        backend: backend.into(),
+                        reason: "grouped operation unavailable".into(),
+                    })
+            })
+            .unwrap_or_else(|error| vec![Err(error); members.len()])
     }
 }
 
@@ -2249,6 +2337,38 @@ mod refusal_tests {
                 refusal,
             };
             assert_eq!(error.to_string(), sentence);
+        }
+    }
+
+    #[test]
+    fn json_keeps_the_refusal_shape_of_schema_version_1() {
+        for (refusal, json, read_back) in [
+            (Refusal::PlanChanged, r#""PlanChanged""#, None),
+            (Refusal::CleanupChanged, r#""CleanupChanged""#, None),
+            (Refusal::NotUnattended, r#""NotUnattended""#, None),
+            (Refusal::NeedsReview, r#""NeedsReview""#, None),
+            (
+                Refusal::PartnerFailed { blamed: false },
+                r#""PartnerFailed""#,
+                None,
+            ),
+            (
+                Refusal::PartnerFailed { blamed: true },
+                r#""PartnerFailed""#,
+                Some(Refusal::PartnerFailed { blamed: false }),
+            ),
+            (Refusal::Building, r#""Building""#, None),
+            (
+                Refusal::Explained("Nothing was changed.".into()),
+                r#"{"Explained":"Nothing was changed."}"#,
+                None,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&refusal).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<Refusal>(json).unwrap(),
+                read_back.unwrap_or(refusal)
+            );
         }
     }
 }
@@ -2858,9 +2978,13 @@ mod apt_upgrade_tests {
     }
 
     /// Formulae and casks that record how they ran, and fail `broken`.
+    /// `drifts` passes its first check only; `unprepared` fails before any.
     struct BrewFixture {
         id: &'static str,
         broken: &'static str,
+        drifts: &'static str,
+        unprepared: bool,
+        reads: usize,
         log: Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl BrewFixture {
@@ -2878,6 +3002,17 @@ mod apt_upgrade_tests {
                 Operation::Upgrade(id) if id.name == self.broken => Err(EngineError::Cancelled),
                 _ => Ok(OperationOutcome::default()),
             }
+        }
+    }
+    fn brew_plan(operation: &Operation, preview: &str) -> TransactionPlan {
+        TransactionPlan {
+            operation: operation.clone(),
+            native_preview: preview.into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: None,
         }
     }
     impl Backend for BrewFixture {
@@ -2908,6 +3043,35 @@ mod apt_upgrade_tests {
             self.log_updates(operations);
             Some(operations.iter().map(|op| self.result(op)).collect())
         }
+        fn prepare(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<(), EngineError> {
+            if self.unprepared {
+                return Err(EngineError::Execution(ExecutionError::Invalid(
+                    "brew couldn't update its data".into(),
+                )));
+            }
+            Ok(())
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            if !matches!(operation, Operation::Upgrade(id) if id.name == self.drifts) {
+                return Ok(None);
+            }
+            self.reads += 1;
+            let preview = if self.reads > 1 {
+                "changed"
+            } else {
+                "reviewed"
+            };
+            Ok(Some(brew_plan(operation, preview)))
+        }
     }
     fn brew_update(backend: &str, name: &str) -> Operation {
         Operation::Upgrade(PackageId {
@@ -2930,6 +3094,9 @@ mod apt_upgrade_tests {
                     .register(BrewFixture {
                         id,
                         broken: "second",
+                        drifts: "",
+                        unprepared: false,
+                        reads: 0,
                         log: log.clone(),
                     })
                     .unwrap();
@@ -2980,6 +3147,66 @@ mod apt_upgrade_tests {
         assert_eq!(
             results.iter().map(Result::is_ok).collect::<Vec<_>>(),
             [true, true, false, true]
+        );
+    }
+
+    #[test]
+    fn cask_updates_that_pass_their_last_check_run_without_the_others() {
+        let casks = [
+            brew_update("homebrew-cask", "first"),
+            brew_update("homebrew-cask", "second"),
+            brew_update("homebrew-cask", "third"),
+        ];
+        let run = |drifts: &'static str, unprepared: bool| {
+            let log = Arc::new(std::sync::Mutex::new(vec![]));
+            let mut engine = Engine::default();
+            engine
+                .register(BrewFixture {
+                    id: "homebrew-cask",
+                    broken: "",
+                    drifts,
+                    unprepared,
+                    reads: 0,
+                    log: log.clone(),
+                })
+                .unwrap();
+            engine.enable_batch_authorization(
+                Host::new(Runtime::Native, Default::default()),
+                Authorization::Polkit,
+            );
+            engine.set_joins_cask_updates(true);
+            engine.remember_operation_plan(brew_plan(&casks[1], "reviewed"));
+            let results = engine.execute_batch(&casks, &Cancellation::default(), &mut |_| {});
+            let ran = log.lock().unwrap().clone();
+            (ran, results)
+        };
+        // Casks join only to share a password, so one whose plan changed
+        // since its first check fails alone, and the rest still update.
+        let (ran, results) = run("second", false);
+        assert_eq!(ran, ["first third"]);
+        assert_eq!(
+            results,
+            [
+                Ok(OperationOutcome::default()),
+                Err(EngineError::Refused {
+                    backend: "homebrew-cask".into(),
+                    refusal: Refusal::PlanChanged,
+                }),
+                Ok(OperationOutcome::default()),
+            ]
+        );
+        // Homebrew couldn't get ready, before any last check: no cask
+        // updates, and each fails with that.
+        let (ran, results) = run("second", true);
+        assert!(ran.is_empty());
+        assert_eq!(
+            results,
+            vec![
+                Err(EngineError::Execution(ExecutionError::Invalid(
+                    "brew couldn't update its data".into()
+                )));
+                3
+            ]
         );
     }
 
