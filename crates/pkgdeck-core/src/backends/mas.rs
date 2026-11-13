@@ -282,13 +282,16 @@ impl<T: Transport> MacAppStore<T> {
             .map(|path| visible(std::path::Path::new(path)))
             .filter(|path| path.is_absolute() && path.extension().is_some_and(|ext| ext == "app"))
             .ok_or_else(|| {
-                refused(format!(
-                    "mas doesn't say where {} is installed, so PkgDeck can't remove it.",
-                    app.name
-                ))
+                refused(
+                    ID,
+                    format!(
+                        "mas doesn't say where {} is installed, so PkgDeck can't remove it.",
+                        app.name
+                    ),
+                )
             })?;
         if !path.join("Contents/_MASReceipt/receipt").is_file() {
-            return Err(refused(format!(
+            return Err(refused(ID, format!(
                 "{} has no App Store receipt, so it may not be {} from the App Store. Reload, then try again.",
                 path.display(),
                 app.name
@@ -318,7 +321,7 @@ impl<T: Transport> MacAppStore<T> {
                 return Ok(outcome);
             }
         }
-        Err(refused(format!(
+        Err(refused(ID, format!(
             "{} is in the Trash, but the App Store still lists it at {}. Reload in a moment to check.",
             app.name,
             path.display()

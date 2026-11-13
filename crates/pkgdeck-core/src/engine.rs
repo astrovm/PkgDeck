@@ -50,7 +50,8 @@ impl EngineError {
     /// the same version would fail the same way: its command failed or
     /// crashed, its source answered something PkgDeck can't use, or PkgDeck
     /// explained why it can't make it. A cancel, a password prompt, the
-    /// system helper, a busy lock, a repository out of reach, an I/O error,
+    /// system helper, a busy lock, a repository out of reach, PkgDeck running
+    /// as root, an I/O error,
     /// a command stopped from outside or a change PkgDeck only held back
     /// says nothing about the package.
     pub fn blames_change(&self) -> bool {
@@ -78,6 +79,7 @@ impl EngineError {
                 | ExecutionError::AuthorizationDenied
                 | ExecutionError::LockBusy
                 | ExecutionError::Unreachable(_)
+                | ExecutionError::RunsAsRoot
                 | ExecutionError::Interrupted => false,
             },
             Self::Unsupported { .. }

@@ -241,7 +241,6 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
         {
             plain_error(error, Some(backend), false)
         }
-        EngineError::Unavailable { reason, .. } if refuses_root(reason) => ROOT_MESSAGE.into(),
         EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
         // Its line names the repository, which can hold a token.
         EngineError::Execution(E::Unreachable(_)) => format!(
@@ -251,10 +250,10 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
             format!("{tool} reported a problem.")
         }
         EngineError::Unavailable { .. } | EngineError::Execution(E::Disabled(_)) => {
-            format!("{tool} couldn't be used.")
+            format!("PkgDeck couldn't use {tool}.")
         }
         EngineError::Execution(E::Io(_)) => {
-            format!("{tool} couldn't finish: a file or a command it needed couldn't be used.")
+            "A file or a command PkgDeck needed couldn't be used.".into()
         }
         // PkgDeck's own words.
         EngineError::UnknownBackend(_)
@@ -267,6 +266,7 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
         | EngineError::Cancelled
         | EngineError::Execution(
             E::Helper(_)
+            | E::RunsAsRoot
             | E::Cancelled
             | E::TimedOut
             | E::AuthorizationCancelled
@@ -296,6 +296,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
         EngineError::Execution(E::Helper(_)) => "PkgDeck's system helper couldn't run this change. Try again.".into(),
+        EngineError::Execution(E::RunsAsRoot) => ROOT_MESSAGE.into(),
         EngineError::Execution(E::Unreachable(line)) => format!("A repository couldn't be reached, so nothing was changed: {} Try again when it's back.", sentence_tail(line)),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
         error if cask_needed_password(error, backend) => {

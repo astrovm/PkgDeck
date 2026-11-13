@@ -1338,12 +1338,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let held = if operations.iter().any(apt) {
                 match engine.plan_apt_upgrade(cancel) {
                     Ok(plan) if removals || plan.removals.is_empty() => None,
-                    Ok(plan) => Some(format!(
+                    Ok(plan) => Some(Held::said(format!(
                         "Not updated automatically: it would remove {} {}. Review it with Update all.",
                         plan.removals.len(),
                         if plan.removals.len() == 1 { "package" } else { "packages" }
-                    )),
-                    Err(error) => Some(plain_error(&error, Some("apt"), false)),
+                    ))),
+                    Err(error) => Some(Held {
+                        shown: plain_error(&error, Some("apt"), false),
+                        kept: kept_reason(&error, "apt"),
+                    }),
                 }
             } else {
                 None
@@ -1411,10 +1414,26 @@ fn joins_cask_updates(job: &Job, authorization: Authorization) -> bool {
 }
 /// Run a confirmed batch and summarize it. `held` changes are reported as
 /// failed with their reason and never run.
+/// Why a change in a batch is held back: what PkgDeck shows, and what
+/// Activity keeps, which never holds what a tool printed.
+#[derive(Clone, Debug)]
+struct Held {
+    shown: String,
+    kept: String,
+}
+impl Held {
+    /// A reason in PkgDeck's own words, shown and kept the same.
+    fn said(reason: String) -> Self {
+        Self {
+            kept: reason.clone(),
+            shown: reason,
+        }
+    }
+}
 fn run_batch(
     engine: &mut Engine,
     operations: &[Operation],
-    held: Vec<(Operation, String)>,
+    held: Vec<(Operation, Held)>,
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Payload {
@@ -1424,7 +1443,7 @@ fn run_batch(
 fn batch(
     engine: &mut Engine,
     operations: &[Operation],
-    held: Vec<(Operation, String)>,
+    held: Vec<(Operation, Held)>,
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Batch {
@@ -1455,7 +1474,7 @@ fn batch(
         }
     });
     let mut ran = ran.into_iter();
-    let results: Vec<Result<OperationOutcome, (EngineError, Option<String>)>> = operations
+    let results: Vec<Result<OperationOutcome, (EngineError, Option<Held>)>> = operations
         .iter()
         .map(|op| match held.iter().find(|(held, _)| held == op) {
             Some((_, reason)) => Err((EngineError::Cancelled, Some(reason.clone()))),
@@ -1493,7 +1512,7 @@ fn batch(
         }
         let (outcome, kept) = match &result {
             Ok(_) => (Outcome::Finished, None),
-            Err((_, Some(reason))) => (Outcome::Failed, Some(reason.clone())),
+            Err((_, Some(reason))) => (Outcome::Failed, Some(reason.kept.clone())),
             Err((error, None)) => ended_by(error, operation.backend()),
         };
         // A held change didn't run.
@@ -1501,7 +1520,7 @@ fn batch(
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
-            Err((_, Some(reason))) => Said::Because(reason),
+            Err((_, Some(reason))) => Said::Because(reason.shown),
             Err((
                 EngineError::Refused {
                     refusal: Refusal::Building,
@@ -1789,7 +1808,7 @@ fn read_activity(path: &std::path::Path) -> std::io::Result<Vec<pkgdeck_core::ac
         flock(lock, FlockOperation::LockShared)?;
     }
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+        Ok(bytes) => Ok(pkgdeck_core::activity::parse(&bytes)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(vec![]),
         Err(error) => Err(error),
     }

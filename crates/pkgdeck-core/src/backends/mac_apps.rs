@@ -428,9 +428,12 @@ fn cask_candidate(bundle_id: &str) -> Option<&'static str> {
 /// How many "Name N.app" spellings the Trash is searched for a free name.
 const TRASH_NAMES: usize = 100;
 
-/// A plain-language refusal, shown as it is.
-pub(super) fn refused(reason: impl Into<String>) -> EngineError {
-    ExecutionError::Invalid(reason.into()).into()
+/// Why PkgDeck won't make a change, or can't finish one, in its own words.
+pub(super) fn refused(backend: &str, reason: impl Into<String>) -> EngineError {
+    EngineError::Refused {
+        backend: backend.into(),
+        refusal: Refusal::Explained(reason.into()),
+    }
 }
 
 /// The path people see. mas reports App Store apps through the Data
@@ -479,19 +482,23 @@ impl Remover<'_> {
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
         if self.uid == 0 {
-            return Err(refused(crate::host::ROOT_REFUSAL));
+            return Err(ExecutionError::RunsAsRoot.into());
         }
         if part_of_macos(path) {
-            return Err(refused(format!(
-                "{name} is part of macOS, so PkgDeck won't remove it."
-            )));
+            return Err(refused(
+                self.backend,
+                format!("{name} is part of macOS, so PkgDeck won't remove it."),
+            ));
         }
         let metadata = fs::symlink_metadata(path).map_err(|_| EngineError::NotFound)?;
         if metadata.file_type().is_symlink() {
-            return Err(refused(format!(
-                "{} is an alias, not the app itself. Remove the app it points to.",
-                path.display()
-            )));
+            return Err(refused(
+                self.backend,
+                format!(
+                    "{} is an alias, not the app itself. Remove the app it points to.",
+                    path.display()
+                ),
+            ));
         }
         let output = self
             .transport
@@ -507,9 +514,10 @@ impl Remover<'_> {
             .lines()
             .any(|line| visible(Path::new(line.trim())).starts_with(path));
         if open {
-            return Err(refused(format!(
-                "{name} is open. Quit it, then remove it again."
-            )));
+            return Err(refused(
+                self.backend,
+                format!("{name} is open. Quit it, then remove it again."),
+            ));
         }
         Ok(())
     }
@@ -561,10 +569,13 @@ impl Remover<'_> {
             return Err(ExecutionError::Failed(result).into());
         }
         if fs::symlink_metadata(path).is_ok() {
-            return Err(refused(format!(
-                "{name} is still at {} after moving it to the Trash.",
-                path.display()
-            )));
+            return Err(refused(
+                self.backend,
+                format!(
+                    "{name} is still at {} after moving it to the Trash.",
+                    path.display()
+                ),
+            ));
         }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -580,7 +591,10 @@ impl Remover<'_> {
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
             .ok_or_else(|| {
-                refused("PkgDeck can't find your home folder, so it has no Trash to use.")
+                refused(
+                    self.backend,
+                    "PkgDeck can't find your home folder, so it has no Trash to use.",
+                )
             })?;
         let trash = home.join(".Trash");
         if fs::symlink_metadata(&trash).is_err() {
@@ -593,10 +607,13 @@ impl Remover<'_> {
         // that sends the app somewhere else.
         let home_owner = fs::metadata(&home).map_err(ExecutionError::from)?.uid();
         if !fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir() && m.uid() == home_owner) {
-            return Err(refused(format!(
-                "{} isn't a folder you own, so PkgDeck won't move apps into it.",
-                trash.display()
-            )));
+            return Err(refused(
+                self.backend,
+                format!(
+                    "{} isn't a folder you own, so PkgDeck won't move apps into it.",
+                    trash.display()
+                ),
+            ));
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         (1..=TRASH_NAMES)
@@ -606,7 +623,7 @@ impl Remover<'_> {
             })
             .find(|candidate| fs::symlink_metadata(candidate).is_err())
             .ok_or_else(|| {
-                refused(format!(
+                refused(self.backend, format!(
                     "The Trash already holds {TRASH_NAMES} apps named {stem}. Empty it, then try again."
                 ))
             })
@@ -995,10 +1012,13 @@ impl MacApps {
         if listed.is_some_and(|listed| {
             listed.bundle_id != now.bundle_id || listed.canonical != now.canonical
         }) {
-            return Err(refused(format!(
-                "{} changed since PkgDeck listed it. Reload, then try again.",
-                path.display()
-            )));
+            return Err(refused(
+                ID,
+                format!(
+                    "{} changed since PkgDeck listed it. Reload, then try again.",
+                    path.display()
+                ),
+            ));
         }
         let name = now.details.package.display_name;
         let remover = Remover {
@@ -1012,7 +1032,7 @@ impl MacApps {
             // Without Homebrew nothing can manage the app.
             Err(EngineError::Execution(ExecutionError::Disabled(_))) => vec![],
             Err(error) => {
-                return Err(refused(format!(
+                return Err(refused(ID, format!(
                     "PkgDeck couldn't check whether Homebrew manages {name} ({error}), so it won't remove it."
                 )))
             }
@@ -1021,10 +1041,13 @@ impl MacApps {
             [] => return remover.trash(&name, path, cancel, progress),
             [token] => token,
             _ => {
-                return Err(refused(format!(
+                return Err(refused(
+                    ID,
+                    format!(
                 "Homebrew's records name more than one cask for {name} ({}). Remove it with brew.",
                 owners.join(", ")
-            )))
+            ),
+                ))
             }
         };
         progress(Progress::Message(format!(
@@ -1042,10 +1065,13 @@ impl MacApps {
             true,
         )?;
         if fs::symlink_metadata(path).is_ok() {
-            return Err(refused(format!(
-                "Homebrew finished, but {name} is still at {}.",
-                path.display()
-            )));
+            return Err(refused(
+                ID,
+                format!(
+                    "Homebrew finished, but {name} is still at {}.",
+                    path.display()
+                ),
+            ));
         }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,

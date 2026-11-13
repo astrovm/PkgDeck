@@ -188,6 +188,9 @@ pub enum ExecutionError {
     /// The package manager changed nothing because it couldn't reach a
     /// repository it needs. Its own line, which names the repository.
     Unreachable(String),
+    /// PkgDeck runs as root, so it makes no change (see
+    /// [`crate::host::ROOT_REFUSAL`]).
+    RunsAsRoot,
 }
 impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -195,6 +198,7 @@ impl std::fmt::Display for ExecutionError {
             Self::Disabled(s) | Self::Invalid(s) | Self::Io(s) => f.write_str(s),
             Self::Helper(s) => write!(f, "PkgDeck's system helper failed: {s}"),
             Self::Unreachable(s) => write!(f, "a repository couldn't be reached: {s}"),
+            Self::RunsAsRoot => f.write_str(crate::host::ROOT_REFUSAL),
             Self::Cancelled => f.write_str("operation cancelled before completion"),
             Self::TimedOut => f.write_str("host read timed out"),
             Self::AuthorizationCancelled => f.write_str("authorization cancelled"),

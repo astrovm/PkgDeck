@@ -2580,9 +2580,7 @@ fn a_cask_brew_skipped_without_failing_does_not_read_as_updated() {
     // brew skips a disabled cask and still exits 0.
     let left_behind = Err(EngineError::Refused {
         backend: "homebrew-cask".into(),
-        refusal: Refusal::Explained(
-            "Homebrew didn't update this cask or say why. It's still on version 1.".into(),
-        ),
+        refusal: Refusal::Explained("Homebrew didn't update this cask or say why.".into()),
     });
     let script = brew(|line| match line {
         "w:brew upgrade --cask -- disabled other no-version unknown" => ok(""),

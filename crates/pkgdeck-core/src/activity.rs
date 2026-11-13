@@ -130,19 +130,9 @@ impl History {
             .truncate(false)
             .open(self.path.with_extension("lock"))?;
         flock(&lock, FlockOperation::LockExclusive)?;
-        let mut entries: Vec<Entry> = fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        let mut entries = fs::read(&self.path)
+            .map(|bytes| parse(&bytes))
             .unwrap_or_default();
-        for entry in entries.iter_mut().filter(|entry| !entry.plain) {
-            for (outcome, reason) in entry.outcomes.iter().zip(&mut entry.reasons) {
-                if *outcome == Outcome::Failed {
-                    *reason = None;
-                }
-            }
-            entry.reasons = said(std::mem::take(&mut entry.reasons));
-            entry.plain = true;
-        }
         let value = mutate(&mut entries);
         if entries.len() > LIMIT {
             entries.drain(..entries.len() - LIMIT);
@@ -326,7 +316,9 @@ pub fn reason(error: &EngineError) -> String {
                 name(backend)
             )
         }
-        EngineError::Unavailable { backend, .. } => format!("{} couldn't be used", name(backend)),
+        EngineError::Unavailable { backend, .. } => {
+            format!("PkgDeck couldn't use {}", name(backend))
+        }
         EngineError::Execution(E::Failed(done)) => {
             format!("The package manager {}", done.ended())
         }
@@ -338,7 +330,7 @@ pub fn reason(error: &EngineError) -> String {
         EngineError::Execution(E::Io(_)) => {
             "A file or a command PkgDeck needed couldn't be used".into()
         }
-        EngineError::Execution(E::Disabled(_)) => "The package manager couldn't be used".into(),
+        EngineError::Execution(E::Disabled(_)) => "PkgDeck couldn't use the package manager".into(),
         EngineError::Execution(E::Helper(_)) => {
             "PkgDeck's system helper couldn't run this change".into()
         }
@@ -352,6 +344,7 @@ pub fn reason(error: &EngineError) -> String {
         | EngineError::Cancelled
         | EngineError::Execution(
             E::Cancelled
+            | E::RunsAsRoot
             | E::TimedOut
             | E::AuthorizationCancelled
             | E::AuthorizationDenied
@@ -389,6 +382,24 @@ fn ended_as(outcomes: &[Outcome]) -> State {
     }
 }
 /// `reasons` or `names` as stored: nothing at all when none is known.
+/// The entries stored in `bytes`, or none when it can't be read. The
+/// reasons of failed changes an older PkgDeck stored are dropped: they could
+/// hold what a tool printed. An older PkgDeck still running leaves
+/// [`Entry::plain`] out when it writes, so then the reasons this one stored
+/// go too. That loses words, never shows a tool's.
+pub fn parse(bytes: &[u8]) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = serde_json::from_slice(bytes).unwrap_or_default();
+    for entry in entries.iter_mut().filter(|entry| !entry.plain) {
+        for (outcome, reason) in entry.outcomes.iter().zip(&mut entry.reasons) {
+            if *outcome == Outcome::Failed {
+                *reason = None;
+            }
+        }
+        entry.reasons = said(std::mem::take(&mut entry.reasons));
+        entry.plain = true;
+    }
+    entries
+}
 fn said(reasons: Vec<Option<String>>) -> Vec<Option<String>> {
     if reasons.iter().all(Option::is_none) {
         vec![]
@@ -730,7 +741,7 @@ mod tests {
                     backend: "docker".into(),
                     reason: "Cannot connect to tcp://user:secret@host:2376".into(),
                 },
-                "Docker images couldn't be used.",
+                "PkgDeck couldn't use Docker images.",
             ),
             (
                 EngineError::Execution(ExecutionError::Io(
@@ -744,11 +755,15 @@ mod tests {
             ),
             (
                 EngineError::Execution(ExecutionError::Disabled("secret".into())),
-                "The package manager couldn't be used.",
+                "PkgDeck couldn't use the package manager.",
             ),
             (
                 EngineError::Execution(ExecutionError::Helper("secret".into())),
                 "PkgDeck's system helper couldn't run this change.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::RunsAsRoot),
+                crate::host::ROOT_REFUSAL,
             ),
             (
                 EngineError::Execution(ExecutionError::LockBusy),

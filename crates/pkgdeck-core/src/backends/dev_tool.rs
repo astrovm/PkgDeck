@@ -2091,12 +2091,13 @@ impl<T: Transport> DevTool<T> {
             )
         }) {
             // The source itself can name a private address or a token. Cargo
-            // lists a Git one as "(<url>?tag=v1#<commit>)" and a folder as
-            // "(/path)".
+            // lists a Git one as "(<url>?tag=v1#<commit>)", a folder as
+            // "(/path)" or "(dir /path)", and a registry as
+            // "(registry `name`)".
             let source = source.trim_start_matches('(');
-            let from = if source.starts_with('/') {
+            let from = if source.starts_with('/') || source.starts_with("dir ") {
                 "a folder"
-            } else if source.starts_with("registry+") || source.starts_with("sparse+") {
+            } else if source.starts_with("registry ") {
                 "another registry"
             } else {
                 "a Git repository"

@@ -78,7 +78,7 @@ pub(crate) fn refuse_root(write: bool) -> Result<(), ExecutionError> {
 }
 fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
     if write && root {
-        return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
+        return Err(ExecutionError::RunsAsRoot);
     }
     Ok(())
 }
@@ -2988,10 +2988,8 @@ mod boundary_tests {
 
     #[test]
     fn only_writes_as_root_are_refused() {
-        assert!(matches!(
-            refuse_root_as(true, true),
-            Err(ExecutionError::Invalid(reason)) if reason == ROOT_REFUSAL
-        ));
+        assert_eq!(refuse_root_as(true, true), Err(ExecutionError::RunsAsRoot));
+        assert_eq!(ExecutionError::RunsAsRoot.to_string(), ROOT_REFUSAL);
         assert!(refuse_root_as(false, true).is_ok());
         assert!(refuse_root_as(true, false).is_ok());
     }

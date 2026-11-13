@@ -910,9 +910,9 @@ fn left_behind(casks: &[Cask], token: &str) -> Option<EngineError> {
     let installed = cask.installed.as_deref()?;
     (cask.version.as_deref() != Some(installed)).then(|| EngineError::Refused {
         backend: "homebrew-cask".into(),
-        refusal: Refusal::Explained(format!(
-            "Homebrew didn't update this cask or say why. It's still on version {installed}."
-        )),
+        // Its row shows the version it's on. The refusal holds only PkgDeck's
+        // words, so Activity can keep it.
+        refusal: Refusal::Explained("Homebrew didn't update this cask or say why.".into()),
     })
 }
 impl<T: Transport> HomebrewCask<T> {

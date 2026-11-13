@@ -209,6 +209,7 @@ fn execution_text(error: &Value) -> String {
         Some("Interrupted") => "The package manager was interrupted. Check its state before trying again.".into(),
         Some("TimedOut") => "The package manager took too long to answer.".into(),
         Some("Cancelled") => "Cancelled.".into(),
+        Some("RunsAsRoot") => pkgdeck_core::host::ROOT_REFUSAL.into(),
         Some(other) => clean(other),
         None => {
             if let Some(text) = ["Invalid", "Io", "Disabled", "Helper"]
@@ -1715,6 +1716,7 @@ mod tests {
             ),
             (json!({"Execution": "TimedOut"}), "took too long"),
             (json!({"Execution": "Cancelled"}), "Cancelled."),
+            (json!({"Execution": "RunsAsRoot"}), "runs as root"),
             (json!({"Execution": {"Invalid": "bad input"}}), "bad input"),
             (json!({"Execution": {"Io": "broken pipe"}}), "broken pipe"),
             (

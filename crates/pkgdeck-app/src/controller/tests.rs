@@ -5721,6 +5721,75 @@ impl Backend for PasswordCask {
             }
     }
 }
+/// APT whose dry run fails with what apt-get printed.
+struct UnplannedApt;
+impl Backend for UnplannedApt {
+    fn id(&self) -> &str {
+        "apt"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Installed, Capability::Upgrade]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+        Err(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: Some(100),
+            signal: None,
+            stdout: vec![],
+            stderr:
+                b"E: Malformed entry 1 in list file /etc/apt/sources.list.d/secret.list (URI)\n"
+                    .to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        })
+        .into())
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        Ok(OperationOutcome::default())
+    }
+}
+#[test]
+fn an_automatic_run_shows_why_apt_waits_but_keeps_no_tool_text() {
+    let mut engine = Engine::default();
+    engine.register(UnplannedApt).unwrap();
+    let mut one = synthetic_package("synthetic", "Synthetic").id;
+    one.backend = "apt".into();
+    // One package's update has no dry run to wait for, so it still runs.
+    let job = Job::AutoUpgrade(
+        vec![
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            Operation::Upgrade(one),
+        ],
+        false,
+    );
+    let replies = run_job(&mut engine, job, &Cancellation::default());
+    let batch = replies
+        .into_iter()
+        .find_map(|reply| match reply {
+            Reply::Done(Ok(Payload::Batch(batch))) => Some(batch),
+            _ => None,
+        })
+        .expect("the run ends with a batch");
+    let step = &batch.steps[0];
+    assert_eq!(step.outcome, Outcome::Failed);
+    assert!(!step.blamed);
+    assert!(
+        matches!(&step.said, Said::Because(shown) if shown.contains("secret.list")),
+        "{:?}",
+        step.said
+    );
+    assert_eq!(step.kept.as_deref(), Some("APT stopped with an error."));
+    assert_eq!(batch.steps[1].outcome, Outcome::Finished);
+}
 #[test]
 fn an_automatic_run_remembers_casks_that_stopped_for_the_password() {
     let cask = |name: &str| {
@@ -9711,6 +9780,18 @@ fn activity_reads_share_the_lock_and_never_write() {
         (entry.id, entry.outcomes),
         (waiting, vec![Outcome::Skipped])
     );
+    // A reason an older PkgDeck kept from a tool doesn't show.
+    let mut raw: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
+    raw[0]["outcomes"] = json!(["failed"]);
+    raw[0]["reasons"] = json!(["The package manager exited with code 1: secret."]);
+    raw[0].as_object_mut().unwrap().remove("plain");
+    std::fs::write(
+        path.join("activity.json"),
+        serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    assert!(store.load().unwrap()[0].reasons.is_empty());
     // A broken file reads as no history rather than failing.
     std::fs::write(path.join("activity.json"), b"not json").unwrap();
     assert!(read_activity(&path.join("activity.json"))
@@ -14755,18 +14836,15 @@ fn a_cleanup_left_alone_is_not_a_failure() {
                 backend: "docker".into(),
                 reason: "Docker is installed but unavailable: tcp://user:secret@host".into(),
             },
-            "Docker images couldn't be used.",
+            "PkgDeck couldn't use Docker images.",
         ),
         (
-            EngineError::Unavailable {
-                backend: "docker".into(),
-                reason: "PkgDeck must run as an unprivileged user".into(),
-            },
+            EngineError::Execution(ExecutionError::RunsAsRoot),
             ROOT_MESSAGE,
         ),
         (
             EngineError::Execution(ExecutionError::Disabled("secret".into())),
-            "Docker images couldn't be used.",
+            "PkgDeck couldn't use Docker images.",
         ),
         (
             EngineError::Execution(ExecutionError::Invalid("secret".into())),
@@ -14776,7 +14854,7 @@ fn a_cleanup_left_alone_is_not_a_failure() {
             EngineError::Execution(ExecutionError::Io(
                 "Couldn't remove ~/x: fatal: secret".into(),
             )),
-            "Docker images couldn't finish: a file or a command it needed couldn't be used.",
+            "A file or a command PkgDeck needed couldn't be used.",
         ),
     ] {
         assert_eq!(

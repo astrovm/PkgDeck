@@ -3423,7 +3423,7 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
     .unwrap();
     // Two outdated crates.io tools, a current one, and two from elsewhere
     // whose names crates.io has for other crates.
-    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\nother v0.1.0 (sparse+https://registry.example.invalid/index/):\n    other\n";
+    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\nother v0.1.0 (registry `my-registry`):\n    other\n";
     let fixture = DevFixture {
         home: Some(base.to_str().unwrap().into()),
         version: "cargo 1.98.1\n".into(),
