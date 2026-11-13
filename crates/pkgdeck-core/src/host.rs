@@ -70,6 +70,8 @@ pub struct Host {
 }
 
 /// Why a write refuses to start when the frontend itself runs as root.
+/// Why a download can't start.
+pub const NO_CURL: &str = "PkgDeck needs curl to download this, and curl isn't installed";
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
 /// Writes refuse to run as root (see [`ROOT_REFUSAL`]).

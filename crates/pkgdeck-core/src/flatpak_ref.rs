@@ -71,9 +71,9 @@ fn reference_bytes(
             source,
         ]
         .map(OsString::from);
-        let executable = host.resolve("curl")?.ok_or_else(|| {
-            invalid("PkgDeck needs curl to download this, and curl isn't installed")
-        })?;
+        let executable = host
+            .resolve("curl")?
+            .ok_or_else(|| invalid(crate::host::NO_CURL))?;
         let result = host.read(
             &executable,
             &args,
@@ -291,6 +291,25 @@ pub fn verified_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_without_curl_says_so() {
+        let empty =
+            std::env::temp_dir().join(format!("pkgdeck-no-curl-ref-{}", std::process::id()));
+        fs::create_dir_all(&empty).unwrap();
+        let host = Host::new(
+            crate::host::Runtime::Native,
+            [(OsString::from("PATH"), empty.as_os_str().to_os_string())].into(),
+        );
+        let error = reference_bytes(
+            "https://example.invalid/a.flatpakref",
+            &Cancellation::default(),
+            &host,
+        )
+        .unwrap_err();
+        assert!(error.to_string().ends_with(crate::host::NO_CURL), "{error}");
+        fs::remove_dir_all(empty).unwrap();
+    }
 
     #[test]
     fn remote_reference_reads_bounded_https_without_following_redirects() {

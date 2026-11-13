@@ -1321,9 +1321,11 @@ impl AppImage {
         if let Some(curl) = &self.curl {
             return Ok(curl.clone());
         }
-        Host::current().resolve("curl")?.ok_or_else(|| {
-            Self::invalid("PkgDeck needs curl to download this, and curl isn't installed")
-        })
+        Self::curl_on(&Host::current())
+    }
+    fn curl_on(host: &Host) -> Result<PathBuf, EngineError> {
+        host.resolve("curl")?
+            .ok_or_else(|| Self::invalid(crate::host::NO_CURL))
     }
     /// A project's releases, newest first. Answers are kept and reused for a
     /// while, and asked again with their ETag, which GitHub doesn't count.
@@ -3553,6 +3555,20 @@ esac
         let backend = AppImage::new("/nonexistent/a".into(), "/nonexistent/b".into(), 1000);
         // Every build PkgDeck tests on has curl; it's found on the PATH.
         assert!(backend.curl().unwrap().ends_with("curl"));
+        // Without curl, a download says why it can't start.
+        let empty = test_base("no-curl");
+        fs::create_dir_all(&empty).unwrap();
+        let host = Host::new(
+            crate::host::Runtime::Native,
+            [(
+                std::ffi::OsString::from("PATH"),
+                empty.as_os_str().to_os_string(),
+            )]
+            .into(),
+        );
+        let error = AppImage::curl_on(&host).unwrap_err();
+        assert!(error.to_string().ends_with(crate::host::NO_CURL), "{error}");
+        fs::remove_dir_all(empty).unwrap();
     }
 
     #[test]
