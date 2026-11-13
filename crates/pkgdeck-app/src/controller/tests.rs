@@ -5126,13 +5126,23 @@ fn repository_confirmation_and_refresh_invalidate_cached_state() {
                     priority: None,
                 },
             ],
-            errors: vec!["Synthetic partial failure".into()],
+            errors: vec![repositories::Problem {
+                backend: "flatpak".into(),
+                scope: Scope::System,
+                file: None,
+                error: EngineError::Execution(pkgdeck_core::process::ExecutionError::Io(
+                    "Synthetic partial failure".into(),
+                )),
+            }],
             features: repositories::Features::default(),
         })));
     let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
     assert_eq!(report["repositories"][0]["scope"], "system");
     assert_eq!(report["repositories"][1]["scope"], "user");
-    assert_eq!(report["errors"][0], "Synthetic partial failure.");
+    assert_eq!(
+        report["errors"][0],
+        "Flatpak, System: Synthetic partial failure."
+    );
     assert_eq!(report["repositories"][0]["where"], "Flatpak, System");
     assert!(controller
         .rust()
@@ -9314,23 +9324,51 @@ fn repository_text_names_sources_and_scopes() {
         };
         assert!(repository_label(&action).starts_with(text));
     }
-    assert_eq!(
-        repository_error("flatpak: host command failed (Some(1)): error: No remote refs\n"),
-        "Flatpak couldn't run: No remote refs."
-    );
-    assert_eq!(
-        repository_error("apt: listing failed"),
-        "APT: Listing failed."
-    );
-    // A line that only starts with the same letters still gets the name.
-    assert_eq!(
-        repository_error("apt: APTX daemon is down"),
-        "APT: APTX daemon is down."
-    );
-    assert_eq!(
-        repository_error("/etc/apt/sources.list: unreadable"),
-        "/etc/apt/sources.list: unreadable."
-    );
+    use pkgdeck_core::process::{Completion, ExecutionError as E};
+    let problem = |backend: &str, scope: Scope, file: Option<&str>, error| repositories::Problem {
+        backend: backend.into(),
+        scope,
+        file: file.map(Into::into),
+        error,
+    };
+    let failed = EngineError::Execution(E::Failed(Completion {
+        code: Some(1),
+        signal: None,
+        stdout: Vec::new(),
+        stderr: b"error: No remote refs\n".to_vec(),
+        truncated: false,
+        cancellation_deferred: false,
+    }));
+    let unreadable = || EngineError::Execution(E::Io("Permission denied (os error 13)".into()));
+    for (problem, text) in [
+        (
+            problem("flatpak", Scope::User { uid: 1000 }, None, failed.clone()),
+            "Flatpak, User: No remote refs.",
+        ),
+        (
+            problem("flatpak", Scope::System, None, failed.clone()),
+            "Flatpak, System: No remote refs.",
+        ),
+        (
+            problem("fwupd", Scope::System, None, failed),
+            "Firmware, System: No remote refs.",
+        ),
+        (
+            problem("dnf", Scope::System, None, unreadable()),
+            "DNF, System: Permission denied (os error 13).",
+        ),
+        (
+            problem(
+                "apt",
+                Scope::System,
+                Some("/etc/apt/sources.list"),
+                unreadable(),
+            ),
+            "APT, /etc/apt/sources.list: Permission denied (os error 13).",
+        ),
+    ] {
+        assert_eq!(repository_error(&problem), text);
+    }
 }
 #[test]
 fn failed_commands_keep_their_output_for_the_banner() {

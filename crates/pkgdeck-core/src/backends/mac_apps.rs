@@ -1009,7 +1009,7 @@ impl MacApps {
                 ID,
                 format!(
                     "{} changed since PkgDeck listed it. Reload, then try again.",
-                    path.display()
+                    now.details.package.display_name
                 ),
             ));
         }
@@ -1063,10 +1063,7 @@ impl MacApps {
         if fs::symlink_metadata(path).is_ok() {
             return Err(refused(
                 ID,
-                format!(
-                    "Homebrew finished, but {name} is still at {}.",
-                    path.display()
-                ),
+                format!("Homebrew finished, but {name} is still in its folder."),
             ));
         }
         Ok(OperationOutcome {
@@ -2722,9 +2719,10 @@ mod tests {
         // Homebrew that leaves the app behind is reported.
         let mut apps = backend();
         let error = remove(&mut apps, &kept).0.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Homebrew finished, but Fixture App is still at"));
+        assert_eq!(
+            error.to_string(),
+            "Homebrew finished, but Fixture App is still in its folder."
+        );
         // Two casks claim it: PkgDeck can't pick one.
         let mut apps = backend();
         let error = remove(&mut apps, &shared).0.unwrap_err();
@@ -2786,13 +2784,13 @@ mod tests {
         scanned.transport = Box::new(mover.clone());
         scanned.installed(&cancel).unwrap();
         rewrite("com.example.other");
-        let error = remove(&mut scanned, &app).0.unwrap_err();
+        let error = remove(&mut scanned, &app).0.unwrap_err().to_string();
+        // Activity keeps this sentence: no home path in it.
         assert!(
-            error
-                .to_string()
-                .contains("changed since PkgDeck listed it"),
+            error.ends_with(" changed since PkgDeck listed it. Reload, then try again."),
             "{error}"
         );
+        assert!(!error.contains(&*app.to_string_lossy()), "{error}");
         // Picked by its exact path, then changed.
         let mut picked = f.backend(Ok(BTreeMap::new()));
         picked.transport = Box::new(mover.clone());

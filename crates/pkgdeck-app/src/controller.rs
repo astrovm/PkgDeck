@@ -2738,18 +2738,18 @@ fn repository_label(action: &RepositoryAction) -> String {
         source_and_scope(&action.backend, &action.scope)
     )
 }
-/// A repository listing error such as "flatpak: host command failed…",
-/// with the source named as people know it.
-fn repository_error(error: &str) -> String {
-    match error.split_once(": ") {
-        Some((source, rest)) if pkgdeck_core::backends::BACKEND_IDS.contains(&source) => {
-            about_source(
-                &source_display_name(source),
-                &plain_text(rest, Some(source)),
-            )
-        }
-        _ => plain_text(error, None),
-    }
+/// A source or a file PkgDeck couldn't list repositories from, as one
+/// sentence that names where first: "Flatpak, User: No remote refs."
+fn repository_error(problem: &repositories::Problem) -> String {
+    let place = match &problem.file {
+        Some(file) => format!(
+            "{}, {}",
+            source_display_name(&problem.backend),
+            file.display()
+        ),
+        None => source_and_scope(&problem.backend, &problem.scope),
+    };
+    format!("{place}: {}", plain_error(&problem.error, None, false))
 }
 /// The repositories report, with each repository's source and scope in
 /// people's words ("where": "Flatpak, System") and errors as sentences.
@@ -2769,7 +2769,7 @@ fn repositories_json(report: &repositories::Report) -> QString {
     value["errors"] = json!(report
         .errors
         .iter()
-        .map(|error| repository_error(error))
+        .map(repository_error)
         .collect::<Vec<_>>());
     encoded(value)
 }
