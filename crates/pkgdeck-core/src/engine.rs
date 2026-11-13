@@ -34,7 +34,9 @@ pub enum EngineError {
         backend: String,
         reason: String,
     },
-    /// PkgDeck stopped the change itself, before the source ran it.
+    /// PkgDeck stopped the change itself, before the source ran it, or
+    /// found it didn't finish and says why in its own words. The refusal
+    /// holds no text a tool printed: Activity keeps it as it is.
     Refused {
         backend: String,
         refusal: Refusal,

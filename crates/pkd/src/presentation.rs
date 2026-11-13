@@ -166,7 +166,7 @@ pub fn error_text(error: &Value) -> String {
                     capability_verb(inner["capability"].as_str().unwrap_or_default())
                 ),
                 "Unavailable" => format!(
-                    "{} isn't available: {}",
+                    "PkgDeck couldn't use {}: {}",
                     source_name(&field(inner, "backend")),
                     field(inner, "reason")
                 ),
@@ -255,8 +255,11 @@ fn failure_text(failure: &Value) -> String {
                 return format!("{name} {}", outcome(result));
             }
             let text = error_text(&failure["error"]);
-            // Many errors already start with their source; don't repeat it.
-            if text.starts_with(&format!("{name}:")) || text.starts_with(&format!("{name} ")) {
+            // Many errors already name their source first; don't repeat it.
+            if text.starts_with(&format!("{name}:"))
+                || text.starts_with(&format!("{name} "))
+                || text.starts_with(&format!("PkgDeck couldn't use {name}:"))
+            {
                 text
             } else {
                 format!("{name}: {text}")
@@ -1727,7 +1730,7 @@ mod tests {
             (json!({"Execution": {"Unknown": 1}}), "Unknown"),
             (
                 json!({"Unavailable": {"backend": "dnf", "reason": "not found"}}),
-                "DNF isn't available: not found",
+                "PkgDeck couldn't use DNF: not found",
             ),
             (
                 json!({"InvalidResponse": {"backend": "apt", "reason": "odd"}}),
@@ -2011,7 +2014,7 @@ mod tests {
         let failure = json!({"backend": "flatpak", "error": {"InvalidResponse": {"backend": "flatpak", "reason": "bad"}}});
         assert_eq!(failure_text(&failure), "Flatpak: bad");
         let failure = json!({"backend": "dnf", "error": {"Unavailable": {"backend": "dnf", "reason": "missing"}}});
-        assert_eq!(failure_text(&failure), "DNF isn't available: missing");
+        assert_eq!(failure_text(&failure), "PkgDeck couldn't use DNF: missing");
         let repositories = json!({"repositories": [
             {"title": "Flathub", "backend": "flatpak", "scope": {"user": {"uid": 1000}}, "enabled": true, "url": "https://dl.flathub.org/repo/"}
         ]});

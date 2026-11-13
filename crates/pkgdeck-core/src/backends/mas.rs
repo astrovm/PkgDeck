@@ -291,9 +291,10 @@ impl<T: Transport> MacAppStore<T> {
                 )
             })?;
         if !path.join("Contents/_MASReceipt/receipt").is_file() {
+            // The path came from mas: Activity keeps this sentence, so it
+            // names only the app.
             return Err(refused(ID, format!(
-                "{} has no App Store receipt, so it may not be {} from the App Store. Reload, then try again.",
-                path.display(),
+                "{} has no App Store receipt where mas lists it, so it may be another app. Reload, then try again.",
                 app.name
             )));
         }
@@ -321,11 +322,13 @@ impl<T: Transport> MacAppStore<T> {
                 return Ok(outcome);
             }
         }
-        Err(refused(ID, format!(
-            "{} is in the Trash, but the App Store still lists it at {}. Reload in a moment to check.",
-            app.name,
-            path.display()
-        )))
+        Err(refused(
+            ID,
+            format!(
+            "{} is in the Trash, but the App Store still lists it. Reload in a moment to check.",
+            app.name
+        ),
+        ))
     }
 }
 

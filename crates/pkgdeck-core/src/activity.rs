@@ -381,7 +381,6 @@ fn ended_as(outcomes: &[Outcome]) -> State {
         State::Finished
     }
 }
-/// `reasons` or `names` as stored: nothing at all when none is known.
 /// The entries stored in `bytes`, or none when it can't be read. The
 /// reasons of failed changes an older PkgDeck stored are dropped: they could
 /// hold what a tool printed. An older PkgDeck still running leaves
@@ -400,6 +399,7 @@ pub fn parse(bytes: &[u8]) -> Vec<Entry> {
     }
     entries
 }
+/// `reasons` or `names` as stored: nothing at all when none is known.
 fn said(reasons: Vec<Option<String>>) -> Vec<Option<String>> {
     if reasons.iter().all(Option::is_none) {
         vec![]

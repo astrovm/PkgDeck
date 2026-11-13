@@ -322,7 +322,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
                 return ROOT_MESSAGE.into();
             }
             format!(
-                "{} isn't available: {}",
+                "PkgDeck couldn't use {}: {}",
                 source_display_name(backend),
                 lower_first(&plain_text(reason, None))
             )

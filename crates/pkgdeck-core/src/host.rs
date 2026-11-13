@@ -1605,10 +1605,12 @@ impl Host {
         authorization: Authorization,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
+        // A request that makes no sense is refused first, as root too.
+        let arguments = AptAction::group_arguments(actions)?;
         refuse_root(true)?;
         classify_apt(self.privileged(
             Path::new("/usr/bin/apt-get"),
-            &AptAction::group_arguments(actions)?,
+            &arguments,
             authorization,
             cancel,
         )?)

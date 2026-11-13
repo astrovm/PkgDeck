@@ -5379,7 +5379,7 @@ fn source_failures_and_busy_requests_preserve_the_active_operation() {
     assert!(controller
         .details()
         .to_string()
-        .contains("Firmware isn't available: synthetic daemon offline."));
+        .contains("PkgDeck couldn't use Firmware: synthetic daemon offline."));
     controller.as_mut().rust_mut().failures.clear();
     controller.as_mut().rust_mut().sources.push(Source {
         backend: "fwupd".into(),
@@ -6103,6 +6103,8 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             false,
         ),
         (EngineError::Execution(ExecutionError::TimedOut), false),
+        // PkgDeck running as root says nothing about the update.
+        (EngineError::Execution(ExecutionError::RunsAsRoot), false),
         (refused(Refusal::NeedsReview), false),
         (refused(Refusal::PartnerFailed { blamed: false }), false),
         (refused(Refusal::PartnerFailed { blamed: true }), true),
@@ -9612,7 +9614,7 @@ fn engine_errors_become_one_plain_sentence() {
             None,
             false
         ),
-        "APT isn't available: APT lists are missing."
+        "PkgDeck couldn't use APT: APT lists are missing."
     );
     assert_eq!(
         plain_error(

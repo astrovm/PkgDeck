@@ -1412,8 +1412,6 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
 fn joins_cask_updates(job: &Job, authorization: Authorization) -> bool {
     matches!(job, Job::UpgradeAll(..)) && matches!(authorization, Authorization::Polkit)
 }
-/// Run a confirmed batch and summarize it. `held` changes are reported as
-/// failed with their reason and never run.
 /// Why a change in a batch is held back: what PkgDeck shows, and what
 /// Activity keeps, which never holds what a tool printed.
 #[derive(Clone, Debug)]
@@ -1430,6 +1428,8 @@ impl Held {
         }
     }
 }
+/// Run a confirmed batch and summarize it. `held` changes are reported as
+/// failed with their reason and never run.
 fn run_batch(
     engine: &mut Engine,
     operations: &[Operation],

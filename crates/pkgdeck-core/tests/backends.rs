@@ -3423,13 +3423,13 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
     .unwrap();
     // Two outdated crates.io tools, a current one, and two from elsewhere
     // whose names crates.io has for other crates.
-    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\nother v0.1.0 (registry `my-registry`):\n    other\n";
+    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\nother v0.1.0 (registry `my-registry`):\n    other\nvendored v0.1.0 (dir /home/test/vendor):\n    vendored\n";
     let fixture = DevFixture {
         home: Some(base.to_str().unwrap().into()),
         version: "cargo 1.98.1\n".into(),
         list: list.into(),
         registry: Some(
-            "bat = \"0.25.0\"\nfd-find = \"10.0.0\"\nripgrep = \"15.2.0\"\navm = \"9.0.0\"\nlocal = \"9.0.0\"\nother = \"9.0.0\"\n"
+            "bat = \"0.25.0\"\nfd-find = \"10.0.0\"\nripgrep = \"15.2.0\"\navm = \"9.0.0\"\nlocal = \"9.0.0\"\nother = \"9.0.0\"\nvendored = \"9.0.0\"\n"
                 .into(),
         ),
         ..DevFixture::default()
@@ -3480,6 +3480,18 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
             .unwrap_err()
             .to_string(),
         "other was installed from another registry, not crates.io. Update it the way you installed it."
+    );
+    let vendored = installed.iter().find(|p| p.id.name == "vendored").unwrap();
+    assert_eq!(
+        backend
+            .execute(
+                &Operation::Upgrade(vendored.id.clone()),
+                &cancel,
+                &mut |_| {}
+            )
+            .unwrap_err()
+            .to_string(),
+        "vendored was installed from a folder, not crates.io. Update it the way you installed it."
     );
     assert_eq!(fixture.writes("cargo").len(), 2);
     // One tool failing doesn't keep the next from updating.

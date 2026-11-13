@@ -1031,10 +1031,13 @@ impl MacApps {
             Ok(records) => records.get(&canonical).cloned().unwrap_or_default(),
             // Without Homebrew nothing can manage the app.
             Err(EngineError::Execution(ExecutionError::Disabled(_))) => vec![],
-            Err(error) => {
-                return Err(refused(ID, format!(
-                    "PkgDeck couldn't check whether Homebrew manages {name} ({error}), so it won't remove it."
-                )))
+            Err(_) => {
+                return Err(refused(
+                    ID,
+                    format!(
+                    "PkgDeck couldn't check whether Homebrew manages {name}, so it won't remove it."
+                ),
+                ))
             }
         };
         let token = match owners.as_slice() {
@@ -2746,9 +2749,11 @@ mod tests {
         let app = f.bundle("App.app", "com.example.app");
         let mut broken = f.backend(Err(invalid(ID, "brew broke")));
         let error = remove(&mut broken, &app).0.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("couldn't check whether Homebrew manages Fixture App"));
+        // What brew printed stays out: Activity keeps this sentence.
+        assert_eq!(
+            error.to_string(),
+            "PkgDeck couldn't check whether Homebrew manages Fixture App, so it won't remove it."
+        );
         let mut cancelled = f.backend(Err(EngineError::Cancelled));
         assert!(matches!(
             remove(&mut cancelled, &app).0,
