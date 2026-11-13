@@ -44,10 +44,10 @@ impl ManagerKind {
         match self {
             Self::Snap => ("snap", &["refresh", "--list"]),
             // `apk list --upgradable` also lists packages /etc/apk/world
-            // pins; an upgrade leaves those alone. Without
+            // pins, and an upgrade leaves those alone. Without
             // --force-missing-repositories, one repository that can't be
             // reached (offline, or one third-party repository down) stops
-            // the whole simulation.
+            // the whole simulation. apk before 2.12 doesn't know the flag.
             Self::Apk => (
                 "apk",
                 &["upgrade", "--simulate", "--force-missing-repositories"],
@@ -279,6 +279,30 @@ fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// Whether apk's output says `text`.
+fn apk_says(done: &Completion, text: &str) -> bool {
+    [&done.stdout, &done.stderr]
+        .iter()
+        .any(|out| String::from_utf8_lossy(out).contains(text))
+}
+
+/// apk older than 2.12 says "apk: unrecognized option: ..." to a flag it
+/// doesn't know.
+fn apk_lacks_an_option(done: &Completion) -> bool {
+    apk_says(done, "unrecognized option")
+}
+
+/// apk refuses a change while a repository it can't reach has no fresh
+/// index (exit 99): "Not continuing due to stale/unavailable repositories".
+/// That says nothing about the package.
+fn apk_repositories_unavailable(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::Execution(ExecutionError::Failed(done))
+            if apk_says(done, "stale/unavailable repositories")
+    )
+}
+
 /// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`
 /// into (`zlib`, `1.4-r0`). apk 3 pads the count: "( 1/12)". A package
 /// world pins to a tagged repository reads "scanelf@edge".
@@ -411,12 +435,14 @@ impl<T: Transport> SystemManager<T> {
             .transport
             .system_manager(executable, &args, cancel, write)?)
     }
-    /// Pending updates by package name. An unavailable listing leaves every
-    /// row's update status as it was rather than failing the inventory.
+    /// Pending updates by package name, or `None` when the manager can't
+    /// tell. Most managers' listing also fails when nothing needs an update
+    /// (`pacman -Qu`), so only apk, which then says so and exits 0, can't
+    /// tell. Either way the inventory itself doesn't fail.
     pub(super) fn updates(
         &self,
         cancel: &Cancellation,
-    ) -> Result<BTreeMap<String, String>, EngineError> {
+    ) -> Result<Option<BTreeMap<String, String>>, EngineError> {
         let (executable, args) = self.kind.update_args();
         let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
         // A check's own copy of the index, while it's newer.
@@ -433,21 +459,17 @@ impl<T: Transport> SystemManager<T> {
                 _ => {}
             }
         }
-        let mut apk_listing = false;
         let result = match self.call_with(executable, args.clone(), cancel, false) {
             Err(EngineError::Execution(ExecutionError::Failed(_))) if args[0] == "-C" => {
                 self.call_with(executable, args[1..].to_vec(), cancel, false)
             }
-            // A world apk can't solve (a package no repository has) fails
-            // the simulation. The plain listing still shows each update,
-            // the pinned ones too, which beats showing none.
-            Err(EngineError::Execution(ExecutionError::Failed(_)))
-                if matches!(self.kind, ManagerKind::Apk) =>
+            Err(EngineError::Execution(ExecutionError::Failed(done)))
+                if matches!(self.kind, ManagerKind::Apk) && apk_lacks_an_option(&done) =>
             {
-                apk_listing = true;
-                let verb = args.len() - self.kind.update_args().1.len();
-                let mut args = args[..verb].to_vec();
-                args.extend(["list".into(), "--upgradable".into()]);
+                let args = args
+                    .into_iter()
+                    .filter(|arg| arg != "--force-missing-repositories")
+                    .collect();
                 self.call_with(executable, args, cancel, false)
             }
             result => result,
@@ -458,10 +480,13 @@ impl<T: Transport> SystemManager<T> {
                 return Err(EngineError::Cancelled)
             }
             Err(error) if matches!(self.kind, ManagerKind::Snap) => return Err(error),
-            Err(_) => return Ok(BTreeMap::new()),
+            // A world apk can't solve (a package no repository has): every
+            // update would fail too, so none is shown as ready.
+            Err(_) if matches!(self.kind, ManagerKind::Apk) => return Ok(None),
+            Err(_) => return Ok(Some(BTreeMap::new())),
         };
         if matches!(self.kind, ManagerKind::Zypper) {
-            return Ok(zypper_updates(&text));
+            return Ok(Some(zypper_updates(&text)));
         }
         let mut arches: Vec<(String, String)> = Vec::new();
         let mut updates: BTreeMap<String, String> = text
@@ -485,7 +510,6 @@ impl<T: Transport> SystemManager<T> {
                         Some((fields[0], fields[3].to_owned()))
                     }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
-                    ManagerKind::Apk if apk_listing => apk_pkgver(fields.first()?),
                     ManagerKind::Apk => apk_upgrading(line),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
                         xbps_pkgver(fields.first()?)
@@ -519,7 +543,7 @@ impl<T: Transport> SystemManager<T> {
                 });
             }
         }
-        Ok(updates)
+        Ok(Some(updates))
     }
     /// `dnf check-update`'s listing, or `None` when it can't tell. It exits
     /// with 100 when there are updates and 0 when there are none.
@@ -1133,9 +1157,16 @@ impl<T: Transport> Backend for SystemManager<T> {
         for package in &mut packages {
             self.snap_icon(package);
             self.snap_components(package);
-            if let Some(candidate) = updates.get(&package.id.name) {
-                package.candidate_version = Some(candidate.clone());
-                package.update = UpdateAvailability::Available;
+            match updates
+                .as_ref()
+                .map(|updates| updates.get(&package.id.name))
+            {
+                None => package.update = UpdateAvailability::Unknown,
+                Some(Some(candidate)) => {
+                    package.candidate_version = Some(candidate.clone());
+                    package.update = UpdateAvailability::Available;
+                }
+                Some(None) => {}
             }
         }
         Ok(packages)
@@ -1310,7 +1341,17 @@ impl<T: Transport> Backend for SystemManager<T> {
             "Running {}. If you cancel, PkgDeck waits for it to finish.",
             self.kind.id()
         )));
-        let result = self.call_with(self.kind.write_executable(operation), args, cancel, true)?;
+        let result = self
+            .call_with(self.kind.write_executable(operation), args, cancel, true)
+            .map_err(|error| match self.kind {
+                ManagerKind::Apk if apk_repositories_unavailable(&error) => {
+                    EngineError::Unavailable {
+                        backend: "apk".into(),
+                        reason: "a repository in /etc/apk/repositories can't be reached".into(),
+                    }
+                }
+                _ => error,
+            })?;
         bytes(self.kind.id(), result.clone())?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -1337,7 +1378,7 @@ impl<T: Transport> Backend for SystemManager<T> {
         if chosen.is_empty() {
             return Ok(vec![]);
         }
-        let updates = self.updates(cancel)?;
+        let updates = self.updates(cancel)?.unwrap_or_default();
         let mut args: Vec<OsString> = vec!["-Qi".into(), "--".into()];
         args.extend(
             updates

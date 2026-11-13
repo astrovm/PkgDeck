@@ -6540,62 +6540,87 @@ fn apk_shows_updates_when_its_simulated_upgrade_cant_tell() {
             .map(|p| (p.id.name, p.candidate_version, p.update))
             .collect::<Vec<_>>()
     };
+    let simulated =
+        "(1/1) Upgrading scanelf@edge (1.3.9-r1 -> 1.3.11-r0)\nOK: 8 MiB in 16 packages\n";
+    let expected = [
+        (
+            "busybox".to_owned(),
+            Some("1.37.0-r12".to_owned()),
+            UpdateAvailability::Current,
+        ),
+        (
+            "scanelf".to_owned(),
+            Some("1.3.11-r0".to_owned()),
+            UpdateAvailability::Available,
+        ),
+    ];
     // A package world pins to a tagged repository ("scanelf@edge") updates
     // under its own name.
     let tagged = Script::new(&[
         ("apk list --installed", installed_lines.as_str()),
         (
             "apk upgrade --simulate --force-missing-repositories",
-            "(1/1) Upgrading scanelf@edge (1.3.9-r1 -> 1.3.11-r0)\nOK: 8 MiB in 16 packages\n",
+            simulated,
         ),
     ]);
-    assert_eq!(
-        updates(&tagged),
-        [
-            (
-                "busybox".into(),
-                Some("1.37.0-r12".into()),
-                UpdateAvailability::Current
-            ),
-            (
-                "scanelf".into(),
-                Some("1.3.11-r0".into()),
-                UpdateAvailability::Available
-            ),
-        ]
-    );
-    // A world apk can't solve fails the simulation; the plain listing still
-    // shows the update.
+    assert_eq!(updates(&tagged), expected);
+    // apk before 2.12 doesn't know --force-missing-repositories; it's asked
+    // again without it.
+    let old = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        (
+            "apk upgrade --simulate --force-missing-repositories",
+            "exit 1\napk: unrecognized option: force-missing-repositories\n",
+        ),
+        ("apk upgrade --simulate", simulated),
+    ]);
+    assert_eq!(updates(&old), expected);
+    // A world apk can't solve fails the simulation, and would fail every
+    // update too: no row says whether it has one.
     let unsolvable = Script::new(&[
         ("apk list --installed", installed_lines.as_str()),
-        ("apk upgrade --simulate", "exit 1\nERROR: unable to select packages:\n  nosuchpkg (no such package):\n"),
-        ("apk list --upgradable", "busybox-1.37.0-r13 x86_64 {busybox} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n"),
+        (
+            "apk upgrade --simulate",
+            "exit 1\nERROR: unable to select packages:\n  nosuchpkg (no such package):\n",
+        ),
     ]);
-    assert_eq!(
-        updates(&unsolvable),
-        [
-            (
-                "busybox".into(),
-                Some("1.37.0-r13".into()),
-                UpdateAvailability::Available
-            ),
-            (
-                "scanelf".into(),
-                Some("1.3.9-r1".into()),
-                UpdateAvailability::Current
-            ),
-        ]
-    );
-    assert!(unsolvable
-        .calls
-        .lock()
-        .unwrap()
-        .contains(&"apk list --upgradable".into()));
-    // Neither can tell: no row shows an update, and none fails.
-    let neither = Script::new(&[("apk list --installed", installed_lines.as_str())]);
-    assert!(updates(&neither)
+    assert!(updates(&unsolvable)
         .iter()
-        .all(|(_, _, update)| *update == UpdateAvailability::Current));
+        .all(|(_, _, update)| *update == UpdateAvailability::Unknown));
+    assert_eq!(unsolvable.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn apk_doesnt_blame_an_update_on_a_repository_it_cant_reach() {
+    let cancel = Cancellation::default();
+    let id = |name: &str| PackageId {
+        backend: "apk".into(),
+        name: name.into(),
+        architecture: std::env::consts::ARCH.into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let mut apk = SystemManager::apk(Script::new(&[
+        ("apk upgrade --update-cache -- zlib", "exit 99\nWARNING: updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
+        ("apk upgrade --update-cache -- musl", "exit 1\nERROR: musl-1.2.6-r0: BAD signature\n"),
+    ]));
+    let error = apk
+        .execute(&Operation::Upgrade(id("zlib")), &cancel, &mut |_| {})
+        .unwrap_err();
+    assert_eq!(
+        error,
+        EngineError::Unavailable {
+            backend: "apk".into(),
+            reason: "a repository in /etc/apk/repositories can't be reached".into(),
+        }
+    );
+    assert!(!error.blames_change());
+    // Any other failure is the update's own.
+    let error = apk
+        .execute(&Operation::Upgrade(id("musl")), &cancel, &mut |_| {})
+        .unwrap_err();
+    assert!(error.blames_change(), "{error:?}");
 }
 
 #[test]

@@ -22,6 +22,7 @@
           <li>An Alpine package from a tagged repository, like scanelf@edge, shows its update</li>
           <li>When one Homebrew cask changed since you reviewed it, the other casks in the run still update</li>
           <li>Updates that failed because of the password prompt or the system helper are tried again</li>
+          <li>An Alpine update that stopped because a repository couldn't be reached is tried again</li>
           <li>Updates that an older PkgDeck marked as failed are tried again</li>
           <li>Automatic updates skip an update only after it failed twice, so a run without network doesn't hold it back</li>
           <li>One update the helper can't run no longer stops the rest of the run</li>

@@ -1862,9 +1862,11 @@ fn update_listings_propagate_cancellation_and_tolerate_failure() {
         listing(|| Err(ExecutionError::Cancelled)).installed(&cancel),
         Err(EngineError::Cancelled)
     ));
+    // apk exits 0 when nothing needs an update, so a failed listing can't
+    // tell: the row is still listed, with its update unknown.
     let installed = listing(|| failed(1)).installed(&cancel).unwrap();
     assert_eq!(installed.len(), 1);
-    assert_eq!(installed[0].update, UpdateAvailability::Current);
+    assert_eq!(installed[0].update, UpdateAvailability::Unknown);
 }
 
 /// Reading a `.snap` runs `snap info`, so the check runs in a child test
