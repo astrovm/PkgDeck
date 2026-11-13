@@ -1321,9 +1321,9 @@ impl AppImage {
         if let Some(curl) = &self.curl {
             return Ok(curl.clone());
         }
-        Host::current()
-            .resolve("curl")?
-            .ok_or_else(|| Self::invalid("curl is unavailable"))
+        Host::current().resolve("curl")?.ok_or_else(|| {
+            Self::invalid("PkgDeck needs curl to download this, and curl isn't installed")
+        })
     }
     /// A project's releases, newest first. Answers are kept and reused for a
     /// while, and asked again with their ETag, which GitHub doesn't count.

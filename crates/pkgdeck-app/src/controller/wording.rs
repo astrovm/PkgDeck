@@ -2,25 +2,7 @@
 //! the tool when it is known.
 use super::*;
 
-/// Drop the " (os error 13)" code Rust adds to a system error. The words
-/// before it already say what went wrong.
-pub(super) fn without_os_code(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(" (os error ") {
-        let after = &rest[at + " (os error ".len()..];
-        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-        out.push_str(&rest[..at]);
-        if digits > 0 && after[digits..].starts_with(')') {
-            rest = &after[digits + 1..];
-        } else {
-            out.push_str(" (os error ");
-            rest = after;
-        }
-    }
-    out.push_str(rest);
-    out
-}
+pub(super) use pkgdeck_core::process::without_os_code;
 /// Capitalize and end with a period, so every message reads as a sentence.
 pub(super) fn sentence(text: &str) -> String {
     let text = without_os_code(text);

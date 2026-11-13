@@ -6327,7 +6327,7 @@ fn one_failed_update_is_named_without_its_path() {
         &Ok(ran(&[(
             &title,
             Outcome::Failed,
-            because("Anchor (AVM) couldn't run: No such file or directory (os error 2)."),
+            because("Anchor (AVM) couldn't run: No such file or directory."),
         )])),
         false,
         &names,
@@ -6335,7 +6335,7 @@ fn one_failed_update_is_named_without_its_path() {
     assert_eq!(notice["title"], "Anchor (AVM) didn't update");
     assert_eq!(
         notice["detail"],
-        "Anchor (AVM) couldn't run: No such file or directory (os error 2)."
+        "Anchor (AVM) couldn't run: No such file or directory."
     );
     // A single change that fails on its own reads the same way.
     let single = write_notice(
@@ -15406,16 +15406,6 @@ fn the_full_details_of_the_open_package_land_in_the_pane_and_the_cache() {
 }
 #[test]
 fn system_error_codes_and_parts_of_pkgdeck_stay_out_of_sentences() {
-    for (raw, plain) in [
-        ("Permission denied (os error 13)", "Permission denied"),
-        ("a (os error 2) and b (os error 5)", "a and b"),
-        // Only a number in the brackets is a code.
-        ("kept (os error x)", "kept (os error x)"),
-        ("kept (os error 7", "kept (os error 7"),
-        ("kept (os error )", "kept (os error )"),
-    ] {
-        assert_eq!(without_os_code(raw), plain);
-    }
     assert_eq!(sentence_tail("gone (os error 2)"), "gone.");
     // "repositories" is a part of PkgDeck, not a source to name.
     let invalid = EngineError::InvalidResponse {

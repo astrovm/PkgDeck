@@ -182,7 +182,7 @@ fn download(
     }
     let curl = host
         .resolve("curl")?
-        .ok_or_else(|| invalid("curl is unavailable"))?;
+        .ok_or_else(|| invalid("PkgDeck needs curl to download this, and curl isn't installed"))?;
     let mut command = Command::new(curl);
     command
         .args([

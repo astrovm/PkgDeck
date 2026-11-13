@@ -71,9 +71,9 @@ fn reference_bytes(
             source,
         ]
         .map(OsString::from);
-        let executable = host
-            .resolve("curl")?
-            .ok_or_else(|| invalid("curl is unavailable"))?;
+        let executable = host.resolve("curl")?.ok_or_else(|| {
+            invalid("PkgDeck needs curl to download this, and curl isn't installed")
+        })?;
         let result = host.read(
             &executable,
             &args,

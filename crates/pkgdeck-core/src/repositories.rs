@@ -62,7 +62,13 @@ impl Problem {
 }
 impl fmt::Display for Problem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let error = &self.error;
+        let error = match &self.error {
+            // "repositories" is a part of PkgDeck, not a source to name.
+            EngineError::InvalidResponse { reason, .. } => {
+                format!("couldn't read the list of repositories: {reason}")
+            }
+            error => error.to_string(),
+        };
         match (self.backend.as_str(), &self.file, &self.scope) {
             ("apt", Some(file), _) => write!(formatter, "APT {}: {error}", file.display()),
             ("apt", None, _) => write!(formatter, "APT: {error}"),
@@ -620,6 +626,13 @@ mod repository_file_tests {
             (
                 problem("apt", Scope::System, apt_file),
                 "APT /etc/apt/sources.list: denied",
+            ),
+            (
+                Problem {
+                    error: invalid("expected value"),
+                    ..problem("fwupd", Scope::System, None)
+                },
+                "Firmware: couldn't read the list of repositories: expected value",
             ),
         ] {
             assert_eq!(problem.to_string(), line);

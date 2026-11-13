@@ -47,9 +47,9 @@ fn source_bytes(source: &str, cancel: &Cancellation, host: &Host) -> Result<Vec<
         if !crate::artifact::https_source(source) {
             return Err(invalid("invalid HTTPS repository link"));
         }
-        let curl = host
-            .resolve("curl")?
-            .ok_or_else(|| invalid("curl is unavailable"))?;
+        let curl = host.resolve("curl")?.ok_or_else(|| {
+            invalid("PkgDeck needs curl to download this, and curl isn't installed")
+        })?;
         let args = [
             "--silent",
             "--show-error",

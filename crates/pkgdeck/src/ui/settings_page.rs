@@ -1661,10 +1661,12 @@ fn clean(app: &mut App, ui: &mut Ui) {
         }
     });
     if projects != before {
-        let error = projects
-            .save(&Host::current())
-            .err()
-            .map(|error| format!("Couldn't save: {error}"));
+        let error = projects.save(&Host::current()).err().map(|error| {
+            format!(
+                "Couldn't save: {}",
+                pkgdeck_core::process::without_os_code(&error.to_string())
+            )
+        });
         ui.data_mut(|data| match error {
             Some(error) => {
                 data.insert_temp(Id::unique("project-settings-error"), error);

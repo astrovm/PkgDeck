@@ -1421,7 +1421,7 @@ fn release_wait_command(
     if time.is_some() || !skip.is_empty() || !no_skip.is_empty() {
         if let Err(error) = wait.save(path) {
             return (
-                json!({"error": "not_saved", "message": format!("Couldn't save the setting: {error}")}),
+                json!({"error": "not_saved", "message": format!("Couldn't save the setting: {}", pkgdeck_core::process::without_os_code(&error.to_string()))}),
                 1,
             );
         }

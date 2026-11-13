@@ -152,6 +152,27 @@ pub fn failure_summary(stderr: &[u8]) -> Option<String> {
     Some(one_line(line))
 }
 
+/// `text` without the " (os error 13)" code Rust adds to a system error.
+/// The words before it already say what went wrong.
+pub fn without_os_code(text: &str) -> String {
+    const CODE: &str = " (os error ";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(CODE) {
+        let after = &rest[at + CODE.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..at]);
+        if digits > 0 && after[digits..].starts_with(')') {
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(CODE);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `line` with no control characters, shortened to 300 characters.
 pub fn one_line(line: &str) -> String {
     let clean: String = line
@@ -404,6 +425,21 @@ fn stop_group(child: &mut Child, mut stdout: impl Read, mut stderr: impl Read, g
 mod tests {
     use super::*;
     use std::process::Command;
+    #[test]
+    fn system_error_codes_are_dropped_and_nothing_else() {
+        for (raw, plain) in [
+            ("Permission denied (os error 13)", "Permission denied"),
+            ("a (os error 2) and b (os error 5)", "a and b"),
+            ("é (os error 2) ü", "é ü"),
+            // Only a number in the brackets is a code.
+            ("kept (os error x)", "kept (os error x)"),
+            ("kept (os error 7", "kept (os error 7"),
+            ("kept (os error )", "kept (os error )"),
+            (" (os error  (os error 5)", " (os error "),
+        ] {
+            assert_eq!(without_os_code(raw), plain);
+        }
+    }
     fn failed(code: Option<i32>, signal: Option<i32>, stderr: &str) -> Completion {
         Completion {
             code,

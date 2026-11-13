@@ -147,8 +147,12 @@ fn capability_verb(capability: &str) -> String {
 pub fn error_message(error: &EngineError) -> String {
     serde_json::to_value(error).map_or_else(|_| clean(&error.to_string()), |v| error_text(&v))
 }
-/// The same wording for an error already serialized in a report.
+/// The same wording for an error already serialized in a report, without
+/// the " (os error 13)" code Rust adds to a system error.
 pub fn error_text(error: &Value) -> String {
+    pkgdeck_core::process::without_os_code(&error_words(error))
+}
+fn error_words(error: &Value) -> String {
     let field = |v: &Value, key: &str| clean(v[key].as_str().unwrap_or_default());
     match error {
         Value::String(kind) => match kind.as_str() {
@@ -173,11 +177,13 @@ pub fn error_text(error: &Value) -> String {
                 "Refused" => serde_json::from_value::<Refusal>(inner["refusal"].clone())
                     .map_or_else(|_| value(error), |refusal| refusal.to_string()),
                 "InvalidResponse" => {
-                    format!(
-                        "{}: {}",
-                        source_name(&field(inner, "backend")),
+                    let backend = field(inner, "backend");
+                    // A part of PkgDeck such as "repositories" isn't a source.
+                    if pkgdeck_core::backends::BACKEND_IDS.contains(&backend.as_str()) {
+                        format!("{}: {}", source_name(&backend), field(inner, "reason"))
+                    } else {
                         field(inner, "reason")
-                    )
+                    }
                 }
                 "Incomplete" => {
                     let failed: Vec<_> = inner
@@ -301,7 +307,7 @@ pub fn result_line(
         line.push_str(&paint.dim("  finished after you cancelled; changes were kept"));
     }
     if let Some(error) = error {
-        let error = clean(error);
+        let error = pkgdeck_core::process::without_os_code(&clean(error));
         let error = if skipped {
             paint.dim(&error)
         } else {
@@ -754,6 +760,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 fn failure_line(paint: Paint, detail: &str) -> String {
+    let detail = pkgdeck_core::process::without_os_code(detail);
     format!("\n{} {detail}", paint.yellow("!"))
 }
 /// "already_installed" reads as "Already installed".
@@ -1840,6 +1847,29 @@ mod tests {
         assert!(output.contains("not installed"), "{output}");
         let repositories = json!({"repositories": [], "errors": ["Synthetic error"]});
         assert!(human(&repositories, 120, false).contains("! Synthetic error"));
+        // The system error code and parts of PkgDeck stay out of the words.
+        let repositories =
+            json!({"repositories": [], "errors": ["APT: Permission denied (os error 13)"]});
+        let shown = human(&repositories, 120, false);
+        assert!(
+            shown.contains("! APT: Permission denied\n")
+                || shown.ends_with("! APT: Permission denied"),
+            "{shown}"
+        );
+        assert_eq!(
+            error_text(&json!({"Execution": {"Io": "No such file or directory (os error 2)"}})),
+            "No such file or directory"
+        );
+        assert_eq!(
+            error_text(
+                &json!({"InvalidResponse": {"backend": "repositories", "reason": "invalid repository name"}})
+            ),
+            "invalid repository name"
+        );
+        assert_eq!(
+            error_text(&json!({"InvalidResponse": {"backend": "flatpak", "reason": "bad row"}})),
+            "Flatpak: bad row"
+        );
         let details =
             json!({"package": {"id": {"name": "tool", "backend": "apt"}, "update": "available"}});
         assert!(human(&details, 80, true).contains("available"));
