@@ -63,9 +63,11 @@ if [[ "$mode" == containers ]]; then
     exit 0
 fi
 if [[ "$engine" == podman ]]; then
-    # The run in the container times each of its stages, so the run as a
-    # whole has no limit (0) of its own. One limit for all of them cut off
-    # a full run that had to build from a cold cache.
+    # The image builds as its own stage, with the stage limit. The run in
+    # the container times each of its stages, so the run as a whole has no
+    # limit (0) of its own. One limit for all of them cut off a full run
+    # that had to build from a cold cache.
+    stage build-image scripts/container.sh development --build-only
     PKGDECK_STAGE_TIMEOUT=0 stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
     exit 0
 fi
