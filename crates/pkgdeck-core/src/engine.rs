@@ -1743,6 +1743,9 @@ impl Engine {
                         refusal: Refusal::NotUnattended,
                     });
                 }
+                // A change the runner's mode refuses fails on its own, so
+                // the rest of the batch still runs.
+                crate::batch::check_mode(self.batch_mode, std::slice::from_ref(operation))?;
                 self.preflight(operation, cancel)
             })
             .collect();
@@ -1801,11 +1804,12 @@ impl Engine {
         if operations.is_empty() {
             return vec![];
         }
-        let protected = crate::batch::batch_commands(operations)
+        let protected: Vec<bool> = crate::batch::batch_commands(operations)
             .expect("individual protected commands were validated above")
             .iter()
-            .any(|commands| !commands.is_empty());
-        if !protected {
+            .map(|commands| !commands.is_empty())
+            .collect();
+        if !protected.contains(&true) {
             let lanes = self.lanes(operations);
             return self.run_lanes(operations, lanes, cancel, events, false);
         }
@@ -1819,21 +1823,7 @@ impl Engine {
             match crate::batch::begin(&host, authorization, self.batch_mode, operations, cancel) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    return operations
-                        .iter()
-                        .enumerate()
-                        .map(|(index, operation)| {
-                            if index != 0 {
-                                events(Event::Started(operation.clone()));
-                            }
-                            let result = Err(EngineError::from(error.clone()));
-                            events(Event::Finished {
-                                operation: operation.clone(),
-                                result: result.clone(),
-                            });
-                            result
-                        })
-                        .collect();
+                    return self.without_runner(operations, &protected, error, cancel, events)
                 }
             };
         if guard.is_none() {
@@ -1849,6 +1839,59 @@ impl Engine {
         let results = self.run_lanes(operations, lanes, cancel, events, true);
         drop(guard);
         results
+    }
+
+    /// The helper didn't start, so the changes it would run fail with
+    /// `error`. The changes that run as the user still run, unless the
+    /// person stopped the batch. `Started` for the first change went out.
+    fn without_runner(
+        &mut self,
+        operations: &[Operation],
+        protected: &[bool],
+        error: crate::process::ExecutionError,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        use crate::process::ExecutionError;
+        let stopped = matches!(
+            error,
+            ExecutionError::Cancelled | ExecutionError::AuthorizationCancelled
+        );
+        let results: Vec<Option<Result<OperationOutcome, EngineError>>> = operations
+            .iter()
+            .zip(protected)
+            .enumerate()
+            .map(|(index, (operation, protected))| {
+                (stopped || *protected).then(|| {
+                    if index != 0 {
+                        events(Event::Started(operation.clone()));
+                    }
+                    let result = Err(EngineError::from(error.clone()));
+                    events(Event::Finished {
+                        operation: operation.clone(),
+                        result: result.clone(),
+                    });
+                    result
+                })
+            })
+            .collect();
+        let rest: Vec<Operation> = operations
+            .iter()
+            .zip(&results)
+            .filter(|(_, result)| result.is_none())
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        let first_started = results[0].is_none();
+        let lanes = self.lanes(&rest);
+        let mut ran = self
+            .run_lanes(&rest, lanes, cancel, events, first_started)
+            .into_iter();
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| ran.next().unwrap_or(Err(EngineError::Cancelled)))
+            })
+            .collect()
     }
 
     fn lanes(&self, operations: &[Operation]) -> Vec<Vec<std::ops::Range<usize>>> {
@@ -2483,11 +2526,106 @@ mod apt_upgrade_tests {
             matches!(
                 results.as_slice(),
                 [Err(EngineError::Execution(ExecutionError::Invalid(reason)))]
-                    if reason.contains("only refresh sources and update every package")
+                    if reason == crate::batch::UPGRADE_ONLY_REFUSAL
             ),
             "{results:?}"
         );
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// [`lists_engine`] plus a source that runs as the user.
+    fn lists_and_user_engine(
+        mode: crate::batch::BatchMode,
+    ) -> (
+        Engine,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::Mutex<Vec<Operation>>>,
+    ) {
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let user = crate::fake::Fake::new("user", &[Capability::Upgrade]);
+        let ran = Arc::clone(&user.ran);
+        engine.register(user).unwrap();
+        engine.set_batch_mode(mode);
+        (engine, log, ran)
+    }
+    fn user_update() -> Operation {
+        Operation::Upgrade(PackageId {
+            backend: "user".into(),
+            scope: Scope::User { uid: 1000 },
+            ..apt_id("tool")
+        })
+    }
+
+    #[test]
+    fn a_change_the_upgrade_only_runner_refuses_fails_alone() {
+        let (mut engine, log, ran) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let operations = [Operation::Install(apt_id("one")), user_update()];
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
+        assert!(
+            matches!(
+                &results[0],
+                Err(EngineError::Execution(ExecutionError::Invalid(reason)))
+                    if reason == crate::batch::UPGRADE_ONLY_REFUSAL
+            ),
+            "{results:?}"
+        );
+        assert!(results[1].is_ok(), "{results:?}");
+        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
+    }
+
+    #[test]
+    fn user_changes_run_when_the_helper_does_not_start() {
+        // No PATH, so no helper: an upgrade-only batch can't start one.
+        let (mut engine, log, ran) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let operations = [Operation::Upgrade(apt_id("one")), user_update()];
+        let mut events = vec![];
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
+            events.push(event)
+        });
+        assert!(
+            matches!(
+                &results[0],
+                Err(EngineError::Execution(ExecutionError::Disabled(reason)))
+                    if reason.contains("system helper")
+            ),
+            "{results:?}"
+        );
+        assert!(results[1].is_ok(), "{results:?}");
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run")));
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
+        // Each change starts once and finishes once.
+        for operation in &operations {
+            let count = |started: bool| {
+                events
+                    .iter()
+                    .filter(|event| match event {
+                        Event::Started(at) => started && at == operation,
+                        Event::Finished { operation: at, .. } => !started && at == operation,
+                        _ => false,
+                    })
+                    .count()
+            };
+            assert_eq!((count(true), count(false)), (1, 1), "{operation:?}");
+        }
+        // A batch the person stopped runs nothing more.
+        let (mut engine, _, ran) = lists_and_user_engine(crate::batch::BatchMode::Reviewed);
+        let protected = [Operation::Upgrade(apt_id("one"))];
+        let stopped = engine.without_runner(
+            &[protected[0].clone(), user_update()],
+            &[true, false],
+            ExecutionError::AuthorizationCancelled,
+            &Cancellation::default(),
+            &mut |_| {},
+        );
+        assert!(stopped.iter().all(Result::is_err), "{stopped:?}");
+        assert!(ran.lock().unwrap().is_empty());
     }
 
     #[test]

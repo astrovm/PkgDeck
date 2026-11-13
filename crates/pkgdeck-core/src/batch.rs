@@ -252,9 +252,10 @@ pub enum BatchMode {
     /// Changes someone reviewed and confirmed for this session.
     #[default]
     Reviewed,
-    /// Refreshes and full upgrades of system managers only, for unattended
-    /// updates under a saved approval. APT removes packages only with
-    /// `removals`, which the person allowed in settings.
+    /// Refreshes and updates of installed packages from system managers
+    /// only (see [`upgrade_only_allows`]), for unattended updates under a
+    /// saved approval. APT removes
+    /// packages only with `removals`, which the person allowed in settings.
     UpgradeOnly { removals: bool },
 }
 /// The runner argument that selects [`BatchMode::UpgradeOnly`]. A saved
@@ -264,30 +265,46 @@ pub const UPGRADE_ONLY: &str = "--upgrade-only";
 pub const ALLOW_REMOVALS: &str = "--allow-removals";
 /// System managers an upgrade-only runner updates.
 pub const UPGRADE_ONLY_BACKENDS: &[&str] = &["apt", "flatpak", "dnf", "pacman", "zypper", "snap"];
+/// System managers that update one installed package at a time when a
+/// release is still waiting (see [`crate::release_wait::can_wait`]): the
+/// rest never wait, so they always update everything. Neither installs a
+/// missing package this way: `flatpak update REF` and `snap refresh NAME`
+/// fail when it isn't installed.
+const UPGRADE_ONLY_PER_PACKAGE: &[&str] = &["flatpak", "snap"];
 
-/// Refuse any change the runner would make as root other than refreshes
-/// and full upgrades of [`UPGRADE_ONLY_BACKENDS`]. Changes that run as the
-/// user never reach the runner and pass. A per-package upgrade is refused:
-/// `pacman -S --needed NAME` would install a package that is not there.
-pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), ExecutionError> {
-    if mode == BatchMode::Reviewed {
-        return Ok(());
-    }
-    let allowed = operations.iter().all(|operation| match operation {
+/// Whether an upgrade-only runner may run `operation`: refreshes and full
+/// upgrades of [`UPGRADE_ONLY_BACKENDS`], updates of one installed package
+/// of [`UPGRADE_ONLY_PER_PACKAGE`], and anything that runs as the user,
+/// which never reaches the runner. A per-package update elsewhere is
+/// refused: `pacman -S --needed NAME` would install a missing package.
+pub fn upgrade_only_allows(operation: &Operation) -> bool {
+    let as_user = || protected_commands(operation).is_ok_and(|commands| commands.is_empty());
+    match operation {
         Operation::Refresh { backend } | Operation::UpgradeAll { backend } => {
-            UPGRADE_ONLY_BACKENDS.contains(&backend.as_str())
-                || protected_commands(operation).is_ok_and(|commands| commands.is_empty())
+            UPGRADE_ONLY_BACKENDS.contains(&backend.as_str()) || as_user()
         }
-        _ => protected_commands(operation).is_ok_and(|commands| commands.is_empty()),
-    });
-    if allowed {
-        Ok(())
-    } else {
-        Err(invalid(
-            "unattended updates only refresh sources and update every package",
-        ))
+        Operation::Upgrade(id) => {
+            (UPGRADE_ONLY_PER_PACKAGE.contains(&id.backend.as_str())
+                && protected_commands(operation).is_ok())
+                || as_user()
+        }
+        _ => as_user(),
     }
 }
+
+/// Refuse any change the runner would make as root other than the ones
+/// [`upgrade_only_allows`]. Changes that run as the user never reach the
+/// runner and pass.
+pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), ExecutionError> {
+    if mode == BatchMode::Reviewed || operations.iter().all(upgrade_only_allows) {
+        Ok(())
+    } else {
+        Err(invalid(UPGRADE_ONLY_REFUSAL))
+    }
+}
+/// Why an upgrade-only runner refuses a change.
+pub const UPGRADE_ONLY_REFUSAL: &str =
+    "unattended updates only refresh sources and update installed packages";
 /// The commands the runner itself runs. In upgrade-only mode without
 /// removals APT aborts rather than remove anything (`--no-remove`); the
 /// frontend still asks for the reviewed command, and the runner substitutes
@@ -1447,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_only_runners_refresh_and_update_everything_and_nothing_else() {
+    fn upgrade_only_runners_refresh_and_update_installed_packages_and_nothing_else() {
         let all = |backend: &str| Operation::UpgradeAll {
             backend: backend.into(),
         };
@@ -1470,13 +1487,42 @@ mod tests {
             check_mode(BatchMode::UpgradeOnly { removals: false }, &user_changes),
             Ok(())
         );
+        // A source with a release still waiting updates its other
+        // packages one by one. Only system managers that can wait do.
+        for backend in UPGRADE_ONLY_BACKENDS {
+            assert_eq!(
+                UPGRADE_ONLY_PER_PACKAGE.contains(backend),
+                crate::release_wait::can_wait(backend),
+                "{backend}"
+            );
+        }
+        let mut runtime = id("flatpak", "org.example.Platform");
+        runtime.reference = Some("runtime/org.example.Platform/x86_64/stable".into());
+        let one_by_one: Vec<_> = [
+            id("flatpak", "org.example.App"),
+            runtime,
+            id("snap", "synthetic"),
+        ]
+        .into_iter()
+        .map(Operation::Upgrade)
+        .collect();
+        for operation in &one_by_one {
+            assert!(upgrade_only_allows(operation), "{operation:?}");
+            assert!(!protected_commands(operation).unwrap().is_empty());
+        }
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &one_by_one),
+            Ok(())
+        );
         for refused in [
             Operation::Install(id("apt", "synthetic")),
             Operation::Remove(id("dnf", "synthetic")),
             // `pacman -S --needed NAME` would install a missing package.
             Operation::Upgrade(id("pacman", "synthetic")),
+            Operation::Upgrade(id("apt", "synthetic")),
             all("fwupd"),
-            Operation::Upgrade(id("flatpak", "org.example.App")),
+            Operation::Upgrade(id("fwupd", "synthetic")),
+            Operation::Install(id("flatpak", "org.example.App")),
             Operation::Clean(crate::package::CleanupId {
                 backend: "apt".into(),
                 key: "autoremove".into(),

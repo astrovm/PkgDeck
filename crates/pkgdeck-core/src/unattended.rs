@@ -4,7 +4,7 @@
 //! The approval is opt-in and narrow. On Linux it is a polkit rule that lets
 //! one user, in an active local session, start PkgDeck's helper with
 //! [`UPGRADE_ONLY`] and nothing else; that helper only refreshes sources and
-//! updates every package (see [`crate::batch::check_mode`]). The rule names
+//! updates installed packages (see [`crate::batch::upgrade_only_allows`]). The rule names
 //! the helper's own root-owned path, so a program the user can replace never
 //! gets it. On macOS it is a sudoers entry for exact commands of root-owned
 //! programs: downloading macOS updates and MacPorts' two update commands,
@@ -166,9 +166,9 @@ pub fn polkit_rule(user: &str, runner: &RunnerMatch) -> Result<String, Execution
     }
     Ok(format!(
         r#"// Written by PkgDeck: "Skip the password" is on for {user}.
-// It lets PkgDeck's helper refresh sources and update every system package
-// for {user}, in an active local session, and nothing else. Turn the setting
-// off in PkgDeck to remove this file.
+// It lets PkgDeck's helper refresh sources and update installed system
+// packages for {user}, in an active local session, and nothing else. Turn the
+// setting off in PkgDeck to remove this file.
 polkit.addRule(function (action, subject) {{
     if (action.id != "org.freedesktop.policykit.exec" || subject.user != "{user}" ||
         !subject.local || !subject.active) {{

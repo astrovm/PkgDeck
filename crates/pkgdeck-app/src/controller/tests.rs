@@ -6676,6 +6676,51 @@ fn automatic_runs_skip_updates_that_failed() {
     assert_eq!(checked.operations, [Operation::Upgrade(other.id.clone())]);
     let _ = std::fs::remove_dir_all(dir);
 }
+#[test]
+fn automatic_runs_update_around_a_waiting_release_only_where_the_helper_may() {
+    // Each source has one release still waiting and one ready update.
+    let packages: Vec<Package> = ["flatpak", "snap", "pacman", "user"]
+        .into_iter()
+        .flat_map(|backend| {
+            ["waiting", "ready"].map(|name| {
+                let mut package = synthetic_package(&format!("{backend}-{name}"), name);
+                package.id.backend = backend.into();
+                if backend == "user" {
+                    package.id.scope = Scope::User { uid: 1000 };
+                }
+                package.candidate_version = Some("2".into());
+                package.update = UpdateAvailability::Available;
+                if name == "waiting" {
+                    package.waiting_until = Some(u64::MAX);
+                }
+                package
+            })
+        })
+        .collect();
+    let ready = |backend: &str| {
+        let package = packages
+            .iter()
+            .find(|package| package.id.name == format!("{backend}-ready"))
+            .unwrap();
+        Operation::Upgrade(package.id.clone())
+    };
+    let plan = automatic_plan(
+        &packages,
+        &NeedsPassword::default(),
+        &FailedUpdates::default(),
+    );
+    // The helper updates one Flatpak or Snap at a time. Pacman never
+    // waits, but if it did, its update would wait for someone to start it.
+    assert_eq!(plan, [ready("flatpak"), ready("snap"), ready("user")]);
+    // The helper takes every change in the plan.
+    assert_eq!(
+        pkgdeck_core::batch::check_mode(
+            pkgdeck_core::batch::BatchMode::UpgradeOnly { removals: false },
+            &plan
+        ),
+        Ok(())
+    );
+}
 /// APT whose dry run removes `removals`, and whose writes succeed.
 struct AptPlanFixture {
     removals: Vec<String>,

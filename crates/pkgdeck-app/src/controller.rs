@@ -2414,6 +2414,12 @@ fn automatic_plan(
             operation => vec![operation],
         })
         .filter(|operation| !failed_before(operation, packages, failed))
+        // An update the helper won't run unattended waits for someone to
+        // start it, instead of failing every run.
+        .filter(|operation| {
+            !matches!(operation, Operation::Upgrade(_))
+                || pkgdeck_core::batch::upgrade_only_allows(operation)
+        })
         .collect();
     if operations
         .iter()
