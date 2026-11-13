@@ -494,10 +494,8 @@ impl Remover<'_> {
         if metadata.file_type().is_symlink() {
             return Err(refused(
                 self.backend,
-                format!(
-                    "{} is an alias, not the app itself. Remove the app it points to.",
-                    path.display()
-                ),
+                // The path can come from mas: name only the app.
+                format!("{name} is an alias, not the app itself. Remove the app it points to."),
             ));
         }
         let output = self
@@ -571,10 +569,7 @@ impl Remover<'_> {
         if fs::symlink_metadata(path).is_ok() {
             return Err(refused(
                 self.backend,
-                format!(
-                    "{name} is still at {} after moving it to the Trash.",
-                    path.display()
-                ),
+                format!("{name} is still in its folder after moving it to the Trash."),
             ));
         }
         Ok(OperationOutcome {
@@ -2628,7 +2623,7 @@ mod tests {
             (Privileged::Cancel, "authorization cancelled"),
             (Privileged::Denied, "authorization denied"),
             (Privileged::Fail, "the package manager"),
-            (Privileged::Ignore, "is still at"),
+            (Privileged::Ignore, "is still in its folder"),
         ] {
             let mut backend = f.backend(Ok(BTreeMap::new()));
             backend.uid = uid() + 1;
@@ -2637,6 +2632,10 @@ mod tests {
             backend.transport = Box::new(mover);
             let error = remove(&mut backend, &app).0.unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+            assert!(
+                !error.to_string().contains(app.to_str().unwrap()),
+                "{error}"
+            );
             assert!(app.is_dir());
         }
         // Cancel in the password dialog is its own outcome, not a failure.
@@ -2828,6 +2827,11 @@ mod tests {
             error
                 .to_string()
                 .contains("is an alias, not the app itself"),
+            "{error}"
+        );
+        // The path can come from mas, so only the app is named.
+        assert!(
+            !error.to_string().contains(alias.to_str().unwrap()),
             "{error}"
         );
         // PkgDeck running as root has no person's Trash to use.

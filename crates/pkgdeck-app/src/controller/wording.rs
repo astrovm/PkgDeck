@@ -276,6 +276,20 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
         ) => plain_error(error, Some(backend), false),
     }
 }
+/// `text` about the source called `name`, led by that name unless `text`
+/// already names it first.
+pub(super) fn about_source(name: &str, text: &str) -> String {
+    let named = [
+        format!("{name}:"),
+        format!("{name} "),
+        format!("PkgDeck couldn't use {name}:"),
+    ];
+    if named.iter().any(|lead| text.starts_with(lead.as_str())) {
+        text.to_owned()
+    } else {
+        format!("{name}: {text}")
+    }
+}
 /// A plain explanation of an engine error, naming the tool when known.
 pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;

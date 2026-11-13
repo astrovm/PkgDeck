@@ -9688,10 +9688,11 @@ fn errors_shown_by_the_controller_are_plain() {
             successful_sources: vec!["apt".into()],
         })));
     let expected = "Cargo couldn't run: rustup has no default toolchain.";
-    assert!(controller
-        .status()
-        .to_string()
-        .contains(&format!("Cargo: {expected}")));
+    // The sentence already names Cargo first.
+    assert_eq!(
+        controller.status().to_string(),
+        format!("1 packages\n{expected}")
+    );
     let rows: Value = serde_json::from_str(&controller.rows().to_string()).unwrap();
     assert_eq!(rows[1]["summary"], expected);
     assert_eq!(rows[1]["display_name"], "Cargo");
@@ -14776,6 +14777,24 @@ fn activity_says_why_homebrew_stopped_without_keeping_its_output() {
     assert_eq!(reason, Some("Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()));
 }
 
+#[test]
+fn a_source_line_names_its_source_once() {
+    for (text, line) in [
+        (
+            "PkgDeck couldn't use DNF: not found.",
+            "PkgDeck couldn't use DNF: not found.",
+        ),
+        ("DNF couldn't run: broken.", "DNF couldn't run: broken."),
+        ("DNF: broken.", "DNF: broken."),
+        (
+            "No package matches the selection.",
+            "DNF: No package matches the selection.",
+        ),
+        ("DNFX reported a problem.", "DNF: DNFX reported a problem."),
+    ] {
+        assert_eq!(about_source("DNF", text), line);
+    }
+}
 #[test]
 fn a_cleanup_left_alone_is_not_a_failure() {
     let building = EngineError::Refused {

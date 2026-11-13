@@ -2856,8 +2856,6 @@ fn merge_retried_packages(
         successful_sources,
     }
 }
-/// Details for a failed source row. Served from the stored report without a
-/// backend roundtrip: the query already failed, re-querying cannot help.
 /// A plain-language reason a change failed, with what to do next.
 fn write_error_text(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     plain_error(error, backend, sudo)
@@ -7437,10 +7435,9 @@ impl ffi::PackageController {
                         report.packages.len(),
                         failed
                             .iter()
-                            .map(|f| format!(
-                                "{}: {}",
-                                source_display_name(&f.backend),
-                                plain_error(&f.error, Some(&f.backend), sudo)
+                            .map(|f| about_source(
+                                &source_display_name(&f.backend),
+                                &plain_error(&f.error, Some(&f.backend), sudo)
                             ))
                             .collect::<Vec<_>>()
                             .join("\n")

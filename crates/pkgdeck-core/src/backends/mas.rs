@@ -699,6 +699,8 @@ mod tests {
                 .contains("Alpha is in the Trash, but the App Store still lists it"),
             "{error}"
         );
+        // The path mas listed stays out.
+        assert!(!error.to_string().contains(".app"), "{error}");
         // One listing to find the app, then every retry.
         let lists = fake
             .calls
@@ -766,6 +768,10 @@ mod tests {
         let error = refusal(copy.to_str().unwrap(), &|_| {});
         assert!(
             error.to_string().contains("has no App Store receipt"),
+            "{error}"
+        );
+        assert!(
+            !error.to_string().contains(copy.to_str().unwrap()),
             "{error}"
         );
         assert!(copy.is_dir());
