@@ -2749,7 +2749,13 @@ fn repository_error(problem: &repositories::Problem) -> String {
         ),
         None => source_and_scope(&problem.backend, &problem.scope),
     };
-    format!("{place}: {}", plain_error(&problem.error, None, false))
+    match &problem.error {
+        // Parser text says nothing people can act on.
+        EngineError::InvalidResponse { .. } => {
+            format!("{place}: PkgDeck couldn't read its list of repositories.")
+        }
+        error => format!("{place}: {}", plain_error(error, None, false)),
+    }
 }
 /// The repositories report, with each repository's source and scope in
 /// people's words ("where": "Flatpak, System") and errors as sentences.

@@ -5071,10 +5071,10 @@ fn repository_confirmation_and_refresh_invalidate_cached_state() {
     controller.as_mut().change_repository(
         r#"{"backend":"flatpak","name":"--all","scope":"system","action":"remove"}"#.into(),
     );
-    assert!(controller
-        .status()
-        .to_string()
-        .contains("invalid repository name"));
+    let status = controller.status().to_string();
+    // "repositories" is a part of PkgDeck, so it isn't named as a source.
+    assert!(status.contains("Invalid repository name."), "{status}");
+    assert!(!status.contains("repositories reported"), "{status}");
     let request = r#"{"backend":"flatpak","name":"fixture","scope":"system","action":"remove"}"#;
     controller.as_mut().change_repository(request.into());
     assert!(controller.confirmation().to_string().contains("System"));
@@ -9355,7 +9355,7 @@ fn repository_text_names_sources_and_scopes() {
         ),
         (
             problem("dnf", Scope::System, None, unreadable()),
-            "DNF, System: Permission denied (os error 13).",
+            "DNF, System: Permission denied.",
         ),
         (
             problem(
@@ -9364,7 +9364,19 @@ fn repository_text_names_sources_and_scopes() {
                 Some("/etc/apt/sources.list"),
                 unreadable(),
             ),
-            "APT, /etc/apt/sources.list: Permission denied (os error 13).",
+            "APT, /etc/apt/sources.list: Permission denied.",
+        ),
+        (
+            problem(
+                "fwupd",
+                Scope::System,
+                None,
+                EngineError::InvalidResponse {
+                    backend: "repositories".into(),
+                    reason: "expected value at line 1 column 1".into(),
+                },
+            ),
+            "Firmware, System: PkgDeck couldn't read its list of repositories.",
         ),
     ] {
         assert_eq!(repository_error(&problem), text);
@@ -15391,4 +15403,27 @@ fn the_full_details_of_the_open_package_land_in_the_pane_and_the_cache() {
         .is_some_and(|cached| cached
             .to_string()
             .contains("Full description from the lookup")));
+}
+#[test]
+fn system_error_codes_and_parts_of_pkgdeck_stay_out_of_sentences() {
+    for (raw, plain) in [
+        ("Permission denied (os error 13)", "Permission denied"),
+        ("a (os error 2) and b (os error 5)", "a and b"),
+        // Only a number in the brackets is a code.
+        ("kept (os error x)", "kept (os error x)"),
+        ("kept (os error 7", "kept (os error 7"),
+        ("kept (os error )", "kept (os error )"),
+    ] {
+        assert_eq!(without_os_code(raw), plain);
+    }
+    assert_eq!(sentence_tail("gone (os error 2)"), "gone.");
+    // "repositories" is a part of PkgDeck, not a source to name.
+    let invalid = EngineError::InvalidResponse {
+        backend: "repositories".into(),
+        reason: "invalid repository name".into(),
+    };
+    assert_eq!(
+        plain_error(&invalid, None, false),
+        "Invalid repository name."
+    );
 }

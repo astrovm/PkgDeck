@@ -1002,14 +1002,15 @@ impl MacApps {
             return Err(EngineError::Cancelled);
         }
         let now = self.describe(path, &canonical, &id.scope, &ownership, cancel)?;
-        if listed.is_some_and(|listed| {
-            listed.bundle_id != now.bundle_id || listed.canonical != now.canonical
-        }) {
+        if let Some(listed) = listed
+            .filter(|listed| listed.bundle_id != now.bundle_id || listed.canonical != now.canonical)
+        {
+            // The name the person picked, not the one now in its place.
             return Err(refused(
                 ID,
                 format!(
                     "{} changed since PkgDeck listed it. Reload, then try again.",
-                    now.details.package.display_name
+                    listed.details.package.display_name
                 ),
             ));
         }
@@ -2783,14 +2784,18 @@ mod tests {
         let mover = f.mover();
         scanned.transport = Box::new(mover.clone());
         scanned.installed(&cancel).unwrap();
-        rewrite("com.example.other");
-        let error = remove(&mut scanned, &app).0.unwrap_err().to_string();
-        // Activity keeps this sentence: no home path in it.
-        assert!(
-            error.ends_with(" changed since PkgDeck listed it. Reload, then try again."),
-            "{error}"
+        // The new app has its own name. The refusal names the one listed,
+        // and Activity keeps the sentence, so no home path is in it.
+        fs::write(
+            app.join("Contents/Info.plist"),
+            json!({"CFBundleIdentifier": "com.example.other", "CFBundleDisplayName": "Other"})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            remove(&mut scanned, &app).0.unwrap_err().to_string(),
+            "Fixture App changed since PkgDeck listed it. Reload, then try again."
         );
-        assert!(!error.contains(&*app.to_string_lossy()), "{error}");
         // Picked by its exact path, then changed.
         let mut picked = f.backend(Ok(BTreeMap::new()));
         picked.transport = Box::new(mover.clone());

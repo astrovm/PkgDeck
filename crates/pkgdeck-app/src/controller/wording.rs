@@ -2,8 +2,28 @@
 //! the tool when it is known.
 use super::*;
 
+/// Drop the " (os error 13)" code Rust adds to a system error. The words
+/// before it already say what went wrong.
+pub(super) fn without_os_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(" (os error ") {
+        let after = &rest[at + " (os error ".len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..at]);
+        if digits > 0 && after[digits..].starts_with(')') {
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(" (os error ");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
 /// Capitalize and end with a period, so every message reads as a sentence.
 pub(super) fn sentence(text: &str) -> String {
+    let text = without_os_code(text);
     let text = text.trim().trim_end_matches([':', ';', ',']).trim_end();
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -171,7 +191,7 @@ pub(super) fn plain_text(raw: &str, backend: Option<&str>) -> String {
 /// The part after "X couldn't run:" keeps its own case (tool names such as
 /// rustup are lowercase) and ends with a period.
 pub(super) fn sentence_tail(line: &str) -> String {
-    let mut line = line.trim().to_owned();
+    let mut line = without_os_code(line).trim().to_owned();
     if !line.ends_with(['.', '!', '?']) {
         line.push('.');
     }
@@ -294,10 +314,9 @@ pub(super) fn about_source(name: &str, text: &str) -> String {
 pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;
     if let Some((path, why)) = skipped_app_entry(error) {
-        let why = why.split(" (os error ").next().unwrap_or(why);
         return format!(
             "Couldn't read {path} ({}). The other apps are still listed.",
-            lower_first(why)
+            lower_first(&without_os_code(why))
         );
     }
     match error {
@@ -349,6 +368,10 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::InvalidResponse { backend: source, reason } => {
             if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
+            }
+            // A part of PkgDeck such as "repositories" isn't a source people know.
+            if !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str()) {
+                return plain_text(reason, None);
             }
             match meaningful_line(&strip_debug(reason)) {
                 Some(line) => format!(
