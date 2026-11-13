@@ -9322,6 +9322,11 @@ fn repository_text_names_sources_and_scopes() {
         repository_error("apt: listing failed"),
         "APT: Listing failed."
     );
+    // A line that only starts with the same letters still gets the name.
+    assert_eq!(
+        repository_error("apt: APTX daemon is down"),
+        "APT: APTX daemon is down."
+    );
     assert_eq!(
         repository_error("/etc/apt/sources.list: unreadable"),
         "/etc/apt/sources.list: unreadable."

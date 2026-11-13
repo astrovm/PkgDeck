@@ -604,10 +604,8 @@ impl Remover<'_> {
         if !fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir() && m.uid() == home_owner) {
             return Err(refused(
                 self.backend,
-                format!(
-                    "{} isn't a folder you own, so PkgDeck won't move apps into it.",
-                    trash.display()
-                ),
+                // Activity keeps this sentence: no home path in it.
+                "Your Trash isn't a folder you own, so PkgDeck won't move apps into it.",
             ));
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -2675,7 +2673,10 @@ mod tests {
         fs::create_dir_all(f.0.join("home")).unwrap();
         fs::create_dir_all(f.0.join("elsewhere")).unwrap();
         symlink(f.0.join("elsewhere"), f.0.join("home/.Trash")).unwrap();
-        assert!(attempt(f.mover()).contains("isn't a folder you own"));
+        assert_eq!(
+            attempt(f.mover()),
+            "Your Trash isn't a folder you own, so PkgDeck won't move apps into it."
+        );
         fs::remove_file(f.0.join("home/.Trash")).unwrap();
         // Every name is taken.
         fs::create_dir(f.0.join("home/.Trash")).unwrap();

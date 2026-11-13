@@ -2743,13 +2743,10 @@ fn repository_label(action: &RepositoryAction) -> String {
 fn repository_error(error: &str) -> String {
     match error.split_once(": ") {
         Some((source, rest)) if pkgdeck_core::backends::BACKEND_IDS.contains(&source) => {
-            let text = plain_text(rest, Some(source));
-            let name = source_display_name(source);
-            if text.starts_with(&name) {
-                text
-            } else {
-                format!("{name}: {text}")
-            }
+            about_source(
+                &source_display_name(source),
+                &plain_text(rest, Some(source)),
+            )
         }
         _ => plain_text(error, None),
     }
