@@ -553,7 +553,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu --dbpath /c/pacman",
                     "zypper --cache-dir /c/zypper --no-refresh --quiet --xmlout --non-interactive list-updates",
-                    "apk --cache-dir /c/apk upgrade --simulate",
+                    "apk --cache-dir /c/apk upgrade --simulate --force-missing-repositories",
                     "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists dist-upgrade",
                 ],
             ),
@@ -562,7 +562,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu",
                     "zypper --quiet --xmlout --non-interactive list-updates",
-                    "apk upgrade --simulate",
+                    "apk upgrade --simulate --force-missing-repositories",
                     "apt-get --simulate -o Debug::NoLocking=1 dist-upgrade",
                 ],
             ),

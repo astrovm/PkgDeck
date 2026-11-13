@@ -496,6 +496,11 @@ which only report. Changes need admin rights and always run the manager from
 its fixed location (`/sbin` or `/usr/sbin` for apk, `/usr/bin` for XBPS,
 `/opt/local/bin/port` for MacPorts), never whatever `PATH` finds first.
 
+- A repository apk can't reach doesn't hide the updates the others list.
+  When apk can't plan an upgrade at all (a package in `/etc/apk/world` that
+  no repository has), updates come from `apk list --upgradable`, which also
+  lists pinned packages.
+
 - MacPorts keeps each port's variants when it upgrades. Only active ports are
   listed; inactive versions stay installed but aren't rows. `pkd refresh` runs
   `port selfupdate`. The Mac app adds `/opt/local/bin` to its `PATH`, so it

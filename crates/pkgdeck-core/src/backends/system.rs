@@ -44,8 +44,14 @@ impl ManagerKind {
         match self {
             Self::Snap => ("snap", &["refresh", "--list"]),
             // `apk list --upgradable` also lists packages /etc/apk/world
-            // pins; an upgrade leaves those alone.
-            Self::Apk => ("apk", &["upgrade", "--simulate"]),
+            // pins; an upgrade leaves those alone. Without
+            // --force-missing-repositories, one repository that can't be
+            // reached (offline, or one third-party repository down) stops
+            // the whole simulation.
+            Self::Apk => (
+                "apk",
+                &["upgrade", "--simulate", "--force-missing-repositories"],
+            ),
             // -C reads the cache a check just refreshed; without one, it's
             // asked again online.
             Self::Dnf => (
@@ -274,10 +280,12 @@ fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
 }
 
 /// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`
-/// into (`zlib`, `1.4-r0`). apk 3 pads the count: "( 1/12)".
+/// into (`zlib`, `1.4-r0`). apk 3 pads the count: "( 1/12)". A package
+/// world pins to a tagged repository reads "scanelf@edge".
 fn apk_upgrading(line: &str) -> Option<(&str, String)> {
     let (_, change) = line.trim().split_once(") Upgrading ")?;
     let (name, versions) = change.split_once(" (")?;
+    let name = name.split_once('@').map_or(name, |(name, _)| name);
     let (_, version) = versions.strip_suffix(')')?.split_once(" -> ")?;
     (!name.contains(char::is_whitespace) && !version.is_empty()).then(|| (name, version.to_owned()))
 }
@@ -425,9 +433,22 @@ impl<T: Transport> SystemManager<T> {
                 _ => {}
             }
         }
+        let mut apk_listing = false;
         let result = match self.call_with(executable, args.clone(), cancel, false) {
             Err(EngineError::Execution(ExecutionError::Failed(_))) if args[0] == "-C" => {
                 self.call_with(executable, args[1..].to_vec(), cancel, false)
+            }
+            // A world apk can't solve (a package no repository has) fails
+            // the simulation. The plain listing still shows each update,
+            // the pinned ones too, which beats showing none.
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+                if matches!(self.kind, ManagerKind::Apk) =>
+            {
+                apk_listing = true;
+                let verb = args.len() - self.kind.update_args().1.len();
+                let mut args = args[..verb].to_vec();
+                args.extend(["list".into(), "--upgradable".into()]);
+                self.call_with(executable, args, cancel, false)
             }
             result => result,
         };
@@ -464,6 +485,7 @@ impl<T: Transport> SystemManager<T> {
                         Some((fields[0], fields[3].to_owned()))
                     }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
+                    ManagerKind::Apk if apk_listing => apk_pkgver(fields.first()?),
                     ManagerKind::Apk => apk_upgrading(line),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
                         xbps_pkgver(fields.first()?)

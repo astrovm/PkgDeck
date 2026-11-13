@@ -6527,6 +6527,78 @@ fn apk_lists_updates_and_writes_with_its_own_verbs() {
 }
 
 #[test]
+fn apk_shows_updates_when_its_simulated_upgrade_cant_tell() {
+    let cancel = Cancellation::default();
+    let arch = std::env::consts::ARCH;
+    let installed_lines = format!("busybox-1.37.0-r12 {arch} {{busybox}} (GPL-2.0-only) [installed]\nscanelf-1.3.9-r1 {arch} {{pax-utils}} (GPL-2.0-only) [installed]\n");
+    let updates = |script: &Script| {
+        let installed = SystemManager::apk(script.clone())
+            .installed(&cancel)
+            .unwrap();
+        installed
+            .into_iter()
+            .map(|p| (p.id.name, p.candidate_version, p.update))
+            .collect::<Vec<_>>()
+    };
+    // A package world pins to a tagged repository ("scanelf@edge") updates
+    // under its own name.
+    let tagged = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        (
+            "apk upgrade --simulate --force-missing-repositories",
+            "(1/1) Upgrading scanelf@edge (1.3.9-r1 -> 1.3.11-r0)\nOK: 8 MiB in 16 packages\n",
+        ),
+    ]);
+    assert_eq!(
+        updates(&tagged),
+        [
+            (
+                "busybox".into(),
+                Some("1.37.0-r12".into()),
+                UpdateAvailability::Current
+            ),
+            (
+                "scanelf".into(),
+                Some("1.3.11-r0".into()),
+                UpdateAvailability::Available
+            ),
+        ]
+    );
+    // A world apk can't solve fails the simulation; the plain listing still
+    // shows the update.
+    let unsolvable = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        ("apk upgrade --simulate", "exit 1\nERROR: unable to select packages:\n  nosuchpkg (no such package):\n"),
+        ("apk list --upgradable", "busybox-1.37.0-r13 x86_64 {busybox} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n"),
+    ]);
+    assert_eq!(
+        updates(&unsolvable),
+        [
+            (
+                "busybox".into(),
+                Some("1.37.0-r13".into()),
+                UpdateAvailability::Available
+            ),
+            (
+                "scanelf".into(),
+                Some("1.3.9-r1".into()),
+                UpdateAvailability::Current
+            ),
+        ]
+    );
+    assert!(unsolvable
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&"apk list --upgradable".into()));
+    // Neither can tell: no row shows an update, and none fails.
+    let neither = Script::new(&[("apk list --installed", installed_lines.as_str())]);
+    assert!(updates(&neither)
+        .iter()
+        .all(|(_, _, update)| *update == UpdateAvailability::Current));
+}
+
+#[test]
 fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
     let cancel = Cancellation::default();
     let script = Script::new(&[
