@@ -1497,6 +1497,7 @@ mod tests {
             );
         }
         let mut runtime = id("flatpak", "org.example.Platform");
+        runtime.architecture = "x86_64".into();
         runtime.reference = Some("runtime/org.example.Platform/x86_64/stable".into());
         let one_by_one: Vec<_> = [
             id("flatpak", "org.example.App"),

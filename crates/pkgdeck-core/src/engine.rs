@@ -2580,7 +2580,13 @@ mod apt_upgrade_tests {
         // No PATH, so no helper: an upgrade-only batch can't start one.
         let (mut engine, log, ran) =
             lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
-        let operations = [Operation::Upgrade(apt_id("one")), user_update()];
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let operations = [
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            user_update(),
+        ];
         let mut events = vec![];
         let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
             events.push(event)
