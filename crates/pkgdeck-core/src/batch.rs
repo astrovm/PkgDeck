@@ -51,19 +51,6 @@ fn identifier(name: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+@-".contains(&b))
 }
-/// A snap's name, with an optional `_KEY` for a parallel instance. A `+`
-/// would name a component, which `snap refresh` installs when it's missing.
-fn snap_name(name: &str) -> bool {
-    let (snap, key) = name.split_once('_').unwrap_or((name, "x"));
-    let plain = |part: &str| {
-        !part.is_empty()
-            && !part.starts_with('-')
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    };
-    plain(snap) && plain(key)
-}
 fn flatpak_identifier(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -247,7 +234,7 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             if matches!(id.backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
         {
             let name = system_id(id, &id.backend)?;
-            if id.backend == "snap" && !snap_name(name) {
+            if id.backend == "snap" && !crate::backends::snap_name(name) {
                 return Err(invalid("invalid snap name"));
             }
             let verb = match operation {

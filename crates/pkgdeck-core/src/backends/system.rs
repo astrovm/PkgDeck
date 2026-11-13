@@ -229,15 +229,23 @@ fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
 /// The snaps and revisions an old-revisions task removes, from its key:
 /// `disabled-revisions:firefox=9113,core22=2955`. `None` for any other key,
 /// or one with a name or revision Snap wouldn't make.
+/// A snap's name, with an optional `_KEY` for a parallel instance, as
+/// snapd allows them. A `+` would name a component, which `snap refresh`
+/// and `snap install` add when it's missing, so no root command takes one.
+pub fn snap_name(name: &str) -> bool {
+    let (snap, key) = name.split_once('_').unwrap_or((name, "x"));
+    let plain = |part: &str, dashes: bool| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || (dashes && byte == b'-')
+            })
+    };
+    plain(snap, true) && plain(key, false)
+}
 pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
     let listed = key.strip_prefix("disabled-revisions:")?;
-    let name = |name: &str| {
-        !name.is_empty()
-            && !name.starts_with('-')
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    };
+    let name = snap_name;
     let revision = |revision: &str| {
         let digits = revision.strip_prefix('x').unwrap_or(revision);
         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -766,7 +774,12 @@ impl<T: Transport> SystemManager<T> {
     }
     /// The revisions Snap keeps to go back to, as one task.
     fn old_revisions(&self, listing: &str) -> Option<CleanupItem> {
-        let mut revisions = disabled_revisions(listing);
+        // Only what Snap would name goes in the key the runner reads. A
+        // name it wouldn't make leaves out that snap, not the rest.
+        let mut revisions: Vec<_> = disabled_revisions(listing)
+            .into_iter()
+            .filter(|(name, ..)| snap_name(name))
+            .collect();
         revisions.sort();
         let key = format!(
             "disabled-revisions:{}",
@@ -776,7 +789,6 @@ impl<T: Transport> SystemManager<T> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        // Only what Snap would name goes in the key the runner reads.
         if revisions.is_empty() || snap_revisions(&key).is_none() {
             return None;
         }

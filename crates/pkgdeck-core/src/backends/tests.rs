@@ -2482,6 +2482,35 @@ cut-short            1.0
         .cleanup(&cancel)
         .unwrap()
         .is_empty());
+    // A parallel instance is cleaned like any snap, and an odd name next
+    // to it leaves out only itself.
+    let mixed = Kit::new(
+        Ok(false),
+        "Name Version Rev Tracking Publisher Notes\nhello-world_foo 1 27 - - disabled\nBad;Name 1 2 - - disabled\nfirefox 158.0.1-1 9113 latest/stable mozilla** disabled\n",
+    );
+    let items = SystemManager::snap(mixed).cleanup(&cancel).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.key.as_str())
+            .collect::<Vec<_>>(),
+        ["disabled-revisions:firefox=9113,hello-world_foo=27"]
+    );
+    for name in ["hello-world_foo", "firefox", "core22"] {
+        assert!(crate::backends::snap_name(name), "{name}");
+    }
+    for name in [
+        "hello+extra",
+        "hello_foo+extra",
+        "hello_",
+        "_foo",
+        "hello_fo-o",
+        "Hello",
+        "-a",
+        "",
+    ] {
+        assert!(!crate::backends::snap_name(name), "{name}");
+    }
     assert!(SystemManager::dnf(Kit::new(Ok(false), ""))
         .cleanup(&cancel)
         .is_err());
