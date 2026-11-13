@@ -358,6 +358,10 @@ impl Transport for Kit {
             .lock()
             .unwrap()
             .push(if write { format!("root {line}") } else { line });
+        // dnf's check-update can't tell, so DNF's listing stays as it is.
+        if args.iter().any(|arg| arg == "check-update") {
+            return Err(ExecutionError::Failed(completion(1, "")));
+        }
         Ok(completion(0, self.listing))
     }
 }
@@ -549,7 +553,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu --dbpath /c/pacman",
                     "zypper --cache-dir /c/zypper --no-refresh --quiet --xmlout --non-interactive list-updates",
-                    "apk --cache-dir /c/apk list --upgradable",
+                    "apk --cache-dir /c/apk upgrade --simulate",
                     "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists dist-upgrade",
                 ],
             ),
@@ -558,7 +562,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu",
                     "zypper --quiet --xmlout --non-interactive list-updates",
-                    "apk list --upgradable",
+                    "apk upgrade --simulate",
                     "apt-get --simulate -o Debug::NoLocking=1 dist-upgrade",
                 ],
             ),
@@ -842,6 +846,12 @@ fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
             if args[0] == "-C" {
                 return Err(ExecutionError::Failed(completion(1, "")));
             }
+            if args.iter().any(|arg| arg == "check-update") {
+                return Err(ExecutionError::Failed(completion(
+                    100,
+                    "htop.x86_64 3.4.1-1.fc44 updates\n",
+                )));
+            }
             Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
         }
     }
@@ -849,8 +859,10 @@ fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
     let dnf = SystemManager::dnf(calls.clone());
     assert_eq!(dnf.updates(&Cancellation::default()).unwrap().len(), 1);
     let calls = calls.0.lock().unwrap();
-    assert_eq!(calls.len(), 2);
+    // check-update, which leaves out what versionlock holds, too.
+    assert_eq!(calls.len(), 4);
     assert_eq!(calls[1], calls[0][1..]);
+    assert_eq!(calls[3], calls[2][1..]);
     drop(calls);
     // Other managers have no online fallback: a failed listing is asked once.
     #[derive(Clone)]

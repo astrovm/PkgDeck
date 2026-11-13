@@ -289,6 +289,19 @@ impl Transport for Fixture {
             *self.candidate.lock().unwrap() = "2.0".into();
             return Ok(output(""));
         }
+        // check-update exits with 100 when there are updates.
+        if args.contains(&"check-update".into()) {
+            let candidate = self.candidate.lock().unwrap().clone();
+            return match self.installed.lock().unwrap().as_ref() {
+                Some(version) if *version != candidate => Err(ExecutionError::Failed(Completion {
+                    code: Some(100),
+                    ..output(format!(
+                        "\nsynthetic-fixture.x86_64   {candidate}   fixture\n"
+                    ))
+                })),
+                _ => Ok(output("")),
+            };
+        }
         if args.contains(&"--upgrades".into()) {
             let candidate = self.candidate.lock().unwrap().clone();
             return Ok(output(match self.installed.lock().unwrap().as_ref() {
@@ -6340,15 +6353,16 @@ impl Transport for Script {
             .filter(|(command, _)| line.starts_with(command.as_str()))
             .max_by_key(|(command, _)| command.len())
             .map(|(_, reply)| reply.clone());
-        // No reply, or a reply of "exit N", fails with that code and no output.
-        let code = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
+        // No reply fails with code 1. A reply of "exit N" fails with that
+        // code, and any lines after it are its output.
+        let (code, stdout) = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
             Some(None) => return Ok(output(reply.unwrap())),
-            Some(Some(code)) => code.parse().unwrap(),
-            None => 1,
+            Some(Some(code)) => code.split_once('\n').unwrap_or((code, "")),
+            None => ("1", ""),
         };
         Err(ExecutionError::Failed(Completion {
-            code: Some(code),
-            ..output("")
+            code: Some(code.parse().unwrap()),
+            ..output(stdout)
         }))
     }
 }
@@ -6359,10 +6373,12 @@ fn apk_lists_updates_and_writes_with_its_own_verbs() {
     // apk reports the machine's own architecture, which search rows use too.
     let arch = std::env::consts::ARCH;
     let installed_lines = format!("busybox-1.37.0-r12 {arch} {{busybox}} (GPL-2.0-only) [installed]\njq-1.8.2-r0 {arch} {{jq}} (MIT) [installed]\n");
-    let upgradable_lines = format!("busybox-1.37.0-r13 {arch} {{busybox}} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n");
+    // apk 3 pads the count. A package /etc/apk/world pins isn't listed.
+    let upgradable_lines =
+        "( 1/10) Upgrading busybox (1.37.0-r12 -> 1.37.0-r13)\n(2/2) Installing new-dependency (1.0-r0)\nOK: 10.0 MiB in 20 packages\n";
     let script = Script::new(&[
         ("apk list --installed", installed_lines.as_str()),
-        ("apk list --upgradable", upgradable_lines.as_str()),
+        ("apk upgrade --simulate", upgradable_lines),
         ("apk search -v jq", "gojq-0.12.19-r3 - Pure Go implementation of jq\njq-1.8.2-r0 - A lightweight and flexible command-line JSON processor\n"),
         ("apk add", ""),
         ("apk del", ""),
@@ -6649,6 +6665,52 @@ fn pacman_detects_and_searches_with_one_command_each() {
         Pacman::pacman(broken).search("missing", &cancel),
         Err(EngineError::Execution(ExecutionError::Failed(_)))
     ));
+}
+
+#[test]
+fn dnf_leaves_out_updates_versionlock_holds() {
+    let cancel = Cancellation::default();
+    let upgrades = "dnf -C --quiet repoquery --upgrades";
+    let installed = "dnf --quiet repoquery --latest-limit 1 --installed";
+    let check = "dnf -C --quiet check-update";
+    // dnf 4's repoquery lists curl-minimal although versionlock holds it.
+    let listed = "curl-minimal|x86_64|7.76.1-40.el9_8.9\n\nglibc-common|x86_64|2.34-284.el9_8.4\n\nlibcurl-minimal|x86_64|7.76.1-40.el9_8.9\n\nglibc-minimal-langpack-with-a-long-name|x86_64|2.34-284.el9_8.4\n";
+    let rows = "curl-minimal|x86_64|7.76.1-40.el9_8.8|URL tool\nglibc-common|x86_64|2.34-284.el9_8.3|Common\nlibcurl-minimal|x86_64|7.76.1-40.el9_8.8|URL library\nglibc-minimal-langpack-with-a-long-name|x86_64|2.34-284.el9_8.3|Langpack\n";
+    let updates = |check_update: &str| {
+        let script = Script::new(&[(upgrades, listed), (installed, rows), (check, check_update)]);
+        Dnf::dnf(script)
+            .installed(&cancel)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.id.name, p.update))
+            .collect::<Vec<_>>()
+    };
+    let [available, current] = [UpdateAvailability::Available, UpdateAvailability::Current];
+    // dnf 4 wraps a long name onto its own line. What an update obsoletes
+    // (curl-minimal here) isn't an update.
+    assert_eq!(
+        updates("exit 100\n\nglibc-common.x86_64                        2.34-284.el9_8.4              baseos\nglibc-minimal-langpack-with-a-long-name.x86_64\n                                           2.34-284.el9_8.4              baseos\nlibcurl-minimal.x86_64                     7.76.1-40.el9_8.9              baseos\nObsoleting Packages\ncurl-full.x86_64                           7.76.1-40.el9_8.9              baseos\n    curl-minimal.x86_64                    7.76.1-40.el9_8.8              @System\n"),
+        [
+            ("curl-minimal".into(), current.clone()),
+            ("glibc-common".into(), available.clone()),
+            ("libcurl-minimal".into(), available.clone()),
+            ("glibc-minimal-langpack-with-a-long-name".into(), available.clone()),
+        ]
+    );
+    // dnf 5 has a heading and one space between columns.
+    assert_eq!(
+        updates("exit 100\nUpgrades\ncurl-minimal.x86_64 7.76.1-40.el9_8.9 updates\n")
+            .into_iter()
+            .filter(|(_, update)| *update == available)
+            .count(),
+        1
+    );
+    // Exit 0: every update is held back.
+    assert!(updates("").into_iter().all(|(_, update)| update == current));
+    // When check-update can't tell, the listing stays as repoquery has it.
+    assert!(updates("exit 1")
+        .into_iter()
+        .all(|(_, update)| update == available));
 }
 
 #[test]

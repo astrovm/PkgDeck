@@ -43,7 +43,9 @@ impl ManagerKind {
     fn update_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Self::Snap => ("snap", &["refresh", "--list"]),
-            Self::Apk => ("apk", &["list", "--upgradable"]),
+            // `apk list --upgradable` also lists packages /etc/apk/world
+            // pins; an upgrade leaves those alone.
+            Self::Apk => ("apk", &["upgrade", "--simulate"]),
             // -C reads the cache a check just refreshed; without one, it's
             // asked again online.
             Self::Dnf => (
@@ -271,6 +273,31 @@ fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`
+/// into (`zlib`, `1.4-r0`). apk 3 pads the count: "( 1/12)".
+fn apk_upgrading(line: &str) -> Option<(&str, String)> {
+    let (_, change) = line.trim().split_once(") Upgrading ")?;
+    let (name, versions) = change.split_once(" (")?;
+    let (_, version) = versions.strip_suffix(')')?.split_once(" -> ")?;
+    (!name.contains(char::is_whitespace) && !version.is_empty()).then(|| (name, version.to_owned()))
+}
+
+/// Every word of `dnf check-update` before its obsoletes, which names
+/// what an update replaces: `name.arch` among them for each update. dnf 4
+/// wraps a long `name.arch` onto its own line; dnf 5 adds an "Upgrades"
+/// heading.
+fn dnf_check_update(text: &str) -> std::collections::BTreeSet<&str> {
+    text.lines()
+        .take_while(|line| {
+            !line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("obsoleting")
+        })
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
 /// Snaps `snap list` marks held (`snap refresh --hold`). A full refresh
 /// leaves them alone, but `snap refresh --list` still lists their updates.
 fn held_snaps(listing: &str) -> std::collections::BTreeSet<String> {
@@ -415,6 +442,7 @@ impl<T: Transport> SystemManager<T> {
         if matches!(self.kind, ManagerKind::Zypper) {
             return Ok(zypper_updates(&text));
         }
+        let mut arches: Vec<(String, String)> = Vec::new();
         let mut updates: BTreeMap<String, String> = text
             .lines()
             .filter_map(|line| {
@@ -423,7 +451,8 @@ impl<T: Transport> SystemManager<T> {
                     ManagerKind::Dnf => {
                         let fields: Vec<&str> = line.split('|').collect();
                         match fields[..] {
-                            [name, _, version] if !version.is_empty() => {
+                            [name, arch, version] if !version.is_empty() => {
+                                arches.push((name.to_owned(), arch.to_owned()));
                                 Some((name, version.to_owned()))
                             }
                             _ => None,
@@ -435,7 +464,7 @@ impl<T: Transport> SystemManager<T> {
                         Some((fields[0], fields[3].to_owned()))
                     }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
-                    ManagerKind::Apk => apk_pkgver(fields.first()?),
+                    ManagerKind::Apk => apk_upgrading(line),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
                         xbps_pkgver(fields.first()?)
                     }
@@ -456,7 +485,47 @@ impl<T: Transport> SystemManager<T> {
                 updates.remove(&name);
             }
         }
+        // dnf 4's repoquery lists what versionlock holds back; check-update,
+        // like an upgrade, leaves it out. dnf 5's repoquery already does.
+        if matches!(self.kind, ManagerKind::Dnf) && !updates.is_empty() {
+            if let Some(listing) = self.dnf_check_update(cancel)? {
+                let listed = dnf_check_update(&listing);
+                updates.retain(|name, _| {
+                    arches.iter().any(|(n, arch)| {
+                        n == name && listed.contains(format!("{name}.{arch}").as_str())
+                    })
+                });
+            }
+        }
         Ok(updates)
+    }
+    /// `dnf check-update`'s listing, or `None` when it can't tell. It exits
+    /// with 100 when there are updates and 0 when there are none.
+    fn dnf_check_update(&self, cancel: &Cancellation) -> Result<Option<String>, EngineError> {
+        let mut args: Vec<OsString> = ["-C", "--quiet", "check-update"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let mut result = self.call(args.clone(), cancel, false);
+        // Without a cache, it's asked again online, like repoquery.
+        if matches!(&result, Err(EngineError::Execution(ExecutionError::Failed(done))) if done.code != Some(100))
+        {
+            args.remove(0);
+            result = self.call(args, cancel, false);
+        }
+        let done = match result {
+            Ok(done) | Err(EngineError::Execution(ExecutionError::Failed(done))) => done,
+            Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
+                return Err(EngineError::Cancelled)
+            }
+            Err(_) => return Ok(None),
+        };
+        Ok(match done.code {
+            _ if done.truncated || done.signal.is_some() => None,
+            Some(0) => Some(String::new()),
+            Some(100) => Some(String::from_utf8_lossy(&done.stdout).into_owned()),
+            _ => None,
+        })
     }
     fn valid_name(&self, name: &str) -> bool {
         !name.is_empty()
