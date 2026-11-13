@@ -264,6 +264,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
         EngineError::Execution(E::Helper(_)) => "PkgDeck's system helper couldn't run this change. Try again.".into(),
+        EngineError::Execution(E::Unreachable(line)) => format!("A repository couldn't be reached, so nothing was changed: {} Try again when it's back.", sentence_tail(line)),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
         error if cask_needed_password(error, backend) => {
             "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()

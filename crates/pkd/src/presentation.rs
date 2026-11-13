@@ -216,6 +216,11 @@ fn execution_text(error: &Value) -> String {
                 .find_map(|kind| error.get(*kind).and_then(Value::as_str))
             {
                 clean(text)
+            } else if let Some(line) = error.get("Unreachable").and_then(Value::as_str) {
+                format!(
+                    "A repository couldn't be reached, so nothing was changed: {}. Try again when it's back.",
+                    clean(line).trim_end_matches('.')
+                )
             } else if let Some(result) = error.get("Failed") {
                 format!("The package manager {}", outcome(result))
             } else {
@@ -1704,6 +1709,10 @@ mod tests {
                 "Another package manager is running",
             ),
             (json!({"Execution": "Interrupted"}), "was interrupted"),
+            (
+                json!({"Execution": {"Unreachable": "opening http://mirror: Connection refused."}}),
+                "couldn't be reached, so nothing was changed: opening http://mirror: Connection refused. Try again",
+            ),
             (json!({"Execution": "TimedOut"}), "took too long"),
             (json!({"Execution": "Cancelled"}), "Cancelled."),
             (json!({"Execution": {"Invalid": "bad input"}}), "bad input"),

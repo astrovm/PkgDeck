@@ -6462,16 +6462,22 @@ impl Transport for Script {
             .max_by_key(|(command, _)| command.len())
             .map(|(_, reply)| reply.clone());
         // No reply fails with code 1. A reply of "exit N" fails with that
-        // code, and any lines after it are its output.
+        // code, and any lines after it are its output. Like the host, a
+        // write that ran answers with its code; a failed read is an error.
         let (code, stdout) = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
             Some(None) => return Ok(output(reply.unwrap())),
             Some(Some(code)) => code.split_once('\n').unwrap_or((code, "")),
             None => ("1", ""),
         };
-        Err(ExecutionError::Failed(Completion {
+        let done = Completion {
             code: Some(code.parse().unwrap()),
             ..output(stdout)
-        }))
+        };
+        if write {
+            Ok(done)
+        } else {
+            Err(ExecutionError::Failed(done))
+        }
     }
 }
 
@@ -6604,18 +6610,26 @@ fn apk_doesnt_blame_an_update_on_a_repository_it_cant_reach() {
     let mut apk = SystemManager::apk(Script::new(&[
         ("apk upgrade --update-cache -- zlib", "exit 99\nWARNING: updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
         ("apk upgrade --update-cache -- musl", "exit 1\nERROR: musl-1.2.6-r0: BAD signature\n"),
+        ("apk upgrade --update-cache -- jq", "exit 99\nERROR: Not continuing due to stale/unavailable repositories.\n"),
     ]));
     let error = apk
         .execute(&Operation::Upgrade(id("zlib")), &cancel, &mut |_| {})
         .unwrap_err();
     assert_eq!(
         error,
-        EngineError::Unavailable {
-            backend: "apk".into(),
-            reason: "a repository in /etc/apk/repositories can't be reached".into(),
-        }
+        EngineError::Execution(ExecutionError::Unreachable(
+            "updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused"
+                .into()
+        ))
     );
     assert!(!error.blames_change());
+    // Without a line that names the repository, apk's refusal says it.
+    assert_eq!(
+        apk.execute(&Operation::Upgrade(id("jq")), &cancel, &mut |_| {}),
+        Err(EngineError::Execution(ExecutionError::Unreachable(
+            "Not continuing due to stale/unavailable repositories.".into()
+        )))
+    );
     // Any other failure is the update's own.
     let error = apk
         .execute(&Operation::Upgrade(id("musl")), &cancel, &mut |_| {})

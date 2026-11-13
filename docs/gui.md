@@ -160,7 +160,8 @@ other sources still appear as they answer.
   back. Its row's arrow tries it again, and once it works the warning goes
   away. When it's the only update left, **Update all** tries it too. An
   update stopped by a cancel, the password prompt, PkgDeck's system helper,
-  a package manager that couldn't start or a shutdown isn't skipped. APT and
+  a package manager that couldn't start, an Alpine repository that couldn't
+  be reached or a shutdown isn't skipped. APT and
   Pacman install some updates together in one step. When one of those fails
   because of the update itself, the others in that step are skipped too.
 - A Homebrew cask that needs your password shows a lock. Automatic updates

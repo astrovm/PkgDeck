@@ -176,12 +176,16 @@ pub enum ExecutionError {
     /// PkgDeck's system helper failed, not the command it was to run: it
     /// didn't start, stopped, or turned the command down.
     Helper(String),
+    /// The package manager changed nothing because it couldn't reach a
+    /// repository it needs. Its own line, which names the repository.
+    Unreachable(String),
 }
 impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled(s) | Self::Invalid(s) | Self::Io(s) => f.write_str(s),
             Self::Helper(s) => write!(f, "PkgDeck's system helper failed: {s}"),
+            Self::Unreachable(s) => write!(f, "a repository couldn't be reached: {s}"),
             Self::Cancelled => f.write_str("operation cancelled before completion"),
             Self::TimedOut => f.write_str("host read timed out"),
             Self::AuthorizationCancelled => f.write_str("authorization cancelled"),
@@ -473,6 +477,11 @@ mod tests {
         assert_eq!(
             ExecutionError::Helper("authorization runner closed unexpectedly".into()).to_string(),
             "PkgDeck's system helper failed: authorization runner closed unexpectedly"
+        );
+        assert_eq!(
+            ExecutionError::Unreachable("opening http://mirror: Connection refused".into())
+                .to_string(),
+            "a repository couldn't be reached: opening http://mirror: Connection refused"
         );
         let apt = "WARNING: apt does not have a stable CLI interface.\n\nE: Unable to locate package x\nE: second\n";
         assert_eq!(

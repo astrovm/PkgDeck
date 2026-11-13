@@ -3741,6 +3741,10 @@ fn finished_changes_explain_what_happened() {
         (E::LockBusy, "Another package manager is running"),
         (E::Interrupted, "interrupted"),
         (
+            E::Unreachable("updating and opening http://mirror/x86_64/APKINDEX.tar.gz: Connection refused".into()),
+            "A repository couldn't be reached, so nothing was changed: updating and opening http://mirror/x86_64/APKINDEX.tar.gz: Connection refused. Try again when it's back.",
+        ),
+        (
             E::Failed(Completion {
                 code: Some(100),
                 signal: None,
@@ -6025,6 +6029,10 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             false,
         ),
         (EngineError::Execution(ExecutionError::LockBusy), false),
+        (
+            EngineError::Execution(ExecutionError::Unreachable("Connection refused".into())),
+            false,
+        ),
         (EngineError::Execution(ExecutionError::TimedOut), false),
         (refused(Refusal::NeedsReview), false),
         (refused(Refusal::PartnerFailed { blamed: false }), false),

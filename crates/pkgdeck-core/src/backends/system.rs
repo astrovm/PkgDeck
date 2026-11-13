@@ -294,13 +294,23 @@ fn apk_lacks_an_option(done: &Completion) -> bool {
 
 /// apk refuses a change while a repository it can't reach has no fresh
 /// index (exit 99): "Not continuing due to stale/unavailable repositories".
-/// That says nothing about the package.
-fn apk_repositories_unavailable(error: &EngineError) -> bool {
-    matches!(
-        error,
-        EngineError::Execution(ExecutionError::Failed(done))
-            if apk_says(done, "stale/unavailable repositories")
-    )
+/// That says nothing about the package. Its line that names the
+/// repository, or else that refusal.
+fn apk_unreachable(done: &Completion) -> Option<String> {
+    if done.code == Some(0) || !apk_says(done, "stale/unavailable repositories") {
+        return None;
+    }
+    let text =
+        String::from_utf8_lossy(&done.stderr).into_owned() + &String::from_utf8_lossy(&done.stdout);
+    let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = lines()
+        .find(|line| line.contains("://"))
+        .or_else(|| lines().find(|line| line.contains("stale/unavailable")))?;
+    let line = line
+        .strip_prefix("WARNING: ")
+        .or_else(|| line.strip_prefix("ERROR: "))
+        .unwrap_or(line);
+    Some(line.to_owned())
 }
 
 /// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`
@@ -1341,17 +1351,13 @@ impl<T: Transport> Backend for SystemManager<T> {
             "Running {}. If you cancel, PkgDeck waits for it to finish.",
             self.kind.id()
         )));
-        let result = self
-            .call_with(self.kind.write_executable(operation), args, cancel, true)
-            .map_err(|error| match self.kind {
-                ManagerKind::Apk if apk_repositories_unavailable(&error) => {
-                    EngineError::Unavailable {
-                        backend: "apk".into(),
-                        reason: "a repository in /etc/apk/repositories can't be reached".into(),
-                    }
-                }
-                _ => error,
-            })?;
+        let result = self.call_with(self.kind.write_executable(operation), args, cancel, true)?;
+        if let Some(line) = matches!(self.kind, ManagerKind::Apk)
+            .then(|| apk_unreachable(&result))
+            .flatten()
+        {
+            return Err(ExecutionError::Unreachable(line).into());
+        }
         bytes(self.kind.id(), result.clone())?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
