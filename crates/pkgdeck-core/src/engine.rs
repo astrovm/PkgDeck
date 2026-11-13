@@ -1804,10 +1804,17 @@ impl Engine {
         if operations.is_empty() {
             return vec![];
         }
-        let protected: Vec<bool> = crate::batch::batch_commands(operations)
-            .expect("individual protected commands were validated above")
+        // Each change on its own: in a batch, a transaction's first change
+        // carries the commands of the rest.
+        let protected: Vec<bool> = operations
             .iter()
-            .map(|commands| !commands.is_empty())
+            .map(|operation| {
+                crate::batch::protected_commands(operation)
+                    .expect("individual protected commands were validated above")
+                    .iter()
+                    .next()
+                    .is_some()
+            })
             .collect();
         if !protected.contains(&true) {
             let lanes = self.lanes(operations);
@@ -2619,6 +2626,25 @@ mod apt_upgrade_tests {
             };
             assert_eq!((count(true), count(false)), (1, 1), "{operation:?}");
         }
+        // Every change of a transaction needs the helper, not only the
+        // first, which carries the commands of the rest.
+        let (mut engine, (log, ran)) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let grouped = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+            user_update(),
+        ];
+        // The helper refuses them, so it doesn't start.
+        let results = engine.execute_checked(&grouped, &Cancellation::default(), &mut |_| {});
+        assert!(results[0].is_err() && results[1].is_err(), "{results:?}");
+        assert!(results[2].is_ok(), "{results:?}");
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run")));
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
         // A batch the person stopped runs nothing more.
         let (mut engine, (_, ran)) = lists_and_user_engine(crate::batch::BatchMode::Reviewed);
         let protected = [Operation::Upgrade(apt_id("one"))];

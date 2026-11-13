@@ -51,6 +51,19 @@ fn identifier(name: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+@-".contains(&b))
 }
+/// A snap's name, with an optional `_KEY` for a parallel instance. A `+`
+/// would name a component, which `snap refresh` installs when it's missing.
+fn snap_name(name: &str) -> bool {
+    let (snap, key) = name.split_once('_').unwrap_or((name, "x"));
+    let plain = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    plain(snap) && plain(key)
+}
 fn flatpak_identifier(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -234,6 +247,9 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
             if matches!(id.backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
         {
             let name = system_id(id, &id.backend)?;
+            if id.backend == "snap" && !snap_name(name) {
+                return Err(invalid("invalid snap name"));
+            }
             let verb = match operation {
                 Operation::Install(_) => "install",
                 Operation::Remove(_) => "remove",
@@ -1515,6 +1531,22 @@ mod tests {
             check_mode(BatchMode::UpgradeOnly { removals: false }, &one_by_one),
             Ok(())
         );
+        // A component isn't installed yet, so `snap refresh` would install
+        // it: no snap command takes one.
+        for component in ["synthetic+extra", "synthetic_key+extra"] {
+            for operation in [
+                Operation::Upgrade(id("snap", component)),
+                Operation::Install(id("snap", component)),
+                Operation::Remove(id("snap", component)),
+            ] {
+                assert!(protected_commands(&operation).is_err(), "{operation:?}");
+                assert!(!upgrade_only_allows(&operation), "{operation:?}");
+            }
+        }
+        assert!(upgrade_only_allows(&Operation::Upgrade(id(
+            "snap",
+            "synthetic_key"
+        ))));
         for refused in [
             Operation::Install(id("apt", "synthetic")),
             Operation::Remove(id("dnf", "synthetic")),
