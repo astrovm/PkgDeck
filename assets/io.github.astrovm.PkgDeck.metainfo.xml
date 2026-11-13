@@ -18,7 +18,9 @@
           <li>While a Snap release waits, the other Snap updates wait for you instead of failing</li>
           <li>A snap held with snap refresh --hold no longer shows an update that Update all never makes</li>
           <li>A Flatpak masked with flatpak mask, or an extension of one, no longer shows an update that Update all never makes</li>
-          <li>Updates that failed because of a password prompt, the system helper or an older PkgDeck are tried again</li>
+          <li>An Alpine package pinned in /etc/apk/world, or a package DNF 4 versionlock holds back, no longer shows an update either</li>
+          <li>Updates that failed because of the password prompt or the system helper are tried again</li>
+          <li>Updates that an older PkgDeck marked as failed are tried again</li>
           <li>Automatic updates skip an update only after it failed twice, so a run without network doesn't hold it back</li>
           <li>One update the helper can't run no longer stops the rest of the run</li>
           <li>Updates that run as you still run when the system helper can't start</li>
