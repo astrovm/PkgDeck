@@ -2533,20 +2533,19 @@ mod apt_upgrade_tests {
         assert!(log.lock().unwrap().is_empty());
     }
 
-    /// [`lists_engine`] plus a source that runs as the user.
-    fn lists_and_user_engine(
-        mode: crate::batch::BatchMode,
-    ) -> (
-        Engine,
+    /// What a test engine's sources logged, and what the user source ran.
+    type Logs = (
         Arc<std::sync::Mutex<Vec<String>>>,
         Arc<std::sync::Mutex<Vec<Operation>>>,
-    ) {
+    );
+    /// [`lists_engine`] plus a source that runs as the user.
+    fn lists_and_user_engine(mode: crate::batch::BatchMode) -> (Engine, Logs) {
         let (mut engine, log) = lists_engine(Ok(()), true);
         let user = crate::fake::Fake::new("user", &[Capability::Upgrade]);
         let ran = Arc::clone(&user.ran);
         engine.register(user).unwrap();
         engine.set_batch_mode(mode);
-        (engine, log, ran)
+        (engine, (log, ran))
     }
     fn user_update() -> Operation {
         Operation::Upgrade(PackageId {
@@ -2558,7 +2557,7 @@ mod apt_upgrade_tests {
 
     #[test]
     fn a_change_the_upgrade_only_runner_refuses_fails_alone() {
-        let (mut engine, log, ran) =
+        let (mut engine, (log, ran)) =
             lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
         let operations = [Operation::Install(apt_id("one")), user_update()];
         let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
@@ -2578,7 +2577,7 @@ mod apt_upgrade_tests {
     #[test]
     fn user_changes_run_when_the_helper_does_not_start() {
         // No PATH, so no helper: an upgrade-only batch can't start one.
-        let (mut engine, log, ran) =
+        let (mut engine, (log, ran)) =
             lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
         engine.remember_apt_upgrade_plan(empty_plan());
         let operations = [
@@ -2621,7 +2620,7 @@ mod apt_upgrade_tests {
             assert_eq!((count(true), count(false)), (1, 1), "{operation:?}");
         }
         // A batch the person stopped runs nothing more.
-        let (mut engine, _, ran) = lists_and_user_engine(crate::batch::BatchMode::Reviewed);
+        let (mut engine, (_, ran)) = lists_and_user_engine(crate::batch::BatchMode::Reviewed);
         let protected = [Operation::Upgrade(apt_id("one"))];
         let stopped = engine.without_runner(
             &[protected[0].clone(), user_update()],
