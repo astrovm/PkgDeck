@@ -2978,11 +2978,11 @@ mod apt_upgrade_tests {
     }
 
     /// Formulae and casks that record how they ran, and fail `broken`.
-    /// `drifts` passes its first check only; `unprepared` fails before any.
+    /// The update with a reviewed plan passes its first check only;
+    /// `unprepared` fails before any.
     struct BrewFixture {
         id: &'static str,
         broken: &'static str,
-        drifts: &'static str,
         unprepared: bool,
         reads: usize,
         log: Arc<std::sync::Mutex<Vec<String>>>,
@@ -3061,9 +3061,7 @@ mod apt_upgrade_tests {
             operation: &Operation,
             _: &Cancellation,
         ) -> Result<Option<TransactionPlan>, EngineError> {
-            if !matches!(operation, Operation::Upgrade(id) if id.name == self.drifts) {
-                return Ok(None);
-            }
+            // Asked only for the update with a reviewed plan.
             self.reads += 1;
             let preview = if self.reads > 1 {
                 "changed"
@@ -3094,7 +3092,6 @@ mod apt_upgrade_tests {
                     .register(BrewFixture {
                         id,
                         broken: "second",
-                        drifts: "",
                         unprepared: false,
                         reads: 0,
                         log: log.clone(),
@@ -3157,14 +3154,13 @@ mod apt_upgrade_tests {
             brew_update("homebrew-cask", "second"),
             brew_update("homebrew-cask", "third"),
         ];
-        let run = |drifts: &'static str, unprepared: bool| {
+        let run = |unprepared: bool| {
             let log = Arc::new(std::sync::Mutex::new(vec![]));
             let mut engine = Engine::default();
             engine
                 .register(BrewFixture {
                     id: "homebrew-cask",
                     broken: "",
-                    drifts,
                     unprepared,
                     reads: 0,
                     log: log.clone(),
@@ -3182,7 +3178,7 @@ mod apt_upgrade_tests {
         };
         // Casks join only to share a password, so one whose plan changed
         // since its first check fails alone, and the rest still update.
-        let (ran, results) = run("second", false);
+        let (ran, results) = run(false);
         assert_eq!(ran, ["first third"]);
         assert_eq!(
             results,
@@ -3197,7 +3193,7 @@ mod apt_upgrade_tests {
         );
         // Homebrew couldn't get ready, before any last check: no cask
         // updates, and each fails with that.
-        let (ran, results) = run("second", true);
+        let (ran, results) = run(true);
         assert!(ran.is_empty());
         assert_eq!(
             results,
