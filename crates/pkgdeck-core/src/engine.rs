@@ -1809,11 +1809,9 @@ impl Engine {
         let protected: Vec<bool> = operations
             .iter()
             .map(|operation| {
-                crate::batch::protected_commands(operation)
+                !crate::batch::protected_commands(operation)
                     .expect("individual protected commands were validated above")
-                    .iter()
-                    .next()
-                    .is_some()
+                    .is_empty()
             })
             .collect();
         if !protected.contains(&true) {
