@@ -2629,15 +2629,12 @@ mod apt_upgrade_tests {
             lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
         let operations = [Operation::Install(apt_id("one")), user_update()];
         let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
-        assert!(
-            matches!(
-                &results[0],
-                Err(EngineError::Refused {
-                    refusal: Refusal::NeedsReview,
-                    ..
-                })
-            ),
-            "{results:?}"
+        assert_eq!(
+            results[0],
+            Err(EngineError::Refused {
+                backend: "apt".into(),
+                refusal: Refusal::NeedsReview,
+            })
         );
         assert!(results[1].is_ok(), "{results:?}");
         assert!(log.lock().unwrap().is_empty());
@@ -2660,13 +2657,11 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
             events.push(event)
         });
-        assert!(
-            matches!(
-                &results[0],
-                Err(EngineError::Execution(ExecutionError::Disabled(reason)))
-                    if reason.contains("system helper")
-            ),
-            "{results:?}"
+        assert_eq!(
+            results[0],
+            Err(EngineError::Execution(ExecutionError::Disabled(
+                "unattended updates need PkgDeck's system helper".into()
+            )))
         );
         assert!(results[1].is_ok(), "{results:?}");
         assert!(!log

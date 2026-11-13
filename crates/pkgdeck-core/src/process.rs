@@ -470,6 +470,10 @@ mod tests {
             ExecutionError::Failed(failed(Some(1), None, rustup)).to_string(),
             "the package manager exited with code 1: error: rustup could not choose a version of cargo to run"
         );
+        assert_eq!(
+            ExecutionError::Helper("authorization runner closed unexpectedly".into()).to_string(),
+            "PkgDeck's system helper failed: authorization runner closed unexpectedly"
+        );
         let apt = "WARNING: apt does not have a stable CLI interface.\n\nE: Unable to locate package x\nE: second\n";
         assert_eq!(
             failure_summary(apt.as_bytes()).unwrap(),

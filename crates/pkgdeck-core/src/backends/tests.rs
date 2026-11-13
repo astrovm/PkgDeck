@@ -831,6 +831,44 @@ fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
 }
 
 #[test]
+fn dnf_keeps_its_updates_when_check_update_cant_tell() {
+    /// repoquery lists htop; check-update answers `0`.
+    #[derive(Clone)]
+    struct CheckUpdate(Result<Completion, ExecutionError>);
+    impl Transport for CheckUpdate {
+        fn system_manager(
+            &self,
+            _: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if args.iter().any(|arg| arg == "check-update") {
+                return self.0.clone();
+            }
+            Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
+        }
+    }
+    let updates =
+        |answer| SystemManager::dnf(CheckUpdate(answer)).updates(&Cancellation::default());
+    let truncated = Completion {
+        truncated: true,
+        ..completion(100, "")
+    };
+    for answer in [
+        Err(ExecutionError::Disabled("dnf not found".into())),
+        Err(ExecutionError::Failed(truncated)),
+    ] {
+        assert_eq!(updates(answer.clone()).unwrap().len(), 1, "{answer:?}");
+    }
+    // A cancel stops the listing.
+    assert_eq!(
+        updates(Err(ExecutionError::Cancelled)),
+        Err(EngineError::Cancelled)
+    );
+}
+
+#[test]
 fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
     #[derive(Clone)]
     struct NoCache(Arc<Mutex<Vec<Vec<OsString>>>>);
@@ -2823,4 +2861,9 @@ fn flatpak_extensions_name_the_ref_they_extend() {
         None
     );
     assert_eq!(flatpak_extension_of("[ExtensionOf]\nref=a.B\n"), None);
+    // Other keys of the group come before or after it.
+    assert_eq!(
+        flatpak_extension_of("[ExtensionOf]\npriority=1\nref=app/a.B/x86_64/stable\n"),
+        Some("app/a.B/x86_64/stable")
+    );
 }
