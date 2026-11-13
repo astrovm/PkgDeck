@@ -27,6 +27,7 @@
           <li>Automatic updates skip an update only after it failed twice, so a run without network doesn't hold it back</li>
           <li>One update the helper can't run no longer stops the rest of the run</li>
           <li>Updates that run as you still run when the system helper can't start</li>
+          <li>Activity no longer keeps what a package manager printed when a change failed, and older entries drop it too</li>
         </ul>
       </description>
     </release>

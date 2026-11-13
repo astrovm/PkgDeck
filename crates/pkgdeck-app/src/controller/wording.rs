@@ -227,7 +227,9 @@ fn homebrew_unreachable(error: &EngineError, backend: Option<&str>) -> bool {
 const HOMEBREW_UNREACHABLE: &str =
     "Homebrew couldn't reach its server. Check your connection, then try again.";
 /// Why a change didn't finish, as Activity keeps it: [`plain_error`]
-/// without anything a tool printed, which Activity never stores.
+/// without anything a tool printed, which Activity never stores. A text an
+/// error carries can hold a tool's words, so it is kept only where PkgDeck
+/// alone writes it, and each new kind of error has to choose its words here.
 pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
     use pkgdeck_core::process::ExecutionError as E;
     let tool = source_display_name(backend);
@@ -239,13 +241,39 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
         {
             plain_error(error, Some(backend), false)
         }
+        EngineError::Unavailable { reason, .. } if refuses_root(reason) => ROOT_MESSAGE.into(),
         EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
         // Its line names the repository, which can hold a token.
         EngineError::Execution(E::Unreachable(_)) => format!(
             "{tool} couldn't reach a repository, so nothing was changed. Try again when it's back."
         ),
-        EngineError::InvalidResponse { .. } => format!("{tool} reported a problem."),
-        error => plain_error(error, Some(backend), false),
+        EngineError::InvalidResponse { .. } | EngineError::Execution(E::Invalid(_)) => {
+            format!("{tool} reported a problem.")
+        }
+        EngineError::Unavailable { .. } | EngineError::Execution(E::Disabled(_)) => {
+            format!("{tool} couldn't be used.")
+        }
+        EngineError::Execution(E::Io(_)) => {
+            format!("{tool} couldn't finish: a file or a command it needed couldn't be used.")
+        }
+        // PkgDeck's own words.
+        EngineError::UnknownBackend(_)
+        | EngineError::DuplicateBackend(_)
+        | EngineError::Unsupported { .. }
+        | EngineError::Refused { .. }
+        | EngineError::NotFound
+        | EngineError::Ambiguous(_)
+        | EngineError::Incomplete(_)
+        | EngineError::Cancelled
+        | EngineError::Execution(
+            E::Helper(_)
+            | E::Cancelled
+            | E::TimedOut
+            | E::AuthorizationCancelled
+            | E::AuthorizationDenied
+            | E::LockBusy
+            | E::Interrupted,
+        ) => plain_error(error, Some(backend), false),
     }
 }
 /// A plain explanation of an engine error, naming the tool when known.

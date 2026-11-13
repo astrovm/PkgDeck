@@ -14748,6 +14748,43 @@ fn a_cleanup_left_alone_is_not_a_failure() {
             Some("apk couldn't reach a repository, so nothing was changed. Try again when it's back.".into())
         )
     );
+    // Text these errors carry can be a tool's: Docker's line, Git's.
+    for (error, kept) in [
+        (
+            EngineError::Unavailable {
+                backend: "docker".into(),
+                reason: "Docker is installed but unavailable: tcp://user:secret@host".into(),
+            },
+            "Docker images couldn't be used.",
+        ),
+        (
+            EngineError::Unavailable {
+                backend: "docker".into(),
+                reason: "PkgDeck must run as an unprivileged user".into(),
+            },
+            ROOT_MESSAGE,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Disabled("secret".into())),
+            "Docker images couldn't be used.",
+        ),
+        (
+            EngineError::Execution(ExecutionError::Invalid("secret".into())),
+            "Docker images reported a problem.",
+        ),
+        (
+            EngineError::Execution(ExecutionError::Io(
+                "Couldn't remove ~/x: fatal: secret".into(),
+            )),
+            "Docker images couldn't finish: a file or a command it needed couldn't be used.",
+        ),
+    ] {
+        assert_eq!(
+            ended_by(&error, "docker"),
+            (Outcome::Failed, Some(kept.into())),
+            "{error:?}"
+        );
+    }
     let (outcome, kept) = ended_by(&EngineError::NotFound, "projects");
     assert_eq!(outcome, Outcome::Failed);
     assert_eq!(

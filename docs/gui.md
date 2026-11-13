@@ -290,8 +290,9 @@ tasks that start unchecked until you check them yourself.
 When some tasks fail, **Activity** shows each reason once, with the tasks it
 stopped. The row shows the reason too, and the whole text when you point at it.
 Activity keeps why each task failed, waits or was skipped: open its card to
-read it. It keeps each task's name too, so a cleaned folder still shows by
-name after it's gone.
+read it. It keeps PkgDeck's own words, never what a tool printed, which can
+name a private address or a token. It keeps each task's name too, so a
+cleaned folder still shows by name after it's gone.
 
 ### Clean settings
 
