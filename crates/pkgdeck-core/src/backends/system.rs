@@ -226,9 +226,6 @@ fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
     (version.contains('_') && !name.is_empty()).then(|| (name, version.to_owned()))
 }
 
-/// The snaps and revisions an old-revisions task removes, from its key:
-/// `disabled-revisions:firefox=9113,core22=2955`. `None` for any other key,
-/// or one with a name or revision Snap wouldn't make.
 /// A snap's name, with an optional `_KEY` for a parallel instance, as
 /// snapd allows them. A `+` would name a component, which `snap refresh`
 /// and `snap install` add when it's missing, so no root command takes one.
@@ -243,6 +240,10 @@ pub fn snap_name(name: &str) -> bool {
     };
     plain(snap, true) && plain(key, false)
 }
+
+/// The snaps and revisions an old-revisions task removes, from its key:
+/// `disabled-revisions:firefox=9113,core22=2955`. `None` for any other key,
+/// or one with a name or revision Snap wouldn't make.
 pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
     let listed = key.strip_prefix("disabled-revisions:")?;
     let name = snap_name;

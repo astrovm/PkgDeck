@@ -14,7 +14,8 @@
       <description>
         <p>Automatic updates work again while a Flatpak or Snap release waits.</p>
         <ul>
-          <li>With Wait for new releases on, automatic updates update the other system Flatpaks and Snaps one by one instead of failing</li>
+          <li>With Wait for new releases on, automatic updates update the other system Flatpaks one by one instead of failing</li>
+          <li>While a Snap release waits, the other Snap updates wait for you instead of failing</li>
           <li>One update the helper can't run no longer stops the rest of the run</li>
           <li>Updates that run as you still run when the system helper can't start</li>
         </ul>

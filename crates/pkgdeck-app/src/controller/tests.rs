@@ -43,6 +43,7 @@ fn ran(steps: &[(&str, Outcome, Said)]) -> Payload {
                 outcome: *outcome,
                 said: said.clone(),
                 kept: None,
+                blamed: *outcome == Outcome::Failed,
             })
             .collect(),
         note: None,
@@ -3893,6 +3894,7 @@ fn finished_changes_explain_what_happened() {
                 outcome: Outcome::Finished,
                 said: Said::Completed,
                 kept: None,
+                blamed: false,
             }],
             note: firmware_note(&[Operation::Upgrade(PackageId {
                 backend: "fwupd".into(),
@@ -5300,6 +5302,7 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
             outcome: Outcome::Finished,
             said: Said::Completed,
             kept: None,
+            blamed: false,
         }],
         note: firmware_note(&[Operation::Upgrade(package.id.clone())]),
     })));
@@ -5911,6 +5914,96 @@ impl Backend for BrokenTool {
         } else {
             Ok(OperationOutcome::default())
         }
+    }
+}
+/// A tool whose updates all stop with `0`.
+struct StoppedTool(EngineError);
+impl Backend for StoppedTool {
+    fn id(&self) -> &str {
+        "anchor"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Installed, Capability::Upgrade]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        Err(self.0.clone())
+    }
+}
+#[test]
+fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
+    let package = |name: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = "anchor".into();
+        package.installed_version = Some("1".into());
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let (one, two) = (package("one"), package("two"));
+    let upgrade = |package: &Package| Operation::Upgrade(package.id.clone());
+    let refused = |refusal| EngineError::Refused {
+        backend: "anchor".into(),
+        refusal,
+    };
+    let remembered = |error: EngineError, job: Job| {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![one.clone(), two.clone()];
+        let mut engine = Engine::default();
+        engine.register(StoppedTool(error)).unwrap();
+        let replies = run_job(&mut engine, job.clone(), &Cancellation::default());
+        controller.as_mut().rust_mut().worker = Some(fake_worker(job, replies));
+        controller.as_mut().poll();
+        let failed = &controller.rust().failed_updates;
+        [&one, &two].map(|package| failed.skips(&package.id, "2"))
+    };
+    for (error, blamed) in [
+        (
+            EngineError::Execution(ExecutionError::Io("No such file".into())),
+            true,
+        ),
+        (
+            refused(Refusal::Explained(
+                "It was installed some other way.".into(),
+            )),
+            true,
+        ),
+        (
+            EngineError::Execution(ExecutionError::AuthorizationCancelled),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::AuthorizationDenied),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Disabled(
+                "PkgDeck's system helper is not installed".into(),
+            )),
+            false,
+        ),
+        (EngineError::Execution(ExecutionError::LockBusy), false),
+        (EngineError::Execution(ExecutionError::TimedOut), false),
+        (refused(Refusal::NeedsReview), false),
+        (refused(Refusal::PartnerFailed), false),
+        (refused(Refusal::PlanChanged), false),
+    ] {
+        let batch = Job::UpgradeAll(vec![upgrade(&one), upgrade(&two)], None);
+        assert_eq!(remembered(error.clone(), batch), [blamed; 2], "{error:?}");
+        let alone = Job::Write(upgrade(&one), None);
+        assert_eq!(
+            remembered(error.clone(), alone),
+            [blamed, false],
+            "{error:?}"
+        );
     }
 }
 #[test]
@@ -6709,9 +6802,10 @@ fn automatic_runs_update_around_a_waiting_release_only_where_the_helper_may() {
         &NeedsPassword::default(),
         &FailedUpdates::default(),
     );
-    // The helper updates one Flatpak or Snap at a time. Pacman never
-    // waits, but if it did, its update would wait for someone to start it.
-    assert_eq!(plan, [ready("flatpak"), ready("snap"), ready("user")]);
+    // The helper updates one Flatpak at a time. One Snap at a time would
+    // update held snaps, and Pacman never waits, but if it did, it would
+    // install missing packages: their updates wait for someone.
+    assert_eq!(plan, [ready("flatpak"), ready("user")]);
     // The helper takes every change in the plan.
     assert_eq!(
         pkgdeck_core::batch::check_mode(
@@ -7565,6 +7659,7 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
             outcome: outcome(operation),
             said: Said::Completed,
             kept: None,
+            blamed: outcome(operation) == Outcome::Failed,
         })
         .collect();
     let job = Job::AutoUpgrade(operations, removals);
@@ -7598,6 +7693,7 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
                 outcome: Outcome::Finished,
                 said: Said::Completed,
                 kept: None,
+                blamed: false,
             }],
             note: None,
         },
@@ -14430,6 +14526,7 @@ fn a_retry_settles_only_the_tasks_it_ran() {
         outcome,
         said: Said::Completed,
         kept: kept.map(str::to_owned),
+        blamed: false,
     };
     // Gradle failed after all, Bun's retry was cancelled, and a task that
     // stopped waiting meanwhile is left alone.
@@ -14608,6 +14705,7 @@ fn a_cleanup_left_alone_is_not_a_failure() {
         outcome,
         said: Said::Because(said.into()),
         kept: Some(said.into()),
+        blamed: false,
     };
     let ran = Batch {
         noun: "cleanup tasks",

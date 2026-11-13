@@ -655,9 +655,10 @@ What it saves:
   `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`. It lets
   PkgDeck's helper refresh and update everything from APT, DNF, Pacman,
   Zypper, system Flatpaks and Snaps, only in your active local session.
-  While a Flatpak or Snap release waits (see **Wait for new releases**), it
-  updates the other installed ones one by one. The helper does nothing else
-  in that mode.
+  While a Flatpak release waits (see **Wait for new releases**), it updates
+  the other installed Flatpaks one by one. While a Snap release waits, the
+  other Snap updates wait for you, so a held snap stays held. The helper
+  does nothing else in that mode.
 - macOS: a sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`,
   checked with `visudo` before it's saved. It allows exactly
   `softwareupdate --download --all --no-scan` and, when MacPorts is

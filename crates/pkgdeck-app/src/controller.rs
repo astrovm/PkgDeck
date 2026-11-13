@@ -331,6 +331,9 @@ struct Ended {
     /// Why it didn't finish, as Activity keeps it: what `said` says,
     /// without anything a tool printed.
     kept: Option<String>,
+    /// It failed because of the change itself, so it would fail the same
+    /// way again (see [`blames_change`]).
+    blamed: bool,
 }
 /// What a cleanup task waiting for a build says.
 const WAITS_FOR_BUILD: &str = "Waits for a build that uses it to finish, then cleans on its own.";
@@ -1390,6 +1393,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                             Said::Completed
                         },
                         kept: None,
+                        blamed: false,
                     }],
                     note: Some(note),
                 }),
@@ -1492,6 +1496,8 @@ fn batch(
             Err((_, Some(reason))) => (Outcome::Failed, Some(reason.clone())),
             Err((error, None)) => ended_by(error, operation.backend()),
         };
+        // A held change didn't run.
+        let blamed = matches!(&result, Err((error, None)) if blames_change(error));
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
@@ -1515,6 +1521,7 @@ fn batch(
             outcome,
             said,
             kept,
+            blamed,
         });
     }
     if !failure_output.is_empty() {
@@ -1541,6 +1548,43 @@ fn ended_by(error: &EngineError, backend: &str) -> (Outcome, Option<String>) {
             ..
         } => (Outcome::Skipped, Some(refusal.to_string())),
         error => (Outcome::Failed, Some(kept_reason(error, backend))),
+    }
+}
+/// Whether `error` comes from the change itself, so trying it again at the
+/// same version would fail the same way: its command failed, its source
+/// answered something PkgDeck can't use, or PkgDeck explained why it can't
+/// make it. A cancel, a password prompt, a missing helper, a busy lock or a
+/// change PkgDeck only held back says nothing about the package.
+fn blames_change(error: &EngineError) -> bool {
+    match error {
+        EngineError::Refused { refusal, .. } => match refusal {
+            Refusal::Explained(_) => true,
+            Refusal::PlanChanged
+            | Refusal::CleanupChanged
+            | Refusal::NotUnattended
+            | Refusal::NeedsReview
+            | Refusal::PartnerFailed
+            | Refusal::Building => false,
+        },
+        EngineError::Execution(error) => match error {
+            ExecutionError::Invalid(_) | ExecutionError::Io(_) | ExecutionError::Failed(_) => true,
+            ExecutionError::Disabled(_)
+            | ExecutionError::Cancelled
+            | ExecutionError::TimedOut
+            | ExecutionError::AuthorizationCancelled
+            | ExecutionError::AuthorizationDenied
+            | ExecutionError::LockBusy
+            | ExecutionError::Interrupted => false,
+        },
+        EngineError::Unsupported { .. }
+        | EngineError::InvalidResponse { .. }
+        | EngineError::NotFound
+        | EngineError::Ambiguous(_) => true,
+        EngineError::UnknownBackend(_)
+        | EngineError::DuplicateBackend(_)
+        | EngineError::Unavailable { .. }
+        | EngineError::Incomplete(_)
+        | EngineError::Cancelled => false,
     }
 }
 /// A firmware update may need a restart before it takes effect.
@@ -5208,9 +5252,11 @@ impl ffi::PackageController {
         self.as_mut()
             .set_notification_history(saved.as_str().into());
     }
-    /// Remember which updates of a finished change failed, so automatic
-    /// runs and Update all skip them, and forget the ones that worked.
-    /// Casks that stopped for the password are remembered apart.
+    /// Remember which updates of a finished change failed because of the
+    /// update itself, so automatic runs and Update all skip them, and
+    /// forget the ones that worked. One stopped by a cancel, the password
+    /// prompt or a helper that didn't start isn't remembered: it can work
+    /// next time. Casks that stopped for the password are remembered apart.
     fn remember_update_outcomes(
         mut self: Pin<&mut Self>,
         job: &Job,
@@ -5218,15 +5264,16 @@ impl ffi::PackageController {
         password_casks: &[PackageId],
     ) {
         let operations = job.operations();
-        let failed: Vec<bool> = match result {
-            Ok(Payload::Batch(ran)) => ran.outcomes().map(|o| o == Outcome::Failed).collect(),
-            Ok(_) => vec![false; operations.len()],
-            Err(
-                EngineError::Cancelled
-                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
-            ) => return,
+        // How each change ended, and whether it failed because of itself.
+        let ended: Vec<(Outcome, bool)> = match result {
+            Ok(Payload::Batch(ran)) => ran
+                .steps
+                .iter()
+                .map(|step| (step.outcome, step.blamed))
+                .collect(),
+            Ok(_) => vec![(Outcome::Finished, false); operations.len()],
             // One change on its own failed as a whole.
-            Err(_) if operations.len() == 1 => vec![true],
+            Err(error) if operations.len() == 1 => vec![(Outcome::Failed, blames_change(error))],
             Err(_) => return,
         };
         let version = |id: &PackageId| -> Option<String> {
@@ -5240,16 +5287,21 @@ impl ffi::PackageController {
         let mut failures = Vec::new();
         let mut worked = Vec::new();
         let mut needed = Vec::new();
-        for (operation, failed) in operations.iter().zip(failed) {
+        for (operation, (outcome, blamed)) in operations.iter().zip(ended) {
             let Operation::Upgrade(id) = operation else {
                 continue;
             };
-            if !failed {
-                worked.push(id.clone());
-            } else if password_casks.contains(id) {
-                needed.extend(version(id).map(|version| (id.name.clone(), version)));
-            } else if let Some(version) = version(id) {
-                failures.push((id.clone(), version));
+            match outcome {
+                Outcome::Finished => worked.push(id.clone()),
+                Outcome::Failed if password_casks.contains(id) => {
+                    needed.extend(version(id).map(|version| (id.name.clone(), version)));
+                }
+                Outcome::Failed if blamed => {
+                    failures.extend(version(id).map(|version| (id.clone(), version)));
+                }
+                // Cancelled, left for later, or stopped by something other
+                // than the update: it says nothing about the update.
+                _ => {}
             }
         }
         if failures.is_empty() && worked.is_empty() && needed.is_empty() {

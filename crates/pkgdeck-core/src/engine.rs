@@ -86,6 +86,8 @@ pub enum Refusal {
     CleanupChanged,
     /// Automatic updates never touch this source.
     NotUnattended,
+    /// Automatic updates touch this source, but not this change.
+    NeedsReview,
     /// A change that has to run together with this one failed its check.
     PartnerFailed,
     /// A build that may use what the cleanup task removes is running.
@@ -101,6 +103,7 @@ impl std::fmt::Display for Refusal {
                 "This cleanup task changed or expired. Reload and review it again."
             }
             Self::NotUnattended => "This source is never updated automatically.",
+            Self::NeedsReview => "Automatic updates don't make this change. Start it yourself.",
             Self::PartnerFailed => {
                 "Another change that runs together with this one could not be checked. Review them again."
             }
@@ -1745,7 +1748,14 @@ impl Engine {
                 }
                 // A change the runner's mode refuses fails on its own, so
                 // the rest of the batch still runs.
-                crate::batch::check_mode(self.batch_mode, std::slice::from_ref(operation))?;
+                if crate::batch::check_mode(self.batch_mode, std::slice::from_ref(operation))
+                    .is_err()
+                {
+                    return Err(EngineError::Refused {
+                        backend: operation.backend().into(),
+                        refusal: Refusal::NeedsReview,
+                    });
+                }
                 self.preflight(operation, cancel)
             })
             .collect();
@@ -2530,8 +2540,10 @@ mod apt_upgrade_tests {
         assert!(
             matches!(
                 results.as_slice(),
-                [Err(EngineError::Execution(ExecutionError::Invalid(reason)))]
-                    if reason == crate::batch::UPGRADE_ONLY_REFUSAL
+                [Err(EngineError::Refused {
+                    refusal: Refusal::NeedsReview,
+                    ..
+                })]
             ),
             "{results:?}"
         );
@@ -2569,8 +2581,10 @@ mod apt_upgrade_tests {
         assert!(
             matches!(
                 &results[0],
-                Err(EngineError::Execution(ExecutionError::Invalid(reason)))
-                    if reason == crate::batch::UPGRADE_ONLY_REFUSAL
+                Err(EngineError::Refused {
+                    refusal: Refusal::NeedsReview,
+                    ..
+                })
             ),
             "{results:?}"
         );

@@ -269,17 +269,19 @@ pub const ALLOW_REMOVALS: &str = "--allow-removals";
 /// System managers an upgrade-only runner updates.
 pub const UPGRADE_ONLY_BACKENDS: &[&str] = &["apt", "flatpak", "dnf", "pacman", "zypper", "snap"];
 /// System managers that update one installed package at a time when a
-/// release is still waiting (see [`crate::release_wait::can_wait`]): the
-/// rest never wait, so they always update everything. Neither installs a
-/// missing package this way: `flatpak update REF` and `snap refresh NAME`
-/// fail when it isn't installed.
-const UPGRADE_ONLY_PER_PACKAGE: &[&str] = &["flatpak", "snap"];
+/// release is still waiting (see [`crate::release_wait::can_wait`]).
+/// `flatpak update REF` fails when the package isn't installed, so it never
+/// installs one. Snap can wait too, but `snap refresh NAME` ignores a hold
+/// set with `snap refresh --hold`, so its other updates wait for someone to
+/// start them. The other managers never wait, so they update everything.
+const UPGRADE_ONLY_PER_PACKAGE: &[&str] = &["flatpak"];
 
 /// Whether an upgrade-only runner may run `operation`: refreshes and full
 /// upgrades of [`UPGRADE_ONLY_BACKENDS`], updates of one installed package
 /// of [`UPGRADE_ONLY_PER_PACKAGE`], and anything that runs as the user,
 /// which never reaches the runner. A per-package update elsewhere is
-/// refused: `pacman -S --needed NAME` would install a missing package.
+/// refused: `pacman -S --needed NAME` would install a missing package, and
+/// `snap refresh NAME` would update a held snap.
 pub fn upgrade_only_allows(operation: &Operation) -> bool {
     let as_user = || protected_commands(operation).is_ok_and(|commands| commands.is_empty());
     match operation {
@@ -306,7 +308,7 @@ pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), Execu
     }
 }
 /// Why an upgrade-only runner refuses a change.
-pub const UPGRADE_ONLY_REFUSAL: &str =
+const UPGRADE_ONLY_REFUSAL: &str =
     "unattended updates only refresh sources and update installed packages";
 /// The commands the runner itself runs. In upgrade-only mode without
 /// removals APT aborts rather than remove anything (`--no-remove`); the
@@ -1491,25 +1493,23 @@ mod tests {
             Ok(())
         );
         // A source with a release still waiting updates its other
-        // packages one by one. Only system managers that can wait do.
+        // packages one by one. Only system managers that can wait do, and
+        // not Snap: `snap refresh NAME` ignores holds.
         for backend in UPGRADE_ONLY_BACKENDS {
             assert_eq!(
                 UPGRADE_ONLY_PER_PACKAGE.contains(backend),
-                crate::release_wait::can_wait(backend),
+                crate::release_wait::can_wait(backend) && *backend != "snap",
                 "{backend}"
             );
         }
+        assert!(crate::release_wait::can_wait("snap"));
         let mut runtime = id("flatpak", "org.example.Platform");
         runtime.architecture = "x86_64".into();
         runtime.reference = Some("runtime/org.example.Platform/x86_64/stable".into());
-        let one_by_one: Vec<_> = [
-            id("flatpak", "org.example.App"),
-            runtime,
-            id("snap", "synthetic"),
-        ]
-        .into_iter()
-        .map(Operation::Upgrade)
-        .collect();
+        let one_by_one: Vec<_> = [id("flatpak", "org.example.App"), runtime]
+            .into_iter()
+            .map(Operation::Upgrade)
+            .collect();
         for operation in &one_by_one {
             assert!(upgrade_only_allows(operation), "{operation:?}");
             assert!(!protected_commands(operation).unwrap().is_empty());
@@ -1530,16 +1530,15 @@ mod tests {
                 assert!(!upgrade_only_allows(&operation), "{operation:?}");
             }
         }
-        assert!(upgrade_only_allows(&Operation::Upgrade(id(
-            "snap",
-            "synthetic_key"
-        ))));
+        assert!(protected_commands(&Operation::Upgrade(id("snap", "synthetic_key"))).is_ok());
         for refused in [
             Operation::Install(id("apt", "synthetic")),
             Operation::Remove(id("dnf", "synthetic")),
             // `pacman -S --needed NAME` would install a missing package.
             Operation::Upgrade(id("pacman", "synthetic")),
             Operation::Upgrade(id("apt", "synthetic")),
+            // `snap refresh NAME` would update a held snap.
+            Operation::Upgrade(id("snap", "synthetic")),
             all("fwupd"),
             Operation::Upgrade(id("fwupd", "synthetic")),
             Operation::Install(id("flatpak", "org.example.App")),
