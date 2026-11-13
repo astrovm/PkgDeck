@@ -292,12 +292,12 @@ fn apk_lacks_an_option(done: &Completion) -> bool {
     apk_says(done, "unrecognized option")
 }
 
-/// apk refuses a change while a repository it can't reach has no fresh
-/// index (exit 99): "Not continuing due to stale/unavailable repositories".
-/// That says nothing about the package. Its line that names the
-/// repository, or else that refusal.
+/// apk 2.14 and later refuse a change while a repository they can't reach
+/// has no fresh index (exit 99): "Not continuing due to stale/unavailable
+/// repositories". That says nothing about the package. Its line that names
+/// the repository, or else that refusal. Older apk skips the repository.
 fn apk_unreachable(done: &Completion) -> Option<String> {
-    if done.code == Some(0) || !apk_says(done, "stale/unavailable repositories") {
+    if done.code != Some(99) || !apk_says(done, "stale/unavailable repositories") {
         return None;
     }
     let text =
@@ -310,7 +310,10 @@ fn apk_unreachable(done: &Completion) -> Option<String> {
         .strip_prefix("WARNING: ")
         .or_else(|| line.strip_prefix("ERROR: "))
         .unwrap_or(line);
-    Some(line.to_owned())
+    // apk 3 adds "Use --force-missing-repositories to continue.", which
+    // isn't for PkgDeck's users.
+    let line = line.split(" Use --").next().unwrap_or(line);
+    Some(crate::process::one_line(line))
 }
 
 /// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`

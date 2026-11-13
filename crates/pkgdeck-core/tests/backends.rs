@@ -6610,7 +6610,11 @@ fn apk_doesnt_blame_an_update_on_a_repository_it_cant_reach() {
     let mut apk = SystemManager::apk(Script::new(&[
         ("apk upgrade --update-cache -- zlib", "exit 99\nWARNING: updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
         ("apk upgrade --update-cache -- musl", "exit 1\nERROR: musl-1.2.6-r0: BAD signature\n"),
-        ("apk upgrade --update-cache -- jq", "exit 99\nERROR: Not continuing due to stale/unavailable repositories.\n"),
+        ("apk upgrade --update-cache -- jq", "exit 99\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
+        // apk before 2.14 skips the repository, so its refusal text with
+        // another exit code is the update's own.
+        ("apk upgrade --update-cache -- curl", "exit 1\nERROR: Not continuing due to stale/unavailable repositories.\n"),
+        ("apk upgrade --update-cache -- xz", &format!("exit 99\nWARNING: opening https://example.invalid/\x1b[31m{}/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories.\n", "a".repeat(400))),
     ]));
     let error = apk
         .execute(&Operation::Upgrade(id("zlib")), &cancel, &mut |_| {})
@@ -6630,11 +6634,26 @@ fn apk_doesnt_blame_an_update_on_a_repository_it_cant_reach() {
             "Not continuing due to stale/unavailable repositories.".into()
         )))
     );
+    // A line apk printed is one line of plain text, at most 300 characters.
+    let Err(EngineError::Execution(ExecutionError::Unreachable(line))) =
+        apk.execute(&Operation::Upgrade(id("xz")), &cancel, &mut |_| {})
+    else {
+        panic!("xz wasn't refused for its repository");
+    };
+    assert!(
+        line.starts_with("opening https://example.invalid/ [31maaa"),
+        "{line}"
+    );
+    assert!(!line.chars().any(char::is_control), "{line}");
+    assert_eq!(line.chars().count(), 301);
+    assert!(line.ends_with('…'));
     // Any other failure is the update's own.
-    let error = apk
-        .execute(&Operation::Upgrade(id("musl")), &cancel, &mut |_| {})
-        .unwrap_err();
-    assert!(error.blames_change(), "{error:?}");
+    for name in ["musl", "curl"] {
+        let error = apk
+            .execute(&Operation::Upgrade(id(name)), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert!(error.blames_change(), "{name}: {error:?}");
+    }
 }
 
 #[test]

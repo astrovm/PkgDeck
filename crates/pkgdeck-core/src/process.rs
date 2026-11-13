@@ -87,14 +87,18 @@ impl Completion {
     /// code 1: error: …" or "was stopped by signal 9". The reason is the
     /// first meaningful stderr line; the full output stays in the value.
     pub fn outcome(&self) -> String {
-        let ended = match (self.code, self.signal) {
-            (Some(code), _) => format!("exited with code {code}"),
-            (None, Some(signal)) => format!("was stopped by signal {signal}"),
-            (None, None) => "was stopped".into(),
-        };
+        let ended = self.ended();
         match failure_summary(&self.stderr) {
             Some(reason) => format!("{ended}: {reason}"),
             None => ended,
+        }
+    }
+    /// How the program ended, without anything it printed.
+    pub fn ended(&self) -> String {
+        match (self.code, self.signal) {
+            (Some(code), _) => format!("exited with code {code}"),
+            (None, Some(signal)) => format!("was stopped by signal {signal}"),
+            (None, None) => "was stopped".into(),
         }
     }
     /// Whether the program stopped on a signal it raised itself: a crash,
@@ -145,16 +149,21 @@ pub fn failure_summary(stderr: &[u8]) -> Option<String> {
         .find(|line| starts(line, &ERRORS) && !bare(line))
         .or_else(|| lines.iter().find(|line| !starts(line, &NOISE)))
         .or_else(|| lines.first())?;
+    Some(one_line(line))
+}
+
+/// `line` with no control characters, shortened to 300 characters.
+pub fn one_line(line: &str) -> String {
     let clean: String = line
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     const LIMIT: usize = 300;
-    Some(if clean.chars().count() > LIMIT {
+    if clean.chars().count() > LIMIT {
         format!("{}…", clean.chars().take(LIMIT).collect::<String>())
     } else {
         clean
-    })
+    }
 }
 
 fn serialize_output<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {

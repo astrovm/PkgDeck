@@ -240,6 +240,10 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
             plain_error(error, Some(backend), false)
         }
         EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
+        // Its line names the repository, which can hold a token.
+        EngineError::Execution(E::Unreachable(_)) => format!(
+            "{tool} couldn't reach a repository, so nothing was changed. Try again when it's back."
+        ),
         EngineError::InvalidResponse { .. } => format!("{tool} reported a problem."),
         error => plain_error(error, Some(backend), false),
     }

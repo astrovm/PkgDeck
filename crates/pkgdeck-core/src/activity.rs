@@ -4,6 +4,7 @@
 use crate::{
     engine::{EngineError, Refusal},
     package::{Operation, OperationOutcome},
+    process::ExecutionError,
 };
 use rustix::fs::{flock, FlockOperation};
 use serde::{Deserialize, Serialize};
@@ -304,6 +305,13 @@ pub fn reason(error: &EngineError) -> String {
             "{} answered in a way PkgDeck didn't understand",
             crate::backends::display_name(backend)
         ),
+        EngineError::Execution(ExecutionError::Failed(done)) => {
+            format!("The package manager {}", done.ended())
+        }
+        // Its line names the repository, which can hold a token.
+        EngineError::Execution(ExecutionError::Unreachable(_)) => {
+            "A repository couldn't be reached, so nothing was changed".into()
+        }
         error => {
             let said = error.to_string();
             let mut letters = said.chars();
@@ -585,7 +593,6 @@ mod tests {
 
     #[test]
     fn how_a_change_ended_says_why_in_a_sentence_without_what_tools_said() {
-        use crate::process::ExecutionError;
         assert_eq!(
             ended(&Ok(OperationOutcome::default())),
             (Outcome::Finished, None)
@@ -624,6 +631,26 @@ mod tests {
         assert_eq!(
             reason(&EngineError::Execution(ExecutionError::Io(String::new()))),
             "."
+        );
+        // What a tool printed stays out: it can name a token or a path.
+        assert_eq!(
+            reason(&EngineError::Execution(ExecutionError::Failed(
+                crate::process::Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"error: https://user:secret@example.invalid\n".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                }
+            ))),
+            "The package manager exited with code 1."
+        );
+        assert_eq!(
+            reason(&EngineError::Execution(ExecutionError::Unreachable(
+                "https://example.invalid/token/x86_64/APKINDEX.tar.gz".into()
+            ))),
+            "A repository couldn't be reached, so nothing was changed."
         );
     }
 }

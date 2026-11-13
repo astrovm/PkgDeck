@@ -14737,6 +14737,17 @@ fn a_cleanup_left_alone_is_not_a_failure() {
         ended_by(&confused, "snap"),
         (Outcome::Failed, Some("Snap reported a problem.".into()))
     );
+    // The repository apk couldn't reach can hold a token in its path.
+    let unreachable = EngineError::Execution(ExecutionError::Unreachable(
+        "https://example.invalid/secret/x86_64/APKINDEX.tar.gz".into(),
+    ));
+    assert_eq!(
+        ended_by(&unreachable, "apk"),
+        (
+            Outcome::Failed,
+            Some("apk couldn't reach a repository, so nothing was changed. Try again when it's back.".into())
+        )
+    );
     let (outcome, kept) = ended_by(&EngineError::NotFound, "projects");
     assert_eq!(outcome, Outcome::Failed);
     assert_eq!(
