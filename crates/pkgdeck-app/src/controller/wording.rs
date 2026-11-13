@@ -263,6 +263,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
+        EngineError::Execution(E::Helper(_)) => "PkgDeck's system helper stopped, so this change didn't finish. Try again.".into(),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
         error if cask_needed_password(error, backend) => {
             "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()

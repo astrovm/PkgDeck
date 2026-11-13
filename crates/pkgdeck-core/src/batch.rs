@@ -761,7 +761,18 @@ fn read_replies(mut output: PipeReader, replies: SharedReplies) {
 impl Session {
     /// Runs the next approved command of `index`, which must be the one
     /// asked for, and waits for it.
+    /// Run the next approved command of change `index` through the
+    /// helper. A command that ran answers with its completion, so any error
+    /// here is the helper's: the change didn't fail on its own.
     fn run(
+        &self,
+        index: usize,
+        actual: &ProtectedCommand,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.exchange(index, actual, cancel).map_err(helper_failed)
+    }
+    fn exchange(
         &self,
         index: usize,
         actual: &ProtectedCommand,
@@ -1036,6 +1047,25 @@ fn begin_session(
     )
 }
 fn begin_session_within(
+    command: Launch,
+    operations: &[Operation],
+    commands: Vec<Vec<ProtectedCommand>>,
+    cancel: &Cancellation,
+    timeout: Duration,
+) -> Result<Option<ScopeGuard>, ExecutionError> {
+    start_session(command, operations, commands, cancel, timeout).map_err(helper_failed)
+}
+/// An I/O or protocol error between PkgDeck and its system helper is the
+/// helper's, not the change's. Answers such as a refused password pass.
+fn helper_failed(error: ExecutionError) -> ExecutionError {
+    match error {
+        ExecutionError::Io(reason) | ExecutionError::Invalid(reason) => {
+            ExecutionError::Helper(reason)
+        }
+        error => error,
+    }
+}
+fn start_session(
     mut command: Launch,
     operations: &[Operation],
     commands: Vec<Vec<ProtectedCommand>>,
@@ -2293,14 +2323,14 @@ done"#;
                 approved.clone(),
                 &cancel
             ),
-            Err(ExecutionError::Invalid(_))
+            Err(ExecutionError::Helper(_))
         ));
         set_operation(0);
         let command = &approved[0][0];
         let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
         assert!(matches!(
             run_in_scope(Path::new("/usr/bin/apt-get"), &["--purge".into()], &cancel),
-            Some(Err(ExecutionError::Invalid(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         // Output lines reach the job's observer while the command runs.
         let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2318,12 +2348,12 @@ done"#;
         );
         assert!(matches!(
             run_in_scope(Path::new(&command.program), &args, &cancel),
-            Some(Err(ExecutionError::Invalid(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         set_operation(10);
         assert!(matches!(
             run_in_scope(Path::new(&command.program), &args, &cancel),
-            Some(Err(ExecutionError::Invalid(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         drop(scope);
         assert!(run_in_scope(Path::new(&command.program), &args, &cancel).is_none());
@@ -2448,7 +2478,7 @@ done"#;
             set_operation(0);
             assert!(matches!(
                 run_in_scope(&program(0), &args(0), &cancel),
-                Some(Err(ExecutionError::Invalid(reason))) if reason.contains("already running")
+                Some(Err(ExecutionError::Helper(reason))) if reason.contains("already running")
             ));
             set_operation(1);
             assert!(run_in_scope(&program(1), &args(1), &cancel)
@@ -2460,7 +2490,7 @@ done"#;
         set_operation(1);
         assert!(matches!(
             run_in_scope(&program(1), &args(1), &cancel),
-            Some(Err(ExecutionError::Invalid(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         // A step it still had to run finds it gone.
         let flatpak = &approved[1][0];
@@ -2468,7 +2498,7 @@ done"#;
         set_operation(1);
         assert!(matches!(
             run_in_scope(Path::new(&flatpak.program), &args(1), &cancel),
-            Some(Err(ExecutionError::Io(reason))) if reason.contains("closed unexpectedly")
+            Some(Err(ExecutionError::Helper(reason))) if reason.contains("closed unexpectedly")
         ));
         drop(scope);
     }
@@ -2740,7 +2770,7 @@ done"#;
         let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
         let result = run_in_scope(Path::new(&command.program), &args, &cancel).unwrap();
         assert!(
-            matches!(result, Err(ExecutionError::Invalid(reason)) if reason == "synthetic rejection")
+            matches!(result, Err(ExecutionError::Helper(reason)) if reason == "synthetic rejection")
         );
         cancel.cancel();
         assert!(matches!(
@@ -3358,7 +3388,7 @@ done"#,
                 commands.clone(),
                 &Cancellation::default()
             ),
-            Err(ExecutionError::Invalid(_))
+            Err(ExecutionError::Helper(_))
         ));
 
         let mut child = Command::new("/bin/sh");
@@ -3371,7 +3401,7 @@ done"#,
         let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
         assert!(matches!(
             run_in_scope(Path::new(&command.program), &args, &cancel),
-            Some(Err(ExecutionError::Invalid(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         drop(scope);
     }
@@ -3610,7 +3640,7 @@ done"#,
         let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
         assert!(matches!(
             run_in_scope(Path::new(&command.program), &args, &cancel),
-            Some(Err(ExecutionError::Io(_)))
+            Some(Err(ExecutionError::Helper(_)))
         ));
         drop(scope);
     }

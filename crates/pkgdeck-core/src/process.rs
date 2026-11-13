@@ -155,11 +155,15 @@ pub enum ExecutionError {
     LockBusy,
     Interrupted,
     Failed(Completion),
+    /// PkgDeck's system helper failed, not the command it was to run: it
+    /// didn't start, stopped, or turned the command down.
+    Helper(String),
 }
 impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled(s) | Self::Invalid(s) | Self::Io(s) => f.write_str(s),
+            Self::Helper(s) => write!(f, "PkgDeck's system helper failed: {s}"),
             Self::Cancelled => f.write_str("operation cancelled before completion"),
             Self::TimedOut => f.write_str("host read timed out"),
             Self::AuthorizationCancelled => f.write_str("authorization cancelled"),

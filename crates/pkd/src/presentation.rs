@@ -211,7 +211,7 @@ fn execution_text(error: &Value) -> String {
         Some("Cancelled") => "Cancelled.".into(),
         Some(other) => clean(other),
         None => {
-            if let Some(text) = ["Invalid", "Io", "Disabled"]
+            if let Some(text) = ["Invalid", "Io", "Disabled", "Helper"]
                 .iter()
                 .find_map(|kind| error.get(*kind).and_then(Value::as_str))
             {

@@ -153,11 +153,14 @@ other sources still appear as they answer.
   PkgDeck updates Cargo, uv, pip, Composer, rustup, pixi, Nix and Conda
   packages one at a time itself. For managers that don't say (npm, for
   one), all of their rows show as updating until they finish.
-- An update that failed shows a warning on its row. **Update all**, **Update
-  selected** and automatic updates skip it until there's a newer version, so
-  one broken update doesn't fail every run. Its row's arrow tries it again,
-  and once it works the warning goes away. When it's the only update left,
-  **Update all** tries it too.
+- An update that failed because of the update itself shows a warning on its
+  row. **Update all** and **Update selected** skip it until there's a newer
+  version, so one broken update doesn't fail every run. Automatic updates
+  skip it once it failed twice, so a run without network doesn't hold it
+  back. Its row's arrow tries it again, and once it works the warning goes
+  away. When it's the only update left, **Update all** tries it too. An
+  update stopped by a cancel, the password prompt, PkgDeck's system helper
+  or a shutdown isn't skipped.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
 - With **Wait for new releases** on, an update too new to install yet shows a

@@ -1478,7 +1478,8 @@ fn batch(
     } else {
         "updates"
     };
-    let mut steps = Vec::new();
+    let mut steps: Vec<Ended> = Vec::new();
+    let mut partners = Vec::new();
     let mut failure_output = Vec::new();
     for (operation, result) in operations.iter().zip(results) {
         if let Err((error, None)) = &result {
@@ -1498,6 +1499,16 @@ fn batch(
         };
         // A held change didn't run.
         let blamed = matches!(&result, Err((error, None)) if blames_change(error));
+        partners.push(matches!(
+            &result,
+            Err((
+                EngineError::Refused {
+                    refusal: Refusal::PartnerFailed,
+                    ..
+                },
+                None
+            ))
+        ));
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
@@ -1523,6 +1534,18 @@ fn batch(
             kept,
             blamed,
         });
+    }
+    let ran_at: Vec<usize> = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !held.iter().any(|(held, _)| held == *op))
+        .map(|(at, _)| at)
+        .collect();
+    let mut blamed: Vec<bool> = ran_at.iter().map(|&at| steps[at].blamed).collect();
+    let partner: Vec<bool> = ran_at.iter().map(|&at| partners[at]).collect();
+    share_partner_blame(&runnable, &mut blamed, &partner);
+    for (&at, blamed) in ran_at.iter().zip(blamed) {
+        steps[at].blamed = blamed;
     }
     if !failure_output.is_empty() {
         send(Reply::FailureOutput(failure_output.join("\n\n")));
@@ -1550,6 +1573,21 @@ fn ended_by(error: &EngineError, backend: &str) -> (Outcome, Option<String>) {
         error => (Outcome::Failed, Some(kept_reason(error, backend))),
     }
 }
+/// A change refused because another change of its transaction failed
+/// fails with it: Update all brings that change back each time. `ran` are
+/// the changes the engine ran; `partner` says which were refused that way.
+fn share_partner_blame(ran: &[Operation], blamed: &mut [bool], partner: &[bool]) {
+    let mut start = 0;
+    while start < ran.len() {
+        let end = pkgdeck_core::batch::group_end(ran, start);
+        if blamed[start..end].contains(&true) {
+            for at in (start..end).filter(|&at| partner[at]) {
+                blamed[at] = true;
+            }
+        }
+        start = end;
+    }
+}
 /// Whether `error` comes from the change itself, so trying it again at the
 /// same version would fail the same way: its command failed, its source
 /// answered something PkgDeck can't use, or PkgDeck explained why it can't
@@ -1567,8 +1605,12 @@ fn blames_change(error: &EngineError) -> bool {
             | Refusal::Building => false,
         },
         EngineError::Execution(error) => match error {
-            ExecutionError::Invalid(_) | ExecutionError::Io(_) | ExecutionError::Failed(_) => true,
+            // A command stopped by a signal, as at a shutdown, may work
+            // next time.
+            ExecutionError::Failed(completion) => completion.signal.is_none(),
+            ExecutionError::Invalid(_) | ExecutionError::Io(_) => true,
             ExecutionError::Disabled(_)
+            | ExecutionError::Helper(_)
             | ExecutionError::Cancelled
             | ExecutionError::TimedOut
             | ExecutionError::AuthorizationCancelled
@@ -2386,13 +2428,21 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
 /// Whether this is an update that already failed at the version it would
 /// go to now.
 fn failed_before(operation: &Operation, packages: &[Package], failed: &FailedUpdates) -> bool {
+    failed_at_its_version(operation, packages, |id, version| failed.skips(id, version))
+}
+/// Whether `failed` says so of the version this update would go to now.
+fn failed_at_its_version(
+    operation: &Operation,
+    packages: &[Package],
+    failed: impl Fn(&PackageId, &str) -> bool,
+) -> bool {
     let Operation::Upgrade(id) = operation else {
         return false;
     };
     packages
         .iter()
         .find(|package| package.id == *id)
-        .is_some_and(|package| failed.skips(id, cask_version(package)))
+        .is_some_and(|package| failed(id, cask_version(package)))
 }
 /// Update all leaves out updates that failed before, so one broken update
 /// doesn't fail every run. When nothing else is left it tries them again:
@@ -2436,7 +2486,7 @@ fn without_waiting(operations: Vec<Operation>, packages: &[Package]) -> Vec<Oper
 /// updates, with the one command the saved approval names. Casks update
 /// one at a time, so one that needs the password stops only itself, and
 /// those that needed it before wait for a newer version, like any update
-/// that failed.
+/// that failed twice.
 fn automatic_plan(
     packages: &[Package],
     needs_password: &NeedsPassword,
@@ -2457,7 +2507,11 @@ fn automatic_plan(
             Operation::UpgradeAll { backend } if backend == "homebrew-cask" => casks.clone(),
             operation => vec![operation],
         })
-        .filter(|operation| !failed_before(operation, packages, failed))
+        .filter(|operation| {
+            !failed_at_its_version(operation, packages, |id, version| {
+                failed.keeps_failing(id, version)
+            })
+        })
         // An update the helper won't run unattended waits for someone to
         // start it, instead of failing every run.
         .filter(|operation| {

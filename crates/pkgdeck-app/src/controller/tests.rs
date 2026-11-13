@@ -5990,6 +5990,35 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             )),
             false,
         ),
+        (
+            EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"error: it broke".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            })),
+            true,
+        ),
+        // Stopped by a shutdown.
+        (
+            EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+                code: None,
+                signal: Some(15),
+                stdout: vec![],
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Helper(
+                "authorization runner closed unexpectedly".into(),
+            )),
+            false,
+        ),
         (EngineError::Execution(ExecutionError::LockBusy), false),
         (EngineError::Execution(ExecutionError::TimedOut), false),
         (refused(Refusal::NeedsReview), false),
@@ -6005,6 +6034,34 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             "{error:?}"
         );
     }
+}
+#[test]
+fn a_change_refused_for_its_partner_shares_the_partners_blame() {
+    let update = |backend: &str, name: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = backend.into();
+        Operation::Upgrade(package.id)
+    };
+    // systemd and systemd-libs update in one pacman transaction; Firefox
+    // is a Flatpak of its own.
+    let ran = [
+        update("pacman", "systemd"),
+        update("pacman", "systemd-libs"),
+        update("flatpak", "org.mozilla.firefox"),
+    ];
+    // systemd failed on its own; systemd-libs was refused with it.
+    let partner = [false, true, false];
+    let mut blamed = [true, false, false];
+    share_partner_blame(&ran, &mut blamed, &partner);
+    assert_eq!(blamed, [true, true, false]);
+    // A partner stopped by the password prompt blames neither.
+    let mut blamed = [false, false, false];
+    share_partner_blame(&ran, &mut blamed, &partner);
+    assert_eq!(blamed, [false, false, false]);
+    // A change in another transaction isn't a partner.
+    let mut blamed = [false, false, true];
+    share_partner_blame(&ran, &mut blamed, &[false, true, false]);
+    assert_eq!(blamed, [false, false, true]);
 }
 #[test]
 fn failures_with_the_same_reason_share_one_line() {
@@ -6735,6 +6792,12 @@ fn automatic_runs_skip_updates_that_failed() {
     let plan = |failed: &FailedUpdates, packages: &[Package]| {
         automatic_plan(packages, &NeedsPassword::default(), failed)
     };
+    assert_eq!(
+        plan(&failed, &[tool.clone()]),
+        [Operation::Upgrade(tool.id.clone())]
+    );
+    // One failure may be a run without network: tried again.
+    failed.remember(&[(tool.id.clone(), "2.0".into())], &[]);
     assert_eq!(
         plan(&failed, &[tool.clone()]),
         [Operation::Upgrade(tool.id.clone())]
