@@ -332,7 +332,7 @@ struct Ended {
     /// without anything a tool printed.
     kept: Option<String>,
     /// It failed because of the change itself, so it would fail the same
-    /// way again (see [`blames_change`]).
+    /// way again (see [`EngineError::blames_change`]).
     blamed: bool,
 }
 /// What a cleanup task waiting for a build says.
@@ -1479,7 +1479,6 @@ fn batch(
         "updates"
     };
     let mut steps: Vec<Ended> = Vec::new();
-    let mut partners = Vec::new();
     let mut failure_output = Vec::new();
     for (operation, result) in operations.iter().zip(results) {
         if let Err((error, None)) = &result {
@@ -1498,17 +1497,7 @@ fn batch(
             Err((error, None)) => ended_by(error, operation.backend()),
         };
         // A held change didn't run.
-        let blamed = matches!(&result, Err((error, None)) if blames_change(error));
-        partners.push(matches!(
-            &result,
-            Err((
-                EngineError::Refused {
-                    refusal: Refusal::PartnerFailed,
-                    ..
-                },
-                None
-            ))
-        ));
+        let blamed = matches!(&result, Err((error, None)) if error.blames_change());
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
@@ -1535,18 +1524,6 @@ fn batch(
             blamed,
         });
     }
-    let ran_at: Vec<usize> = operations
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| !held.iter().any(|(held, _)| held == *op))
-        .map(|(at, _)| at)
-        .collect();
-    let mut blamed: Vec<bool> = ran_at.iter().map(|&at| steps[at].blamed).collect();
-    let partner: Vec<bool> = ran_at.iter().map(|&at| partners[at]).collect();
-    share_partner_blame(&runnable, &mut blamed, &partner);
-    for (&at, blamed) in ran_at.iter().zip(blamed) {
-        steps[at].blamed = blamed;
-    }
     if !failure_output.is_empty() {
         send(Reply::FailureOutput(failure_output.join("\n\n")));
     }
@@ -1571,62 +1548,6 @@ fn ended_by(error: &EngineError, backend: &str) -> (Outcome, Option<String>) {
             ..
         } => (Outcome::Skipped, Some(refusal.to_string())),
         error => (Outcome::Failed, Some(kept_reason(error, backend))),
-    }
-}
-/// A change refused because another change of its transaction failed
-/// fails with it: Update all brings that change back each time. `ran` are
-/// the changes the engine ran; `partner` says which were refused that way.
-fn share_partner_blame(ran: &[Operation], blamed: &mut [bool], partner: &[bool]) {
-    let mut start = 0;
-    while start < ran.len() {
-        let end = pkgdeck_core::batch::group_end(ran, start);
-        if blamed[start..end].contains(&true) {
-            for at in (start..end).filter(|&at| partner[at]) {
-                blamed[at] = true;
-            }
-        }
-        start = end;
-    }
-}
-/// Whether `error` comes from the change itself, so trying it again at the
-/// same version would fail the same way: its command failed, its source
-/// answered something PkgDeck can't use, or PkgDeck explained why it can't
-/// make it. A cancel, a password prompt, a missing helper, a busy lock or a
-/// change PkgDeck only held back says nothing about the package.
-fn blames_change(error: &EngineError) -> bool {
-    match error {
-        EngineError::Refused { refusal, .. } => match refusal {
-            Refusal::Explained(_) => true,
-            Refusal::PlanChanged
-            | Refusal::CleanupChanged
-            | Refusal::NotUnattended
-            | Refusal::NeedsReview
-            | Refusal::PartnerFailed
-            | Refusal::Building => false,
-        },
-        EngineError::Execution(error) => match error {
-            // A command stopped by a signal, as at a shutdown, may work
-            // next time.
-            ExecutionError::Failed(completion) => completion.signal.is_none(),
-            ExecutionError::Invalid(_) | ExecutionError::Io(_) => true,
-            ExecutionError::Disabled(_)
-            | ExecutionError::Helper(_)
-            | ExecutionError::Cancelled
-            | ExecutionError::TimedOut
-            | ExecutionError::AuthorizationCancelled
-            | ExecutionError::AuthorizationDenied
-            | ExecutionError::LockBusy
-            | ExecutionError::Interrupted => false,
-        },
-        EngineError::Unsupported { .. }
-        | EngineError::InvalidResponse { .. }
-        | EngineError::NotFound
-        | EngineError::Ambiguous(_) => true,
-        EngineError::UnknownBackend(_)
-        | EngineError::DuplicateBackend(_)
-        | EngineError::Unavailable { .. }
-        | EngineError::Incomplete(_)
-        | EngineError::Cancelled => false,
     }
 }
 /// A firmware update may need a restart before it takes effect.
@@ -5327,7 +5248,7 @@ impl ffi::PackageController {
                 .collect(),
             Ok(_) => vec![(Outcome::Finished, false); operations.len()],
             // One change on its own failed as a whole.
-            Err(error) if operations.len() == 1 => vec![(Outcome::Failed, blames_change(error))],
+            Err(error) if operations.len() == 1 => vec![(Outcome::Failed, error.blames_change())],
             Err(_) => return,
         };
         let version = |id: &PackageId| -> Option<String> {

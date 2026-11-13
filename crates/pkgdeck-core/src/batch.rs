@@ -759,10 +759,8 @@ fn read_replies(mut output: PipeReader, replies: SharedReplies) {
     }
 }
 impl Session {
-    /// Runs the next approved command of `index`, which must be the one
-    /// asked for, and waits for it.
-    /// Run the next approved command of change `index` through the
-    /// helper. A command that ran answers with its completion, so any error
+    /// Run the next approved command of change `index`, which must be the
+    /// one asked for, through the helper, and wait for it. A command that ran answers with its completion, so any error
     /// here is the helper's: the change didn't fail on its own.
     fn run(
         &self,
@@ -924,6 +922,17 @@ fn appimage_launcher(path: &Path) -> Option<PathBuf> {
         .then_some(path)
 }
 pub fn begin(
+    host: &Host,
+    authorization: Authorization,
+    mode: BatchMode,
+    operations: &[Operation],
+    cancel: &Cancellation,
+) -> Result<Option<ScopeGuard>, ExecutionError> {
+    // Whatever stops the helper before it runs anything is the helper's
+    // failure, not a change's.
+    prepare(host, authorization, mode, operations, cancel).map_err(helper_failed)
+}
+fn prepare(
     host: &Host,
     authorization: Authorization,
     mode: BatchMode,
@@ -1701,7 +1710,7 @@ mod tests {
             &[Operation::Install(id("apt", "synthetic"))],
             &cancel,
         );
-        assert!(matches!(refused, Err(ExecutionError::Invalid(_))));
+        assert!(matches!(refused, Err(ExecutionError::Helper(_))));
     }
 
     #[test]
@@ -3428,7 +3437,7 @@ done"#,
                 &operations,
                 &cancel
             ),
-            Err(ExecutionError::Invalid(_))
+            Err(ExecutionError::Helper(_))
         ));
         drop(scope);
     }

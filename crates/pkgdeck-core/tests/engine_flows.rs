@@ -18,6 +18,9 @@ struct Fixture {
     writes: Arc<AtomicUsize>,
     reads: usize,
     stable_reads: usize,
+    /// After `stable_reads`, a plan fails with PkgDeck's explanation
+    /// instead of changing.
+    explains: bool,
 }
 impl Fixture {
     fn new(id: &'static str, capabilities: &'static [Capability]) -> Self {
@@ -27,6 +30,7 @@ impl Fixture {
             writes: Arc::default(),
             reads: 0,
             stable_reads: usize::MAX,
+            explains: false,
         }
     }
     fn preview(&mut self) -> String {
@@ -61,9 +65,16 @@ impl Backend for Fixture {
         operation: &Operation,
         _: &Cancellation,
     ) -> Result<Option<TransactionPlan>, EngineError> {
+        let native_preview = self.preview();
+        if self.explains && native_preview == "changed" {
+            return Err(EngineError::Refused {
+                backend: self.id.into(),
+                refusal: Refusal::Explained("It was installed some other way.".into()),
+            });
+        }
         Ok(Some(TransactionPlan {
             operation: operation.clone(),
-            native_preview: self.preview(),
+            native_preview,
             changes: vec![],
             download_bytes: None,
             disk_bytes: None,
@@ -347,10 +358,24 @@ fn a_changed_change_in_a_batch_leaves_the_rest_to_run() {
     );
     let results = engine.execute_batch(&[first, second, clean], &cancel, &mut |_| {});
     refused(&results[0], Refusal::PlanChanged);
-    refused(&results[1], Refusal::PartnerFailed);
+    // A changed plan says nothing about the package, so neither is blamed.
+    refused(&results[1], Refusal::PartnerFailed { blamed: false });
     assert!(results[2].is_ok(), "{:?}", results[2]);
     assert_eq!(apt_writes.load(Ordering::SeqCst), 0);
     assert_eq!(fresh_writes.load(Ordering::SeqCst), 1);
+
+    // A change that fails on its own blames the change that waits with it.
+    let (first, second) = (apt_install("one"), apt_install("two"));
+    let mut engine = authorized(Fixture {
+        stable_reads: 1,
+        explains: true,
+        ..Fixture::new("apt", APT)
+    });
+    engine.plan_operation(&first, &cancel).unwrap();
+    let results = engine.execute_batch(&[first, second], &cancel, &mut |_| {});
+    assert!(results[0].as_ref().unwrap_err().blames_change());
+    refused(&results[1], Refusal::PartnerFailed { blamed: true });
+    assert!(results[1].as_ref().unwrap_err().blames_change());
 }
 
 #[test]

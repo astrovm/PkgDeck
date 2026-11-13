@@ -45,6 +45,52 @@ pub enum EngineError {
     Cancelled,
     Execution(ExecutionError),
 }
+impl EngineError {
+    /// Whether the change itself caused this error, so trying it again at
+    /// the same version would fail the same way: its command failed or
+    /// crashed, its source answered something PkgDeck can't use, or PkgDeck
+    /// explained why it can't make it. A cancel, a password prompt, the
+    /// system helper, a busy lock, an I/O error, a command stopped from
+    /// outside or a change PkgDeck only held back says nothing about the
+    /// package.
+    pub fn blames_change(&self) -> bool {
+        match self {
+            Self::Refused { refusal, .. } => match refusal {
+                Refusal::Explained(_) => true,
+                Refusal::PartnerFailed { blamed } => *blamed,
+                Refusal::PlanChanged
+                | Refusal::CleanupChanged
+                | Refusal::NotUnattended
+                | Refusal::NeedsReview
+                | Refusal::Building => false,
+            },
+            Self::Execution(error) => match error {
+                ExecutionError::Failed(completion) => {
+                    completion.signal.is_none() || completion.crashed()
+                }
+                ExecutionError::Invalid(_) => true,
+                ExecutionError::Io(_)
+                | ExecutionError::Disabled(_)
+                | ExecutionError::Helper(_)
+                | ExecutionError::Cancelled
+                | ExecutionError::TimedOut
+                | ExecutionError::AuthorizationCancelled
+                | ExecutionError::AuthorizationDenied
+                | ExecutionError::LockBusy
+                | ExecutionError::Interrupted => false,
+            },
+            Self::Unsupported { .. }
+            | Self::InvalidResponse { .. }
+            | Self::NotFound
+            | Self::Ambiguous(_) => true,
+            Self::UnknownBackend(_)
+            | Self::DuplicateBackend(_)
+            | Self::Unavailable { .. }
+            | Self::Incomplete(_)
+            | Self::Cancelled => false,
+        }
+    }
+}
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -89,7 +135,9 @@ pub enum Refusal {
     /// Automatic updates touch this source, but not this change.
     NeedsReview,
     /// A change that has to run together with this one failed its check.
-    PartnerFailed,
+    /// `blamed` when that failure blames the partner itself (see
+    /// [`EngineError::blames_change`]), so this one fails with it.
+    PartnerFailed { blamed: bool },
     /// A build that may use what the cleanup task removes is running.
     Building,
     /// PkgDeck's own explanation, already a full sentence.
@@ -104,7 +152,7 @@ impl std::fmt::Display for Refusal {
             }
             Self::NotUnattended => "This source is never updated automatically.",
             Self::NeedsReview => "Automatic updates don't make this change. Start it yourself.",
-            Self::PartnerFailed => {
+            Self::PartnerFailed { .. } => {
                 "Another change that runs together with this one could not be checked. Review them again."
             }
             Self::Building => "Something that uses it is being built. Clean again when it finishes.",
@@ -1770,12 +1818,15 @@ impl Engine {
         while index < operations.len() {
             let end = crate::batch::group_end(operations, index);
             if checked[index..end].iter().any(Result::is_err) {
+                let blamed = checked[index..end]
+                    .iter()
+                    .any(|checked| checked.as_ref().is_err_and(EngineError::blames_change));
                 for position in index..end {
                     let operation = &operations[position];
                     let result = Err(checked[position].clone().err().unwrap_or_else(|| {
                         EngineError::Refused {
                             backend: operation.backend().into(),
-                            refusal: Refusal::PartnerFailed,
+                            refusal: Refusal::PartnerFailed { blamed },
                         }
                     }));
                     events(Event::Started(operation.clone()));
@@ -2185,7 +2236,7 @@ mod refusal_tests {
                 "This source is never updated automatically.",
             ),
             (
-                Refusal::PartnerFailed,
+                Refusal::PartnerFailed { blamed: true },
                 "Another change that runs together with this one could not be checked. Review them again.",
             ),
             (

@@ -5907,8 +5907,8 @@ impl Backend for BrokenTool {
     ) -> Result<OperationOutcome, EngineError> {
         if self.broken {
             Err(EngineError::Execution(
-                pkgdeck_core::process::ExecutionError::Io(
-                    "No such file or directory (os error 2)".into(),
+                pkgdeck_core::process::ExecutionError::Invalid(
+                    "avm printed an unknown version".into(),
                 ),
             ))
         } else {
@@ -5965,10 +5965,21 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
         let failed = &controller.rust().failed_updates;
         [&one, &two].map(|package| failed.skips(&package.id, "2"))
     };
+    let killed = |signal| {
+        EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: None,
+            signal: Some(signal),
+            stdout: vec![],
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }))
+    };
     for (error, blamed) in [
+        // pkexec or a file PkgDeck reads, not the package.
         (
             EngineError::Execution(ExecutionError::Io("No such file".into())),
-            true,
+            false,
         ),
         (
             refused(Refusal::Explained(
@@ -6001,18 +6012,12 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             })),
             true,
         ),
-        // Stopped by a shutdown.
-        (
-            EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
-                code: None,
-                signal: Some(15),
-                stdout: vec![],
-                stderr: vec![],
-                truncated: false,
-                cancellation_deferred: false,
-            })),
-            false,
-        ),
+        // Stopped by a shutdown or the OOM killer, it may work next
+        // time. A crash fails the same way again.
+        (killed(15), false),
+        (killed(9), false),
+        (killed(11), true),
+        (killed(6), true),
         (
             EngineError::Execution(ExecutionError::Helper(
                 "authorization runner closed unexpectedly".into(),
@@ -6022,7 +6027,8 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
         (EngineError::Execution(ExecutionError::LockBusy), false),
         (EngineError::Execution(ExecutionError::TimedOut), false),
         (refused(Refusal::NeedsReview), false),
-        (refused(Refusal::PartnerFailed), false),
+        (refused(Refusal::PartnerFailed { blamed: false }), false),
+        (refused(Refusal::PartnerFailed { blamed: true }), true),
         (refused(Refusal::PlanChanged), false),
     ] {
         let batch = Job::UpgradeAll(vec![upgrade(&one), upgrade(&two)], None);
@@ -6034,34 +6040,6 @@ fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
             "{error:?}"
         );
     }
-}
-#[test]
-fn a_change_refused_for_its_partner_shares_the_partners_blame() {
-    let update = |backend: &str, name: &str| {
-        let mut package = synthetic_package(name, name);
-        package.id.backend = backend.into();
-        Operation::Upgrade(package.id)
-    };
-    // systemd and systemd-libs update in one pacman transaction; Firefox
-    // is a Flatpak of its own.
-    let ran = [
-        update("pacman", "systemd"),
-        update("pacman", "systemd-libs"),
-        update("flatpak", "org.mozilla.firefox"),
-    ];
-    // systemd failed on its own; systemd-libs was refused with it.
-    let partner = [false, true, false];
-    let mut blamed = [true, false, false];
-    share_partner_blame(&ran, &mut blamed, &partner);
-    assert_eq!(blamed, [true, true, false]);
-    // A partner stopped by the password prompt blames neither.
-    let mut blamed = [false, false, false];
-    share_partner_blame(&ran, &mut blamed, &partner);
-    assert_eq!(blamed, [false, false, false]);
-    // A change in another transaction isn't a partner.
-    let mut blamed = [false, false, true];
-    share_partner_blame(&ran, &mut blamed, &[false, true, false]);
-    assert_eq!(blamed, [false, false, true]);
 }
 #[test]
 fn failures_with_the_same_reason_share_one_line() {

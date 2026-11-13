@@ -97,6 +97,24 @@ impl Completion {
             None => ended,
         }
     }
+    /// Whether the program stopped on a signal it raised itself: a crash,
+    /// not a stop from outside such as a shutdown or the OOM killer.
+    pub fn crashed(&self) -> bool {
+        use rustix::process::Signal;
+        self.signal.is_some_and(|signal| {
+            [
+                Signal::ILL,
+                Signal::TRAP,
+                Signal::ABORT,
+                Signal::BUS,
+                Signal::FPE,
+                Signal::SEGV,
+                Signal::SYS,
+            ]
+            .iter()
+            .any(|crash| crash.as_raw() == signal)
+        })
+    }
 }
 
 /// The stderr line that best explains a failed command: the first line
