@@ -1016,6 +1016,10 @@ struct FlatpakFixture {
     appstream_fails: bool,
     /// What `flatpak remotes` prints: name and options.
     remotes: Option<&'static str>,
+    /// What `flatpak --user mask` prints. The system has no masks.
+    user_masks: Option<&'static str>,
+    /// What `flatpak info --show-metadata` prints for each ref.
+    metadata: Vec<(&'static str, &'static str)>,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -1110,6 +1114,21 @@ impl Transport for FlatpakFixture {
         }
         if args.contains(&"remotes".into()) {
             return Ok(output(self.remotes.unwrap_or_default()));
+        }
+        if args.contains(&"mask".into()) {
+            return Ok(output(if system {
+                ""
+            } else {
+                self.user_masks.unwrap_or_default()
+            }));
+        }
+        if args.contains(&"--show-metadata".into()) {
+            return Ok(output(
+                self.metadata
+                    .iter()
+                    .find(|(reference, _)| args.last() == Some(&(*reference).to_owned()))
+                    .map_or("", |(_, metadata)| *metadata),
+            ));
         }
         if args.contains(&"list".into()) {
             if let Some(installed) = &self.installed {
@@ -1934,6 +1953,11 @@ impl Transport for FlatpakGate {
             .map(|arg| arg.to_string_lossy().into_owned())
             .filter(|arg| arg != "--cached")
             .collect();
+        // Neither installation masks anything. Masks are read only after
+        // the updates, so they aren't part of what runs at once.
+        if args[1] == "mask" {
+            return Ok(output(""));
+        }
         // Searches and listings are local reads; update checks name a
         // remote once asking every remote failed.
         let group = match (args[1].as_str(), args.len()) {
@@ -5237,6 +5261,90 @@ fn flatpak_updates_match_commits_by_scope_origin_kind_and_branch() {
             .reference
             .as_deref(),
         Some("app/io.example.App/x86_64/stable")
+    );
+}
+
+#[test]
+fn masked_flatpaks_list_no_update() {
+    // Measured with Flatpak 1.18.4: `flatpak --user mask org.test.App`
+    // leaves the app and its extension in `remote-ls --updates`, but
+    // `flatpak update` says "Nothing to update."
+    let fixture = FlatpakFixture {
+        installed: Some(
+            "org.test.App\tx86_64\tstable\t1\tApp\tlocal\tcurrent\n\
+             org.test.App.Plugin\tx86_64\tstable\t\tPlugin\tlocal\truntime\n\
+             org.test.Platform\tx86_64\t1\t\tPlatform\tlocal\truntime\n\
+             org.test.Platform\tx86_64\t2\t\tPlatform\tlocal\truntime\n\
+             org.other.App\tx86_64\tstable\t1\tOther\tlocal\tcurrent\n"
+                .into(),
+        ),
+        user_updates: Some(output(
+            "app/org.test.App/x86_64/stable\t2\tlocal\n\
+             runtime/org.test.App.Plugin/x86_64/stable\t\tlocal\n\
+             runtime/org.test.Platform/x86_64/1\t\tlocal\n\
+             runtime/org.test.Platform/x86_64/2\t\tlocal\n\
+             app/org.other.App/x86_64/stable\t2\tlocal\n",
+        )),
+        user_masks: Some("  org.test.App\n  org.test.Platform//1\n"),
+        metadata: vec![(
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            "[Runtime]\nname=org.test.App.Plugin\n\n[ExtensionOf]\nref=app/org.test.App/x86_64/stable\n",
+        )],
+        ..Default::default()
+    };
+    let packages = Flatpak::new(fixture.clone())
+        .installed(&Cancellation::default())
+        .unwrap();
+    let update = |reference: &str| {
+        packages
+            .iter()
+            .find(|p| p.id.scope != Scope::System && p.id.reference.as_deref() == Some(reference))
+            .map(|p| (p.update.clone(), p.candidate_version.clone()))
+            .unwrap()
+    };
+    for (reference, version) in [
+        ("app/org.test.App/x86_64/stable", "1"),
+        ("runtime/org.test.App.Plugin/x86_64/stable", ""),
+        ("runtime/org.test.Platform/x86_64/1", ""),
+    ] {
+        assert_eq!(
+            update(reference),
+            (UpdateAvailability::Current, Some(version.into())),
+            "{reference}"
+        );
+    }
+    for (reference, version) in [
+        ("runtime/org.test.Platform/x86_64/2", ""),
+        ("app/org.other.App/x86_64/stable", "2"),
+    ] {
+        assert_eq!(
+            update(reference),
+            (UpdateAvailability::Available, Some(version.into())),
+            "{reference}"
+        );
+    }
+    // Only runtimes can be extensions, so only they are looked up.
+    let calls = fixture.calls.lock().unwrap();
+    let looked_up: Vec<_> = calls
+        .iter()
+        .filter(|(args, _, _)| args.contains(&"--show-metadata".into()))
+        .map(|(args, _, _)| args.last().unwrap().as_str())
+        .collect();
+    assert_eq!(
+        looked_up,
+        [
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            "runtime/org.test.Platform/x86_64/2"
+        ]
+    );
+    // The system installation has no updates, so it isn't asked for masks.
+    let asked: Vec<_> = calls
+        .iter()
+        .filter(|(args, _, _)| args.contains(&"mask".into()))
+        .collect();
+    assert_eq!(
+        asked,
+        [&(vec!["--user".into(), "mask".into()], false, false)]
     );
 }
 

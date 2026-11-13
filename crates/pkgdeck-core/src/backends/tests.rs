@@ -2689,3 +2689,138 @@ fn a_casks_icon_comes_from_the_folder_holding_its_app() {
     assert_eq!(cask_icon_in(&[], &[], &[], &cancel), None);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn flatpak_masks_match_what_flatpak_update_skips() {
+    // Measured with Flatpak 1.18.4: `flatpak --user mask` prints each
+    // pattern indented by two spaces, and nothing without masks.
+    let listing = "  org.test.App\n  org.test.Platform//1\n  org.x.*\n  runtime/org.y.*/aarch64\n";
+    assert_eq!(
+        flatpak_masks(listing),
+        [
+            "org.test.App",
+            "org.test.Platform//1",
+            "org.x.*",
+            "runtime/org.y.*/aarch64"
+        ]
+    );
+    assert!(flatpak_masks("").is_empty());
+    // A terminal gets a header first. It isn't a pattern.
+    assert_eq!(flatpak_masks("Masked patterns:\n  org.x.*\n"), ["org.x.*"]);
+    assert!(flatpak_masks("No masked patterns\n").is_empty());
+
+    let cases = [
+        // An exact ID, for apps and runtimes, on any arch and branch.
+        ("org.test.App", "app/org.test.App/x86_64/stable", true),
+        ("org.test.App", "app/org.test.App/aarch64/beta", true),
+        ("org.test.App", "runtime/org.test.App/x86_64/stable", true),
+        ("org.test.App", "app/org.test.AppTwo/x86_64/stable", false),
+        (
+            "org.test.App",
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            false,
+        ),
+        ("org.test.App", "app/org.test/x86_64/stable", false),
+        // `*` covers dots, but never a `/`.
+        ("org.test.*", "app/org.test.App/x86_64/stable", true),
+        (
+            "org.test.*",
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            true,
+        ),
+        ("org.test.*", "app/org.testing.App/x86_64/stable", false),
+        ("org.*.App", "app/org.a.b.App/x86_64/stable", true),
+        ("*", "runtime/org.gnome.Platform/x86_64/49", true),
+        ("org.test.*/x86_64", "app/org.test.App/x86_64/stable", true),
+        // An empty arch before `//branch` matches any arch.
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/1",
+            true,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/aarch64/1",
+            true,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/2",
+            false,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/10",
+            false,
+        ),
+        (
+            "org.test.App/x86_64/stable",
+            "app/org.test.App/x86_64/stable",
+            true,
+        ),
+        (
+            "org.test.App/aarch64",
+            "app/org.test.App/x86_64/stable",
+            false,
+        ),
+        ("org.test.App//st*", "app/org.test.App/x86_64/stable", true),
+        // A kind limits the pattern to that kind.
+        ("app/org.test.App", "app/org.test.App/x86_64/stable", true),
+        (
+            "app/org.test.App",
+            "runtime/org.test.App/x86_64/stable",
+            false,
+        ),
+        (
+            "runtime/org.y.*/aarch64",
+            "runtime/org.y.Sdk/aarch64/49",
+            true,
+        ),
+        (
+            "runtime/org.y.*/aarch64",
+            "runtime/org.y.Sdk/x86_64/49",
+            false,
+        ),
+        ("runtime/org.y.*/aarch64", "app/org.y.Sdk/aarch64/49", false),
+        // An empty part matches any value only when a `/` follows it.
+        ("org.test.App/", "app/org.test.App/x86_64/stable", false),
+        ("/x86_64", "app/org.test.App/x86_64/stable", true),
+        // Flatpak skips patterns it can't read.
+        (
+            "org.test.App/x86_64/stable/extra",
+            "app/org.test.App/x86_64/stable",
+            false,
+        ),
+        ("org.test.?pp", "app/org.test.App/x86_64/stable", false),
+        ("org.test.[A]pp", "app/org.test.App/x86_64/stable", false),
+        ("app/", "app/org.test.App/x86_64/stable", false),
+        ("", "app/org.test.App/x86_64/stable", false),
+        ("org.test.App", "not a ref", false),
+    ];
+    for (pattern, reference, masked) in cases {
+        assert_eq!(
+            flatpak_masked(pattern, reference),
+            masked,
+            "{pattern} on {reference}"
+        );
+    }
+}
+
+#[test]
+fn flatpak_extensions_name_the_ref_they_extend() {
+    // Measured with Flatpak 1.18.4: `flatpak --user info --show-metadata`
+    // of an app extension.
+    let metadata = "[Runtime]\nname=org.test.App.Plugin\nruntime=org.test.App.Plugin/x86_64/stable\nsdk=org.test.App.Plugin/x86_64/stable\n\n[ExtensionOf]\nref=app/org.test.App/x86_64/stable\n";
+    assert_eq!(
+        flatpak_extension_of(metadata),
+        Some("app/org.test.App/x86_64/stable")
+    );
+    let runtime = "[Runtime]\nname=org.test.Platform\nruntime=org.test.Platform/x86_64/1\n";
+    assert_eq!(flatpak_extension_of(runtime), None);
+    // Only the [ExtensionOf] group names it, and only with a full ref.
+    assert_eq!(
+        flatpak_extension_of("[Other]\nref=app/a.B/x86_64/stable\n"),
+        None
+    );
+    assert_eq!(flatpak_extension_of("[ExtensionOf]\nref=a.B\n"), None);
+}

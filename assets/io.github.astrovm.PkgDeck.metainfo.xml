@@ -17,6 +17,7 @@
           <li>With Wait for new releases on, automatic updates update the other system Flatpaks one by one instead of failing</li>
           <li>While a Snap release waits, the other Snap updates wait for you instead of failing</li>
           <li>A snap held with snap refresh --hold no longer shows an update that Update all never makes</li>
+          <li>A Flatpak masked with flatpak mask, or an extension of one, no longer shows an update that Update all never makes</li>
           <li>Updates that failed because of a password prompt, the system helper or an older PkgDeck are tried again</li>
           <li>Automatic updates skip an update only after it failed twice, so a run without network doesn't hold it back</li>
           <li>One update the helper can't run no longer stops the rest of the run</li>
