@@ -576,6 +576,30 @@ fn an_update_says_what_it_replaces_or_that_it_is_a_new_build() {
         let update = json!({"installed": installed, "candidate": "2", "update": "available"});
         assert_eq!(replaces(update), None);
     }
+    // An unknown new version is not a rebuild.
+    assert_eq!(
+        replaces(json!({"installed": "1", "candidate": "", "update": "available"})),
+        Some("from 1".into())
+    );
+}
+
+#[test]
+fn a_page_names_the_update_or_the_new_build() {
+    let update = |installed: &str, candidate: &str, state: &str| {
+        row(json!({"installed": installed, "candidate": candidate, "update": state}))
+    };
+    let normal = update("1", "2", "available");
+    assert_eq!(update_version(&normal), Some("2"));
+    assert_eq!(update_text(&normal), "Update 2 available");
+    let rebuilt = update("2.1.0", "2.1.0", "available");
+    assert_eq!(update_version(&rebuilt), Some("2.1.0"));
+    assert_eq!(update_text(&rebuilt), "New build of 2.1.0 available");
+    // No version from the source: an update with no version to name.
+    let unnamed = update("1", "", "available");
+    assert_eq!(update_version(&unnamed), None);
+    assert_eq!(update_text(&unnamed), "Update available");
+    // A newer version that isn't offered as an update is no update.
+    assert_eq!(update_version(&update("1", "2", "current")), None);
 }
 
 #[test]
@@ -625,7 +649,11 @@ fn versions_read_by_kind_and_state() {
     );
     assert_eq!(
         version(json!({"update": "available", "installed": "2", "candidate": "2"})),
-        "2"
+        "2 (new build)"
+    );
+    assert_eq!(
+        version(json!({"update": "available", "installed": "", "candidate": ""})),
+        "Unknown"
     );
     assert_eq!(
         version(json!({"update": "available", "installed": "1"})),

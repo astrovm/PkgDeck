@@ -3675,8 +3675,8 @@ fn confirm_item(package: &Package) -> Value {
         "group": source_display_name(&package.id.backend),
         "icon_name": package.id.backend,
         "title": confirm_title(package),
-        "from": package.installed_version,
-        "to": package.candidate_version,
+        "from": known_version(package.installed_version.as_deref()),
+        "to": known_version(package.candidate_version.as_deref()),
         "icon": package.icon,
         "note": if package.id.backend == "fwupd" { package.summary.as_str() } else { "" },
     })
@@ -3892,27 +3892,28 @@ fn confirmation_preview(
         if !package.display_name.is_empty() && package.display_name != package.id.name {
             lines.insert(1, package.display_name.clone());
         }
-        if let Some(version) = &package.installed_version {
+        let installed = known_version(package.installed_version.as_deref());
+        let candidate = known_version(package.candidate_version.as_deref());
+        let rebuild = is_rebuild(installed, candidate);
+        if let Some(version) = installed {
             lines.push(format!("Installed: {version}"));
         }
-        if let Some(version) = &package.candidate_version {
-            lines.push(format!("Available: {version}"));
+        match candidate {
+            Some(_) if rebuild => lines.push("Available: new build".into()),
+            Some(version) => lines.push(format!("Available: {version}")),
+            None => {}
         }
         // The version line says what changes: old → new for an update, the
         // version that goes for a removal, the one that arrives for an install.
-        match (
-            operation,
-            &package.installed_version,
-            &package.candidate_version,
-        ) {
-            (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
-            (Operation::Install(_), None, Some(new)) => summary.push(new.clone()),
-            (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
+        match (operation, installed, candidate) {
+            (Operation::Remove(_), Some(old), _) => summary.push(old.into()),
+            (Operation::Install(_), None, Some(new)) => summary.push(new.into()),
             // The source rebuilt the same version.
-            (Operation::Upgrade(_), Some(old), Some(_)) => {
+            (Operation::Upgrade(_), Some(old), _) if rebuild => {
                 summary.push(format!("{old} (new build)"))
             }
-            (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
+            (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
+            (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.into()),
             _ => {}
         }
         if package.id.backend == "fwupd" {
@@ -3997,7 +3998,11 @@ fn confirmation_preview(
                 PlannedAction::Remove => "Remove",
                 PlannedAction::Upgrade => "Update",
             };
-            let version = match (&change.installed_version, &change.candidate_version) {
+            let (installed, candidate) = (
+                known_version(change.installed_version.as_deref()),
+                known_version(change.candidate_version.as_deref()),
+            );
+            let version = match (installed, candidate) {
                 // The source rebuilt the same version.
                 (Some(old), Some(new)) if old == new && change.action == PlannedAction::Upgrade => {
                     format!(" ({old}, new build)")
@@ -4011,9 +4016,7 @@ fn confirmation_preview(
                 (None, None) => String::new(),
             };
             if moving && change.action == PlannedAction::Install {
-                let version = change
-                    .candidate_version
-                    .as_deref()
+                let version = candidate
                     .map(|version| format!(" {version}"))
                     .unwrap_or_default();
                 return format!("Move {}{version} into PkgDeck", change.name);

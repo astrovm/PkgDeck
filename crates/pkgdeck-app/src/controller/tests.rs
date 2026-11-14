@@ -1487,6 +1487,32 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
     assert!(summary.contains("\n1 (new build)"), "{summary}");
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Update anonymous (1, new build)"), "{body}");
+    assert!(
+        body.contains("Installed: 1\n\nAvailable: new build"),
+        "{body}"
+    );
+    // An empty version is unknown: no "(new build)" without a version.
+    let mut unknown = package.clone();
+    unknown.installed_version = Some(String::new());
+    unknown.candidate_version = Some(String::new());
+    let mut unknown_plan = rebuilt_plan.clone();
+    unknown_plan.changes[0].installed_version = Some(String::new());
+    unknown_plan.changes[0].candidate_version = Some(String::new());
+    let preview = confirmation_preview(
+        &operation,
+        std::slice::from_ref(&unknown),
+        &[],
+        Some(&unknown_plan),
+    );
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(!summary.contains("new build"), "{summary}");
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Selected: Update anonymous"), "{body}");
+    assert!(!body.contains("Selected: Update anonymous ("), "{body}");
+    assert!(
+        !body.contains("Installed:") && !body.contains("Available:"),
+        "{body}"
+    );
     let mut environment_package = package.clone();
     environment_package.id.scope = Scope::Environment {
         path: std::path::PathBuf::from("/synthetic/env"),
@@ -8714,6 +8740,12 @@ fn checked_proposals_plan_selected_upgrades() {
     assert_eq!(plan.items[0]["group"], "fixture");
     assert_eq!(plan.items[0]["from"], "1");
     assert_eq!(plan.items[0]["to"], "2");
+    // An empty version is unknown, so the row shows no version for it.
+    let mut unknown = package("unknown");
+    unknown.installed_version = Some(String::new());
+    unknown.candidate_version = Some(String::new());
+    let items = update_items(&[Operation::Upgrade(unknown.id.clone())], &[unknown]);
+    assert!(items[0]["from"].is_null() && items[0]["to"].is_null());
     // Update all lists every package its sources would update.
     let all = update_items(
         &[Operation::UpgradeAll {

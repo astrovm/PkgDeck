@@ -507,11 +507,7 @@ fn app_page(
                         .filter(|v| !v.is_empty())
                         .or(row.candidate.clone())
                         .unwrap_or_default();
-                    let new = row
-                        .candidate
-                        .clone()
-                        .filter(|new| row.has_update() && !new.is_empty());
-                    if let Some(new) = new {
+                    if let Some(new) = model::update_version(row) {
                         // Like the list: the new version, then what it replaces.
                         ui.horizontal(|ui| {
                             ui.label(
@@ -1061,10 +1057,7 @@ fn percent(segment: &str) -> String {
 
 fn update_state(app: &App, row: &Row) -> String {
     if row.has_update() {
-        let state = match row.candidate.as_deref().filter(|c| !c.is_empty()) {
-            Some(version) => format!("Update {version} available"),
-            None => "Update available".into(),
-        };
+        let state = model::update_text(row);
         return match row.waiting_until() {
             Some(until) => format!("{state}. {}", model::waiting_text(until)),
             None => state,

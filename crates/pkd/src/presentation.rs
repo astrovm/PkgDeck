@@ -1,7 +1,7 @@
 //! Human-readable command-line presentation.
 use pkgdeck_core::{
     engine::{EngineError, Refusal},
-    package::{Operation, PackageId, Scope},
+    package::{is_rebuild, known_version, Operation, PackageId, Scope},
 };
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
@@ -148,16 +148,17 @@ pub fn error_message(error: &EngineError) -> String {
     serde_json::to_value(error).map_or_else(|_| clean(&error.to_string()), |v| error_text(&v))
 }
 /// "1.0 → 2.0", or "2.1.0 (new build)" when the source rebuilt the same
-/// version, as Flatpak does.
+/// version, as Flatpak does. An empty version is unknown.
 fn update_versions(package: &Value) -> String {
     let (old, new) = (
-        value(&package["installed_version"]),
-        value(&package["candidate_version"]),
+        known_version(package["installed_version"].as_str()),
+        known_version(package["candidate_version"].as_str()),
     );
-    if old == new {
-        format!("{old} (new build)")
-    } else {
-        format!("{old} → {new}")
+    match (old, new) {
+        (Some(old), Some(new)) if old == new => format!("{} (new build)", clean(old)),
+        (Some(old), Some(new)) => format!("{} → {}", clean(old), clean(new)),
+        (Some(version), None) | (None, Some(version)) => clean(version),
+        (None, None) => "Unknown".into(),
     }
 }
 /// The same wording for an error already serialized in a report, without
@@ -1087,6 +1088,10 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             .as_str()
             .map(|backend| Value::String(source_name(backend)))
             .unwrap_or(Value::Null);
+        let rebuild = is_rebuild(
+            p["installed_version"].as_str(),
+            p["candidate_version"].as_str(),
+        );
         for (label, field) in [
             ("Source", &source),
             ("Reference", &p["id"]["reference"]),
@@ -1099,11 +1104,15 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ("Data", &data["data"]),
             ("Dependencies", &data["dependencies"]),
         ] {
-            // A missing installed version means not installed; other empty
-            // fields carry no information and are left out.
+            // A missing installed version means not installed, and an empty
+            // one means an unknown version. Other empty fields carry no
+            // information and are left out.
             let text = if label == "Installed" && field.is_null() {
                 "no".into()
+            } else if label == "Installed" && field == "" {
+                "yes".into()
             } else if field.is_null()
+                || field == ""
                 || field.as_array().is_some_and(Vec::is_empty)
                 || (label == "Update" && field == "unknown")
             {
@@ -1119,8 +1128,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 format!("{}{size}", value(&field["shown"]))
             } else if label == "Update" && field == "current" {
                 "up to date".into()
+            } else if label == "Available" && rebuild {
+                "new build".into()
             } else if label == "Update" && field == "available" {
-                paint.cyan(&match p["candidate_version"].as_str() {
+                paint.cyan(&match known_version(p["candidate_version"].as_str()) {
+                    Some(_) if rebuild => "available (new build)".into(),
                     Some(version) => format!("available ({})", clean(version)),
                     None => "available".into(),
                 })
@@ -2158,6 +2170,15 @@ mod tests {
                 ], "failures": []}),
                 "1 update available:\n  ↑ tool  APT  2.1.0 (new build)\n",
             ),
+            // An empty version is unknown, never " (new build)" or "1.0 → ".
+            (
+                json!({"operations": [], "updates": [
+                    {"id": id, "installed_version": "", "candidate_version": ""},
+                    {"id": id, "installed_version": "1.0", "candidate_version": ""},
+                    {"id": id, "installed_version": "", "candidate_version": "2.0"}
+                ], "failures": []}),
+                "3 updates available:\n  ↑ tool  APT  Unknown\n  ↑ tool  APT  1.0\n  ↑ tool  APT  2.0\n",
+            ),
             (
                 json!({"operations": [], "updates": [{"id": id, "installed_version": "1.0"}], "failures": []}),
                 "1 update available:",
@@ -2207,6 +2228,28 @@ mod tests {
             false,
         );
         assert!(installed.contains("Installed  1.0"));
+        // A rebuild of the same version says so once, not 2.1.0 twice.
+        let rebuilt = human(
+            &json!({"package":{"id":id,"installed_version":"2.1.0","candidate_version":"2.1.0","update":"available"}}),
+            80,
+            false,
+        );
+        assert!(
+            rebuilt.contains(
+                "Installed  2.1.0\n   Available  new build\n      Update  available (new build)"
+            ),
+            "{rebuilt}"
+        );
+        // An empty version is unknown: installed, with no version to show.
+        let unknown = human(
+            &json!({"package":{"id":id,"installed_version":"","candidate_version":"","update":"available"}}),
+            80,
+            false,
+        );
+        assert!(
+            unknown.contains("Installed  yes\n      Update  available"),
+            "{unknown}"
+        );
         // An app's own folder, and how much it takes, like its page in the app.
         let data = json!({"package":{"id":id,"installed_version":"1.0"},"data":{"folder":"/home/user/.var/app/synthetic","shown":"~/.var/app/synthetic","bytes":49152}});
         let shown = human(&data, 80, false);

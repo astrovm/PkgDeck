@@ -499,6 +499,18 @@ pub const FLATPAK_NEW_REMOTE: &str = "new-remote:";
 pub fn unverified_search_offer(package: &Package) -> bool {
     package.installed_version.is_none() && package.candidate_version.is_none()
 }
+/// A version a source reported, or `None` when it is missing or empty.
+pub fn known_version(version: Option<&str>) -> Option<&str> {
+    version.filter(|version| !version.is_empty())
+}
+/// True when an update keeps the same known version: the source rebuilt
+/// it, as Flathub does with a new build of an app.
+pub fn is_rebuild(installed: Option<&str>, candidate: Option<&str>) -> bool {
+    matches!(
+        (known_version(installed), known_version(candidate)),
+        (Some(old), Some(new)) if old == new
+    )
+}
 fn score(package: &Package, query: &str) -> u8 {
     let name = package.id.name.to_lowercase();
     let summary = package.summary.to_lowercase();
@@ -621,6 +633,24 @@ mod tests {
             homepages: vec![],
             adopt_with: None,
             waiting_until: None,
+        }
+    }
+    #[test]
+    fn a_rebuild_keeps_the_same_known_version() {
+        assert_eq!(known_version(Some("")), None);
+        assert_eq!(known_version(Some("1")), Some("1"));
+        assert!(is_rebuild(Some("2.1.0"), Some("2.1.0")));
+        for (installed, candidate) in [
+            (Some("1"), Some("2")),
+            (Some(""), Some("")),
+            (None, None),
+            (Some("1"), None),
+            (None, Some("1")),
+        ] {
+            assert!(
+                !is_rebuild(installed, candidate),
+                "{installed:?} {candidate:?}"
+            );
         }
     }
     fn firefox_id() -> PackageId {
