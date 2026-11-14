@@ -20,14 +20,14 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 sha2.workspace = true
 hex.workspace = true
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-rfd = "=0.17.2"
+rfd = "=0.18.0"
 memmap2 = "=0.9.12"
 # The window's handle, to ask the desktop to blur behind glass styles.
 raw-window-handle = "=0.6.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "=0.3.7", default-features = false, features = ["async-io", "blocking"] }
-notify-rust = "=4.18.2"
+notify-rust = "=4.19.0"
 # Reads the desktop's reduce-motion setting through its settings portal.
 zbus = { version = "=6.2.1", default-features = false, features = ["default-rt"] }
 # Waits for the portal's signals on one thread.
