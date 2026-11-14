@@ -69,10 +69,9 @@ if [[ "$kind" == development ]]; then
     exec 9>"$cache/.target-lock"
     if flock -n -x 9; then
         if [[ -d $cache/target ]]; then
-            # -k is POSIX: macOS du has no -b.
-            target_kib=$(du -sk "$cache/target" | cut -f1)
-            if ((target_kib > 20000000000 / 1024)); then
-                echo "Deleting oversized container target: $cache/target ($target_kib KiB)" >&2
+            target_bytes=$(du -sb "$cache/target" | cut -f1)
+            if ((target_bytes > 20000000000)); then
+                echo "Deleting oversized container target: $cache/target ($target_bytes bytes)" >&2
                 rm -rf "$cache/target"
             fi
         fi
