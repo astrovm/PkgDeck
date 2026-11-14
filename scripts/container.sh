@@ -108,7 +108,9 @@ if [[ "$kind" == development ]]; then
         common=$(git rev-parse --path-format=absolute --git-common-dir)
         # One file per worktree: several can share a PKGDECK_CONTAINER_CACHE.
         git_file="$cache/git-file-$workspace_key"
-        printf 'gitdir: %s\n' "$(git rev-parse --absolute-git-dir)" >"$git_file.$$"
+        # Its own line, so set -e stops the script if git fails.
+        git_dir=$(git rev-parse --absolute-git-dir)
+        printf 'gitdir: %s\n' "$git_dir" >"$git_file.$$"
         mv "$git_file.$$" "$git_file"
         git_mount=(-v "$common:$common:ro" -v "$git_file:/workspace/.git:ro")
     fi
