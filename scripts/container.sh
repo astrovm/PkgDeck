@@ -69,9 +69,10 @@ if [[ "$kind" == development ]]; then
     exec 9>"$cache/.target-lock"
     if flock -n -x 9; then
         if [[ -d $cache/target ]]; then
-            target_bytes=$(du -sb "$cache/target" | cut -f1)
-            if ((target_bytes > 20000000000)); then
-                echo "Deleting oversized container target: $cache/target ($target_bytes bytes)" >&2
+            # -k is POSIX: macOS du has no -b.
+            target_kib=$(du -sk "$cache/target" | cut -f1)
+            if ((target_kib > 20000000000 / 1024)); then
+                echo "Deleting oversized container target: $cache/target ($target_kib KiB)" >&2
                 rm -rf "$cache/target"
             fi
         fi
@@ -100,11 +101,17 @@ if [[ "$kind" == development ]]; then
     # a mapped user that then keeps native builds out of the checkout.
     mkdir -p target
     # A worktree's .git is a file that points into the main checkout's git
-    # folder. Mount that folder read-only at the same path, so git works in
-    # the container as it does in a plain clone (scripts/mutants.sh diff).
+    # folder, maybe by a relative path. Mount that folder read-only at the
+    # same path, and a .git file with its absolute path over the worktree's,
+    # so git works in the container as in a plain clone (scripts/mutants.sh).
     git_mount=()
-    if [[ -f .git ]] && common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-        git_mount=(-v "$common:$common:ro")
+    if [[ -f .git ]]; then
+        common=$(git rev-parse --path-format=absolute --git-common-dir)
+        # One file per worktree: several can share a PKGDECK_CONTAINER_CACHE.
+        git_file="$cache/git-file-$workspace_key"
+        printf 'gitdir: %s\n' "$(git rev-parse --absolute-git-dir)" >"$git_file.$$"
+        mv "$git_file.$$" "$git_file"
+        git_mount=(-v "$common:$common:ro" -v "$git_file:/workspace/.git:ro")
     fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
     # The `[@]+` form keeps an empty array from being an unbound variable: the
