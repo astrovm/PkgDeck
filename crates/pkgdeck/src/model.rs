@@ -1223,6 +1223,9 @@ pub fn update_text(row: &Row) -> String {
 /// The line under an update's new version: the version it replaces, or
 /// "new build" when the source rebuilt the same version, as Flatpak does.
 pub fn replaces_text(row: &Row) -> Option<String> {
+    if !row.has_update() {
+        return None;
+    }
     let (old, new) = (row.installed.as_deref(), row.candidate.as_deref());
     let old = known_version(old)?;
     Some(if is_rebuild(Some(old), new) {

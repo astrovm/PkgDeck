@@ -576,6 +576,11 @@ fn an_update_says_what_it_replaces_or_that_it_is_a_new_build() {
         let update = json!({"installed": installed, "candidate": "2", "update": "available"});
         assert_eq!(replaces(update), None);
     }
+    // APT reports an up-to-date package's version twice: no update, no line.
+    assert_eq!(
+        replaces(json!({"installed": "1.0", "candidate": "1.0", "update": "current"})),
+        None
+    );
     // An unknown new version is not a rebuild.
     assert_eq!(
         replaces(json!({"installed": "1", "candidate": "", "update": "available"})),
