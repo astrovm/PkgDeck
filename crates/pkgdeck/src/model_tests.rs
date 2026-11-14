@@ -660,6 +660,11 @@ fn versions_read_by_kind_and_state() {
         version(json!({"update": "available", "installed": "", "candidate": ""})),
         "Unknown"
     );
+    // The installed version is unknown: the new one is all there is to show.
+    assert_eq!(
+        version(json!({"update": "available", "installed": "", "candidate": "2"})),
+        "2"
+    );
     assert_eq!(
         version(json!({"update": "available", "installed": "1"})),
         "1"

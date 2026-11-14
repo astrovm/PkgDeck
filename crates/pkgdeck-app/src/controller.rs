@@ -3910,7 +3910,6 @@ fn confirmation_preview(
         // version that goes for a removal, the one that arrives for an install.
         match (operation, installed, candidate) {
             (Operation::Remove(_), Some(old), _) => summary.push(old.into()),
-            (Operation::Install(_), None, Some(new)) => summary.push(new.into()),
             // The source rebuilt the same version.
             (Operation::Upgrade(_), Some(old), _) if rebuild => {
                 summary.push(format!("{old} (new build)"))

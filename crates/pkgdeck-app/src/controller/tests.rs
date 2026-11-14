@@ -1502,6 +1502,22 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Installed: 1\n\nAvailable: 1"), "{body}");
     assert!(!preview["summary"].as_str().unwrap().contains("new build"));
+    // Reinstalling it names its one version, not "1 → 1" or a new build.
+    let install = Operation::Install(current.id.clone());
+    let preview = confirmation_preview(&install, std::slice::from_ref(&current), &[], None);
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\nAPT, System\n1"), "{summary}");
+    assert!(
+        !summary.contains('→') && !summary.contains("new build"),
+        "{summary}"
+    );
+    // A new install names the version it brings.
+    let mut fresh = package.clone();
+    fresh.installed_version = None;
+    let install = Operation::Install(fresh.id.clone());
+    let preview = confirmation_preview(&install, std::slice::from_ref(&fresh), &[], None);
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\nAPT, System\n2"), "{summary}");
     // An empty version is unknown: no "(new build)" without a version.
     let mut unknown = package.clone();
     unknown.installed_version = Some(String::new());

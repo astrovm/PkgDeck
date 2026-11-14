@@ -425,6 +425,32 @@ fn the_installed_filter_narrows_the_list() {
 }
 
 #[test]
+fn a_confirmation_row_shows_the_version_change_or_the_new_build() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.invalidate();
+    app.c().set_confirmation_data(
+        json!({"action": "Update 2 packages", "summary": "Update 2 packages", "items": [
+            {"group": "Flatpak", "icon_name": "flatpak", "title": "Pinball", "from": "2.1.0", "to": "2.1.0"},
+            {"group": "APT", "icon_name": "apt", "title": "htop", "from": "3.3", "to": "3.4"}
+        ]})
+        .to_string()
+        .into(),
+    );
+    app.c().set_confirmation("Update 2 packages?".into());
+    app.react();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    // The rebuild shows its version once, with "new build" beside it.
+    assert!(harness.query_by_label("new build").is_some());
+    assert_eq!(harness.query_all_by_label("2.1.0").count(), 1);
+    // A real update shows both versions with an arrow.
+    for label in ["3.4", "→", "3.3"] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+}
+
+#[test]
 fn a_confirmation_asks_and_cancel_turns_it_down() {
     let mut app = app();
     app.page = Page::Installed;
