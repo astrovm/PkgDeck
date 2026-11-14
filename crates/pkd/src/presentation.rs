@@ -1130,7 +1130,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 "up to date".into()
             } else if label == "Available" && rebuild {
                 "new build".into()
-            } else if label == "Update" && field == "available" {
+            } else if label == "Update" {
+                // "unknown" is left out and "current" is handled above, so
+                // this is an available update.
                 paint.cyan(&match known_version(p["candidate_version"].as_str()) {
                     Some(_) if rebuild => "available (new build)".into(),
                     Some(version) => format!("available ({})", clean(version)),
