@@ -1467,6 +1467,26 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
         .as_str()
         .unwrap()
         .contains("Restart required"));
+    // The source rebuilt the same version, as Flathub does.
+    let mut rebuilt = package.clone();
+    rebuilt.candidate_version = Some("1".into());
+    let mut rebuilt_plan = plan.clone();
+    rebuilt_plan.changes = vec![PlannedChange {
+        action: PlannedAction::Upgrade,
+        name: "anonymous".into(),
+        installed_version: Some("1".into()),
+        candidate_version: Some("1".into()),
+    }];
+    let preview = confirmation_preview(
+        &operation,
+        std::slice::from_ref(&rebuilt),
+        &[],
+        Some(&rebuilt_plan),
+    );
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\n1 (new build)"), "{summary}");
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Update anonymous (1, new build)"), "{body}");
     let mut environment_package = package.clone();
     environment_package.id.scope = Scope::Environment {
         path: std::path::PathBuf::from("/synthetic/env"),
@@ -3514,7 +3534,9 @@ fn removal_confirmation_lists_the_selected_and_other_native_changes() {
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Selected: Remove editor (1)"), "{body}");
     assert!(
-        body.contains("Other changes:\nInstall libnew (3)\nUpdate libsame (4)\nRemove libgone"),
+        body.contains(
+            "Other changes:\nInstall libnew (3)\nUpdate libsame (4, new build)\nRemove libgone"
+        ),
         "{body}"
     );
     // A source-wide change has no selected package among the plan.

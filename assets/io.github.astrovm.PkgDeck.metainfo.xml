@@ -28,6 +28,7 @@
           <li>One update the helper can't run no longer stops the rest of the run</li>
           <li>Updates that run as you still run when the system helper can't start</li>
           <li>Activity no longer keeps what a package manager printed when a change failed, and older entries drop it too</li>
+          <li>An update that rebuilds the same version, like a new Flathub build, says "new build" instead of "2.1.0 from 2.1.0"</li>
           <li>Repositories says in a sentence why it couldn't list Flatpak or Firmware repositories, and names the installation</li>
         </ul>
       </description>

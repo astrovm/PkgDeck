@@ -1203,6 +1203,17 @@ pub fn new_version(row: &Row) -> String {
         .unwrap_or_else(|| "Unknown".into())
 }
 
+/// The line under an update's new version: the version it replaces, or
+/// "new build" when the source rebuilt the same version, as Flatpak does.
+pub fn replaces_text(row: &Row) -> Option<String> {
+    let old = row.installed.as_deref().filter(|old| !old.is_empty())?;
+    Some(if row.candidate.as_deref() == Some(old) {
+        "new build".into()
+    } else {
+        format!("from {old}")
+    })
+}
+
 /// Why an update is left out for now, in the person's own time zone.
 pub fn waiting_text(until: u64) -> String {
     let when = i64::try_from(until)

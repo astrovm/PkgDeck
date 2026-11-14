@@ -510,17 +510,18 @@ fn app_page(
                     let new = row
                         .candidate
                         .clone()
-                        .filter(|new| row.has_update() && !new.is_empty() && *new != version);
+                        .filter(|new| row.has_update() && !new.is_empty());
                     if let Some(new) = new {
+                        // Like the list: the new version, then what it replaces.
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(new)
                                     .font(theme::mono(12.5))
                                     .color(palette.accent),
                             );
-                            if !version.is_empty() {
+                            if let Some(replaces) = model::replaces_text(row) {
                                 ui.label(
-                                    egui::RichText::new(format!("from {version}"))
+                                    egui::RichText::new(replaces)
                                         .font(theme::font(12.0))
                                         .color(palette.muted),
                                 );

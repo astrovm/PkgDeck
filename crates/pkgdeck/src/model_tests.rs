@@ -561,6 +561,24 @@ fn an_update_with_no_version_reads_unknown() {
 }
 
 #[test]
+fn an_update_says_what_it_replaces_or_that_it_is_a_new_build() {
+    let replaces = |value: Value| replaces_text(&row(value));
+    assert_eq!(
+        replaces(json!({"installed": "1", "candidate": "2", "update": "available"})),
+        Some("from 1".into())
+    );
+    // Flathub rebuilt 2.1.0: same label, new commit.
+    assert_eq!(
+        replaces(json!({"installed": "2.1.0", "candidate": "2.1.0", "update": "available"})),
+        Some("new build".into())
+    );
+    for installed in [json!(""), json!(null)] {
+        let update = json!({"installed": installed, "candidate": "2", "update": "available"});
+        assert_eq!(replaces(update), None);
+    }
+}
+
+#[test]
 fn versions_read_by_kind_and_state() {
     let version = |value: Value| version_text(&row(value));
     // A newer version the source doesn't offer as an update isn't one.

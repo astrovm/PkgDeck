@@ -147,6 +147,19 @@ fn capability_verb(capability: &str) -> String {
 pub fn error_message(error: &EngineError) -> String {
     serde_json::to_value(error).map_or_else(|_| clean(&error.to_string()), |v| error_text(&v))
 }
+/// "1.0 → 2.0", or "2.1.0 (new build)" when the source rebuilt the same
+/// version, as Flatpak does.
+fn update_versions(package: &Value) -> String {
+    let (old, new) = (
+        value(&package["installed_version"]),
+        value(&package["candidate_version"]),
+    );
+    if old == new {
+        format!("{old} (new build)")
+    } else {
+        format!("{old} → {new}")
+    }
+}
 /// The same wording for an error already serialized in a report, without
 /// the " (os error 13)" code Rust adds to a system error.
 pub fn error_text(error: &Value) -> String {
@@ -393,11 +406,7 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
             let version = if package["candidate_version"].is_null() {
                 value(&package["installed_version"])
             } else {
-                format!(
-                    "{} → {}",
-                    value(&package["installed_version"]),
-                    value(&package["candidate_version"])
-                )
+                update_versions(package)
             };
             text.push_str(&format!(
                 "\n  {} {name}  {}  {}",
@@ -877,11 +886,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     _ => value(&p["id"]["backend"]),
                 };
                 let version = if update && installed && !p["candidate_version"].is_null() {
-                    format!(
-                        "{} → {}",
-                        value(&p["installed_version"]),
-                        value(&p["candidate_version"])
-                    )
+                    update_versions(p)
                 } else {
                     value(if installed {
                         &p["installed_version"]
@@ -1839,6 +1844,13 @@ mod tests {
         let output = human(&packages, 120, true);
         assert!(output.contains("flatpak (user)") && output.contains("flatpak (system)"));
         assert!(output.contains("1 → 2"));
+        let rebuilt = json!({"packages": [
+            {"id": {"name": "org.example.App", "backend": "flatpak", "scope": "system"},
+             "installed_version": "2.1.0", "candidate_version": "2.1.0", "update": "available"}
+        ]});
+        let output = human(&rebuilt, 120, true);
+        assert!(output.contains("2.1.0 (new build)"), "{output}");
+        assert!(!output.contains("2.1.0 → 2.1.0"), "{output}");
         let sources = json!({"sources": [
             {"backend": "apt", "availability": {"Ok": "available"}, "capabilities": ["search"]},
             {"backend": "dnf", "availability": {"Ok": {"unavailable": "not installed"}}, "capabilities": []}
@@ -2138,6 +2150,13 @@ mod tests {
                     {"id": id, "display_name": "Tool", "installed_version": "1.0", "candidate_version": null}
                 ], "failures": []}),
                 "2 updates available:\n  ↑ tool  APT  1.0 → 2.0\n  ↑ Tool (tool)  APT  1.0\nRun `pkd upgrade` to install them.",
+            ),
+            // The source rebuilt the same version, as Flathub does.
+            (
+                json!({"operations": [], "updates": [
+                    {"id": id, "installed_version": "2.1.0", "candidate_version": "2.1.0"}
+                ], "failures": []}),
+                "1 update available:\n  ↑ tool  APT  2.1.0 (new build)\n",
             ),
             (
                 json!({"operations": [], "updates": [{"id": id, "installed_version": "1.0"}], "failures": []}),

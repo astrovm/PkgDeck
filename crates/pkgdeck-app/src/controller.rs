@@ -3908,6 +3908,10 @@ fn confirmation_preview(
             (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
             (Operation::Install(_), None, Some(new)) => summary.push(new.clone()),
             (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
+            // The source rebuilt the same version.
+            (Operation::Upgrade(_), Some(old), Some(_)) => {
+                summary.push(format!("{old} (new build)"))
+            }
             (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
             _ => {}
         }
@@ -3994,6 +3998,10 @@ fn confirmation_preview(
                 PlannedAction::Upgrade => "Update",
             };
             let version = match (&change.installed_version, &change.candidate_version) {
+                // The source rebuilt the same version.
+                (Some(old), Some(new)) if old == new && change.action == PlannedAction::Upgrade => {
+                    format!(" ({old}, new build)")
+                }
                 (Some(old), Some(new)) if old == new || change.action == PlannedAction::Remove => {
                     format!(" ({old})")
                 }
