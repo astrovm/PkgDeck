@@ -99,10 +99,18 @@ if [[ "$kind" == development ]]; then
     # Podman would otherwise create this mount point as the container's root,
     # a mapped user that then keeps native builds out of the checkout.
     mkdir -p target
+    # A worktree's .git is a file that points into the main checkout's git
+    # folder. Mount that folder read-only at the same path, so git works in
+    # the container as it does in a plain clone (scripts/mutants.sh diff).
+    git_mount=()
+    if [[ -f .git ]] && common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+        git_mount=(-v "$common:$common:ro")
+    fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
     # The `[@]+` form keeps an empty array from being an unbound variable: the
     # default macOS bash is 3.2, where set -u rejects "${interactive[@]}".
-    run_container ${interactive[@]+"${interactive[@]}"} --userns=keep-id -e LANG=C.UTF-8 \
+    run_container ${interactive[@]+"${interactive[@]}"} ${git_mount[@]+"${git_mount[@]}"} \
+        --userns=keep-id -e LANG=C.UTF-8 \
         -v "$PWD:/workspace:rw" -v "$cache/cargo:/cache/cargo:rw" \
         -v "$cache/target:/workspace/target:rw" \
         "$image" bash -ec 'mkdir -p "$HOME"; source scripts/dev-env.sh; exec "$@"' -- "${command[@]}"
