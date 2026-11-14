@@ -99,10 +99,26 @@ if [[ "$kind" == development ]]; then
     # Podman would otherwise create this mount point as the container's root,
     # a mapped user that then keeps native builds out of the checkout.
     mkdir -p target
+    # A worktree's .git is a file that points into the main checkout's git
+    # folder, maybe by a relative path. Mount that folder read-only at the
+    # same path, and a .git file with its absolute path over the worktree's,
+    # so git works in the container as in a plain clone (scripts/mutants.sh).
+    git_mount=()
+    if [[ -f .git ]]; then
+        common=$(git rev-parse --path-format=absolute --git-common-dir)
+        # One file per worktree: several can share a PKGDECK_CONTAINER_CACHE.
+        git_file="$cache/git-file-$workspace_key"
+        # Its own line, so set -e stops the script if git fails.
+        git_dir=$(git rev-parse --absolute-git-dir)
+        printf 'gitdir: %s\n' "$git_dir" >"$git_file.$$"
+        mv "$git_file.$$" "$git_file"
+        git_mount=(-v "$common:$common:ro" -v "$git_file:/workspace/.git:ro")
+    fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
     # The `[@]+` form keeps an empty array from being an unbound variable: the
     # default macOS bash is 3.2, where set -u rejects "${interactive[@]}".
-    run_container ${interactive[@]+"${interactive[@]}"} --userns=keep-id -e LANG=C.UTF-8 \
+    run_container ${interactive[@]+"${interactive[@]}"} ${git_mount[@]+"${git_mount[@]}"} \
+        --userns=keep-id -e LANG=C.UTF-8 \
         -v "$PWD:/workspace:rw" -v "$cache/cargo:/cache/cargo:rw" \
         -v "$cache/target:/workspace/target:rw" \
         "$image" bash -ec 'mkdir -p "$HOME"; source scripts/dev-env.sh; exec "$@"' -- "${command[@]}"

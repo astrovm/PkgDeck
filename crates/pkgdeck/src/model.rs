@@ -4,7 +4,7 @@
 //! directly.
 
 use pkgdeck_core::backends;
-use pkgdeck_core::package::FLATPAK_NEW_REMOTE;
+use pkgdeck_core::package::{is_rebuild, known_version, FLATPAK_NEW_REMOTE};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -1203,6 +1203,38 @@ pub fn new_version(row: &Row) -> String {
         .unwrap_or_else(|| "Unknown".into())
 }
 
+/// The version an update brings, when the row has one and the source named
+/// its version.
+pub fn update_version(row: &Row) -> Option<&str> {
+    known_version(row.candidate.as_deref()).filter(|_| row.has_update())
+}
+
+/// A package page's update status: "Update 2.0 available", or "New build
+/// of 2.1.0 available" when the source rebuilt the same version.
+pub fn update_text(row: &Row) -> String {
+    let (old, new) = (row.installed.as_deref(), row.candidate.as_deref());
+    match known_version(new) {
+        Some(version) if is_rebuild(old, new) => format!("New build of {version} available"),
+        Some(version) => format!("Update {version} available"),
+        None => "Update available".into(),
+    }
+}
+
+/// The line under an update's new version: the version it replaces, or
+/// "new build" when the source rebuilt the same version, as Flatpak does.
+pub fn replaces_text(row: &Row) -> Option<String> {
+    if !row.has_update() {
+        return None;
+    }
+    let (old, new) = (row.installed.as_deref(), row.candidate.as_deref());
+    let old = known_version(old)?;
+    Some(if is_rebuild(Some(old), new) {
+        "new build".into()
+    } else {
+        format!("from {old}")
+    })
+}
+
 /// Why an update is left out for now, in the person's own time zone.
 pub fn waiting_text(until: u64) -> String {
     let when = i64::try_from(until)
@@ -1227,7 +1259,8 @@ pub fn version_text(row: &Row) -> String {
         },
         "failure" => "Failed".into(),
         _ if row.has_update() => match (known(&row.installed), known(&row.candidate)) {
-            (Some(old), Some(new)) if old != new => format!("{new} from {old}"),
+            (Some(old), Some(new)) if old == new => format!("{new} (new build)"),
+            (Some(old), Some(new)) => format!("{new} from {old}"),
             (_, Some(new)) => new,
             (Some(old), None) => old,
             _ => "Unknown".into(),

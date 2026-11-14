@@ -507,20 +507,17 @@ fn app_page(
                         .filter(|v| !v.is_empty())
                         .or(row.candidate.clone())
                         .unwrap_or_default();
-                    let new = row
-                        .candidate
-                        .clone()
-                        .filter(|new| row.has_update() && !new.is_empty() && *new != version);
-                    if let Some(new) = new {
+                    if let Some(new) = model::update_version(row) {
+                        // Like the list: the new version, then what it replaces.
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(new)
                                     .font(theme::mono(12.5))
                                     .color(palette.accent),
                             );
-                            if !version.is_empty() {
+                            if let Some(replaces) = model::replaces_text(row) {
                                 ui.label(
-                                    egui::RichText::new(format!("from {version}"))
+                                    egui::RichText::new(replaces)
                                         .font(theme::font(12.0))
                                         .color(palette.muted),
                                 );
@@ -1060,10 +1057,7 @@ fn percent(segment: &str) -> String {
 
 fn update_state(app: &App, row: &Row) -> String {
     if row.has_update() {
-        let state = match row.candidate.as_deref().filter(|c| !c.is_empty()) {
-            Some(version) => format!("Update {version} available"),
-            None => "Update available".into(),
-        };
+        let state = model::update_text(row);
         return match row.waiting_until() {
             Some(until) => format!("{state}. {}", model::waiting_text(until)),
             None => state,

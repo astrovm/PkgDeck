@@ -1461,12 +1461,85 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
         confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Selected: Update anonymous (1 → 2)"));
+    assert!(body.contains("Installed: 1\n\nAvailable: 2"), "{body}");
     assert!(body.contains("Remove anonymous (1)"));
     assert!(body.contains("Download: 2.0 KB, Disk: -512 bytes"));
     assert!(preview["summary"]
         .as_str()
         .unwrap()
         .contains("Restart required"));
+    // The source rebuilt the same version, as Flathub does.
+    let mut rebuilt = package.clone();
+    rebuilt.candidate_version = Some("1".into());
+    let mut rebuilt_plan = plan.clone();
+    rebuilt_plan.changes = vec![PlannedChange {
+        action: PlannedAction::Upgrade,
+        name: "anonymous".into(),
+        installed_version: Some("1".into()),
+        candidate_version: Some("1".into()),
+    }];
+    let preview = confirmation_preview(
+        &operation,
+        std::slice::from_ref(&rebuilt),
+        &[],
+        Some(&rebuilt_plan),
+    );
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\n1 (new build)"), "{summary}");
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Update anonymous (1, new build)"), "{body}");
+    assert!(
+        body.contains("Installed: 1\n\nAvailable: new build"),
+        "{body}"
+    );
+    // APT reports an up-to-date package's version twice: removing it is
+    // not about a new build.
+    let mut current = package.clone();
+    current.candidate_version = Some("1".into());
+    current.update = UpdateAvailability::Current;
+    let remove = Operation::Remove(current.id.clone());
+    let preview = confirmation_preview(&remove, std::slice::from_ref(&current), &[], None);
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Installed: 1\n\nAvailable: 1"), "{body}");
+    assert!(!preview["summary"].as_str().unwrap().contains("new build"));
+    // Reinstalling it names its one version, not "1 → 1" or a new build.
+    let install = Operation::Install(current.id.clone());
+    let preview = confirmation_preview(&install, std::slice::from_ref(&current), &[], None);
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\nAPT, System\n1"), "{summary}");
+    assert!(
+        !summary.contains('→') && !summary.contains("new build"),
+        "{summary}"
+    );
+    // A new install names the version it brings.
+    let mut fresh = package.clone();
+    fresh.installed_version = None;
+    let install = Operation::Install(fresh.id.clone());
+    let preview = confirmation_preview(&install, std::slice::from_ref(&fresh), &[], None);
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(summary.contains("\nAPT, System\n2"), "{summary}");
+    // An empty version is unknown: no "(new build)" without a version.
+    let mut unknown = package.clone();
+    unknown.installed_version = Some(String::new());
+    unknown.candidate_version = Some(String::new());
+    let mut unknown_plan = rebuilt_plan.clone();
+    unknown_plan.changes[0].installed_version = Some(String::new());
+    unknown_plan.changes[0].candidate_version = Some(String::new());
+    let preview = confirmation_preview(
+        &operation,
+        std::slice::from_ref(&unknown),
+        &[],
+        Some(&unknown_plan),
+    );
+    let summary = preview["summary"].as_str().unwrap();
+    assert!(!summary.contains("new build"), "{summary}");
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Selected: Update anonymous"), "{body}");
+    assert!(!body.contains("Selected: Update anonymous ("), "{body}");
+    assert!(
+        !body.contains("Installed:") && !body.contains("Available:"),
+        "{body}"
+    );
     let mut environment_package = package.clone();
     environment_package.id.scope = Scope::Environment {
         path: std::path::PathBuf::from("/synthetic/env"),
@@ -3514,7 +3587,9 @@ fn removal_confirmation_lists_the_selected_and_other_native_changes() {
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Selected: Remove editor (1)"), "{body}");
     assert!(
-        body.contains("Other changes:\nInstall libnew (3)\nUpdate libsame (4)\nRemove libgone"),
+        body.contains(
+            "Other changes:\nInstall libnew (3)\nUpdate libsame (4, new build)\nRemove libgone"
+        ),
         "{body}"
     );
     // A source-wide change has no selected package among the plan.
@@ -8692,6 +8767,12 @@ fn checked_proposals_plan_selected_upgrades() {
     assert_eq!(plan.items[0]["group"], "fixture");
     assert_eq!(plan.items[0]["from"], "1");
     assert_eq!(plan.items[0]["to"], "2");
+    // An empty version is unknown, so the row shows no version for it.
+    let mut unknown = package("unknown");
+    unknown.installed_version = Some(String::new());
+    unknown.candidate_version = Some(String::new());
+    let items = update_items(&[Operation::Upgrade(unknown.id.clone())], &[unknown]);
+    assert!(items[0]["from"].is_null() && items[0]["to"].is_null());
     // Update all lists every package its sources would update.
     let all = update_items(
         &[Operation::UpgradeAll {

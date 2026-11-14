@@ -101,6 +101,28 @@ cp containers/development.Containerfile "$fresh/containers/"
 cp rust-toolchain.toml "$fresh/"
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" "$fresh/scripts/container.sh" development --exec true
 [[ -d $fresh/target ]]
+# A worktree's .git file can hold a relative path, which the container can't
+# follow. The run mounts the main git folder and an absolute .git file.
+repo="$work/repo"
+git init -q "$repo"
+repo=$(cd "$repo" && pwd -P)
+git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m init
+git -C "$repo" worktree add -q --relative-paths --detach "$work/tree"
+mkdir -p "$work/tree/scripts" "$work/tree/containers"
+cp scripts/container.sh scripts/setup-dev.sh scripts/dev-env.sh scripts/prune-container-caches.sh "$work/tree/scripts/"
+cp containers/development.Containerfile "$work/tree/containers/"
+cp rust-toolchain.toml "$work/tree/"
+[[ $(<"$work/tree/.git") == "gitdir: ../repo/.git/worktrees/tree" ]]
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" "$work/tree/scripts/container.sh" development --exec true
+grep -Fxq "$repo/.git:$repo/.git:ro" "$work/args"
+git_file=$(grep -x "$work/cache/git-file-.*:/workspace/.git:ro" "$work/args")
+[[ $(<"${git_file%%:*}") == "gitdir: $repo/.git/worktrees/tree" ]]
+# A plain clone mounts no git folder of its own.
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" "$fresh/scripts/container.sh" development --exec true
+if grep -q ':/workspace/.git:ro$' "$work/args"; then
+    echo 'A plain clone got a .git mount.' >&2
+    exit 1
+fi
 # Size limit uses apparent bytes, so sparse files exercise the real boundary.
 mkdir -p "$work/cache/target" "$work/cache/cargo"
 touch "$work/cache/cargo/keep"

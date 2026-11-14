@@ -1052,14 +1052,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 galley,
                 palette.accent,
             );
-            if let Some(old) = row.installed.as_deref().filter(|o| !o.is_empty()) {
-                let galley = one_line(
-                    ui,
-                    &format!("from {old}"),
-                    theme::font(12.0),
-                    palette.muted,
-                    v.width(),
-                );
+            if let Some(replaces) = model::replaces_text(&row) {
+                let galley = one_line(ui, &replaces, theme::font(12.0), palette.muted, v.width());
                 painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
             }
         } else {

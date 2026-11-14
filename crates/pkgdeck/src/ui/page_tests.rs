@@ -63,6 +63,22 @@ fn draw(
     draw_with_fallback(app, row, width, narrow, opened, false)
 }
 
+#[test]
+fn an_appimage_page_names_its_update_or_its_new_build() {
+    for (installed, candidate, state) in [
+        ("1.0", "2.0", "Update 2.0 available"),
+        ("2.1.0", "2.1.0", "New build of 2.1.0 available"),
+    ] {
+        let mut row = row("package");
+        row.source = "appimage".into();
+        row.installed = Some(installed.into());
+        row.candidate = Some(candidate.into());
+        row.update = "available".into();
+        let harness = draw(app(&row, Page::Updates), row, 900.0, false, false);
+        assert!(harness.query_by_label_contains(state).is_some(), "{state}");
+    }
+}
+
 fn fixture_details(row: &Row) -> Details {
     Details {
         package: Some(row.clone()),

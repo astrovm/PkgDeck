@@ -459,6 +459,19 @@ fn detail_row(ui: &mut Ui, item: &model::ConfirmItem, grouped: bool, palette: &P
                             .color(palette.muted),
                     );
                 }
+                // The source rebuilt the same version, as Flathub does.
+                (Some(_), Some(to)) => {
+                    ui.label(
+                        egui::RichText::new("new build")
+                            .font(theme::font(12.5))
+                            .color(palette.muted),
+                    );
+                    ui.label(
+                        egui::RichText::new(to)
+                            .font(theme::mono(12.5))
+                            .color(palette.accent),
+                    );
+                }
                 (_, Some(version)) | (Some(version), None) => {
                     ui.label(
                         egui::RichText::new(version)
