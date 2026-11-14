@@ -404,11 +404,7 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
         ));
         for package in updates {
             let (name, _) = package_name(package);
-            let version = if package["candidate_version"].is_null() {
-                value(&package["installed_version"])
-            } else {
-                update_versions(package)
-            };
+            let version = update_versions(package);
             text.push_str(&format!(
                 "\n  {} {name}  {}  {}",
                 paint.cyan("↑"),
@@ -886,14 +882,15 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     ),
                     _ => value(&p["id"]["backend"]),
                 };
-                let version = if update && installed && !p["candidate_version"].is_null() {
+                let version = if update && installed {
                     update_versions(p)
                 } else {
-                    value(if installed {
+                    let version = if installed {
                         &p["installed_version"]
                     } else {
                         &p["candidate_version"]
-                    })
+                    };
+                    known_version(version.as_str()).map_or_else(|| "Unknown".into(), clean)
                 };
                 let marker_style: Style = match (update, installed, named) {
                     (true, _, true) => cyan_named,
@@ -1088,10 +1085,13 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             .as_str()
             .map(|backend| Value::String(source_name(backend)))
             .unwrap_or(Value::Null);
-        let rebuild = is_rebuild(
-            p["installed_version"].as_str(),
-            p["candidate_version"].as_str(),
-        );
+        // An up-to-date package can report the same version twice, as APT
+        // does: only an update is a new build.
+        let rebuild = p["update"] == "available"
+            && is_rebuild(
+                p["installed_version"].as_str(),
+                p["candidate_version"].as_str(),
+            );
         for (label, field) in [
             ("Source", &source),
             ("Reference", &p["id"]["reference"]),
@@ -1863,6 +1863,13 @@ mod tests {
         let output = human(&rebuilt, 120, true);
         assert!(output.contains("2.1.0 (new build)"), "{output}");
         assert!(!output.contains("2.1.0 → 2.1.0"), "{output}");
+        // An empty version is unknown, never a blank column.
+        let blank = json!({"packages": [
+            {"id": {"name": "blank", "backend": "apt", "scope": "system"},
+             "installed_version": "", "candidate_version": "", "update": "current"}
+        ]});
+        let output = human(&blank, 120, false);
+        assert!(output.contains("Unknown"), "{output}");
         let sources = json!({"sources": [
             {"backend": "apt", "availability": {"Ok": "available"}, "capabilities": ["search"]},
             {"backend": "dnf", "availability": {"Ok": {"unavailable": "not installed"}}, "capabilities": []}
@@ -2183,6 +2190,10 @@ mod tests {
                 json!({"operations": [], "updates": [{"id": id, "installed_version": "1.0"}], "failures": []}),
                 "1 update available:",
             ),
+            (
+                json!({"operations": [], "updates": [{"id": id, "installed_version": ""}], "failures": []}),
+                "1 update available:\n  ↑ tool  APT  Unknown\n",
+            ),
         ] {
             let text = human(&data, 80, false);
             assert!(text.contains(expected), "{text}");
@@ -2239,6 +2250,16 @@ mod tests {
                 "Installed  2.1.0\n   Available  new build\n      Update  available (new build)"
             ),
             "{rebuilt}"
+        );
+        // APT reports an up-to-date package's version twice: no new build.
+        let current = human(
+            &json!({"package":{"id":id,"installed_version":"1.0","candidate_version":"1.0","update":"current"}}),
+            80,
+            false,
+        );
+        assert!(
+            current.contains("Installed  1.0\n   Available  1.0\n      Update  up to date"),
+            "{current}"
         );
         // An empty version is unknown: installed, with no version to show.
         let unknown = human(

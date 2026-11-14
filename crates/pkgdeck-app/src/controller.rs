@@ -3894,7 +3894,10 @@ fn confirmation_preview(
         }
         let installed = known_version(package.installed_version.as_deref());
         let candidate = known_version(package.candidate_version.as_deref());
-        let rebuild = is_rebuild(installed, candidate);
+        // An up-to-date package can report the same version twice, as APT
+        // does: only an update is a new build.
+        let rebuild =
+            package.update == UpdateAvailability::Available && is_rebuild(installed, candidate);
         if let Some(version) = installed {
             lines.push(format!("Installed: {version}"));
         }

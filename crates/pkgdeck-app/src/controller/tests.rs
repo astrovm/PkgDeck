@@ -1461,6 +1461,7 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
         confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
     let body = preview["body"].as_str().unwrap();
     assert!(body.contains("Selected: Update anonymous (1 → 2)"));
+    assert!(body.contains("Installed: 1\n\nAvailable: 2"), "{body}");
     assert!(body.contains("Remove anonymous (1)"));
     assert!(body.contains("Download: 2.0 KB, Disk: -512 bytes"));
     assert!(preview["summary"]
@@ -1491,6 +1492,16 @@ fn confirmation_preview_names_target_and_extra_native_changes() {
         body.contains("Installed: 1\n\nAvailable: new build"),
         "{body}"
     );
+    // APT reports an up-to-date package's version twice: removing it is
+    // not about a new build.
+    let mut current = package.clone();
+    current.candidate_version = Some("1".into());
+    current.update = UpdateAvailability::Current;
+    let remove = Operation::Remove(current.id.clone());
+    let preview = confirmation_preview(&remove, std::slice::from_ref(&current), &[], None);
+    let body = preview["body"].as_str().unwrap();
+    assert!(body.contains("Installed: 1\n\nAvailable: 1"), "{body}");
+    assert!(!preview["summary"].as_str().unwrap().contains("new build"));
     // An empty version is unknown: no "(new build)" without a version.
     let mut unknown = package.clone();
     unknown.installed_version = Some(String::new());
