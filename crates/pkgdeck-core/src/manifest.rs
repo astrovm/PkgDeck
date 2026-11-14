@@ -207,9 +207,8 @@ fn file_error(verb: &str, path: &Path, error: &std::io::Error) -> ManifestError 
             ))
         }
         _ => {
-            let text = error.to_string();
             // "No space left on device (os error 28)" → "no space left on device".
-            let text = text.split(" (os error").next().unwrap_or(&text);
+            let text = crate::process::without_os_code(&error.to_string());
             let mut chars = text.chars();
             chars
                 .next()

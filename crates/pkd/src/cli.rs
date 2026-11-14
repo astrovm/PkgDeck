@@ -1421,7 +1421,7 @@ fn release_wait_command(
     if time.is_some() || !skip.is_empty() || !no_skip.is_empty() {
         if let Err(error) = wait.save(path) {
             return (
-                json!({"error": "not_saved", "message": format!("Couldn't save the setting: {error}")}),
+                json!({"error": "not_saved", "message": format!("Couldn't save the setting: {}", pkgdeck_core::process::without_os_code(&error.to_string()))}),
                 1,
             );
         }
@@ -2197,6 +2197,9 @@ mod tests {
         let inside_a_file = path.join("release-wait.json");
         let (data, code) = release_wait_command(Some(&inside_a_file), Some("off"), &[], &[]);
         assert_eq!((code, &data["error"]), (1, &json!("not_saved")), "{data}");
+        let message = data["message"].as_str().unwrap();
+        assert!(message.starts_with("Couldn't save the setting: "), "{data}");
+        assert!(!message.contains("os error"), "{data}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
     fn decline(_: &[Operation]) -> bool {

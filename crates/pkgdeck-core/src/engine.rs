@@ -34,7 +34,9 @@ pub enum EngineError {
         backend: String,
         reason: String,
     },
-    /// PkgDeck stopped the change itself, before the source ran it.
+    /// PkgDeck stopped the change itself, before the source ran it, or
+    /// found it didn't finish and says why in its own words. The refusal
+    /// holds no text a tool printed: Activity keeps it as it is.
     Refused {
         backend: String,
         refusal: Refusal,
@@ -44,6 +46,55 @@ pub enum EngineError {
     Incomplete(Vec<BackendFailure>),
     Cancelled,
     Execution(ExecutionError),
+}
+impl EngineError {
+    /// Whether the change itself caused this error, so trying it again at
+    /// the same version would fail the same way: its command failed or
+    /// crashed, its source answered something PkgDeck can't use, or PkgDeck
+    /// explained why it can't make it. A cancel, a password prompt, the
+    /// system helper, a busy lock, a repository out of reach, PkgDeck running
+    /// as root, an I/O error,
+    /// a command stopped from outside or a change PkgDeck only held back
+    /// says nothing about the package.
+    pub fn blames_change(&self) -> bool {
+        match self {
+            Self::Refused { refusal, .. } => match refusal {
+                Refusal::Explained(_) => true,
+                Refusal::PartnerFailed { blamed } => *blamed,
+                Refusal::PlanChanged
+                | Refusal::CleanupChanged
+                | Refusal::NotUnattended
+                | Refusal::NeedsReview
+                | Refusal::Building => false,
+            },
+            Self::Execution(error) => match error {
+                ExecutionError::Failed(completion) => {
+                    completion.signal.is_none() || completion.crashed()
+                }
+                ExecutionError::Invalid(_) => true,
+                ExecutionError::Io(_)
+                | ExecutionError::Disabled(_)
+                | ExecutionError::Helper(_)
+                | ExecutionError::Cancelled
+                | ExecutionError::TimedOut
+                | ExecutionError::AuthorizationCancelled
+                | ExecutionError::AuthorizationDenied
+                | ExecutionError::LockBusy
+                | ExecutionError::Unreachable(_)
+                | ExecutionError::RunsAsRoot
+                | ExecutionError::Interrupted => false,
+            },
+            Self::Unsupported { .. }
+            | Self::InvalidResponse { .. }
+            | Self::NotFound
+            | Self::Ambiguous(_) => true,
+            Self::UnknownBackend(_)
+            | Self::DuplicateBackend(_)
+            | Self::Unavailable { .. }
+            | Self::Incomplete(_)
+            | Self::Cancelled => false,
+        }
+    }
 }
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,6 +130,7 @@ impl std::fmt::Display for EngineError {
 }
 /// Why PkgDeck stopped a change. Each one is a sentence people can read.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(from = "RefusalJson", into = "RefusalJson")]
 pub enum Refusal {
     /// The source would now do something other than what was reviewed.
     PlanChanged,
@@ -86,12 +138,55 @@ pub enum Refusal {
     CleanupChanged,
     /// Automatic updates never touch this source.
     NotUnattended,
+    /// Automatic updates touch this source, but not this change.
+    NeedsReview,
     /// A change that has to run together with this one failed its check.
-    PartnerFailed,
+    /// `blamed` when that failure blames the partner itself (see
+    /// [`EngineError::blames_change`]), so this one fails with it.
+    PartnerFailed { blamed: bool },
     /// A build that may use what the cleanup task removes is running.
     Building,
     /// PkgDeck's own explanation, already a full sentence.
     Explained(String),
+}
+/// [`Refusal`] in `pkd --json`, the shape schema version 1 gave it. A
+/// partner's blame only decides what PkgDeck remembers as failed, so it
+/// stays out: `"PartnerFailed"` reads back as not blamed.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum RefusalJson {
+    PlanChanged,
+    CleanupChanged,
+    NotUnattended,
+    NeedsReview,
+    PartnerFailed,
+    Building,
+    Explained(String),
+}
+impl From<Refusal> for RefusalJson {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::PlanChanged => Self::PlanChanged,
+            Refusal::CleanupChanged => Self::CleanupChanged,
+            Refusal::NotUnattended => Self::NotUnattended,
+            Refusal::NeedsReview => Self::NeedsReview,
+            Refusal::PartnerFailed { .. } => Self::PartnerFailed,
+            Refusal::Building => Self::Building,
+            Refusal::Explained(sentence) => Self::Explained(sentence),
+        }
+    }
+}
+impl From<RefusalJson> for Refusal {
+    fn from(refusal: RefusalJson) -> Self {
+        match refusal {
+            RefusalJson::PlanChanged => Self::PlanChanged,
+            RefusalJson::CleanupChanged => Self::CleanupChanged,
+            RefusalJson::NotUnattended => Self::NotUnattended,
+            RefusalJson::NeedsReview => Self::NeedsReview,
+            RefusalJson::PartnerFailed => Self::PartnerFailed { blamed: false },
+            RefusalJson::Building => Self::Building,
+            RefusalJson::Explained(sentence) => Self::Explained(sentence),
+        }
+    }
 }
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,7 +196,8 @@ impl std::fmt::Display for Refusal {
                 "This cleanup task changed or expired. Reload and review it again."
             }
             Self::NotUnattended => "This source is never updated automatically.",
-            Self::PartnerFailed => {
+            Self::NeedsReview => "Automatic updates don't make this change. Start it yourself.",
+            Self::PartnerFailed { .. } => {
                 "Another change that runs together with this one could not be checked. Review them again."
             }
             Self::Building => "Something that uses it is being built. Clean again when it finishes.",
@@ -1743,6 +1839,16 @@ impl Engine {
                         refusal: Refusal::NotUnattended,
                     });
                 }
+                // A change the runner's mode refuses fails on its own, so
+                // the rest of the batch still runs.
+                if crate::batch::check_mode(self.batch_mode, std::slice::from_ref(operation))
+                    .is_err()
+                {
+                    return Err(EngineError::Refused {
+                        backend: operation.backend().into(),
+                        refusal: Refusal::NeedsReview,
+                    });
+                }
                 self.preflight(operation, cancel)
             })
             .collect();
@@ -1757,12 +1863,15 @@ impl Engine {
         while index < operations.len() {
             let end = crate::batch::group_end(operations, index);
             if checked[index..end].iter().any(Result::is_err) {
+                let blamed = checked[index..end]
+                    .iter()
+                    .any(|checked| checked.as_ref().is_err_and(EngineError::blames_change));
                 for position in index..end {
                     let operation = &operations[position];
                     let result = Err(checked[position].clone().err().unwrap_or_else(|| {
                         EngineError::Refused {
                             backend: operation.backend().into(),
-                            refusal: Refusal::PartnerFailed,
+                            refusal: Refusal::PartnerFailed { blamed },
                         }
                     }));
                     events(Event::Started(operation.clone()));
@@ -1801,11 +1910,17 @@ impl Engine {
         if operations.is_empty() {
             return vec![];
         }
-        let protected = crate::batch::batch_commands(operations)
-            .expect("individual protected commands were validated above")
+        // Each change on its own: in a batch, a transaction's first change
+        // carries the commands of the rest.
+        let protected: Vec<bool> = operations
             .iter()
-            .any(|commands| !commands.is_empty());
-        if !protected {
+            .map(|operation| {
+                !crate::batch::protected_commands(operation)
+                    .expect("individual protected commands were validated above")
+                    .is_empty()
+            })
+            .collect();
+        if !protected.contains(&true) {
             let lanes = self.lanes(operations);
             return self.run_lanes(operations, lanes, cancel, events, false);
         }
@@ -1819,21 +1934,7 @@ impl Engine {
             match crate::batch::begin(&host, authorization, self.batch_mode, operations, cancel) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    return operations
-                        .iter()
-                        .enumerate()
-                        .map(|(index, operation)| {
-                            if index != 0 {
-                                events(Event::Started(operation.clone()));
-                            }
-                            let result = Err(EngineError::from(error.clone()));
-                            events(Event::Finished {
-                                operation: operation.clone(),
-                                result: result.clone(),
-                            });
-                            result
-                        })
-                        .collect();
+                    return self.without_runner(operations, &protected, error, cancel, events)
                 }
             };
         if guard.is_none() {
@@ -1849,6 +1950,59 @@ impl Engine {
         let results = self.run_lanes(operations, lanes, cancel, events, true);
         drop(guard);
         results
+    }
+
+    /// The helper didn't start, so the changes it would run fail with
+    /// `error`. The changes that run as the user still run, unless the
+    /// person stopped the batch. `Started` for the first change went out.
+    fn without_runner(
+        &mut self,
+        operations: &[Operation],
+        protected: &[bool],
+        error: crate::process::ExecutionError,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        use crate::process::ExecutionError;
+        let stopped = matches!(
+            error,
+            ExecutionError::Cancelled | ExecutionError::AuthorizationCancelled
+        );
+        let results: Vec<Option<Result<OperationOutcome, EngineError>>> = operations
+            .iter()
+            .zip(protected)
+            .enumerate()
+            .map(|(index, (operation, protected))| {
+                (stopped || *protected).then(|| {
+                    if index != 0 {
+                        events(Event::Started(operation.clone()));
+                    }
+                    let result = Err(EngineError::from(error.clone()));
+                    events(Event::Finished {
+                        operation: operation.clone(),
+                        result: result.clone(),
+                    });
+                    result
+                })
+            })
+            .collect();
+        let rest: Vec<Operation> = operations
+            .iter()
+            .zip(&results)
+            .filter(|(_, result)| result.is_none())
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        let first_started = results[0].is_none();
+        let lanes = self.lanes(&rest);
+        let mut ran = self
+            .run_lanes(&rest, lanes, cancel, events, first_started)
+            .into_iter();
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| ran.next().unwrap_or(Err(EngineError::Cancelled)))
+            })
+            .collect()
     }
 
     fn lanes(&self, operations: &[Operation]) -> Vec<Vec<std::ops::Range<usize>>> {
@@ -2022,26 +2176,48 @@ impl Engine {
                     .and_then(|()| self.preflight(member, cancel))
             })
             .collect::<Vec<_>>();
-        let joined = rechecked.into_iter().find_map(Result::err).map_or_else(
-            || {
-                self.ready(backend, operation.capability(), cancel)
-                    .and_then(|manager| {
-                        manager
-                            .execute_joined(&operations[index..end], cancel, &mut |progress| {
-                                events(Event::Progress {
-                                    operation: operation.clone(),
-                                    progress,
-                                });
-                            })
-                            .ok_or_else(|| EngineError::InvalidResponse {
-                                backend: backend.into(),
-                                reason: "grouped operation unavailable".into(),
-                            })
-                    })
-            },
-            Err,
-        );
-        let results = joined.unwrap_or_else(|error| vec![Err(error); end - index]);
+        let members = &operations[index..end];
+        let results = if rechecked.iter().all(Result::is_ok) {
+            self.join(operation, members, cancel, events)
+        } else if crate::batch::group_end(operations, index) >= end {
+            // One transaction: it runs whole or not at all. A member that
+            // passed its check fails with its partner, and with its blame.
+            let blamed = rechecked
+                .iter()
+                .any(|checked| checked.as_ref().is_err_and(EngineError::blames_change));
+            rechecked
+                .into_iter()
+                .zip(members)
+                .map(|(checked, member)| {
+                    Err(checked.err().unwrap_or_else(|| EngineError::Refused {
+                        backend: member.backend().into(),
+                        refusal: Refusal::PartnerFailed { blamed },
+                    }))
+                })
+                .collect()
+        } else {
+            // Joined only to share a password (cask updates): each one
+            // that passed its check runs, whatever happened to the others.
+            let ready: Vec<Operation> = members
+                .iter()
+                .zip(&rechecked)
+                .filter(|(_, checked)| checked.is_ok())
+                .map(|(member, _)| member.clone())
+                .collect();
+            let mut ran = if ready.is_empty() {
+                vec![]
+            } else {
+                self.join(&ready[0], &ready, cancel, events)
+            }
+            .into_iter();
+            rechecked
+                .into_iter()
+                .map(|checked| match checked {
+                    Ok(()) => ran.next().unwrap_or(Err(EngineError::Cancelled)),
+                    Err(error) => Err(error),
+                })
+                .collect()
+        };
         crate::cache::invalidate(backend);
         operations[index..end]
             .iter()
@@ -2054,6 +2230,32 @@ impl Engine {
                 result
             })
             .collect()
+    }
+
+    /// Runs `members` together, with progress shown on `operation`.
+    fn join(
+        &mut self,
+        operation: &Operation,
+        members: &[Operation],
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+    ) -> Vec<Result<OperationOutcome, EngineError>> {
+        let backend = operation.backend();
+        self.ready(backend, operation.capability(), cancel)
+            .and_then(|manager| {
+                manager
+                    .execute_joined(members, cancel, &mut |progress| {
+                        events(Event::Progress {
+                            operation: operation.clone(),
+                            progress,
+                        });
+                    })
+                    .ok_or_else(|| EngineError::InvalidResponse {
+                        backend: backend.into(),
+                        reason: "grouped operation unavailable".into(),
+                    })
+            })
+            .unwrap_or_else(|error| vec![Err(error); members.len()])
     }
 }
 
@@ -2127,7 +2329,7 @@ mod refusal_tests {
                 "This source is never updated automatically.",
             ),
             (
-                Refusal::PartnerFailed,
+                Refusal::PartnerFailed { blamed: true },
                 "Another change that runs together with this one could not be checked. Review them again.",
             ),
             (
@@ -2140,6 +2342,38 @@ mod refusal_tests {
                 refusal,
             };
             assert_eq!(error.to_string(), sentence);
+        }
+    }
+
+    #[test]
+    fn json_keeps_the_refusal_shape_of_schema_version_1() {
+        for (refusal, json, read_back) in [
+            (Refusal::PlanChanged, r#""PlanChanged""#, None),
+            (Refusal::CleanupChanged, r#""CleanupChanged""#, None),
+            (Refusal::NotUnattended, r#""NotUnattended""#, None),
+            (Refusal::NeedsReview, r#""NeedsReview""#, None),
+            (
+                Refusal::PartnerFailed { blamed: false },
+                r#""PartnerFailed""#,
+                None,
+            ),
+            (
+                Refusal::PartnerFailed { blamed: true },
+                r#""PartnerFailed""#,
+                Some(Refusal::PartnerFailed { blamed: false }),
+            ),
+            (Refusal::Building, r#""Building""#, None),
+            (
+                Refusal::Explained("Nothing was changed.".into()),
+                r#"{"Explained":"Nothing was changed."}"#,
+                None,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&refusal).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<Refusal>(json).unwrap(),
+                read_back.unwrap_or(refusal)
+            );
         }
     }
 }
@@ -2482,12 +2716,130 @@ mod apt_upgrade_tests {
         assert!(
             matches!(
                 results.as_slice(),
-                [Err(EngineError::Execution(ExecutionError::Invalid(reason)))]
-                    if reason.contains("only refresh sources and update every package")
+                [Err(EngineError::Refused {
+                    refusal: Refusal::NeedsReview,
+                    ..
+                })]
             ),
             "{results:?}"
         );
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// What a test engine's sources logged, and what the user source ran.
+    type Logs = (
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::Mutex<Vec<Operation>>>,
+    );
+    /// [`lists_engine`] plus a source that runs as the user.
+    fn lists_and_user_engine(mode: crate::batch::BatchMode) -> (Engine, Logs) {
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let user = crate::fake::Fake::new("user", &[Capability::Upgrade]);
+        let ran = Arc::clone(&user.ran);
+        engine.register(user).unwrap();
+        engine.set_batch_mode(mode);
+        (engine, (log, ran))
+    }
+    fn user_update() -> Operation {
+        Operation::Upgrade(PackageId {
+            backend: "user".into(),
+            scope: Scope::User { uid: 1000 },
+            ..apt_id("tool")
+        })
+    }
+
+    #[test]
+    fn a_change_the_upgrade_only_runner_refuses_fails_alone() {
+        let (mut engine, (log, ran)) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let operations = [Operation::Install(apt_id("one")), user_update()];
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
+        assert_eq!(
+            results[0],
+            Err(EngineError::Refused {
+                backend: "apt".into(),
+                refusal: Refusal::NeedsReview,
+            })
+        );
+        assert!(results[1].is_ok(), "{results:?}");
+        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
+    }
+
+    #[test]
+    fn user_changes_run_when_the_helper_does_not_start() {
+        // No PATH, so no helper: an upgrade-only batch can't start one.
+        let (mut engine, (log, ran)) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        engine.remember_apt_upgrade_plan(empty_plan());
+        let operations = [
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            user_update(),
+        ];
+        let mut events = vec![];
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
+            events.push(event)
+        });
+        assert_eq!(
+            results[0],
+            Err(EngineError::Execution(ExecutionError::Disabled(
+                "unattended updates need PkgDeck's system helper".into()
+            )))
+        );
+        assert!(results[1].is_ok(), "{results:?}");
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run")));
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
+        // Each change starts once and finishes once.
+        for operation in &operations {
+            let count = |started: bool| {
+                events
+                    .iter()
+                    .filter(|event| match event {
+                        Event::Started(at) => started && at == operation,
+                        Event::Finished { operation: at, .. } => !started && at == operation,
+                        _ => false,
+                    })
+                    .count()
+            };
+            assert_eq!((count(true), count(false)), (1, 1), "{operation:?}");
+        }
+        // Every change of a transaction needs the helper, not only the
+        // first, which carries the commands of the rest.
+        let (mut engine, (log, ran)) =
+            lists_and_user_engine(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        let grouped = [
+            Operation::Upgrade(apt_id("one")),
+            Operation::Upgrade(apt_id("two")),
+            user_update(),
+        ];
+        // The helper refuses them, so it doesn't start.
+        let results = engine.execute_checked(&grouped, &Cancellation::default(), &mut |_| {});
+        assert!(results[0].is_err() && results[1].is_err(), "{results:?}");
+        assert!(results[2].is_ok(), "{results:?}");
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run")));
+        assert_eq!(*ran.lock().unwrap(), [user_update()]);
+        // A batch the person stopped runs nothing more.
+        let (mut engine, (_, ran)) = lists_and_user_engine(crate::batch::BatchMode::Reviewed);
+        let protected = [Operation::Upgrade(apt_id("one"))];
+        let stopped = engine.without_runner(
+            &[protected[0].clone(), user_update()],
+            &[true, false],
+            ExecutionError::AuthorizationCancelled,
+            &Cancellation::default(),
+            &mut |_| {},
+        );
+        assert!(stopped.iter().all(Result::is_err), "{stopped:?}");
+        assert!(ran.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2631,9 +2983,13 @@ mod apt_upgrade_tests {
     }
 
     /// Formulae and casks that record how they ran, and fail `broken`.
+    /// The update with a reviewed plan passes its first check only;
+    /// `unprepared` fails before any.
     struct BrewFixture {
         id: &'static str,
         broken: &'static str,
+        unprepared: bool,
+        reads: usize,
         log: Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl BrewFixture {
@@ -2651,6 +3007,17 @@ mod apt_upgrade_tests {
                 Operation::Upgrade(id) if id.name == self.broken => Err(EngineError::Cancelled),
                 _ => Ok(OperationOutcome::default()),
             }
+        }
+    }
+    fn brew_plan(operation: &Operation, preview: &str) -> TransactionPlan {
+        TransactionPlan {
+            operation: operation.clone(),
+            native_preview: preview.into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: None,
         }
     }
     impl Backend for BrewFixture {
@@ -2681,6 +3048,33 @@ mod apt_upgrade_tests {
             self.log_updates(operations);
             Some(operations.iter().map(|op| self.result(op)).collect())
         }
+        fn prepare(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<(), EngineError> {
+            if self.unprepared {
+                return Err(EngineError::Execution(ExecutionError::Invalid(
+                    "brew couldn't update its data".into(),
+                )));
+            }
+            Ok(())
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            // Asked only for the update with a reviewed plan.
+            self.reads += 1;
+            let preview = if self.reads > 1 {
+                "changed"
+            } else {
+                "reviewed"
+            };
+            Ok(Some(brew_plan(operation, preview)))
+        }
     }
     fn brew_update(backend: &str, name: &str) -> Operation {
         Operation::Upgrade(PackageId {
@@ -2703,6 +3097,8 @@ mod apt_upgrade_tests {
                     .register(BrewFixture {
                         id,
                         broken: "second",
+                        unprepared: false,
+                        reads: 0,
                         log: log.clone(),
                     })
                     .unwrap();
@@ -2753,6 +3149,65 @@ mod apt_upgrade_tests {
         assert_eq!(
             results.iter().map(Result::is_ok).collect::<Vec<_>>(),
             [true, true, false, true]
+        );
+    }
+
+    #[test]
+    fn cask_updates_that_pass_their_last_check_run_without_the_others() {
+        let casks = [
+            brew_update("homebrew-cask", "first"),
+            brew_update("homebrew-cask", "second"),
+            brew_update("homebrew-cask", "third"),
+        ];
+        let run = |unprepared: bool| {
+            let log = Arc::new(std::sync::Mutex::new(vec![]));
+            let mut engine = Engine::default();
+            engine
+                .register(BrewFixture {
+                    id: "homebrew-cask",
+                    broken: "",
+                    unprepared,
+                    reads: 0,
+                    log: log.clone(),
+                })
+                .unwrap();
+            engine.enable_batch_authorization(
+                Host::new(Runtime::Native, Default::default()),
+                Authorization::Polkit,
+            );
+            engine.set_joins_cask_updates(true);
+            engine.remember_operation_plan(brew_plan(&casks[1], "reviewed"));
+            let results = engine.execute_batch(&casks, &Cancellation::default(), &mut |_| {});
+            let ran = log.lock().unwrap().clone();
+            (ran, results)
+        };
+        // Casks join only to share a password, so one whose plan changed
+        // since its first check fails alone, and the rest still update.
+        let (ran, results) = run(false);
+        assert_eq!(ran, ["first third"]);
+        assert_eq!(
+            results,
+            [
+                Ok(OperationOutcome::default()),
+                Err(EngineError::Refused {
+                    backend: "homebrew-cask".into(),
+                    refusal: Refusal::PlanChanged,
+                }),
+                Ok(OperationOutcome::default()),
+            ]
+        );
+        // Homebrew couldn't get ready, before any last check: no cask
+        // updates, and each fails with that.
+        let (ran, results) = run(true);
+        assert!(ran.is_empty());
+        assert_eq!(
+            results,
+            vec![
+                Err(EngineError::Execution(ExecutionError::Invalid(
+                    "brew couldn't update its data".into()
+                )));
+                3
+            ]
         );
     }
 

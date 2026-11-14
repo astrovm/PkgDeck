@@ -1561,7 +1561,9 @@ fn wait_for_new_releases_is_saved_where_pkd_reads_it() {
     std::fs::write(&dir, "a file, not a folder").unwrap();
     app.set_release_wait(ReleaseWait::default());
     app.tick(Instant::now());
-    assert!(app.release_wait_error.is_some());
+    let error = app.release_wait_error.clone().unwrap();
+    assert!(error.starts_with("Couldn't save this: "), "{error}");
+    assert!(!error.contains("os error"), "{error}");
     std::fs::remove_file(&dir).unwrap();
 }
 

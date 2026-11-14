@@ -1805,6 +1805,48 @@ fn system_manager_queries_validate_names_and_exit_codes() {
 }
 
 #[test]
+fn held_snaps_list_no_update() {
+    // Measured with snapd 2.78: `snap refresh --hold=1h hello-world` marks
+    // it held, `snap refresh --list` still lists it, and `snap refresh`
+    // says "All snaps up to date".
+    let script = Script::new(|line| match line {
+        "snap list" => ok(
+            "Name         Version  Rev  Tracking       Publisher    Notes\n\
+             hello-world  6.3      27   -              canonical**  held\n\
+             firefox      150.0    9113 latest/stable  mozilla**    -\n\
+             core22       20261001 2955 latest/stable  canonical**  base,held\n",
+        ),
+        "snap refresh --list" => ok("Name         Version  Rev   Size    Publisher    Notes\n\
+             hello-world  6.4      29    20.5kB  canonical**  -\n\
+             firefox      151.0    9200  300MB   mozilla**    -\n\
+             core22       20261101 3000  70MB    canonical**  base\n"),
+        _ => failed(1),
+    });
+    let installed = manager("snap", script)
+        .installed(&Cancellation::default())
+        .unwrap();
+    let update = |name: &str| {
+        let package = installed
+            .iter()
+            .find(|package| package.id.name == name)
+            .unwrap();
+        (package.update.clone(), package.candidate_version.clone())
+    };
+    assert_eq!(
+        update("firefox"),
+        (UpdateAvailability::Available, Some("151.0".into()))
+    );
+    // A held snap stays on the version it has.
+    for (held, version) in [("hello-world", "6.3"), ("core22", "20261001")] {
+        assert_eq!(
+            update(held),
+            (UpdateAvailability::Current, Some(version.into())),
+            "{held}"
+        );
+    }
+}
+
+#[test]
 fn update_listings_propagate_cancellation_and_tolerate_failure() {
     let cancel = Cancellation::default();
     let listing = |updates: fn() -> Reply| {
@@ -1820,9 +1862,11 @@ fn update_listings_propagate_cancellation_and_tolerate_failure() {
         listing(|| Err(ExecutionError::Cancelled)).installed(&cancel),
         Err(EngineError::Cancelled)
     ));
+    // apk exits 0 when nothing needs an update, so a failed listing can't
+    // tell: the row is still listed, with its update unknown.
     let installed = listing(|| failed(1)).installed(&cancel).unwrap();
     assert_eq!(installed.len(), 1);
-    assert_eq!(installed[0].update, UpdateAvailability::Current);
+    assert_eq!(installed[0].update, UpdateAvailability::Unknown);
 }
 
 /// Reading a `.snap` runs `snap info`, so the check runs in a child test
@@ -2536,9 +2580,7 @@ fn a_cask_brew_skipped_without_failing_does_not_read_as_updated() {
     // brew skips a disabled cask and still exits 0.
     let left_behind = Err(EngineError::Refused {
         backend: "homebrew-cask".into(),
-        refusal: Refusal::Explained(
-            "Homebrew didn't update this cask or say why. It's still on version 1.".into(),
-        ),
+        refusal: Refusal::Explained("Homebrew didn't update this cask or say why.".into()),
     });
     let script = brew(|line| match line {
         "w:brew upgrade --cask -- disabled other no-version unknown" => ok(""),

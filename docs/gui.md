@@ -153,11 +153,17 @@ other sources still appear as they answer.
   PkgDeck updates Cargo, uv, pip, Composer, rustup, pixi, Nix and Conda
   packages one at a time itself. For managers that don't say (npm, for
   one), all of their rows show as updating until they finish.
-- An update that failed shows a warning on its row. **Update all**, **Update
-  selected** and automatic updates skip it until there's a newer version, so
-  one broken update doesn't fail every run. Its row's arrow tries it again,
-  and once it works the warning goes away. When it's the only update left,
-  **Update all** tries it too.
+- An update that failed because of the update itself shows a warning on its
+  row. **Update all** and **Update selected** skip it until there's a newer
+  version, so one broken update doesn't fail every run. Automatic updates
+  skip it once it failed twice, so a run without network doesn't hold it
+  back. Its row's arrow tries it again, and once it works the warning goes
+  away. When it's the only update left, **Update all** tries it too. An
+  update stopped by a cancel, the password prompt, PkgDeck's system helper,
+  a package manager that couldn't start, an Alpine repository that couldn't
+  be reached, PkgDeck running as root or a shutdown isn't skipped. APT and
+  Pacman install some updates together in one step. When one of those fails
+  because of the update itself, the others in that step are skipped too.
 - A Homebrew cask that needs your password shows a lock. Automatic updates
   skip it. Its row's arrow asks for the password.
 - With **Wait for new releases** on, an update too new to install yet shows a
@@ -284,8 +290,9 @@ tasks that start unchecked until you check them yourself.
 When some tasks fail, **Activity** shows each reason once, with the tasks it
 stopped. The row shows the reason too, and the whole text when you point at it.
 Activity keeps why each task failed, waits or was skipped: open its card to
-read it. It keeps each task's name too, so a cleaned folder still shows by
-name after it's gone.
+read it. It keeps PkgDeck's own words, never what a tool printed, which can
+name a private address or a token. It keeps each task's name too, so a
+cleaned folder still shows by name after it's gone.
 
 ### Clean settings
 
@@ -655,7 +662,10 @@ What it saves:
   `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`. It lets
   PkgDeck's helper refresh and update everything from APT, DNF, Pacman,
   Zypper, system Flatpaks and Snaps, only in your active local session.
-  The helper does nothing else in that mode.
+  While a Flatpak release waits (see **Wait for new releases**), it updates
+  the other installed Flatpaks one by one. While a Snap release waits, the
+  other Snap updates wait for you, so a held snap stays held. The helper
+  does nothing else in that mode.
 - macOS: a sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`,
   checked with `visudo` before it's saved. It allows exactly
   `softwareupdate --download --all --no-scan` and, when MacPorts is

@@ -159,6 +159,11 @@ macOS updates, and a `git fetch` for Oh My Zsh. Each source fetches once;
 Homebrew's refresh is its fetch. Then it lists the updates it found. It never
 installs anything.
 
+A package its manager holds back has no update: an APT hold, a DNF
+versionlock, a Zypper lock, a Pacman `IgnorePkg`, an apk pin in
+`/etc/apk/world`, an XBPS hold, a held snap or a masked Flatpak. An update
+leaves it alone, so PkgDeck doesn't list one.
+
 `pkd upgrade` without names updates every installed package that has an
 update. `--from` and `--arch` narrow it down. It uses what the last refresh
 found and never fetches, like `pkd list`. Without a recent refresh it can
@@ -486,10 +491,16 @@ the AUR can't be reached, packages are still listed with unknown updates.
 
 `apk` (Alpine), `xbps` (Void), and `macports` work like the other system
 package managers: search, list, install, remove, update, and refresh. Updates
-come from `apk list --upgradable`, `xbps-install -Mun`, and `port outdated`,
+come from `apk upgrade --simulate`, `xbps-install -Mun`, and `port outdated`,
 which only report. Changes need admin rights and always run the manager from
 its fixed location (`/sbin` or `/usr/sbin` for apk, `/usr/bin` for XBPS,
 `/opt/local/bin/port` for MacPorts), never whatever `PATH` finds first.
+
+- A repository apk can't reach doesn't hide the updates the others list.
+  apk won't update while that repository is out of reach, and such a
+  failure isn't held against the update. When apk can't plan an upgrade at
+  all (a package in `/etc/apk/world` that no repository has), apk rows show
+  their update as unknown.
 
 - MacPorts keeps each port's variants when it upgrades. Only active ports are
   listed; inactive versions stay installed but aren't rows. `pkd refresh` runs

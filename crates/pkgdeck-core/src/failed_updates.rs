@@ -1,7 +1,9 @@
-//! Updates that failed, with the version each one couldn't update to.
-//! Automatic runs and Update all leave them out until a newer version
-//! comes out, so one broken update doesn't fail every run. The person can
-//! still update one on its own, and an update that works is forgotten.
+//! Updates that failed, with the version each one couldn't update to and
+//! how many times. Update all leaves them out until a newer version comes
+//! out, so one broken update doesn't fail every run. Automatic runs leave
+//! one out once it failed twice: a run that lost the network or stopped
+//! for a shutdown doesn't hold its updates back. The person can still
+//! update one on its own, and an update that works is forgotten.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -15,6 +17,11 @@ use crate::package::PackageId;
 pub struct FailedUpdate {
     pub id: PackageId,
     pub version: String,
+    /// How many times it failed at this version. 0 in a store from
+    /// PkgDeck 0.15.2 or older, which also kept updates its system helper
+    /// refused or never started: those are forgotten.
+    #[serde(default)]
+    pub failures: u32,
 }
 
 #[derive(Debug, Default)]
@@ -31,10 +38,11 @@ impl FailedUpdates {
             .map_or_else(Self::default, |path| Self::at(&path))
     }
     pub fn at(path: &Path) -> Self {
-        let updates = fs::read(path)
+        let mut updates: Vec<FailedUpdate> = fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        updates.retain(|update| update.failures > 0);
         Self {
             path: Some(path.to_owned()),
             updates,
@@ -42,9 +50,18 @@ impl FailedUpdates {
     }
     /// Whether this update to `version` failed before.
     pub fn skips(&self, id: &PackageId, version: &str) -> bool {
+        self.failures(id, version) > 0
+    }
+    /// Whether automatic runs leave this update to `version` out: it failed
+    /// more than once, so it isn't a lost network or a shutdown.
+    pub fn keeps_failing(&self, id: &PackageId, version: &str) -> bool {
+        self.failures(id, version) > 1
+    }
+    fn failures(&self, id: &PackageId, version: &str) -> u32 {
         self.updates
             .iter()
-            .any(|update| update.id == *id && update.version == version)
+            .find(|update| update.id == *id && update.version == version)
+            .map_or(0, |update| update.failures)
     }
     pub fn updates(&self) -> &[FailedUpdate] {
         &self.updates
@@ -52,14 +69,18 @@ impl FailedUpdates {
     /// Remember the updates that failed and forget the ones that worked.
     pub fn remember(&mut self, failed: &[(PackageId, String)], worked: &[PackageId]) {
         let before = self.updates.clone();
+        let failures: Vec<FailedUpdate> = failed
+            .iter()
+            .map(|(id, version)| FailedUpdate {
+                id: id.clone(),
+                version: version.clone(),
+                failures: self.failures(id, version) + 1,
+            })
+            .collect();
         self.updates.retain(|update| {
             !worked.contains(&update.id) && !failed.iter().any(|(id, _)| *id == update.id)
         });
-        self.updates
-            .extend(failed.iter().map(|(id, version)| FailedUpdate {
-                id: id.clone(),
-                version: version.clone(),
-            }));
+        self.updates.extend(failures);
         if self.updates != before {
             self.save();
         }
@@ -139,6 +160,36 @@ mod tests {
         // Updated on its own: forgotten.
         store.remember(&[], std::slice::from_ref(&tool));
         assert!(!FailedUpdates::at(&path).skips(&tool, "2.1"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn automatic_runs_skip_an_update_once_it_failed_twice() {
+        let dir = scratch("twice");
+        let path = dir.join("failed-updates.json");
+        let tool = id("example", "tool");
+        let mut store = FailedUpdates::at(&path);
+        store.remember(&[(tool.clone(), "2.0".into())], &[]);
+        assert!(store.skips(&tool, "2.0") && !store.keeps_failing(&tool, "2.0"));
+        store.remember(&[(tool.clone(), "2.0".into())], &[]);
+        assert!(FailedUpdates::at(&path).keeps_failing(&tool, "2.0"));
+        // A newer version starts over.
+        store.remember(&[(tool.clone(), "2.1".into())], &[]);
+        assert!(store.skips(&tool, "2.1") && !store.keeps_failing(&tool, "2.1"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failures_kept_before_they_were_counted_are_forgotten() {
+        let dir = scratch("uncounted");
+        let path = dir.join("failed-updates.json");
+        fs::create_dir_all(&dir).unwrap();
+        let tool = id("example", "tool");
+        let old = serde_json::json!([{"id": tool, "version": "2.0"}]);
+        fs::write(&path, old.to_string()).unwrap();
+        let store = FailedUpdates::at(&path);
+        assert!(store.updates().is_empty());
+        assert!(!store.skips(&tool, "2.0"));
         fs::remove_dir_all(dir).unwrap();
     }
 

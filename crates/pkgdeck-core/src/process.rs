@@ -87,15 +87,37 @@ impl Completion {
     /// code 1: error: …" or "was stopped by signal 9". The reason is the
     /// first meaningful stderr line; the full output stays in the value.
     pub fn outcome(&self) -> String {
-        let ended = match (self.code, self.signal) {
-            (Some(code), _) => format!("exited with code {code}"),
-            (None, Some(signal)) => format!("was stopped by signal {signal}"),
-            (None, None) => "was stopped".into(),
-        };
+        let ended = self.ended();
         match failure_summary(&self.stderr) {
             Some(reason) => format!("{ended}: {reason}"),
             None => ended,
         }
+    }
+    /// How the program ended, without anything it printed.
+    pub fn ended(&self) -> String {
+        match (self.code, self.signal) {
+            (Some(code), _) => format!("exited with code {code}"),
+            (None, Some(signal)) => format!("was stopped by signal {signal}"),
+            (None, None) => "was stopped".into(),
+        }
+    }
+    /// Whether the program stopped on a signal it raised itself: a crash,
+    /// not a stop from outside such as a shutdown or the OOM killer.
+    pub fn crashed(&self) -> bool {
+        use rustix::process::Signal;
+        self.signal.is_some_and(|signal| {
+            [
+                Signal::ILL,
+                Signal::TRAP,
+                Signal::ABORT,
+                Signal::BUS,
+                Signal::FPE,
+                Signal::SEGV,
+                Signal::SYS,
+            ]
+            .iter()
+            .any(|crash| crash.as_raw() == signal)
+        })
     }
 }
 
@@ -127,16 +149,42 @@ pub fn failure_summary(stderr: &[u8]) -> Option<String> {
         .find(|line| starts(line, &ERRORS) && !bare(line))
         .or_else(|| lines.iter().find(|line| !starts(line, &NOISE)))
         .or_else(|| lines.first())?;
+    Some(one_line(line))
+}
+
+/// `text` without the " (os error 13)" code Rust adds to a system error.
+/// The words before it already say what went wrong.
+pub fn without_os_code(text: &str) -> String {
+    const CODE: &str = " (os error ";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(CODE) {
+        let after = &rest[at + CODE.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..at]);
+        if digits > 0 && after[digits..].starts_with(')') {
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(CODE);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `line` with no control characters, shortened to 300 characters.
+pub fn one_line(line: &str) -> String {
     let clean: String = line
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     const LIMIT: usize = 300;
-    Some(if clean.chars().count() > LIMIT {
+    if clean.chars().count() > LIMIT {
         format!("{}…", clean.chars().take(LIMIT).collect::<String>())
     } else {
         clean
-    })
+    }
 }
 
 fn serialize_output<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
@@ -155,11 +203,23 @@ pub enum ExecutionError {
     LockBusy,
     Interrupted,
     Failed(Completion),
+    /// PkgDeck's system helper failed, not the command it was to run: it
+    /// didn't start, stopped, or turned the command down.
+    Helper(String),
+    /// The package manager changed nothing because it couldn't reach a
+    /// repository it needs. Its own line, which names the repository.
+    Unreachable(String),
+    /// PkgDeck runs as root, so it makes no change (see
+    /// [`crate::host::ROOT_REFUSAL`]).
+    RunsAsRoot,
 }
 impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled(s) | Self::Invalid(s) | Self::Io(s) => f.write_str(s),
+            Self::Helper(s) => write!(f, "PkgDeck's system helper failed: {s}"),
+            Self::Unreachable(s) => write!(f, "a repository couldn't be reached: {s}"),
+            Self::RunsAsRoot => f.write_str(crate::host::ROOT_REFUSAL),
             Self::Cancelled => f.write_str("operation cancelled before completion"),
             Self::TimedOut => f.write_str("host read timed out"),
             Self::AuthorizationCancelled => f.write_str("authorization cancelled"),
@@ -365,6 +425,21 @@ fn stop_group(child: &mut Child, mut stdout: impl Read, mut stderr: impl Read, g
 mod tests {
     use super::*;
     use std::process::Command;
+    #[test]
+    fn system_error_codes_are_dropped_and_nothing_else() {
+        for (raw, plain) in [
+            ("Permission denied (os error 13)", "Permission denied"),
+            ("a (os error 2) and b (os error 5)", "a and b"),
+            ("é (os error 2) ü", "é ü"),
+            // Only a number in the brackets is a code.
+            ("kept (os error x)", "kept (os error x)"),
+            ("kept (os error 7", "kept (os error 7"),
+            ("kept (os error )", "kept (os error )"),
+            (" (os error  (os error 5)", " (os error "),
+        ] {
+            assert_eq!(without_os_code(raw), plain);
+        }
+    }
     fn failed(code: Option<i32>, signal: Option<i32>, stderr: &str) -> Completion {
         Completion {
             code,
@@ -447,6 +522,15 @@ mod tests {
         assert_eq!(
             ExecutionError::Failed(failed(Some(1), None, rustup)).to_string(),
             "the package manager exited with code 1: error: rustup could not choose a version of cargo to run"
+        );
+        assert_eq!(
+            ExecutionError::Helper("authorization runner closed unexpectedly".into()).to_string(),
+            "PkgDeck's system helper failed: authorization runner closed unexpectedly"
+        );
+        assert_eq!(
+            ExecutionError::Unreachable("opening http://mirror: Connection refused".into())
+                .to_string(),
+            "a repository couldn't be reached: opening http://mirror: Connection refused"
         );
         let apt = "WARNING: apt does not have a stable CLI interface.\n\nE: Unable to locate package x\nE: second\n";
         assert_eq!(

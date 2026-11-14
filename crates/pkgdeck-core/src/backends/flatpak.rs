@@ -121,6 +121,83 @@ pub(super) fn flatpak_reference(reference: &str) -> Option<(&str, &str, &str, &s
         && parts.next().is_none())
     .then_some((kind, name, arch, branch))
 }
+/// The patterns `flatpak mask` prints: one per line, indented by two
+/// spaces. A header line, if any, is not indented.
+pub(super) fn flatpak_masks(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter(|line| line.starts_with(' '))
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+/// If a mask pattern matches a full ref, as `flatpak update` decides.
+///
+/// This follows `flatpak_filter_glob_to_regexp` in flatpak's
+/// `common/flatpak-utils.c`. A pattern is `[app/|runtime/]id[/arch[/branch]]`.
+/// Without a kind it matches apps and runtimes. `*` matches any run of
+/// `[.-_a-zA-Z0-9]`, so it never crosses a `/`. A part left out matches any
+/// value, and an empty part before a `/` (as in `id//branch`) does too.
+/// Flatpak ignores a pattern it can't read, so it matches nothing here.
+pub(super) fn flatpak_masked(pattern: &str, reference: &str) -> bool {
+    let Some((kind, id, arch, branch)) = flatpak_reference(reference) else {
+        return false;
+    };
+    let glob = match pattern.split_once('/') {
+        Some((prefix @ ("app" | "runtime"), rest)) => {
+            if prefix != kind {
+                return false;
+            }
+            rest
+        }
+        _ => pattern,
+    };
+    if glob.is_empty() {
+        return false;
+    }
+    let parts: Vec<_> = glob.split('/').collect();
+    if parts.len() > 3
+        || !glob
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.*/".contains(&b))
+    {
+        return false;
+    }
+    let last = parts.len() - 1;
+    parts
+        .iter()
+        .zip([id, arch, branch])
+        .enumerate()
+        .all(|(index, (part, value))| {
+            // flatpak only widens an empty part when a `/` follows it.
+            (part.is_empty() && index < last) || glob_matches(part.as_bytes(), value.as_bytes())
+        })
+}
+/// A glob with `*` as its only wildcard, matched against the whole value.
+fn glob_matches(glob: &[u8], value: &[u8]) -> bool {
+    match glob.split_first() {
+        None => value.is_empty(),
+        Some((b'*', rest)) => (0..=value.len()).any(|skip| glob_matches(rest, &value[skip..])),
+        Some((first, rest)) => value.first() == Some(first) && glob_matches(rest, &value[1..]),
+    }
+}
+/// The ref an extension extends, from the `[ExtensionOf]` group that
+/// `flatpak info --show-metadata` prints. `flatpak update` leaves an
+/// extension alone while the ref it extends is masked.
+pub(super) fn flatpak_extension_of(metadata: &str) -> Option<&str> {
+    let mut group = "";
+    for line in metadata.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            group = name;
+        } else if group == "ExtensionOf" {
+            if let Some(("ref", value)) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim())) {
+                return flatpak_reference(value).is_some().then_some(value);
+            }
+        }
+    }
+    None
+}
 /// The answer of a Flatpak query run on its own thread.
 fn joined<R>(worker: std::thread::ScopedJoinHandle<'_, R>) -> R {
     worker.join().expect("Flatpak worker panicked")
@@ -655,24 +732,71 @@ impl<T: Transport + Sync> Flatpak<T> {
             }
             Err(error) => return Err(error),
         }
-        for updates in texts {
-            for line in updates.lines().filter(|line| !line.trim().is_empty()) {
-                let fields: Vec<_> = line.split('\t').collect();
-                if fields.len() != 3
-                    || flatpak_reference(fields[0]).is_none()
-                    || !flatpak_id(fields[2])
-                {
-                    return Err(invalid("flatpak", "invalid update metadata"));
-                }
-                for (package, origin) in packages.iter_mut().zip(&origins) {
-                    if package.id.reference.as_deref() == Some(fields[0]) && origin == fields[2] {
-                        package.candidate_version = Some(fields[1].into());
-                        package.update = UpdateAvailability::Available;
-                    }
+        let mut found = Vec::new();
+        for line in texts
+            .iter()
+            .flat_map(|text| text.lines())
+            .filter(|line| !line.trim().is_empty())
+        {
+            let fields: Vec<_> = line.split('\t').collect();
+            let [reference, version, origin] = fields.as_slice() else {
+                return Err(invalid("flatpak", "invalid update metadata"));
+            };
+            if flatpak_reference(reference).is_none() || !flatpak_id(origin) {
+                return Err(invalid("flatpak", "invalid update metadata"));
+            }
+            found.push((*reference, *version, *origin));
+        }
+        // `remote-ls --updates` still lists a masked ref, but `flatpak
+        // update` leaves it alone, like the packages pacman.conf ignores.
+        let masks = if found.is_empty() || cancel.requested() {
+            vec![]
+        } else {
+            self.masks(prefix, cancel, system)
+        };
+        let masked = |reference: &str| masks.iter().any(|mask| flatpak_masked(mask, reference));
+        for (reference, version, origin) in found {
+            if masked(reference)
+                || (!masks.is_empty()
+                    && reference.starts_with("runtime/")
+                    && self
+                        .extension_of(prefix, reference, cancel, system)
+                        .is_some_and(|parent| masked(&parent)))
+            {
+                continue;
+            }
+            for (package, installed_from) in packages.iter_mut().zip(&origins) {
+                if package.id.reference.as_deref() == Some(reference) && installed_from == origin {
+                    package.candidate_version = Some(version.into());
+                    package.update = UpdateAvailability::Available;
                 }
             }
         }
         Ok(packages)
+    }
+    /// What `flatpak mask` holds back in one installation. An unreadable
+    /// list holds back nothing.
+    fn masks(&self, prefix: &str, cancel: &Cancellation, system: bool) -> Vec<String> {
+        self.read(&[prefix, "mask"], cancel, system)
+            .map(|output| flatpak_masks(&String::from_utf8_lossy(&output)))
+            .unwrap_or_default()
+    }
+    /// The ref an installed extension extends, if its metadata names one.
+    fn extension_of(
+        &self,
+        prefix: &str,
+        reference: &str,
+        cancel: &Cancellation,
+        system: bool,
+    ) -> Option<String> {
+        let output = self
+            .read(
+                &[prefix, "info", "--show-metadata", reference],
+                cancel,
+                system,
+            )
+            .ok()?;
+        flatpak_extension_of(&String::from_utf8_lossy(&output)).map(str::to_owned)
     }
     fn search_scope(
         &self,

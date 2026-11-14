@@ -358,6 +358,10 @@ impl Transport for Kit {
             .lock()
             .unwrap()
             .push(if write { format!("root {line}") } else { line });
+        // dnf's check-update can't tell, so DNF's listing stays as it is.
+        if args.iter().any(|arg| arg == "check-update") {
+            return Err(ExecutionError::Failed(completion(1, "")));
+        }
         Ok(completion(0, self.listing))
     }
 }
@@ -549,7 +553,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu --dbpath /c/pacman",
                     "zypper --cache-dir /c/zypper --no-refresh --quiet --xmlout --non-interactive list-updates",
-                    "apk --cache-dir /c/apk list --upgradable",
+                    "apk --cache-dir /c/apk upgrade --simulate --force-missing-repositories",
                     "apt-get --simulate -o Debug::NoLocking=1 -o Dir::State::Lists=/c/apt/lists dist-upgrade",
                 ],
             ),
@@ -558,7 +562,7 @@ fn updates_come_from_the_users_copy_only_while_it_is_newer() {
                 [
                     "pacman -Qu",
                     "zypper --quiet --xmlout --non-interactive list-updates",
-                    "apk list --upgradable",
+                    "apk upgrade --simulate --force-missing-repositories",
                     "apt-get --simulate -o Debug::NoLocking=1 dist-upgrade",
                 ],
             ),
@@ -788,7 +792,7 @@ fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
         "htop|x86_64|3.4.1-1.fc44\nnot a row\n|x86_64|\nless|x86_64|704-4.fc44\n",
     ));
     assert_eq!(
-        dnf.updates(&cancel).unwrap(),
+        dnf.updates(&cancel).unwrap().unwrap(),
         BTreeMap::from([
             ("htop".to_owned(), "3.4.1-1.fc44".to_owned()),
             ("less".to_owned(), "704-4.fc44".to_owned()),
@@ -800,7 +804,7 @@ fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
     ));
     // Held back in pacman.conf, the kernel isn't one an upgrade installs.
     assert_eq!(
-        pacman.updates(&cancel).unwrap(),
+        pacman.updates(&cancel).unwrap().unwrap(),
         BTreeMap::from([
             ("curl".to_owned(), "8.23.0-1".to_owned()),
             ("zlib".to_owned(), "1:1.3.2-4".to_owned()),
@@ -821,8 +825,50 @@ fn dnf_pacman_and_zypper_say_which_packages_have_updates() {
 "#,
     ));
     assert_eq!(
-        zypper.updates(&cancel).unwrap(),
+        zypper.updates(&cancel).unwrap().unwrap(),
         BTreeMap::from([("openSUSE-build-key".to_owned(), "1.0-69.1".to_owned())])
+    );
+}
+
+#[test]
+fn dnf_keeps_its_updates_when_check_update_cant_tell() {
+    /// repoquery lists htop; check-update answers `0`.
+    #[derive(Clone)]
+    struct CheckUpdate(Result<Completion, ExecutionError>);
+    impl Transport for CheckUpdate {
+        fn system_manager(
+            &self,
+            _: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if args.iter().any(|arg| arg == "check-update") {
+                return self.0.clone();
+            }
+            Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
+        }
+    }
+    let updates =
+        |answer| SystemManager::dnf(CheckUpdate(answer)).updates(&Cancellation::default());
+    let truncated = Completion {
+        truncated: true,
+        ..completion(100, "")
+    };
+    for answer in [
+        Err(ExecutionError::Disabled("dnf not found".into())),
+        Err(ExecutionError::Failed(truncated)),
+    ] {
+        assert_eq!(
+            updates(answer.clone()).unwrap().unwrap().len(),
+            1,
+            "{answer:?}"
+        );
+    }
+    // A cancel stops the listing.
+    assert_eq!(
+        updates(Err(ExecutionError::Cancelled)),
+        Err(EngineError::Cancelled)
     );
 }
 
@@ -842,15 +888,29 @@ fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
             if args[0] == "-C" {
                 return Err(ExecutionError::Failed(completion(1, "")));
             }
+            if args.iter().any(|arg| arg == "check-update") {
+                return Err(ExecutionError::Failed(completion(
+                    100,
+                    "htop.x86_64 3.4.1-1.fc44 updates\n",
+                )));
+            }
             Ok(completion(0, "htop|x86_64|3.4.1-1.fc44\n"))
         }
     }
     let calls = NoCache(Arc::default());
     let dnf = SystemManager::dnf(calls.clone());
-    assert_eq!(dnf.updates(&Cancellation::default()).unwrap().len(), 1);
+    assert_eq!(
+        dnf.updates(&Cancellation::default())
+            .unwrap()
+            .unwrap()
+            .len(),
+        1
+    );
     let calls = calls.0.lock().unwrap();
-    assert_eq!(calls.len(), 2);
+    // check-update, which leaves out what versionlock holds, too.
+    assert_eq!(calls.len(), 4);
     assert_eq!(calls[1], calls[0][1..]);
+    assert_eq!(calls[3], calls[2][1..]);
     drop(calls);
     // Other managers have no online fallback: a failed listing is asked once.
     #[derive(Clone)]
@@ -871,7 +931,7 @@ fn dnf_reads_updates_online_when_it_has_no_cache_yet() {
     let pacman = SystemManager::pacman(down.clone());
     assert_eq!(
         pacman.updates(&Cancellation::default()),
-        Ok(BTreeMap::new())
+        Ok(Some(BTreeMap::new()))
     );
     assert_eq!(*down.0.lock().unwrap(), 1);
 }
@@ -2482,6 +2542,35 @@ cut-short            1.0
         .cleanup(&cancel)
         .unwrap()
         .is_empty());
+    // A parallel instance is cleaned like any snap, and an odd name next
+    // to it leaves out only itself.
+    let mixed = Kit::new(
+        Ok(false),
+        "Name Version Rev Tracking Publisher Notes\nhello-world_foo 1 27 - - disabled\nBad;Name 1 2 - - disabled\nfirefox 158.0.1-1 9113 latest/stable mozilla** disabled\n",
+    );
+    let items = SystemManager::snap(mixed).cleanup(&cancel).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.key.as_str())
+            .collect::<Vec<_>>(),
+        ["disabled-revisions:firefox=9113,hello-world_foo=27"]
+    );
+    for name in ["hello-world_foo", "firefox", "core22"] {
+        assert!(crate::backends::snap_name(name), "{name}");
+    }
+    for name in [
+        "hello+extra",
+        "hello_foo+extra",
+        "hello_",
+        "_foo",
+        "hello_fo-o",
+        "Hello",
+        "-a",
+        "",
+    ] {
+        assert!(!crate::backends::snap_name(name), "{name}");
+    }
     assert!(SystemManager::dnf(Kit::new(Ok(false), ""))
         .cleanup(&cancel)
         .is_err());
@@ -2647,4 +2736,144 @@ fn a_casks_icon_comes_from_the_folder_holding_its_app() {
     assert_eq!(cask_icon_in(&artifacts, &[], &[system], &cancel), None);
     assert_eq!(cask_icon_in(&[], &[], &[], &cancel), None);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn flatpak_masks_match_what_flatpak_update_skips() {
+    // Measured with Flatpak 1.18.4: `flatpak --user mask` prints each
+    // pattern indented by two spaces, and nothing without masks.
+    let listing = "  org.test.App\n  org.test.Platform//1\n  org.x.*\n  runtime/org.y.*/aarch64\n";
+    assert_eq!(
+        flatpak_masks(listing),
+        [
+            "org.test.App",
+            "org.test.Platform//1",
+            "org.x.*",
+            "runtime/org.y.*/aarch64"
+        ]
+    );
+    assert!(flatpak_masks("").is_empty());
+    // A terminal gets a header first. It isn't a pattern.
+    assert_eq!(flatpak_masks("Masked patterns:\n  org.x.*\n"), ["org.x.*"]);
+    assert!(flatpak_masks("No masked patterns\n").is_empty());
+
+    let cases = [
+        // An exact ID, for apps and runtimes, on any arch and branch.
+        ("org.test.App", "app/org.test.App/x86_64/stable", true),
+        ("org.test.App", "app/org.test.App/aarch64/beta", true),
+        ("org.test.App", "runtime/org.test.App/x86_64/stable", true),
+        ("org.test.App", "app/org.test.AppTwo/x86_64/stable", false),
+        (
+            "org.test.App",
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            false,
+        ),
+        ("org.test.App", "app/org.test/x86_64/stable", false),
+        // `*` covers dots, but never a `/`.
+        ("org.test.*", "app/org.test.App/x86_64/stable", true),
+        (
+            "org.test.*",
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            true,
+        ),
+        ("org.test.*", "app/org.testing.App/x86_64/stable", false),
+        ("org.*.App", "app/org.a.b.App/x86_64/stable", true),
+        ("*", "runtime/org.gnome.Platform/x86_64/49", true),
+        ("org.test.*/x86_64", "app/org.test.App/x86_64/stable", true),
+        // An empty arch before `//branch` matches any arch.
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/1",
+            true,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/aarch64/1",
+            true,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/2",
+            false,
+        ),
+        (
+            "org.test.Platform//1",
+            "runtime/org.test.Platform/x86_64/10",
+            false,
+        ),
+        (
+            "org.test.App/x86_64/stable",
+            "app/org.test.App/x86_64/stable",
+            true,
+        ),
+        (
+            "org.test.App/aarch64",
+            "app/org.test.App/x86_64/stable",
+            false,
+        ),
+        ("org.test.App//st*", "app/org.test.App/x86_64/stable", true),
+        // A kind limits the pattern to that kind.
+        ("app/org.test.App", "app/org.test.App/x86_64/stable", true),
+        (
+            "app/org.test.App",
+            "runtime/org.test.App/x86_64/stable",
+            false,
+        ),
+        (
+            "runtime/org.y.*/aarch64",
+            "runtime/org.y.Sdk/aarch64/49",
+            true,
+        ),
+        (
+            "runtime/org.y.*/aarch64",
+            "runtime/org.y.Sdk/x86_64/49",
+            false,
+        ),
+        ("runtime/org.y.*/aarch64", "app/org.y.Sdk/aarch64/49", false),
+        // An empty part matches any value only when a `/` follows it.
+        ("org.test.App/", "app/org.test.App/x86_64/stable", false),
+        ("/x86_64", "app/org.test.App/x86_64/stable", true),
+        // Flatpak skips patterns it can't read.
+        (
+            "org.test.App/x86_64/stable/extra",
+            "app/org.test.App/x86_64/stable",
+            false,
+        ),
+        ("org.test.?pp", "app/org.test.App/x86_64/stable", false),
+        ("org.test.[A]pp", "app/org.test.App/x86_64/stable", false),
+        ("app/", "app/org.test.App/x86_64/stable", false),
+        ("", "app/org.test.App/x86_64/stable", false),
+        ("org.test.App", "not a ref", false),
+    ];
+    for (pattern, reference, masked) in cases {
+        assert_eq!(
+            flatpak_masked(pattern, reference),
+            masked,
+            "{pattern} on {reference}"
+        );
+    }
+}
+
+#[test]
+fn flatpak_extensions_name_the_ref_they_extend() {
+    // Measured with Flatpak 1.18.4: `flatpak --user info --show-metadata`
+    // of an app extension.
+    let metadata = "[Runtime]\nname=org.test.App.Plugin\nruntime=org.test.App.Plugin/x86_64/stable\nsdk=org.test.App.Plugin/x86_64/stable\n\n[ExtensionOf]\nref=app/org.test.App/x86_64/stable\n";
+    assert_eq!(
+        flatpak_extension_of(metadata),
+        Some("app/org.test.App/x86_64/stable")
+    );
+    let runtime = "[Runtime]\nname=org.test.Platform\nruntime=org.test.Platform/x86_64/1\n";
+    assert_eq!(flatpak_extension_of(runtime), None);
+    // Only the [ExtensionOf] group names it, and only with a full ref.
+    assert_eq!(
+        flatpak_extension_of("[Other]\nref=app/a.B/x86_64/stable\n"),
+        None
+    );
+    assert_eq!(flatpak_extension_of("[ExtensionOf]\nref=a.B\n"), None);
+    // Other keys of the group come before or after it.
+    assert_eq!(
+        flatpak_extension_of("[ExtensionOf]\npriority=1\nref=app/a.B/x86_64/stable\n"),
+        Some("app/a.B/x86_64/stable")
+    );
 }

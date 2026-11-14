@@ -13,7 +13,10 @@ adduser='useradd -m pkgdeck-test'
 fallback=true
 case "$backend" in
     dnf) image=registry.fedoraproject.org/fedora:45; bootstrap='dnf -y install sudo'; query='rpm -q jq'; writers=/usr/bin/dnf ;;
-    pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; writers=/usr/bin/pacman ;;
+    # The image's own systemd stays behind for the lockstep test below, so
+    # sudo comes alone. While Arch moves to a new library (OpenSSL 4), that
+    # partial update can't resolve, so the whole image updates instead.
+    pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo || pacman -Su --noconfirm sudo'; query='pacman -Q jq'; writers=/usr/bin/pacman ;;
     zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='sed -i "s|http://|https://|g" /etc/zypp/repos.d/*.repo; zypper --non-interactive install sudo'; query='rpm -q jq'; writers=/usr/bin/zypper
         # download.opensuse.org's redirector can time out for minutes, or
         # send a file to a mirror that doesn't have it yet while a snapshot

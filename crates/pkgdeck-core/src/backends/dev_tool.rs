@@ -2090,7 +2090,18 @@ impl<T: Transport> DevTool<T> {
                     | "(registry+sparse+https://index.crates.io/)"
             )
         }) {
-            let from = source.trim_start_matches('(').trim_end_matches(')');
+            // The source itself can name a private address or a token. Cargo
+            // lists a Git one as "(<url>?tag=v1#<commit>)", a folder as
+            // "(/path)" or "(dir /path)", and a registry as
+            // "(registry `name`)".
+            let source = source.trim_start_matches('(');
+            let from = if source.starts_with('/') || source.starts_with("dir ") {
+                "a folder"
+            } else if source.starts_with("registry ") {
+                "another registry"
+            } else {
+                "a Git repository"
+            };
             return Err(EngineError::Refused {
                 backend: id.into(),
                 refusal: Refusal::Explained(format!(

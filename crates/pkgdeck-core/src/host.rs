@@ -70,6 +70,8 @@ pub struct Host {
 }
 
 /// Why a write refuses to start when the frontend itself runs as root.
+/// Why a download can't start.
+pub const NO_CURL: &str = "PkgDeck needs curl to download this, and curl isn't installed";
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
 /// Writes refuse to run as root (see [`ROOT_REFUSAL`]).
@@ -78,7 +80,7 @@ pub(crate) fn refuse_root(write: bool) -> Result<(), ExecutionError> {
 }
 fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
     if write && root {
-        return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
+        return Err(ExecutionError::RunsAsRoot);
     }
     Ok(())
 }
@@ -1605,10 +1607,12 @@ impl Host {
         authorization: Authorization,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
+        // A request that makes no sense is refused first, as root too.
+        let arguments = AptAction::group_arguments(actions)?;
         refuse_root(true)?;
         classify_apt(self.privileged(
             Path::new("/usr/bin/apt-get"),
-            &AptAction::group_arguments(actions)?,
+            &arguments,
             authorization,
             cancel,
         )?)
@@ -2988,10 +2992,8 @@ mod boundary_tests {
 
     #[test]
     fn only_writes_as_root_are_refused() {
-        assert!(matches!(
-            refuse_root_as(true, true),
-            Err(ExecutionError::Invalid(reason)) if reason == ROOT_REFUSAL
-        ));
+        assert_eq!(refuse_root_as(true, true), Err(ExecutionError::RunsAsRoot));
+        assert_eq!(ExecutionError::RunsAsRoot.to_string(), ROOT_REFUSAL);
         assert!(refuse_root_as(false, true).is_ok());
         assert!(refuse_root_as(true, false).is_ok());
     }

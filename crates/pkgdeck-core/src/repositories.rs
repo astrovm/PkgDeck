@@ -6,7 +6,11 @@ use crate::{
     process::{Cancellation, Completion, ExecutionError},
 };
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsString, path::Path};
+use std::{
+    ffi::OsString,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Repository {
@@ -21,8 +25,65 @@ pub struct Repository {
 #[derive(Default, Serialize)]
 pub struct Report {
     pub repositories: Vec<Repository>,
-    pub errors: Vec<String>,
+    pub errors: Vec<Problem>,
     pub features: Features,
+}
+/// A source or a file PkgDeck couldn't list repositories from. It keeps
+/// the source and the error apart, so each reader words it in its own way.
+/// The JSON and `Display` show one line, such as "Flatpak (User): …".
+#[derive(Clone, Debug)]
+pub struct Problem {
+    /// The source, such as "flatpak", "fwupd", "dnf", "zypper" or "apt".
+    pub backend: String,
+    pub scope: Scope,
+    /// The file PkgDeck couldn't read, when the problem is one file.
+    pub file: Option<PathBuf>,
+    pub error: EngineError,
+}
+impl Problem {
+    fn new(backend: &str, scope: Scope, error: EngineError) -> Self {
+        Self {
+            backend: backend.into(),
+            scope,
+            file: None,
+            error,
+        }
+    }
+    fn io(backend: &str, file: Option<&Path>, error: &std::io::Error) -> Self {
+        Self {
+            file: file.map(Path::to_path_buf),
+            ..Self::new(
+                backend,
+                Scope::System,
+                EngineError::Execution(ExecutionError::Io(error.to_string())),
+            )
+        }
+    }
+}
+impl fmt::Display for Problem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = match &self.error {
+            // "repositories" is a part of PkgDeck, not a source to name.
+            EngineError::InvalidResponse { reason, .. } => {
+                format!("couldn't read the list of repositories: {reason}")
+            }
+            error => error.to_string(),
+        };
+        match (self.backend.as_str(), &self.file, &self.scope) {
+            ("apt", Some(file), _) => write!(formatter, "APT {}: {error}", file.display()),
+            ("apt", None, _) => write!(formatter, "APT: {error}"),
+            ("flatpak", _, Scope::System) => write!(formatter, "Flatpak (System): {error}"),
+            ("flatpak", _, _) => write!(formatter, "Flatpak (User): {error}"),
+            ("fwupd", _, _) => write!(formatter, "Firmware: {error}"),
+            (_, Some(file), _) => write!(formatter, "{}: {error}", file.display()),
+            (backend, None, _) => write!(formatter, "{backend}: {error}"),
+        }
+    }
+}
+impl Serialize for Problem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
 }
 #[derive(Default, Serialize)]
 pub struct Features {
@@ -329,16 +390,15 @@ pub fn list_selected(
         (backends.is_empty() || backends.iter().any(|b| b == backend))
             && scope.is_none_or(|s| s == candidate)
     };
-    for (backend, label, installation) in [
+    for (backend, installation) in [
         (
             "flatpak",
-            "Flatpak (User)",
             Scope::User {
                 uid: rustix::process::getuid().as_raw(),
             },
         ),
-        ("flatpak", "Flatpak (System)", Scope::System),
-        ("fwupd", "Firmware", Scope::System),
+        ("flatpak", Scope::System),
+        ("fwupd", Scope::System),
     ] {
         if !allowed(backend, &installation) {
             continue;
@@ -360,7 +420,9 @@ pub fn list_selected(
                 report.repositories.extend(rows);
             }
             Err(EngineError::Execution(ExecutionError::Disabled(_))) => (),
-            Err(error) => report.errors.push(format!("{label}: {error}")),
+            Err(error) => report
+                .errors
+                .push(Problem::new(backend, installation, error)),
         }
     }
     for (backend, directory) in [("dnf", "etc/yum.repos.d"), ("zypper", "etc/zypp/repos.d")] {
@@ -377,7 +439,7 @@ pub fn list_selected(
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                report.errors.push(format!("{backend}: {error}"));
+                report.errors.push(Problem::io(backend, None, &error));
                 continue;
             }
         };
@@ -389,7 +451,9 @@ pub fn list_selected(
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(error) => {
-                    report.errors.push(format!("{}: {error}", file.display()));
+                    report
+                        .errors
+                        .push(Problem::io(backend, Some(&file), &error));
                     continue;
                 }
             };
@@ -460,7 +524,7 @@ pub fn list_selected(
     match entries {
         Ok(entries) => files.extend(entries),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => report.errors.push(format!("APT: {error}")),
+        Err(error) => report.errors.push(Problem::io("apt", None, &error)),
     }
     files.sort();
     for file in files {
@@ -474,9 +538,7 @@ pub fn list_selected(
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                report
-                    .errors
-                    .push(format!("APT {}: {error}", file.display()));
+                report.errors.push(Problem::io("apt", Some(&file), &error));
                 continue;
             }
         };
@@ -538,6 +600,49 @@ mod repository_file_tests {
         host::{Authorization, Host},
     };
     #[test]
+    fn a_problem_reads_as_one_line_naming_where() {
+        let problem = |backend: &str, scope: Scope, file: Option<&str>| Problem {
+            backend: backend.into(),
+            scope,
+            file: file.map(Into::into),
+            error: EngineError::Execution(ExecutionError::Io("denied".into())),
+        };
+        let user = Scope::User { uid: 1000 };
+        let dnf_file = Some("/etc/yum.repos.d/a.repo");
+        let apt_file = Some("/etc/apt/sources.list");
+        for (problem, line) in [
+            (problem("flatpak", user, None), "Flatpak (User): denied"),
+            (
+                problem("flatpak", Scope::System, None),
+                "Flatpak (System): denied",
+            ),
+            (problem("fwupd", Scope::System, None), "Firmware: denied"),
+            (problem("dnf", Scope::System, None), "dnf: denied"),
+            (
+                problem("dnf", Scope::System, dnf_file),
+                "/etc/yum.repos.d/a.repo: denied",
+            ),
+            (problem("apt", Scope::System, None), "APT: denied"),
+            (
+                problem("apt", Scope::System, apt_file),
+                "APT /etc/apt/sources.list: denied",
+            ),
+            (
+                Problem {
+                    error: invalid("expected value"),
+                    ..problem("fwupd", Scope::System, None)
+                },
+                "Firmware: couldn't read the list of repositories: expected value",
+            ),
+        ] {
+            assert_eq!(problem.to_string(), line);
+            assert_eq!(
+                serde_json::to_value(&problem).unwrap(),
+                serde_json::json!(line)
+            );
+        }
+    }
+    #[test]
     fn failed_or_cut_command_output_and_bad_flatpak_rows_are_errors() {
         let completion = |code, truncated| Completion {
             code: Some(code),
@@ -580,7 +685,12 @@ mod repository_file_tests {
         );
         assert!(report.repositories.is_empty());
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
-        assert!(report.errors[0].contains("invalid Flatpak repository metadata"));
+        assert!(report.errors[0].to_string().starts_with("Flatpak (User): "));
+        assert!(report.errors[0]
+            .to_string()
+            .contains("invalid Flatpak repository metadata"));
+        assert_eq!(report.errors[0].backend, "flatpak");
+        assert_eq!(report.errors[0].scope, user);
         std::fs::remove_dir_all(root).unwrap();
         let system = parse_action(
             r#"{"backend":"fwupd","name":"lvfs","scope":"system","action":"set_enabled","enabled":false}"#,

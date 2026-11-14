@@ -289,6 +289,19 @@ impl Transport for Fixture {
             *self.candidate.lock().unwrap() = "2.0".into();
             return Ok(output(""));
         }
+        // check-update exits with 100 when there are updates.
+        if args.contains(&"check-update".into()) {
+            let candidate = self.candidate.lock().unwrap().clone();
+            return match self.installed.lock().unwrap().as_ref() {
+                Some(version) if *version != candidate => Err(ExecutionError::Failed(Completion {
+                    code: Some(100),
+                    ..output(format!(
+                        "\nsynthetic-fixture.x86_64   {candidate}   fixture\n"
+                    ))
+                })),
+                _ => Ok(output("")),
+            };
+        }
         if args.contains(&"--upgrades".into()) {
             let candidate = self.candidate.lock().unwrap().clone();
             return Ok(output(match self.installed.lock().unwrap().as_ref() {
@@ -1003,6 +1016,10 @@ struct FlatpakFixture {
     appstream_fails: bool,
     /// What `flatpak remotes` prints: name and options.
     remotes: Option<&'static str>,
+    /// What `flatpak --user mask` prints. The system has no masks.
+    user_masks: Option<&'static str>,
+    /// What `flatpak info --show-metadata` prints for each ref.
+    metadata: Vec<(&'static str, &'static str)>,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -1097,6 +1114,21 @@ impl Transport for FlatpakFixture {
         }
         if args.contains(&"remotes".into()) {
             return Ok(output(self.remotes.unwrap_or_default()));
+        }
+        if args.contains(&"mask".into()) {
+            return Ok(output(if system {
+                ""
+            } else {
+                self.user_masks.unwrap_or_default()
+            }));
+        }
+        if args.contains(&"--show-metadata".into()) {
+            return Ok(output(
+                self.metadata
+                    .iter()
+                    .find(|(reference, _)| args.last() == Some(&(*reference).to_owned()))
+                    .map_or("", |(_, metadata)| *metadata),
+            ));
         }
         if args.contains(&"list".into()) {
             if let Some(installed) = &self.installed {
@@ -1921,6 +1953,11 @@ impl Transport for FlatpakGate {
             .map(|arg| arg.to_string_lossy().into_owned())
             .filter(|arg| arg != "--cached")
             .collect();
+        // Neither installation masks anything. Masks are read only after
+        // the updates, so they aren't part of what runs at once.
+        if args[1] == "mask" {
+            return Ok(output(""));
+        }
         // Searches and listings are local reads; update checks name a
         // remote once asking every remote failed.
         let group = match (args[1].as_str(), args.len()) {
@@ -3386,13 +3423,13 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
     .unwrap();
     // Two outdated crates.io tools, a current one, and two from elsewhere
     // whose names crates.io has for other crates.
-    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\n";
+    let list = "bat v0.24.0:\n    bat\nfd-find v10.0.0:\n    fd\nripgrep v14.1.0:\n    rg\navm v1.1.2 (https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b):\n    avm\nlocal v0.1.0 (/home/test/src/local):\n    local\nother v0.1.0 (registry `my-registry`):\n    other\nvendored v0.1.0 (dir /home/test/vendor):\n    vendored\n";
     let fixture = DevFixture {
         home: Some(base.to_str().unwrap().into()),
         version: "cargo 1.98.1\n".into(),
         list: list.into(),
         registry: Some(
-            "bat = \"0.25.0\"\nfd-find = \"10.0.0\"\nripgrep = \"15.2.0\"\navm = \"9.0.0\"\nlocal = \"9.0.0\"\n"
+            "bat = \"0.25.0\"\nfd-find = \"10.0.0\"\nripgrep = \"15.2.0\"\navm = \"9.0.0\"\nlocal = \"9.0.0\"\nother = \"9.0.0\"\nvendored = \"9.0.0\"\n"
                 .into(),
         ),
         ..DevFixture::default()
@@ -3426,7 +3463,35 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
             .execute(&Operation::Upgrade(avm.id.clone()), &cancel, &mut |_| {})
             .unwrap_err()
             .to_string(),
-        "avm was installed from https://github.com/solana-foundation/anchor?tag=v1.1.2#24035e2b, not crates.io. Update it the way you installed it."
+        "avm was installed from a Git repository, not crates.io. Update it the way you installed it."
+    );
+    let local = installed.iter().find(|p| p.id.name == "local").unwrap();
+    assert_eq!(
+        backend
+            .execute(&Operation::Upgrade(local.id.clone()), &cancel, &mut |_| {})
+            .unwrap_err()
+            .to_string(),
+        "local was installed from a folder, not crates.io. Update it the way you installed it."
+    );
+    let other = installed.iter().find(|p| p.id.name == "other").unwrap();
+    assert_eq!(
+        backend
+            .execute(&Operation::Upgrade(other.id.clone()), &cancel, &mut |_| {})
+            .unwrap_err()
+            .to_string(),
+        "other was installed from another registry, not crates.io. Update it the way you installed it."
+    );
+    let vendored = installed.iter().find(|p| p.id.name == "vendored").unwrap();
+    assert_eq!(
+        backend
+            .execute(
+                &Operation::Upgrade(vendored.id.clone()),
+                &cancel,
+                &mut |_| {}
+            )
+            .unwrap_err()
+            .to_string(),
+        "vendored was installed from a folder, not crates.io. Update it the way you installed it."
     );
     assert_eq!(fixture.writes("cargo").len(), 2);
     // One tool failing doesn't keep the next from updating.
@@ -5228,6 +5293,90 @@ fn flatpak_updates_match_commits_by_scope_origin_kind_and_branch() {
 }
 
 #[test]
+fn masked_flatpaks_list_no_update() {
+    // Measured with Flatpak 1.18.4: `flatpak --user mask org.test.App`
+    // leaves the app and its extension in `remote-ls --updates`, but
+    // `flatpak update` says "Nothing to update."
+    let fixture = FlatpakFixture {
+        installed: Some(
+            "org.test.App\tx86_64\tstable\t1\tApp\tlocal\tcurrent\n\
+             org.test.App.Plugin\tx86_64\tstable\t\tPlugin\tlocal\truntime\n\
+             org.test.Platform\tx86_64\t1\t\tPlatform\tlocal\truntime\n\
+             org.test.Platform\tx86_64\t2\t\tPlatform\tlocal\truntime\n\
+             org.other.App\tx86_64\tstable\t1\tOther\tlocal\tcurrent\n"
+                .into(),
+        ),
+        user_updates: Some(output(
+            "app/org.test.App/x86_64/stable\t2\tlocal\n\
+             runtime/org.test.App.Plugin/x86_64/stable\t\tlocal\n\
+             runtime/org.test.Platform/x86_64/1\t\tlocal\n\
+             runtime/org.test.Platform/x86_64/2\t\tlocal\n\
+             app/org.other.App/x86_64/stable\t2\tlocal\n",
+        )),
+        user_masks: Some("  org.test.App\n  org.test.Platform//1\n"),
+        metadata: vec![(
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            "[Runtime]\nname=org.test.App.Plugin\n\n[ExtensionOf]\nref=app/org.test.App/x86_64/stable\n",
+        )],
+        ..Default::default()
+    };
+    let packages = Flatpak::new(fixture.clone())
+        .installed(&Cancellation::default())
+        .unwrap();
+    let update = |reference: &str| {
+        packages
+            .iter()
+            .find(|p| p.id.scope != Scope::System && p.id.reference.as_deref() == Some(reference))
+            .map(|p| (p.update.clone(), p.candidate_version.clone()))
+            .unwrap()
+    };
+    for (reference, version) in [
+        ("app/org.test.App/x86_64/stable", "1"),
+        ("runtime/org.test.App.Plugin/x86_64/stable", ""),
+        ("runtime/org.test.Platform/x86_64/1", ""),
+    ] {
+        assert_eq!(
+            update(reference),
+            (UpdateAvailability::Current, Some(version.into())),
+            "{reference}"
+        );
+    }
+    for (reference, version) in [
+        ("runtime/org.test.Platform/x86_64/2", ""),
+        ("app/org.other.App/x86_64/stable", "2"),
+    ] {
+        assert_eq!(
+            update(reference),
+            (UpdateAvailability::Available, Some(version.into())),
+            "{reference}"
+        );
+    }
+    // Only runtimes can be extensions, so only they are looked up.
+    let calls = fixture.calls.lock().unwrap();
+    let looked_up: Vec<_> = calls
+        .iter()
+        .filter(|(args, _, _)| args.contains(&"--show-metadata".into()))
+        .map(|(args, _, _)| args.last().unwrap().as_str())
+        .collect();
+    assert_eq!(
+        looked_up,
+        [
+            "runtime/org.test.App.Plugin/x86_64/stable",
+            "runtime/org.test.Platform/x86_64/2"
+        ]
+    );
+    // The system installation has no updates, so it isn't asked for masks.
+    let asked: Vec<_> = calls
+        .iter()
+        .filter(|(args, _, _)| args.contains(&"mask".into()))
+        .collect();
+    assert_eq!(
+        asked,
+        [&(vec!["--user".into(), "mask".into()], false, false)]
+    );
+}
+
+#[test]
 fn flatpak_update_query_failures_are_not_reported_as_current() {
     let cancel = Cancellation::default();
     let mut failed = output("");
@@ -6340,16 +6489,23 @@ impl Transport for Script {
             .filter(|(command, _)| line.starts_with(command.as_str()))
             .max_by_key(|(command, _)| command.len())
             .map(|(_, reply)| reply.clone());
-        // No reply, or a reply of "exit N", fails with that code and no output.
-        let code = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
+        // No reply fails with code 1. A reply of "exit N" fails with that
+        // code, and any lines after it are its output. Like the host, a
+        // write that ran answers with its code; a failed read is an error.
+        let (code, stdout) = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
             Some(None) => return Ok(output(reply.unwrap())),
-            Some(Some(code)) => code.parse().unwrap(),
-            None => 1,
+            Some(Some(code)) => code.split_once('\n').unwrap_or((code, "")),
+            None => ("1", ""),
         };
-        Err(ExecutionError::Failed(Completion {
-            code: Some(code),
-            ..output("")
-        }))
+        let done = Completion {
+            code: Some(code.parse().unwrap()),
+            ..output(stdout)
+        };
+        if write {
+            Ok(done)
+        } else {
+            Err(ExecutionError::Failed(done))
+        }
     }
 }
 
@@ -6359,10 +6515,12 @@ fn apk_lists_updates_and_writes_with_its_own_verbs() {
     // apk reports the machine's own architecture, which search rows use too.
     let arch = std::env::consts::ARCH;
     let installed_lines = format!("busybox-1.37.0-r12 {arch} {{busybox}} (GPL-2.0-only) [installed]\njq-1.8.2-r0 {arch} {{jq}} (MIT) [installed]\n");
-    let upgradable_lines = format!("busybox-1.37.0-r13 {arch} {{busybox}} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n");
+    // apk 3 pads the count. A package /etc/apk/world pins isn't listed.
+    let upgradable_lines =
+        "( 1/10) Upgrading busybox (1.37.0-r12 -> 1.37.0-r13)\n(2/2) Installing new-dependency (1.0-r0)\nOK: 10.0 MiB in 20 packages\n";
     let script = Script::new(&[
         ("apk list --installed", installed_lines.as_str()),
-        ("apk list --upgradable", upgradable_lines.as_str()),
+        ("apk upgrade --simulate", upgradable_lines),
         ("apk search -v jq", "gojq-0.12.19-r3 - Pure Go implementation of jq\njq-1.8.2-r0 - A lightweight and flexible command-line JSON processor\n"),
         ("apk add", ""),
         ("apk del", ""),
@@ -6400,6 +6558,130 @@ fn apk_lists_updates_and_writes_with_its_own_verbs() {
         .lock()
         .unwrap()
         .contains(&"apk del -- jq (write)".into()));
+}
+
+#[test]
+fn apk_shows_updates_when_its_simulated_upgrade_cant_tell() {
+    let cancel = Cancellation::default();
+    let arch = std::env::consts::ARCH;
+    let installed_lines = format!("busybox-1.37.0-r12 {arch} {{busybox}} (GPL-2.0-only) [installed]\nscanelf-1.3.9-r1 {arch} {{pax-utils}} (GPL-2.0-only) [installed]\n");
+    let updates = |script: &Script| {
+        let installed = SystemManager::apk(script.clone())
+            .installed(&cancel)
+            .unwrap();
+        installed
+            .into_iter()
+            .map(|p| (p.id.name, p.candidate_version, p.update))
+            .collect::<Vec<_>>()
+    };
+    let simulated =
+        "(1/1) Upgrading scanelf@edge (1.3.9-r1 -> 1.3.11-r0)\nOK: 8 MiB in 16 packages\n";
+    let expected = [
+        (
+            "busybox".to_owned(),
+            Some("1.37.0-r12".to_owned()),
+            UpdateAvailability::Current,
+        ),
+        (
+            "scanelf".to_owned(),
+            Some("1.3.11-r0".to_owned()),
+            UpdateAvailability::Available,
+        ),
+    ];
+    // A package world pins to a tagged repository ("scanelf@edge") updates
+    // under its own name.
+    let tagged = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        (
+            "apk upgrade --simulate --force-missing-repositories",
+            simulated,
+        ),
+    ]);
+    assert_eq!(updates(&tagged), expected);
+    // apk before 2.12 doesn't know --force-missing-repositories; it's asked
+    // again without it.
+    let old = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        (
+            "apk upgrade --simulate --force-missing-repositories",
+            "exit 1\napk: unrecognized option: force-missing-repositories\n",
+        ),
+        ("apk upgrade --simulate", simulated),
+    ]);
+    assert_eq!(updates(&old), expected);
+    // A world apk can't solve fails the simulation, and would fail every
+    // update too: no row says whether it has one.
+    let unsolvable = Script::new(&[
+        ("apk list --installed", installed_lines.as_str()),
+        (
+            "apk upgrade --simulate",
+            "exit 1\nERROR: unable to select packages:\n  nosuchpkg (no such package):\n",
+        ),
+    ]);
+    assert!(updates(&unsolvable)
+        .iter()
+        .all(|(_, _, update)| *update == UpdateAvailability::Unknown));
+    assert_eq!(unsolvable.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn apk_doesnt_blame_an_update_on_a_repository_it_cant_reach() {
+    let cancel = Cancellation::default();
+    let id = |name: &str| PackageId {
+        backend: "apk".into(),
+        name: name.into(),
+        architecture: std::env::consts::ARCH.into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let mut apk = SystemManager::apk(Script::new(&[
+        ("apk upgrade --update-cache -- zlib", "exit 99\nWARNING: updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
+        ("apk upgrade --update-cache -- musl", "exit 1\nERROR: musl-1.2.6-r0: BAD signature\n"),
+        ("apk upgrade --update-cache -- jq", "exit 99\nERROR: Not continuing due to stale/unavailable repositories. Use --force-missing-repositories to continue.\n"),
+        // apk before 2.14 skips the repository, so its refusal text with
+        // another exit code is the update's own.
+        ("apk upgrade --update-cache -- curl", "exit 1\nERROR: Not continuing due to stale/unavailable repositories.\n"),
+        ("apk upgrade --update-cache -- xz", &format!("exit 99\nWARNING: opening https://example.invalid/\x1b[31m{}/APKINDEX.tar.gz: Connection refused\nERROR: Not continuing due to stale/unavailable repositories.\n", "a".repeat(400))),
+    ]));
+    let error = apk
+        .execute(&Operation::Upgrade(id("zlib")), &cancel, &mut |_| {})
+        .unwrap_err();
+    assert_eq!(
+        error,
+        EngineError::Execution(ExecutionError::Unreachable(
+            "updating and opening http://127.0.0.1:9/x/x86_64/APKINDEX.tar.gz: Connection refused"
+                .into()
+        ))
+    );
+    assert!(!error.blames_change());
+    // Without a line that names the repository, apk's refusal says it.
+    assert_eq!(
+        apk.execute(&Operation::Upgrade(id("jq")), &cancel, &mut |_| {}),
+        Err(EngineError::Execution(ExecutionError::Unreachable(
+            "Not continuing due to stale/unavailable repositories.".into()
+        )))
+    );
+    // A line apk printed is one line of plain text, at most 300 characters.
+    let Err(EngineError::Execution(ExecutionError::Unreachable(line))) =
+        apk.execute(&Operation::Upgrade(id("xz")), &cancel, &mut |_| {})
+    else {
+        panic!("xz wasn't refused for its repository");
+    };
+    assert!(
+        line.starts_with("opening https://example.invalid/ [31maaa"),
+        "{line}"
+    );
+    assert!(!line.chars().any(char::is_control), "{line}");
+    assert_eq!(line.chars().count(), 301);
+    assert!(line.ends_with('…'));
+    // Any other failure is the update's own.
+    for name in ["musl", "curl"] {
+        let error = apk
+            .execute(&Operation::Upgrade(id(name)), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert!(error.blames_change(), "{name}: {error:?}");
+    }
 }
 
 #[test]
@@ -6649,6 +6931,52 @@ fn pacman_detects_and_searches_with_one_command_each() {
         Pacman::pacman(broken).search("missing", &cancel),
         Err(EngineError::Execution(ExecutionError::Failed(_)))
     ));
+}
+
+#[test]
+fn dnf_leaves_out_updates_versionlock_holds() {
+    let cancel = Cancellation::default();
+    let upgrades = "dnf -C --quiet repoquery --upgrades";
+    let installed = "dnf --quiet repoquery --latest-limit 1 --installed";
+    let check = "dnf -C --quiet check-update";
+    // dnf 4's repoquery lists curl-minimal although versionlock holds it.
+    let listed = "curl-minimal|x86_64|7.76.1-40.el9_8.9\n\nglibc-common|x86_64|2.34-284.el9_8.4\n\nlibcurl-minimal|x86_64|7.76.1-40.el9_8.9\n\nglibc-minimal-langpack-with-a-long-name|x86_64|2.34-284.el9_8.4\n";
+    let rows = "curl-minimal|x86_64|7.76.1-40.el9_8.8|URL tool\nglibc-common|x86_64|2.34-284.el9_8.3|Common\nlibcurl-minimal|x86_64|7.76.1-40.el9_8.8|URL library\nglibc-minimal-langpack-with-a-long-name|x86_64|2.34-284.el9_8.3|Langpack\n";
+    let updates = |check_update: &str| {
+        let script = Script::new(&[(upgrades, listed), (installed, rows), (check, check_update)]);
+        Dnf::dnf(script)
+            .installed(&cancel)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.id.name, p.update))
+            .collect::<Vec<_>>()
+    };
+    let [available, current] = [UpdateAvailability::Available, UpdateAvailability::Current];
+    // dnf 4 wraps a long name onto its own line. What an update obsoletes
+    // (curl-minimal here) isn't an update.
+    assert_eq!(
+        updates("exit 100\n\nglibc-common.x86_64                        2.34-284.el9_8.4              baseos\nglibc-minimal-langpack-with-a-long-name.x86_64\n                                           2.34-284.el9_8.4              baseos\nlibcurl-minimal.x86_64                     7.76.1-40.el9_8.9              baseos\nObsoleting Packages\ncurl-full.x86_64                           7.76.1-40.el9_8.9              baseos\n    curl-minimal.x86_64                    7.76.1-40.el9_8.8              @System\n"),
+        [
+            ("curl-minimal".into(), current.clone()),
+            ("glibc-common".into(), available.clone()),
+            ("libcurl-minimal".into(), available.clone()),
+            ("glibc-minimal-langpack-with-a-long-name".into(), available.clone()),
+        ]
+    );
+    // dnf 5 has a heading and one space between columns.
+    assert_eq!(
+        updates("exit 100\nUpgrades\ncurl-minimal.x86_64 7.76.1-40.el9_8.9 updates\n")
+            .into_iter()
+            .filter(|(_, update)| *update == available)
+            .count(),
+        1
+    );
+    // Exit 0: every update is held back.
+    assert!(updates("").into_iter().all(|(_, update)| update == current));
+    // When check-update can't tell, the listing stays as repoquery has it.
+    assert!(updates("exit 1")
+        .into_iter()
+        .all(|(_, update)| update == available));
 }
 
 #[test]

@@ -182,7 +182,7 @@ fn download(
     }
     let curl = host
         .resolve("curl")?
-        .ok_or_else(|| invalid("curl is unavailable"))?;
+        .ok_or_else(|| invalid(crate::host::NO_CURL))?;
     let mut command = Command::new(curl);
     command
         .args([

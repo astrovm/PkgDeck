@@ -495,10 +495,9 @@ fn repository_errors_preserve_other_sources_and_respect_source_filter() {
     let report = repositories::list(&fixture, &root, &Cancellation::default());
     assert_eq!(report.repositories.len(), 2);
     assert_eq!(report.errors.len(), 3);
-    assert!(report
-        .errors
-        .iter()
-        .any(|error| error.contains("invalid firmware remote ID")));
+    assert!(report.errors.iter().any(|error| error.backend == "fwupd"
+        && error.to_string().starts_with("Firmware: ")
+        && error.to_string().contains("invalid firmware remote ID")));
     let report = repositories::list_selected(
         &fixture,
         &root,

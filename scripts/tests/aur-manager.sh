@@ -122,7 +122,9 @@ sandbox=
 "$engine" run --rm --platform linux/amd64 -v "$binary:/opt/pkd:ro" docker.io/library/archlinux:base bash -c '
     # Mirrors time out now and then; setup is not what this tests.
     for attempt in 1 2 3; do
-        if pacman -Sy --noconfirm $2 sudo fakeroot jq; then break; fi
+        # A full update: a partial one fails while Arch moves to a new
+        # library (OpenSSL 4).
+        if pacman -Syu --noconfirm $2 sudo fakeroot jq; then break; fi
         [[ $attempt == 3 ]] && exit 1
         sleep 15
     done

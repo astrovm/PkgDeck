@@ -61,7 +61,7 @@ cat >"$work/bin/podman" <<'EOF'
 case "$1" in
     info) [[ $* == *CPUs* ]] && echo '8 1000' || echo true ;;
     image) exit 0 ;;
-    run) printf '%s\n' "$@" >"$PODMAN_ARGS"; exit "${PODMAN_STATUS:-0}" ;;
+    run) printf '%s\n' "$@" >"$PODMAN_ARGS"; sleep "${PODMAN_SLEEP:-0}"; exit "${PODMAN_STATUS:-0}" ;;
     *) exit 2 ;;
 esac
 EOF
@@ -72,6 +72,23 @@ grep -Fxq tests "$work/args"
 grep -Fxq "$work/cache/cargo:/cache/cargo:rw" "$work/args"
 grep -Fxq "$work/cache/target:/workspace/target:rw" "$work/args"
 grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
+# The container times each of its own stages, so a long container run as a
+# whole must not hit the stage limit (a full run from a cold cache did).
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PODMAN_SLEEP=0.5 PKGDECK_STAGE_TIMEOUT=0.1s PKGDECK_CONTAINER_CACHE="$work/cache" PKGDECK_LOG_ROOT="$work/container-logs" scripts/verify.sh full --only tests --engine podman
+# The image build keeps the stage limit, so a stalled download ends.
+mkdir -p "$work/stall"
+cat >"$work/stall/podman" <<'EOF'
+#!/bin/bash
+case "$1" in
+    info) echo true ;;
+    image) exit 1 ;;
+    build) sleep 5 ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod +x "$work/stall/podman"
+expect_code 124 env PATH="$work/stall:$PATH" PKGDECK_STAGE_TIMEOUT=0.1s PKGDECK_CONTAINER_CACHE="$work/cache" PKGDECK_LOG_ROOT="$work/stalled-logs" scripts/verify.sh full --only tests --engine podman
+test -f "$work/stalled-logs/latest/build-image.log"
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec

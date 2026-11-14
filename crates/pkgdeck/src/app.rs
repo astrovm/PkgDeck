@@ -427,10 +427,12 @@ impl App {
     fn apply_release_wait(&mut self) {
         self.release_wait_changed = false;
         self.release_wait_error = self.store.release_wait_path().and_then(|path| {
-            self.release_wait
-                .save(&path)
-                .err()
-                .map(|error| format!("Couldn't save this: {error}"))
+            self.release_wait.save(&path).err().map(|error| {
+                format!(
+                    "Couldn't save this: {}",
+                    pkgdeck_core::process::without_os_code(&error.to_string())
+                )
+            })
         });
         self.c().forget_update_list();
         self.check_updates(true);

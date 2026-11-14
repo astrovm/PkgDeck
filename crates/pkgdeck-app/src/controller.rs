@@ -331,6 +331,9 @@ struct Ended {
     /// Why it didn't finish, as Activity keeps it: what `said` says,
     /// without anything a tool printed.
     kept: Option<String>,
+    /// It failed because of the change itself, so it would fail the same
+    /// way again (see [`EngineError::blames_change`]).
+    blamed: bool,
 }
 /// What a cleanup task waiting for a build says.
 const WAITS_FOR_BUILD: &str = "Waits for a build that uses it to finish, then cleans on its own.";
@@ -1335,12 +1338,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let held = if operations.iter().any(apt) {
                 match engine.plan_apt_upgrade(cancel) {
                     Ok(plan) if removals || plan.removals.is_empty() => None,
-                    Ok(plan) => Some(format!(
+                    Ok(plan) => Some(Held::said(format!(
                         "Not updated automatically: it would remove {} {}. Review it with Update all.",
                         plan.removals.len(),
                         if plan.removals.len() == 1 { "package" } else { "packages" }
-                    )),
-                    Err(error) => Some(plain_error(&error, Some("apt"), false)),
+                    ))),
+                    Err(error) => Some(Held {
+                        shown: plain_error(&error, Some("apt"), false),
+                        kept: kept_reason(&error, "apt"),
+                    }),
                 }
             } else {
                 None
@@ -1390,6 +1396,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                             Said::Completed
                         },
                         kept: None,
+                        blamed: false,
                     }],
                     note: Some(note),
                 }),
@@ -1405,12 +1412,28 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
 fn joins_cask_updates(job: &Job, authorization: Authorization) -> bool {
     matches!(job, Job::UpgradeAll(..)) && matches!(authorization, Authorization::Polkit)
 }
+/// Why a change in a batch is held back: what PkgDeck shows, and what
+/// Activity keeps, which never holds what a tool printed.
+#[derive(Clone, Debug)]
+struct Held {
+    shown: String,
+    kept: String,
+}
+impl Held {
+    /// A reason in PkgDeck's own words, shown and kept the same.
+    fn said(reason: String) -> Self {
+        Self {
+            kept: reason.clone(),
+            shown: reason,
+        }
+    }
+}
 /// Run a confirmed batch and summarize it. `held` changes are reported as
 /// failed with their reason and never run.
 fn run_batch(
     engine: &mut Engine,
     operations: &[Operation],
-    held: Vec<(Operation, String)>,
+    held: Vec<(Operation, Held)>,
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Payload {
@@ -1420,7 +1443,7 @@ fn run_batch(
 fn batch(
     engine: &mut Engine,
     operations: &[Operation],
-    held: Vec<(Operation, String)>,
+    held: Vec<(Operation, Held)>,
     cancel: &Cancellation,
     send: &mut dyn FnMut(Reply),
 ) -> Batch {
@@ -1451,7 +1474,7 @@ fn batch(
         }
     });
     let mut ran = ran.into_iter();
-    let results: Vec<Result<OperationOutcome, (EngineError, Option<String>)>> = operations
+    let results: Vec<Result<OperationOutcome, (EngineError, Option<Held>)>> = operations
         .iter()
         .map(|op| match held.iter().find(|(held, _)| held == op) {
             Some((_, reason)) => Err((EngineError::Cancelled, Some(reason.clone()))),
@@ -1474,7 +1497,7 @@ fn batch(
     } else {
         "updates"
     };
-    let mut steps = Vec::new();
+    let mut steps: Vec<Ended> = Vec::new();
     let mut failure_output = Vec::new();
     for (operation, result) in operations.iter().zip(results) {
         if let Err((error, None)) = &result {
@@ -1489,13 +1512,15 @@ fn batch(
         }
         let (outcome, kept) = match &result {
             Ok(_) => (Outcome::Finished, None),
-            Err((_, Some(reason))) => (Outcome::Failed, Some(reason.clone())),
+            Err((_, Some(reason))) => (Outcome::Failed, Some(reason.kept.clone())),
             Err((error, None)) => ended_by(error, operation.backend()),
         };
+        // A held change didn't run.
+        let blamed = matches!(&result, Err((error, None)) if error.blames_change());
         let said = match result {
             Ok(outcome) if outcome.cancellation_deferred => Said::KeptAfterCancel,
             Ok(_) => Said::Completed,
-            Err((_, Some(reason))) => Said::Because(reason),
+            Err((_, Some(reason))) => Said::Because(reason.shown),
             Err((
                 EngineError::Refused {
                     refusal: Refusal::Building,
@@ -1515,6 +1540,7 @@ fn batch(
             outcome,
             said,
             kept,
+            blamed,
         });
     }
     if !failure_output.is_empty() {
@@ -1782,7 +1808,7 @@ fn read_activity(path: &std::path::Path) -> std::io::Result<Vec<pkgdeck_core::ac
         flock(lock, FlockOperation::LockShared)?;
     }
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+        Ok(bytes) => Ok(pkgdeck_core::activity::parse(&bytes)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(vec![]),
         Err(error) => Err(error),
     }
@@ -2342,13 +2368,21 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
 /// Whether this is an update that already failed at the version it would
 /// go to now.
 fn failed_before(operation: &Operation, packages: &[Package], failed: &FailedUpdates) -> bool {
+    failed_at_its_version(operation, packages, |id, version| failed.skips(id, version))
+}
+/// Whether `failed` says so of the version this update would go to now.
+fn failed_at_its_version(
+    operation: &Operation,
+    packages: &[Package],
+    failed: impl Fn(&PackageId, &str) -> bool,
+) -> bool {
     let Operation::Upgrade(id) = operation else {
         return false;
     };
     packages
         .iter()
         .find(|package| package.id == *id)
-        .is_some_and(|package| failed.skips(id, cask_version(package)))
+        .is_some_and(|package| failed(id, cask_version(package)))
 }
 /// Update all leaves out updates that failed before, so one broken update
 /// doesn't fail every run. When nothing else is left it tries them again:
@@ -2392,7 +2426,7 @@ fn without_waiting(operations: Vec<Operation>, packages: &[Package]) -> Vec<Oper
 /// updates, with the one command the saved approval names. Casks update
 /// one at a time, so one that needs the password stops only itself, and
 /// those that needed it before wait for a newer version, like any update
-/// that failed.
+/// that failed twice.
 fn automatic_plan(
     packages: &[Package],
     needs_password: &NeedsPassword,
@@ -2413,7 +2447,17 @@ fn automatic_plan(
             Operation::UpgradeAll { backend } if backend == "homebrew-cask" => casks.clone(),
             operation => vec![operation],
         })
-        .filter(|operation| !failed_before(operation, packages, failed))
+        .filter(|operation| {
+            !failed_at_its_version(operation, packages, |id, version| {
+                failed.keeps_failing(id, version)
+            })
+        })
+        // An update the helper won't run unattended waits for someone to
+        // start it, instead of failing every run.
+        .filter(|operation| {
+            !matches!(operation, Operation::Upgrade(_))
+                || pkgdeck_core::batch::upgrade_only_allows(operation)
+        })
         .collect();
     if operations
         .iter()
@@ -2694,20 +2738,23 @@ fn repository_label(action: &RepositoryAction) -> String {
         source_and_scope(&action.backend, &action.scope)
     )
 }
-/// A repository listing error such as "flatpak: host command failed…",
-/// with the source named as people know it.
-fn repository_error(error: &str) -> String {
-    match error.split_once(": ") {
-        Some((source, rest)) if pkgdeck_core::backends::BACKEND_IDS.contains(&source) => {
-            let text = plain_text(rest, Some(source));
-            let name = source_display_name(source);
-            if text.starts_with(&name) {
-                text
-            } else {
-                format!("{name}: {text}")
-            }
+/// A source or a file PkgDeck couldn't list repositories from, as one
+/// sentence that names where first: "Flatpak, User: No remote refs."
+fn repository_error(problem: &repositories::Problem) -> String {
+    let place = match &problem.file {
+        Some(file) => format!(
+            "{}, {}",
+            source_display_name(&problem.backend),
+            file.display()
+        ),
+        None => source_and_scope(&problem.backend, &problem.scope),
+    };
+    match &problem.error {
+        // Parser text says nothing people can act on.
+        EngineError::InvalidResponse { .. } => {
+            format!("{place}: PkgDeck couldn't read its list of repositories.")
         }
-        _ => plain_text(error, None),
+        error => format!("{place}: {}", plain_error(error, None, false)),
     }
 }
 /// The repositories report, with each repository's source and scope in
@@ -2728,7 +2775,7 @@ fn repositories_json(report: &repositories::Report) -> QString {
     value["errors"] = json!(report
         .errors
         .iter()
-        .map(|error| repository_error(error))
+        .map(repository_error)
         .collect::<Vec<_>>());
     encoded(value)
 }
@@ -2812,8 +2859,6 @@ fn merge_retried_packages(
         successful_sources,
     }
 }
-/// Details for a failed source row. Served from the stored report without a
-/// backend roundtrip: the query already failed, re-querying cannot help.
 /// A plain-language reason a change failed, with what to do next.
 fn write_error_text(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     plain_error(error, backend, sudo)
@@ -5202,9 +5247,11 @@ impl ffi::PackageController {
         self.as_mut()
             .set_notification_history(saved.as_str().into());
     }
-    /// Remember which updates of a finished change failed, so automatic
-    /// runs and Update all skip them, and forget the ones that worked.
-    /// Casks that stopped for the password are remembered apart.
+    /// Remember which updates of a finished change failed because of the
+    /// update itself, so automatic runs and Update all skip them, and
+    /// forget the ones that worked. One stopped by a cancel, the password
+    /// prompt or a helper that didn't start isn't remembered: it can work
+    /// next time. Casks that stopped for the password are remembered apart.
     fn remember_update_outcomes(
         mut self: Pin<&mut Self>,
         job: &Job,
@@ -5212,15 +5259,16 @@ impl ffi::PackageController {
         password_casks: &[PackageId],
     ) {
         let operations = job.operations();
-        let failed: Vec<bool> = match result {
-            Ok(Payload::Batch(ran)) => ran.outcomes().map(|o| o == Outcome::Failed).collect(),
-            Ok(_) => vec![false; operations.len()],
-            Err(
-                EngineError::Cancelled
-                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
-            ) => return,
+        // How each change ended, and whether it failed because of itself.
+        let ended: Vec<(Outcome, bool)> = match result {
+            Ok(Payload::Batch(ran)) => ran
+                .steps
+                .iter()
+                .map(|step| (step.outcome, step.blamed))
+                .collect(),
+            Ok(_) => vec![(Outcome::Finished, false); operations.len()],
             // One change on its own failed as a whole.
-            Err(_) if operations.len() == 1 => vec![true],
+            Err(error) if operations.len() == 1 => vec![(Outcome::Failed, error.blames_change())],
             Err(_) => return,
         };
         let version = |id: &PackageId| -> Option<String> {
@@ -5234,16 +5282,21 @@ impl ffi::PackageController {
         let mut failures = Vec::new();
         let mut worked = Vec::new();
         let mut needed = Vec::new();
-        for (operation, failed) in operations.iter().zip(failed) {
+        for (operation, (outcome, blamed)) in operations.iter().zip(ended) {
             let Operation::Upgrade(id) = operation else {
                 continue;
             };
-            if !failed {
-                worked.push(id.clone());
-            } else if password_casks.contains(id) {
-                needed.extend(version(id).map(|version| (id.name.clone(), version)));
-            } else if let Some(version) = version(id) {
-                failures.push((id.clone(), version));
+            match outcome {
+                Outcome::Finished => worked.push(id.clone()),
+                Outcome::Failed if password_casks.contains(id) => {
+                    needed.extend(version(id).map(|version| (id.name.clone(), version)));
+                }
+                Outcome::Failed if blamed => {
+                    failures.extend(version(id).map(|version| (id.clone(), version)));
+                }
+                // Cancelled, left for later, or stopped by something other
+                // than the update: it says nothing about the update.
+                _ => {}
             }
         }
         if failures.is_empty() && worked.is_empty() && needed.is_empty() {
@@ -7385,10 +7438,9 @@ impl ffi::PackageController {
                         report.packages.len(),
                         failed
                             .iter()
-                            .map(|f| format!(
-                                "{}: {}",
-                                source_display_name(&f.backend),
-                                plain_error(&f.error, Some(&f.backend), sudo)
+                            .map(|f| about_source(
+                                &source_display_name(&f.backend),
+                                &plain_error(&f.error, Some(&f.backend), sudo)
                             ))
                             .collect::<Vec<_>>()
                             .join("\n")

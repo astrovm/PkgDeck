@@ -49,7 +49,7 @@ fn source_bytes(source: &str, cancel: &Cancellation, host: &Host) -> Result<Vec<
         }
         let curl = host
             .resolve("curl")?
-            .ok_or_else(|| invalid("curl is unavailable"))?;
+            .ok_or_else(|| invalid(crate::host::NO_CURL))?;
         let args = [
             "--silent",
             "--show-error",
@@ -423,6 +423,24 @@ mod tests {
     use std::collections::BTreeMap;
     fn validate(suffix: &str, text: &str) -> Result<(String, String, String), EngineError> {
         super::validate(suffix, text, &Host::current())
+    }
+    #[test]
+    fn a_download_without_curl_says_so() {
+        let empty =
+            std::env::temp_dir().join(format!("pkgdeck-no-curl-repo-{}", std::process::id()));
+        fs::create_dir_all(&empty).unwrap();
+        let host = Host::new(
+            Runtime::Native,
+            BTreeMap::from([(OsString::from("PATH"), empty.as_os_str().to_os_string())]),
+        );
+        let error = source_bytes(
+            "https://example.invalid/a.repo",
+            &Cancellation::default(),
+            &host,
+        )
+        .unwrap_err();
+        assert!(error.to_string().ends_with(crate::host::NO_CURL), "{error}");
+        fs::remove_dir_all(empty).unwrap();
     }
     #[test]
     fn requires_signed_apt_sources() {

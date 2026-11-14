@@ -43,7 +43,15 @@ impl ManagerKind {
     fn update_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Self::Snap => ("snap", &["refresh", "--list"]),
-            Self::Apk => ("apk", &["list", "--upgradable"]),
+            // `apk list --upgradable` also lists packages /etc/apk/world
+            // pins, and an upgrade leaves those alone. Without
+            // --force-missing-repositories, one repository that can't be
+            // reached (offline, or one third-party repository down) stops
+            // the whole simulation. apk before 2.12 doesn't know the flag.
+            Self::Apk => (
+                "apk",
+                &["upgrade", "--simulate", "--force-missing-repositories"],
+            ),
             // -C reads the cache a check just refreshed; without one, it's
             // asked again online.
             Self::Dnf => (
@@ -226,18 +234,27 @@ fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
     (version.contains('_') && !name.is_empty()).then(|| (name, version.to_owned()))
 }
 
+/// A snap's name, with an optional `_KEY` for a parallel instance, as
+/// snapd allows them. A `+` would name a component, which `snap refresh`
+/// and `snap install` add when it's missing, so no root command takes one.
+pub fn snap_name(name: &str) -> bool {
+    let (snap, key) = name.split_once('_').unwrap_or((name, "x"));
+    let plain = |part: &str, dashes: bool| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || (dashes && byte == b'-')
+            })
+    };
+    plain(snap, true) && plain(key, false)
+}
+
 /// The snaps and revisions an old-revisions task removes, from its key:
 /// `disabled-revisions:firefox=9113,core22=2955`. `None` for any other key,
 /// or one with a name or revision Snap wouldn't make.
 pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
     let listed = key.strip_prefix("disabled-revisions:")?;
-    let name = |name: &str| {
-        !name.is_empty()
-            && !name.starts_with('-')
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    };
+    let name = snap_name;
     let revision = |revision: &str| {
         let digits = revision.strip_prefix('x').unwrap_or(revision);
         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -252,8 +269,6 @@ pub fn snap_revisions(key: &str) -> Option<Vec<(String, String)>> {
         .filter(|revisions| !revisions.is_empty())
 }
 
-/// Revisions `snap list --all` marks disabled, with their versions: what
-/// Snap keeps to go back to after an update.
 /// Every installed snap by name, from `snap list --all`.
 fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
     listing
@@ -264,6 +279,92 @@ fn snap_names(listing: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// Whether apk's output says `text`.
+fn apk_says(done: &Completion, text: &str) -> bool {
+    [&done.stdout, &done.stderr]
+        .iter()
+        .any(|out| String::from_utf8_lossy(out).contains(text))
+}
+
+/// apk older than 2.12 says "apk: unrecognized option: ..." to a flag it
+/// doesn't know.
+fn apk_lacks_an_option(done: &Completion) -> bool {
+    apk_says(done, "unrecognized option")
+}
+
+/// apk 2.14 and later refuse a change while a repository they can't reach
+/// has no fresh index (exit 99): "Not continuing due to stale/unavailable
+/// repositories". That says nothing about the package. Its line that names
+/// the repository, or else that refusal. Older apk skips the repository.
+fn apk_unreachable(done: &Completion) -> Option<String> {
+    if done.code != Some(99) || !apk_says(done, "stale/unavailable repositories") {
+        return None;
+    }
+    let text =
+        String::from_utf8_lossy(&done.stderr).into_owned() + &String::from_utf8_lossy(&done.stdout);
+    let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = lines()
+        .find(|line| line.contains("://"))
+        .or_else(|| lines().find(|line| line.contains("stale/unavailable")))?;
+    let line = line
+        .strip_prefix("WARNING: ")
+        .or_else(|| line.strip_prefix("ERROR: "))
+        .unwrap_or(line);
+    // apk 3 adds "Use --force-missing-repositories to continue.", which
+    // isn't for PkgDeck's users.
+    let line = line.split(" Use --").next().unwrap_or(line);
+    Some(crate::process::one_line(line))
+}
+
+/// "(1/2) Upgrading zlib (1.3.2-r1 -> 1.4-r0)" from `apk upgrade --simulate`
+/// into (`zlib`, `1.4-r0`). apk 3 pads the count: "( 1/12)". A package
+/// world pins to a tagged repository reads "scanelf@edge".
+fn apk_upgrading(line: &str) -> Option<(&str, String)> {
+    let (_, change) = line.trim().split_once(") Upgrading ")?;
+    let (name, versions) = change.split_once(" (")?;
+    let name = name.split_once('@').map_or(name, |(name, _)| name);
+    let (_, version) = versions.strip_suffix(')')?.split_once(" -> ")?;
+    (!name.contains(char::is_whitespace) && !version.is_empty()).then(|| (name, version.to_owned()))
+}
+
+/// Every word of `dnf check-update` before its obsoletes, which names
+/// what an update replaces: `name.arch` among them for each update. dnf 4
+/// wraps a long `name.arch` onto its own line; dnf 5 adds an "Upgrades"
+/// heading.
+fn dnf_check_update(text: &str) -> std::collections::BTreeSet<&str> {
+    text.lines()
+        .take_while(|line| {
+            !line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("obsoleting")
+        })
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
+/// Snaps `snap list` marks held (`snap refresh --hold`). A full refresh
+/// leaves them alone, but `snap refresh --list` still lists their updates.
+fn held_snaps(listing: &str) -> std::collections::BTreeSet<String> {
+    listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            // Name Version Rev Tracking Publisher Notes
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let [name, _, _, _, _, notes] = fields.as_slice() else {
+                return None;
+            };
+            notes
+                .split(',')
+                .any(|note| note == "held")
+                .then(|| (*name).to_owned())
+        })
+        .collect()
+}
+
+/// Revisions `snap list --all` marks disabled, with their versions: what
+/// Snap keeps to go back to after an update.
 fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
     listing
         .lines()
@@ -347,12 +448,14 @@ impl<T: Transport> SystemManager<T> {
             .transport
             .system_manager(executable, &args, cancel, write)?)
     }
-    /// Pending updates by package name. An unavailable listing leaves every
-    /// row's update status as it was rather than failing the inventory.
+    /// Pending updates by package name, or `None` when the manager can't
+    /// tell. Most managers' listing also fails when nothing needs an update
+    /// (`pacman -Qu`), so only apk, which then says so and exits 0, can't
+    /// tell. Either way the inventory itself doesn't fail.
     pub(super) fn updates(
         &self,
         cancel: &Cancellation,
-    ) -> Result<BTreeMap<String, String>, EngineError> {
+    ) -> Result<Option<BTreeMap<String, String>>, EngineError> {
         let (executable, args) = self.kind.update_args();
         let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
         // A check's own copy of the index, while it's newer.
@@ -373,6 +476,15 @@ impl<T: Transport> SystemManager<T> {
             Err(EngineError::Execution(ExecutionError::Failed(_))) if args[0] == "-C" => {
                 self.call_with(executable, args[1..].to_vec(), cancel, false)
             }
+            Err(EngineError::Execution(ExecutionError::Failed(done)))
+                if matches!(self.kind, ManagerKind::Apk) && apk_lacks_an_option(&done) =>
+            {
+                let args = args
+                    .into_iter()
+                    .filter(|arg| arg != "--force-missing-repositories")
+                    .collect();
+                self.call_with(executable, args, cancel, false)
+            }
             result => result,
         };
         let text = match result {
@@ -381,12 +493,16 @@ impl<T: Transport> SystemManager<T> {
                 return Err(EngineError::Cancelled)
             }
             Err(error) if matches!(self.kind, ManagerKind::Snap) => return Err(error),
-            Err(_) => return Ok(BTreeMap::new()),
+            // A world apk can't solve (a package no repository has): every
+            // update would fail too, so none is shown as ready.
+            Err(_) if matches!(self.kind, ManagerKind::Apk) => return Ok(None),
+            Err(_) => return Ok(Some(BTreeMap::new())),
         };
         if matches!(self.kind, ManagerKind::Zypper) {
-            return Ok(zypper_updates(&text));
+            return Ok(Some(zypper_updates(&text)));
         }
-        Ok(text
+        let mut arches: Vec<(String, String)> = Vec::new();
+        let mut updates: BTreeMap<String, String> = text
             .lines()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
@@ -394,7 +510,8 @@ impl<T: Transport> SystemManager<T> {
                     ManagerKind::Dnf => {
                         let fields: Vec<&str> = line.split('|').collect();
                         match fields[..] {
-                            [name, _, version] if !version.is_empty() => {
+                            [name, arch, version] if !version.is_empty() => {
+                                arches.push((name.to_owned(), arch.to_owned()));
                                 Some((name, version.to_owned()))
                             }
                             _ => None,
@@ -406,7 +523,7 @@ impl<T: Transport> SystemManager<T> {
                         Some((fields[0], fields[3].to_owned()))
                     }
                     ManagerKind::Snap => Some((*fields.first()?, (*fields.get(1)?).to_owned())),
-                    ManagerKind::Apk => apk_pkgver(fields.first()?),
+                    ManagerKind::Apk => apk_upgrading(line),
                     ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
                         xbps_pkgver(fields.first()?)
                     }
@@ -417,7 +534,57 @@ impl<T: Transport> SystemManager<T> {
                 }
                 .map(|(name, version)| (name.to_owned(), version))
             })
-            .collect())
+            .collect();
+        // A held snap's update isn't one: Update all leaves it alone, like
+        // the packages pacman.conf ignores.
+        if matches!(self.kind, ManagerKind::Snap) && !updates.is_empty() {
+            let listing = self.call(vec!["list".into()], cancel, false)?;
+            let listing = String::from_utf8_lossy(&bytes("snap", listing)?).into_owned();
+            for name in held_snaps(&listing) {
+                updates.remove(&name);
+            }
+        }
+        // dnf 4's repoquery lists what versionlock holds back; check-update,
+        // like an upgrade, leaves it out. dnf 5's repoquery already does.
+        if matches!(self.kind, ManagerKind::Dnf) && !updates.is_empty() {
+            if let Some(listing) = self.dnf_check_update(cancel)? {
+                let listed = dnf_check_update(&listing);
+                updates.retain(|name, _| {
+                    arches.iter().any(|(n, arch)| {
+                        n == name && listed.contains(format!("{name}.{arch}").as_str())
+                    })
+                });
+            }
+        }
+        Ok(Some(updates))
+    }
+    /// `dnf check-update`'s listing, or `None` when it can't tell. It exits
+    /// with 100 when there are updates and 0 when there are none.
+    fn dnf_check_update(&self, cancel: &Cancellation) -> Result<Option<String>, EngineError> {
+        let mut args: Vec<OsString> = ["-C", "--quiet", "check-update"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let mut result = self.call(args.clone(), cancel, false);
+        // Without a cache, it's asked again online, like repoquery.
+        if matches!(&result, Err(EngineError::Execution(ExecutionError::Failed(done))) if done.code != Some(100))
+        {
+            args.remove(0);
+            result = self.call(args, cancel, false);
+        }
+        let done = match result {
+            Ok(done) | Err(EngineError::Execution(ExecutionError::Failed(done))) => done,
+            Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
+                return Err(EngineError::Cancelled)
+            }
+            Err(_) => return Ok(None),
+        };
+        Ok(match done.code {
+            _ if done.truncated || done.signal.is_some() => None,
+            Some(0) => Some(String::new()),
+            Some(100) => Some(String::from_utf8_lossy(&done.stdout).into_owned()),
+            _ => None,
+        })
     }
     fn valid_name(&self, name: &str) -> bool {
         !name.is_empty()
@@ -766,7 +933,12 @@ impl<T: Transport> SystemManager<T> {
     }
     /// The revisions Snap keeps to go back to, as one task.
     fn old_revisions(&self, listing: &str) -> Option<CleanupItem> {
-        let mut revisions = disabled_revisions(listing);
+        // Only what Snap would name goes in the key the runner reads. A
+        // name it wouldn't make leaves out that snap, not the rest.
+        let mut revisions: Vec<_> = disabled_revisions(listing)
+            .into_iter()
+            .filter(|(name, ..)| snap_name(name))
+            .collect();
         revisions.sort();
         let key = format!(
             "disabled-revisions:{}",
@@ -776,7 +948,6 @@ impl<T: Transport> SystemManager<T> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        // Only what Snap would name goes in the key the runner reads.
         if revisions.is_empty() || snap_revisions(&key).is_none() {
             return None;
         }
@@ -999,9 +1170,16 @@ impl<T: Transport> Backend for SystemManager<T> {
         for package in &mut packages {
             self.snap_icon(package);
             self.snap_components(package);
-            if let Some(candidate) = updates.get(&package.id.name) {
-                package.candidate_version = Some(candidate.clone());
-                package.update = UpdateAvailability::Available;
+            match updates
+                .as_ref()
+                .map(|updates| updates.get(&package.id.name))
+            {
+                None => package.update = UpdateAvailability::Unknown,
+                Some(Some(candidate)) => {
+                    package.candidate_version = Some(candidate.clone());
+                    package.update = UpdateAvailability::Available;
+                }
+                Some(None) => {}
             }
         }
         Ok(packages)
@@ -1177,6 +1355,12 @@ impl<T: Transport> Backend for SystemManager<T> {
             self.kind.id()
         )));
         let result = self.call_with(self.kind.write_executable(operation), args, cancel, true)?;
+        if let Some(line) = matches!(self.kind, ManagerKind::Apk)
+            .then(|| apk_unreachable(&result))
+            .flatten()
+        {
+            return Err(ExecutionError::Unreachable(line).into());
+        }
         bytes(self.kind.id(), result.clone())?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -1203,7 +1387,7 @@ impl<T: Transport> Backend for SystemManager<T> {
         if chosen.is_empty() {
             return Ok(vec![]);
         }
-        let updates = self.updates(cancel)?;
+        let updates = self.updates(cancel)?.unwrap_or_default();
         let mut args: Vec<OsString> = vec!["-Qi".into(), "--".into()];
         args.extend(
             updates

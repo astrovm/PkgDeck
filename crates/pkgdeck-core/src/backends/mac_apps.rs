@@ -428,9 +428,12 @@ fn cask_candidate(bundle_id: &str) -> Option<&'static str> {
 /// How many "Name N.app" spellings the Trash is searched for a free name.
 const TRASH_NAMES: usize = 100;
 
-/// A plain-language refusal, shown as it is.
-pub(super) fn refused(reason: impl Into<String>) -> EngineError {
-    ExecutionError::Invalid(reason.into()).into()
+/// Why PkgDeck won't make a change, or can't finish one, in its own words.
+pub(super) fn refused(backend: &str, reason: impl Into<String>) -> EngineError {
+    EngineError::Refused {
+        backend: backend.into(),
+        refusal: Refusal::Explained(reason.into()),
+    }
 }
 
 /// The path people see. mas reports App Store apps through the Data
@@ -479,19 +482,21 @@ impl Remover<'_> {
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
         if self.uid == 0 {
-            return Err(refused(crate::host::ROOT_REFUSAL));
+            return Err(ExecutionError::RunsAsRoot.into());
         }
         if part_of_macos(path) {
-            return Err(refused(format!(
-                "{name} is part of macOS, so PkgDeck won't remove it."
-            )));
+            return Err(refused(
+                self.backend,
+                format!("{name} is part of macOS, so PkgDeck won't remove it."),
+            ));
         }
         let metadata = fs::symlink_metadata(path).map_err(|_| EngineError::NotFound)?;
         if metadata.file_type().is_symlink() {
-            return Err(refused(format!(
-                "{} is an alias, not the app itself. Remove the app it points to.",
-                path.display()
-            )));
+            return Err(refused(
+                self.backend,
+                // The path can come from mas: name only the app.
+                format!("{name} is an alias, not the app itself. Remove the app it points to."),
+            ));
         }
         let output = self
             .transport
@@ -507,9 +512,10 @@ impl Remover<'_> {
             .lines()
             .any(|line| visible(Path::new(line.trim())).starts_with(path));
         if open {
-            return Err(refused(format!(
-                "{name} is open. Quit it, then remove it again."
-            )));
+            return Err(refused(
+                self.backend,
+                format!("{name} is open. Quit it, then remove it again."),
+            ));
         }
         Ok(())
     }
@@ -561,10 +567,10 @@ impl Remover<'_> {
             return Err(ExecutionError::Failed(result).into());
         }
         if fs::symlink_metadata(path).is_ok() {
-            return Err(refused(format!(
-                "{name} is still at {} after moving it to the Trash.",
-                path.display()
-            )));
+            return Err(refused(
+                self.backend,
+                format!("{name} is still in its folder after moving it to the Trash."),
+            ));
         }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -580,7 +586,10 @@ impl Remover<'_> {
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
             .ok_or_else(|| {
-                refused("PkgDeck can't find your home folder, so it has no Trash to use.")
+                refused(
+                    self.backend,
+                    "PkgDeck can't find your home folder, so it has no Trash to use.",
+                )
             })?;
         let trash = home.join(".Trash");
         if fs::symlink_metadata(&trash).is_err() {
@@ -593,10 +602,11 @@ impl Remover<'_> {
         // that sends the app somewhere else.
         let home_owner = fs::metadata(&home).map_err(ExecutionError::from)?.uid();
         if !fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir() && m.uid() == home_owner) {
-            return Err(refused(format!(
-                "{} isn't a folder you own, so PkgDeck won't move apps into it.",
-                trash.display()
-            )));
+            return Err(refused(
+                self.backend,
+                // Activity keeps this sentence: no home path in it.
+                "Your Trash isn't a folder you own, so PkgDeck won't move apps into it.",
+            ));
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         (1..=TRASH_NAMES)
@@ -606,7 +616,7 @@ impl Remover<'_> {
             })
             .find(|candidate| fs::symlink_metadata(candidate).is_err())
             .ok_or_else(|| {
-                refused(format!(
+                refused(self.backend, format!(
                     "The Trash already holds {TRASH_NAMES} apps named {stem}. Empty it, then try again."
                 ))
             })
@@ -992,13 +1002,17 @@ impl MacApps {
             return Err(EngineError::Cancelled);
         }
         let now = self.describe(path, &canonical, &id.scope, &ownership, cancel)?;
-        if listed.is_some_and(|listed| {
-            listed.bundle_id != now.bundle_id || listed.canonical != now.canonical
-        }) {
-            return Err(refused(format!(
-                "{} changed since PkgDeck listed it. Reload, then try again.",
-                path.display()
-            )));
+        if let Some(listed) = listed
+            .filter(|listed| listed.bundle_id != now.bundle_id || listed.canonical != now.canonical)
+        {
+            // The name the person picked, not the one now in its place.
+            return Err(refused(
+                ID,
+                format!(
+                    "{} changed since PkgDeck listed it. Reload, then try again.",
+                    listed.details.package.display_name
+                ),
+            ));
         }
         let name = now.details.package.display_name;
         let remover = Remover {
@@ -1011,20 +1025,26 @@ impl MacApps {
             Ok(records) => records.get(&canonical).cloned().unwrap_or_default(),
             // Without Homebrew nothing can manage the app.
             Err(EngineError::Execution(ExecutionError::Disabled(_))) => vec![],
-            Err(error) => {
-                return Err(refused(format!(
-                    "PkgDeck couldn't check whether Homebrew manages {name} ({error}), so it won't remove it."
-                )))
+            Err(_) => {
+                return Err(refused(
+                    ID,
+                    format!(
+                    "PkgDeck couldn't check whether Homebrew manages {name}, so it won't remove it."
+                ),
+                ))
             }
         };
         let token = match owners.as_slice() {
             [] => return remover.trash(&name, path, cancel, progress),
             [token] => token,
             _ => {
-                return Err(refused(format!(
+                return Err(refused(
+                    ID,
+                    format!(
                 "Homebrew's records name more than one cask for {name} ({}). Remove it with brew.",
                 owners.join(", ")
-            )))
+            ),
+                ))
             }
         };
         progress(Progress::Message(format!(
@@ -1042,10 +1062,10 @@ impl MacApps {
             true,
         )?;
         if fs::symlink_metadata(path).is_ok() {
-            return Err(refused(format!(
-                "Homebrew finished, but {name} is still at {}.",
-                path.display()
-            )));
+            return Err(refused(
+                ID,
+                format!("Homebrew finished, but {name} is still in its folder."),
+            ));
         }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -2599,7 +2619,7 @@ mod tests {
             (Privileged::Cancel, "authorization cancelled"),
             (Privileged::Denied, "authorization denied"),
             (Privileged::Fail, "the package manager"),
-            (Privileged::Ignore, "is still at"),
+            (Privileged::Ignore, "is still in its folder"),
         ] {
             let mut backend = f.backend(Ok(BTreeMap::new()));
             backend.uid = uid() + 1;
@@ -2608,6 +2628,10 @@ mod tests {
             backend.transport = Box::new(mover);
             let error = remove(&mut backend, &app).0.unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+            assert!(
+                !error.to_string().contains(app.to_str().unwrap()),
+                "{error}"
+            );
             assert!(app.is_dir());
         }
         // Cancel in the password dialog is its own outcome, not a failure.
@@ -2647,7 +2671,10 @@ mod tests {
         fs::create_dir_all(f.0.join("home")).unwrap();
         fs::create_dir_all(f.0.join("elsewhere")).unwrap();
         symlink(f.0.join("elsewhere"), f.0.join("home/.Trash")).unwrap();
-        assert!(attempt(f.mover()).contains("isn't a folder you own"));
+        assert_eq!(
+            attempt(f.mover()),
+            "Your Trash isn't a folder you own, so PkgDeck won't move apps into it."
+        );
         fs::remove_file(f.0.join("home/.Trash")).unwrap();
         // Every name is taken.
         fs::create_dir(f.0.join("home/.Trash")).unwrap();
@@ -2693,9 +2720,10 @@ mod tests {
         // Homebrew that leaves the app behind is reported.
         let mut apps = backend();
         let error = remove(&mut apps, &kept).0.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Homebrew finished, but Fixture App is still at"));
+        assert_eq!(
+            error.to_string(),
+            "Homebrew finished, but Fixture App is still in its folder."
+        );
         // Two casks claim it: PkgDeck can't pick one.
         let mut apps = backend();
         let error = remove(&mut apps, &shared).0.unwrap_err();
@@ -2720,9 +2748,11 @@ mod tests {
         let app = f.bundle("App.app", "com.example.app");
         let mut broken = f.backend(Err(invalid(ID, "brew broke")));
         let error = remove(&mut broken, &app).0.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("couldn't check whether Homebrew manages Fixture App"));
+        // What brew printed stays out: Activity keeps this sentence.
+        assert_eq!(
+            error.to_string(),
+            "PkgDeck couldn't check whether Homebrew manages Fixture App, so it won't remove it."
+        );
         let mut cancelled = f.backend(Err(EngineError::Cancelled));
         assert!(matches!(
             remove(&mut cancelled, &app).0,
@@ -2754,13 +2784,17 @@ mod tests {
         let mover = f.mover();
         scanned.transport = Box::new(mover.clone());
         scanned.installed(&cancel).unwrap();
-        rewrite("com.example.other");
-        let error = remove(&mut scanned, &app).0.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("changed since PkgDeck listed it"),
-            "{error}"
+        // The new app has its own name. The refusal names the one listed,
+        // and Activity keeps the sentence, so no home path is in it.
+        fs::write(
+            app.join("Contents/Info.plist"),
+            json!({"CFBundleIdentifier": "com.example.other", "CFBundleDisplayName": "Other"})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            remove(&mut scanned, &app).0.unwrap_err().to_string(),
+            "Fixture App changed since PkgDeck listed it. Reload, then try again."
         );
         // Picked by its exact path, then changed.
         let mut picked = f.backend(Ok(BTreeMap::new()));
@@ -2797,6 +2831,11 @@ mod tests {
             error
                 .to_string()
                 .contains("is an alias, not the app itself"),
+            "{error}"
+        );
+        // The path can come from mas, so only the app is named.
+        assert!(
+            !error.to_string().contains(alias.to_str().unwrap()),
             "{error}"
         );
         // PkgDeck running as root has no person's Trash to use.

@@ -2,8 +2,10 @@
 //! the tool when it is known.
 use super::*;
 
+pub(super) use pkgdeck_core::process::without_os_code;
 /// Capitalize and end with a period, so every message reads as a sentence.
 pub(super) fn sentence(text: &str) -> String {
+    let text = without_os_code(text);
     let text = text.trim().trim_end_matches([':', ';', ',']).trim_end();
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -171,7 +173,7 @@ pub(super) fn plain_text(raw: &str, backend: Option<&str>) -> String {
 /// The part after "X couldn't run:" keeps its own case (tool names such as
 /// rustup are lowercase) and ends with a period.
 pub(super) fn sentence_tail(line: &str) -> String {
-    let mut line = line.trim().to_owned();
+    let mut line = without_os_code(line).trim().to_owned();
     if !line.ends_with(['.', '!', '?']) {
         line.push('.');
     }
@@ -227,7 +229,9 @@ fn homebrew_unreachable(error: &EngineError, backend: Option<&str>) -> bool {
 const HOMEBREW_UNREACHABLE: &str =
     "Homebrew couldn't reach its server. Check your connection, then try again.";
 /// Why a change didn't finish, as Activity keeps it: [`plain_error`]
-/// without anything a tool printed, which Activity never stores.
+/// without anything a tool printed, which Activity never stores. A text an
+/// error carries can hold a tool's words, so it is kept only where PkgDeck
+/// alone writes it, and each new kind of error has to choose its words here.
 pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
     use pkgdeck_core::process::ExecutionError as E;
     let tool = source_display_name(backend);
@@ -240,18 +244,61 @@ pub(super) fn kept_reason(error: &EngineError, backend: &str) -> String {
             plain_error(error, Some(backend), false)
         }
         EngineError::Execution(E::Failed(_)) => format!("{tool} stopped with an error."),
-        EngineError::InvalidResponse { .. } => format!("{tool} reported a problem."),
-        error => plain_error(error, Some(backend), false),
+        // Its line names the repository, which can hold a token.
+        EngineError::Execution(E::Unreachable(_)) => format!(
+            "{tool} couldn't reach a repository, so nothing was changed. Try again when it's back."
+        ),
+        EngineError::InvalidResponse { .. } | EngineError::Execution(E::Invalid(_)) => {
+            format!("{tool} reported a problem.")
+        }
+        EngineError::Unavailable { .. } | EngineError::Execution(E::Disabled(_)) => {
+            format!("PkgDeck couldn't use {tool}.")
+        }
+        EngineError::Execution(E::Io(_)) => {
+            "A file or a command PkgDeck needed couldn't be used.".into()
+        }
+        // PkgDeck's own words.
+        EngineError::UnknownBackend(_)
+        | EngineError::DuplicateBackend(_)
+        | EngineError::Unsupported { .. }
+        | EngineError::Refused { .. }
+        | EngineError::NotFound
+        | EngineError::Ambiguous(_)
+        | EngineError::Incomplete(_)
+        | EngineError::Cancelled
+        | EngineError::Execution(
+            E::Helper(_)
+            | E::RunsAsRoot
+            | E::Cancelled
+            | E::TimedOut
+            | E::AuthorizationCancelled
+            | E::AuthorizationDenied
+            | E::LockBusy
+            | E::Interrupted,
+        ) => plain_error(error, Some(backend), false),
+    }
+}
+/// `text` about the source called `name`, led by that name unless `text`
+/// already names it first.
+pub(super) fn about_source(name: &str, text: &str) -> String {
+    let named = [
+        format!("{name}:"),
+        format!("{name} "),
+        format!("PkgDeck couldn't use {name}:"),
+    ];
+    if named.iter().any(|lead| text.starts_with(lead.as_str())) {
+        text.to_owned()
+    } else {
+        format!("{name}: {text}")
     }
 }
 /// A plain explanation of an engine error, naming the tool when known.
 pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;
     if let Some((path, why)) = skipped_app_entry(error) {
-        let why = why.split(" (os error ").next().unwrap_or(why);
         return format!(
             "Couldn't read {path} ({}). The other apps are still listed.",
-            lower_first(why)
+            lower_first(&without_os_code(why))
         );
     }
     match error {
@@ -263,6 +310,9 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
+        EngineError::Execution(E::Helper(_)) => "PkgDeck's system helper couldn't run this change. Try again.".into(),
+        EngineError::Execution(E::RunsAsRoot) => ROOT_MESSAGE.into(),
+        EngineError::Execution(E::Unreachable(line)) => format!("A repository couldn't be reached, so nothing was changed: {} Try again when it's back.", sentence_tail(line)),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
         error if cask_needed_password(error, backend) => {
             "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()
@@ -287,7 +337,7 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
                 return ROOT_MESSAGE.into();
             }
             format!(
-                "{} isn't available: {}",
+                "PkgDeck couldn't use {}: {}",
                 source_display_name(backend),
                 lower_first(&plain_text(reason, None))
             )
@@ -300,6 +350,10 @@ pub(super) fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool
         EngineError::InvalidResponse { backend: source, reason } => {
             if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
+            }
+            // A part of PkgDeck such as "repositories" isn't a source people know.
+            if !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str()) {
+                return plain_text(reason, None);
             }
             match meaningful_line(&strip_debug(reason)) {
                 Some(line) => format!(

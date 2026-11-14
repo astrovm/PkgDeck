@@ -43,6 +43,7 @@ fn ran(steps: &[(&str, Outcome, Said)]) -> Payload {
                 outcome: *outcome,
                 said: said.clone(),
                 kept: None,
+                blamed: *outcome == Outcome::Failed,
             })
             .collect(),
         note: None,
@@ -3740,6 +3741,10 @@ fn finished_changes_explain_what_happened() {
         (E::LockBusy, "Another package manager is running"),
         (E::Interrupted, "interrupted"),
         (
+            E::Unreachable("updating and opening http://mirror/x86_64/APKINDEX.tar.gz: Connection refused".into()),
+            "A repository couldn't be reached, so nothing was changed: updating and opening http://mirror/x86_64/APKINDEX.tar.gz: Connection refused. Try again when it's back.",
+        ),
+        (
             E::Failed(Completion {
                 code: Some(100),
                 signal: None,
@@ -3893,6 +3898,7 @@ fn finished_changes_explain_what_happened() {
                 outcome: Outcome::Finished,
                 said: Said::Completed,
                 kept: None,
+                blamed: false,
             }],
             note: firmware_note(&[Operation::Upgrade(PackageId {
                 backend: "fwupd".into(),
@@ -5065,10 +5071,10 @@ fn repository_confirmation_and_refresh_invalidate_cached_state() {
     controller.as_mut().change_repository(
         r#"{"backend":"flatpak","name":"--all","scope":"system","action":"remove"}"#.into(),
     );
-    assert!(controller
-        .status()
-        .to_string()
-        .contains("invalid repository name"));
+    let status = controller.status().to_string();
+    // "repositories" is a part of PkgDeck, so it isn't named as a source.
+    assert!(status.contains("Invalid repository name."), "{status}");
+    assert!(!status.contains("repositories reported"), "{status}");
     let request = r#"{"backend":"flatpak","name":"fixture","scope":"system","action":"remove"}"#;
     controller.as_mut().change_repository(request.into());
     assert!(controller.confirmation().to_string().contains("System"));
@@ -5120,13 +5126,23 @@ fn repository_confirmation_and_refresh_invalidate_cached_state() {
                     priority: None,
                 },
             ],
-            errors: vec!["Synthetic partial failure".into()],
+            errors: vec![repositories::Problem {
+                backend: "flatpak".into(),
+                scope: Scope::System,
+                file: None,
+                error: EngineError::Execution(pkgdeck_core::process::ExecutionError::Io(
+                    "Synthetic partial failure".into(),
+                )),
+            }],
             features: repositories::Features::default(),
         })));
     let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
     assert_eq!(report["repositories"][0]["scope"], "system");
     assert_eq!(report["repositories"][1]["scope"], "user");
-    assert_eq!(report["errors"][0], "Synthetic partial failure.");
+    assert_eq!(
+        report["errors"][0],
+        "Flatpak, System: Synthetic partial failure."
+    );
     assert_eq!(report["repositories"][0]["where"], "Flatpak, System");
     assert!(controller
         .rust()
@@ -5300,6 +5316,7 @@ fn firmware_actions_require_confirmation_and_never_offer_removal() {
             outcome: Outcome::Finished,
             said: Said::Completed,
             kept: None,
+            blamed: false,
         }],
         note: firmware_note(&[Operation::Upgrade(package.id.clone())]),
     })));
@@ -5372,7 +5389,7 @@ fn source_failures_and_busy_requests_preserve_the_active_operation() {
     assert!(controller
         .details()
         .to_string()
-        .contains("Firmware isn't available: synthetic daemon offline."));
+        .contains("PkgDeck couldn't use Firmware: synthetic daemon offline."));
     controller.as_mut().rust_mut().failures.clear();
     controller.as_mut().rust_mut().sources.push(Source {
         backend: "fwupd".into(),
@@ -5714,6 +5731,75 @@ impl Backend for PasswordCask {
             }
     }
 }
+/// APT whose dry run fails with what apt-get printed.
+struct UnplannedApt;
+impl Backend for UnplannedApt {
+    fn id(&self) -> &str {
+        "apt"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Installed, Capability::Upgrade]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+        Err(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: Some(100),
+            signal: None,
+            stdout: vec![],
+            stderr:
+                b"E: Malformed entry 1 in list file /etc/apt/sources.list.d/secret.list (URI)\n"
+                    .to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        })
+        .into())
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        Ok(OperationOutcome::default())
+    }
+}
+#[test]
+fn an_automatic_run_shows_why_apt_waits_but_keeps_no_tool_text() {
+    let mut engine = Engine::default();
+    engine.register(UnplannedApt).unwrap();
+    let mut one = synthetic_package("synthetic", "Synthetic").id;
+    one.backend = "apt".into();
+    // One package's update has no dry run to wait for, so it still runs.
+    let job = Job::AutoUpgrade(
+        vec![
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            Operation::Upgrade(one),
+        ],
+        false,
+    );
+    let replies = run_job(&mut engine, job, &Cancellation::default());
+    let batch = replies
+        .into_iter()
+        .find_map(|reply| match reply {
+            Reply::Done(Ok(Payload::Batch(batch))) => Some(batch),
+            _ => None,
+        })
+        .expect("the run ends with a batch");
+    let step = &batch.steps[0];
+    assert_eq!(step.outcome, Outcome::Failed);
+    assert!(!step.blamed);
+    assert!(
+        matches!(&step.said, Said::Because(shown) if shown.contains("secret.list")),
+        "{:?}",
+        step.said
+    );
+    assert_eq!(step.kept.as_deref(), Some("APT stopped with an error."));
+    assert_eq!(batch.steps[1].outcome, Outcome::Finished);
+}
 #[test]
 fn an_automatic_run_remembers_casks_that_stopped_for_the_password() {
     let cask = |name: &str| {
@@ -5904,13 +5990,144 @@ impl Backend for BrokenTool {
     ) -> Result<OperationOutcome, EngineError> {
         if self.broken {
             Err(EngineError::Execution(
-                pkgdeck_core::process::ExecutionError::Io(
-                    "No such file or directory (os error 2)".into(),
+                pkgdeck_core::process::ExecutionError::Invalid(
+                    "avm printed an unknown version".into(),
                 ),
             ))
         } else {
             Ok(OperationOutcome::default())
         }
+    }
+}
+/// A tool whose updates all stop with `0`.
+struct StoppedTool(EngineError);
+impl Backend for StoppedTool {
+    fn id(&self) -> &str {
+        "anchor"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Installed, Capability::Upgrade]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn execute(
+        &mut self,
+        _: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        Err(self.0.clone())
+    }
+}
+#[test]
+fn only_updates_that_fail_on_their_own_are_remembered_as_failed() {
+    let package = |name: &str| {
+        let mut package = synthetic_package(name, name);
+        package.id.backend = "anchor".into();
+        package.installed_version = Some("1".into());
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        package
+    };
+    let (one, two) = (package("one"), package("two"));
+    let upgrade = |package: &Package| Operation::Upgrade(package.id.clone());
+    let refused = |refusal| EngineError::Refused {
+        backend: "anchor".into(),
+        refusal,
+    };
+    let remembered = |error: EngineError, job: Job| {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![one.clone(), two.clone()];
+        let mut engine = Engine::default();
+        engine.register(StoppedTool(error)).unwrap();
+        let replies = run_job(&mut engine, job.clone(), &Cancellation::default());
+        controller.as_mut().rust_mut().worker = Some(fake_worker(job, replies));
+        controller.as_mut().poll();
+        let failed = &controller.rust().failed_updates;
+        [&one, &two].map(|package| failed.skips(&package.id, "2"))
+    };
+    let killed = |signal| {
+        EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+            code: None,
+            signal: Some(signal),
+            stdout: vec![],
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }))
+    };
+    for (error, blamed) in [
+        // pkexec or a file PkgDeck reads, not the package.
+        (
+            EngineError::Execution(ExecutionError::Io("No such file".into())),
+            false,
+        ),
+        (
+            refused(Refusal::Explained(
+                "It was installed some other way.".into(),
+            )),
+            true,
+        ),
+        (
+            EngineError::Execution(ExecutionError::AuthorizationCancelled),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::AuthorizationDenied),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Disabled(
+                "PkgDeck's system helper is not installed".into(),
+            )),
+            false,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Failed(pkgdeck_core::process::Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"error: it broke".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            })),
+            true,
+        ),
+        // Stopped by a shutdown or the OOM killer, it may work next
+        // time. A crash fails the same way again.
+        (killed(15), false),
+        (killed(9), false),
+        (killed(11), true),
+        (killed(6), true),
+        (
+            EngineError::Execution(ExecutionError::Helper(
+                "authorization runner closed unexpectedly".into(),
+            )),
+            false,
+        ),
+        (EngineError::Execution(ExecutionError::LockBusy), false),
+        (
+            EngineError::Execution(ExecutionError::Unreachable("Connection refused".into())),
+            false,
+        ),
+        (EngineError::Execution(ExecutionError::TimedOut), false),
+        // PkgDeck running as root says nothing about the update.
+        (EngineError::Execution(ExecutionError::RunsAsRoot), false),
+        (refused(Refusal::NeedsReview), false),
+        (refused(Refusal::PartnerFailed { blamed: false }), false),
+        (refused(Refusal::PartnerFailed { blamed: true }), true),
+        (refused(Refusal::PlanChanged), false),
+    ] {
+        let batch = Job::UpgradeAll(vec![upgrade(&one), upgrade(&two)], None);
+        assert_eq!(remembered(error.clone(), batch), [blamed; 2], "{error:?}");
+        let alone = Job::Write(upgrade(&one), None);
+        assert_eq!(
+            remembered(error.clone(), alone),
+            [blamed, false],
+            "{error:?}"
+        );
     }
 }
 #[test]
@@ -6110,7 +6327,7 @@ fn one_failed_update_is_named_without_its_path() {
         &Ok(ran(&[(
             &title,
             Outcome::Failed,
-            because("Anchor (AVM) couldn't run: No such file or directory (os error 2)."),
+            because("Anchor (AVM) couldn't run: No such file or directory."),
         )])),
         false,
         &names,
@@ -6118,7 +6335,7 @@ fn one_failed_update_is_named_without_its_path() {
     assert_eq!(notice["title"], "Anchor (AVM) didn't update");
     assert_eq!(
         notice["detail"],
-        "Anchor (AVM) couldn't run: No such file or directory (os error 2)."
+        "Anchor (AVM) couldn't run: No such file or directory."
     );
     // A single change that fails on its own reads the same way.
     let single = write_notice(
@@ -6646,6 +6863,12 @@ fn automatic_runs_skip_updates_that_failed() {
         plan(&failed, &[tool.clone()]),
         [Operation::Upgrade(tool.id.clone())]
     );
+    // One failure may be a run without network: tried again.
+    failed.remember(&[(tool.id.clone(), "2.0".into())], &[]);
+    assert_eq!(
+        plan(&failed, &[tool.clone()]),
+        [Operation::Upgrade(tool.id.clone())]
+    );
     failed.remember(&[(tool.id.clone(), "2.0".into())], &[]);
     // Automatic runs never fall back to trying it again.
     assert!(plan(&failed, &[tool.clone()]).is_empty());
@@ -6675,6 +6898,52 @@ fn automatic_runs_skip_updates_that_failed() {
     );
     assert_eq!(checked.operations, [Operation::Upgrade(other.id.clone())]);
     let _ = std::fs::remove_dir_all(dir);
+}
+#[test]
+fn automatic_runs_update_around_a_waiting_release_only_where_the_helper_may() {
+    // Each source has one release still waiting and one ready update.
+    let packages: Vec<Package> = ["flatpak", "snap", "pacman", "user"]
+        .into_iter()
+        .flat_map(|backend| {
+            ["waiting", "ready"].map(|name| {
+                let mut package = synthetic_package(&format!("{backend}-{name}"), name);
+                package.id.backend = backend.into();
+                if backend == "user" {
+                    package.id.scope = Scope::User { uid: 1000 };
+                }
+                package.candidate_version = Some("2".into());
+                package.update = UpdateAvailability::Available;
+                if name == "waiting" {
+                    package.waiting_until = Some(u64::MAX);
+                }
+                package
+            })
+        })
+        .collect();
+    let ready = |backend: &str| {
+        let package = packages
+            .iter()
+            .find(|package| package.id.name == format!("{backend}-ready"))
+            .unwrap();
+        Operation::Upgrade(package.id.clone())
+    };
+    let plan = automatic_plan(
+        &packages,
+        &NeedsPassword::default(),
+        &FailedUpdates::default(),
+    );
+    // The helper updates one Flatpak at a time. One Snap at a time would
+    // update held snaps, and Pacman never waits, but if it did, it would
+    // install missing packages: their updates wait for someone.
+    assert_eq!(plan, [ready("flatpak"), ready("user")]);
+    // The helper takes every change in the plan.
+    assert_eq!(
+        pkgdeck_core::batch::check_mode(
+            pkgdeck_core::batch::BatchMode::UpgradeOnly { removals: false },
+            &plan
+        ),
+        Ok(())
+    );
 }
 /// APT whose dry run removes `removals`, and whose writes succeed.
 struct AptPlanFixture {
@@ -7520,6 +7789,7 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
             outcome: outcome(operation),
             said: Said::Completed,
             kept: None,
+            blamed: outcome(operation) == Outcome::Failed,
         })
         .collect();
     let job = Job::AutoUpgrade(operations, removals);
@@ -7553,6 +7823,7 @@ fn a_finished_automatic_run_counts_and_names_what_it_updated() {
                 outcome: Outcome::Finished,
                 said: Said::Completed,
                 kept: None,
+                blamed: false,
             }],
             note: None,
         },
@@ -9053,18 +9324,63 @@ fn repository_text_names_sources_and_scopes() {
         };
         assert!(repository_label(&action).starts_with(text));
     }
-    assert_eq!(
-        repository_error("flatpak: host command failed (Some(1)): error: No remote refs\n"),
-        "Flatpak couldn't run: No remote refs."
-    );
-    assert_eq!(
-        repository_error("apt: listing failed"),
-        "APT: Listing failed."
-    );
-    assert_eq!(
-        repository_error("/etc/apt/sources.list: unreadable"),
-        "/etc/apt/sources.list: unreadable."
-    );
+    use pkgdeck_core::process::{Completion, ExecutionError as E};
+    let problem = |backend: &str, scope: Scope, file: Option<&str>, error| repositories::Problem {
+        backend: backend.into(),
+        scope,
+        file: file.map(Into::into),
+        error,
+    };
+    let failed = EngineError::Execution(E::Failed(Completion {
+        code: Some(1),
+        signal: None,
+        stdout: Vec::new(),
+        stderr: b"error: No remote refs\n".to_vec(),
+        truncated: false,
+        cancellation_deferred: false,
+    }));
+    let unreadable = || EngineError::Execution(E::Io("Permission denied (os error 13)".into()));
+    for (problem, text) in [
+        (
+            problem("flatpak", Scope::User { uid: 1000 }, None, failed.clone()),
+            "Flatpak, User: No remote refs.",
+        ),
+        (
+            problem("flatpak", Scope::System, None, failed.clone()),
+            "Flatpak, System: No remote refs.",
+        ),
+        (
+            problem("fwupd", Scope::System, None, failed),
+            "Firmware, System: No remote refs.",
+        ),
+        (
+            problem("dnf", Scope::System, None, unreadable()),
+            "DNF, System: Permission denied.",
+        ),
+        (
+            problem(
+                "apt",
+                Scope::System,
+                Some("/etc/apt/sources.list"),
+                unreadable(),
+            ),
+            "APT, /etc/apt/sources.list: Permission denied.",
+        ),
+        (
+            problem(
+                "fwupd",
+                Scope::System,
+                None,
+                EngineError::InvalidResponse {
+                    backend: "repositories".into(),
+                    reason: "expected value at line 1 column 1".into(),
+                },
+            ),
+            "Firmware, System: PkgDeck couldn't read its list of repositories.",
+        ),
+    ] {
+        assert_eq!(repository_error(&problem), text);
+    }
 }
 #[test]
 fn failed_commands_keep_their_output_for_the_banner() {
@@ -9353,7 +9669,7 @@ fn engine_errors_become_one_plain_sentence() {
             None,
             false
         ),
-        "APT isn't available: APT lists are missing."
+        "PkgDeck couldn't use APT: APT lists are missing."
     );
     assert_eq!(
         plain_error(
@@ -9427,10 +9743,11 @@ fn errors_shown_by_the_controller_are_plain() {
             successful_sources: vec!["apt".into()],
         })));
     let expected = "Cargo couldn't run: rustup has no default toolchain.";
-    assert!(controller
-        .status()
-        .to_string()
-        .contains(&format!("Cargo: {expected}")));
+    // The sentence already names Cargo first.
+    assert_eq!(
+        controller.status().to_string(),
+        format!("1 packages\n{expected}")
+    );
     let rows: Value = serde_json::from_str(&controller.rows().to_string()).unwrap();
     assert_eq!(rows[1]["summary"], expected);
     assert_eq!(rows[1]["display_name"], "Cargo");
@@ -9521,6 +9838,18 @@ fn activity_reads_share_the_lock_and_never_write() {
         (entry.id, entry.outcomes),
         (waiting, vec![Outcome::Skipped])
     );
+    // A reason an older PkgDeck kept from a tool doesn't show.
+    let mut raw: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
+    raw[0]["outcomes"] = json!(["failed"]);
+    raw[0]["reasons"] = json!(["The package manager exited with code 1: secret."]);
+    raw[0].as_object_mut().unwrap().remove("plain");
+    std::fs::write(
+        path.join("activity.json"),
+        serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    assert!(store.load().unwrap()[0].reasons.is_empty());
     // A broken file reads as no history rather than failing.
     std::fs::write(path.join("activity.json"), b"not json").unwrap();
     assert!(read_activity(&path.join("activity.json"))
@@ -14385,6 +14714,7 @@ fn a_retry_settles_only_the_tasks_it_ran() {
         outcome,
         said: Said::Completed,
         kept: kept.map(str::to_owned),
+        blamed: false,
     };
     // Gradle failed after all, Bun's retry was cancelled, and a task that
     // stopped waiting meanwhile is left alone.
@@ -14503,6 +14833,24 @@ fn activity_says_why_homebrew_stopped_without_keeping_its_output() {
 }
 
 #[test]
+fn a_source_line_names_its_source_once() {
+    for (text, line) in [
+        (
+            "PkgDeck couldn't use DNF: not found.",
+            "PkgDeck couldn't use DNF: not found.",
+        ),
+        ("DNF couldn't run: broken.", "DNF couldn't run: broken."),
+        ("DNF: broken.", "DNF: broken."),
+        (
+            "No package matches the selection.",
+            "DNF: No package matches the selection.",
+        ),
+        ("DNFX reported a problem.", "DNF: DNFX reported a problem."),
+    ] {
+        assert_eq!(about_source("DNF", text), line);
+    }
+}
+#[test]
 fn a_cleanup_left_alone_is_not_a_failure() {
     let building = EngineError::Refused {
         backend: "dev-caches".into(),
@@ -14546,6 +14894,51 @@ fn a_cleanup_left_alone_is_not_a_failure() {
         ended_by(&confused, "snap"),
         (Outcome::Failed, Some("Snap reported a problem.".into()))
     );
+    // The repository apk couldn't reach can hold a token in its path.
+    let unreachable = EngineError::Execution(ExecutionError::Unreachable(
+        "https://example.invalid/secret/x86_64/APKINDEX.tar.gz".into(),
+    ));
+    assert_eq!(
+        ended_by(&unreachable, "apk"),
+        (
+            Outcome::Failed,
+            Some("apk couldn't reach a repository, so nothing was changed. Try again when it's back.".into())
+        )
+    );
+    // Text these errors carry can be a tool's: Docker's line, Git's.
+    for (error, kept) in [
+        (
+            EngineError::Unavailable {
+                backend: "docker".into(),
+                reason: "Docker is installed but unavailable: tcp://user:secret@host".into(),
+            },
+            "PkgDeck couldn't use Docker images.",
+        ),
+        (
+            EngineError::Execution(ExecutionError::RunsAsRoot),
+            ROOT_MESSAGE,
+        ),
+        (
+            EngineError::Execution(ExecutionError::Disabled("secret".into())),
+            "PkgDeck couldn't use Docker images.",
+        ),
+        (
+            EngineError::Execution(ExecutionError::Invalid("secret".into())),
+            "Docker images reported a problem.",
+        ),
+        (
+            EngineError::Execution(ExecutionError::Io(
+                "Couldn't remove ~/x: fatal: secret".into(),
+            )),
+            "A file or a command PkgDeck needed couldn't be used.",
+        ),
+    ] {
+        assert_eq!(
+            ended_by(&error, "docker"),
+            (Outcome::Failed, Some(kept.into())),
+            "{error:?}"
+        );
+    }
     let (outcome, kept) = ended_by(&EngineError::NotFound, "projects");
     assert_eq!(outcome, Outcome::Failed);
     assert_eq!(
@@ -14563,6 +14956,7 @@ fn a_cleanup_left_alone_is_not_a_failure() {
         outcome,
         said: Said::Because(said.into()),
         kept: Some(said.into()),
+        blamed: false,
     };
     let ran = Batch {
         noun: "cleanup tasks",
@@ -15009,4 +15403,17 @@ fn the_full_details_of_the_open_package_land_in_the_pane_and_the_cache() {
         .is_some_and(|cached| cached
             .to_string()
             .contains("Full description from the lookup")));
+}
+#[test]
+fn system_error_codes_and_parts_of_pkgdeck_stay_out_of_sentences() {
+    assert_eq!(sentence_tail("gone (os error 2)"), "gone.");
+    // "repositories" is a part of PkgDeck, not a source to name.
+    let invalid = EngineError::InvalidResponse {
+        backend: "repositories".into(),
+        reason: "invalid repository name".into(),
+    };
+    assert_eq!(
+        plain_error(&invalid, None, false),
+        "Invalid repository name."
+    );
 }

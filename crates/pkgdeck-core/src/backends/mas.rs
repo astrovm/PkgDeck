@@ -282,15 +282,19 @@ impl<T: Transport> MacAppStore<T> {
             .map(|path| visible(std::path::Path::new(path)))
             .filter(|path| path.is_absolute() && path.extension().is_some_and(|ext| ext == "app"))
             .ok_or_else(|| {
-                refused(format!(
-                    "mas doesn't say where {} is installed, so PkgDeck can't remove it.",
-                    app.name
-                ))
+                refused(
+                    ID,
+                    format!(
+                        "mas doesn't say where {} is installed, so PkgDeck can't remove it.",
+                        app.name
+                    ),
+                )
             })?;
         if !path.join("Contents/_MASReceipt/receipt").is_file() {
-            return Err(refused(format!(
-                "{} has no App Store receipt, so it may not be {} from the App Store. Reload, then try again.",
-                path.display(),
+            // The path came from mas: Activity keeps this sentence, so it
+            // names only the app.
+            return Err(refused(ID, format!(
+                "{} has no App Store receipt where mas lists it, so it may be another app. Reload, then try again.",
                 app.name
             )));
         }
@@ -318,11 +322,13 @@ impl<T: Transport> MacAppStore<T> {
                 return Ok(outcome);
             }
         }
-        Err(refused(format!(
-            "{} is in the Trash, but the App Store still lists it at {}. Reload in a moment to check.",
-            app.name,
-            path.display()
-        )))
+        Err(refused(
+            ID,
+            format!(
+            "{} is in the Trash, but the App Store still lists it. Reload in a moment to check.",
+            app.name
+        ),
+        ))
     }
 }
 
@@ -693,6 +699,8 @@ mod tests {
                 .contains("Alpha is in the Trash, but the App Store still lists it"),
             "{error}"
         );
+        // The path mas listed stays out.
+        assert!(!error.to_string().contains(".app"), "{error}");
         // One listing to find the app, then every retry.
         let lists = fake
             .calls
@@ -760,6 +768,10 @@ mod tests {
         let error = refusal(copy.to_str().unwrap(), &|_| {});
         assert!(
             error.to_string().contains("has no App Store receipt"),
+            "{error}"
+        );
+        assert!(
+            !error.to_string().contains(copy.to_str().unwrap()),
             "{error}"
         );
         assert!(copy.is_dir());

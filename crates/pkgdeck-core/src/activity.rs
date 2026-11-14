@@ -4,6 +4,7 @@
 use crate::{
     engine::{EngineError, Refusal},
     package::{Operation, OperationOutcome},
+    process::ExecutionError,
 };
 use rustix::fs::{flock, FlockOperation};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,10 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<Option<String>>,
     pub owner_pid: u32,
+    /// Its reasons hold only PkgDeck's own words. An older PkgDeck could
+    /// keep what a tool printed in the reason of a change that failed.
+    #[serde(default)]
+    pub plain: bool,
 }
 impl Entry {
     /// Whether the process that ran it is still there. A signal-0 probe
@@ -125,9 +130,8 @@ impl History {
             .truncate(false)
             .open(self.path.with_extension("lock"))?;
         flock(&lock, FlockOperation::LockExclusive)?;
-        let mut entries: Vec<Entry> = fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        let mut entries = fs::read(&self.path)
+            .map(|bytes| parse(&bytes))
             .unwrap_or_default();
         let value = mutate(&mut entries);
         if entries.len() > LIMIT {
@@ -175,6 +179,7 @@ impl History {
                 reasons: vec![],
                 names: said(names),
                 owner_pid: std::process::id(),
+                plain: true,
             });
             id
         })
@@ -203,6 +208,7 @@ impl History {
                 outcomes,
                 names: said(names),
                 owner_pid: std::process::id(),
+                plain: true,
             });
             id
         })
@@ -296,15 +302,55 @@ pub fn ended(result: &Result<OperationOutcome, EngineError>) -> (Outcome, Option
 }
 
 /// Why `error` stopped a change, as Activity keeps it. What a tool answered
-/// stays out: it can be long, or say more than it should.
+/// stays out: it can be long, or name a token or a path. So a text an error
+/// carries is kept only where PkgDeck alone writes it, and each new kind of
+/// error has to choose its words here.
 pub fn reason(error: &EngineError) -> String {
+    use ExecutionError as E;
+    // A name like npm keeps its own case.
+    let name = crate::backends::display_name;
     let said = match error {
-        // A name like npm keeps its own case.
-        EngineError::InvalidResponse { backend, .. } => format!(
-            "{} answered in a way PkgDeck didn't understand",
-            crate::backends::display_name(backend)
-        ),
-        error => {
+        EngineError::InvalidResponse { backend, .. } => {
+            format!(
+                "{} answered in a way PkgDeck didn't understand",
+                name(backend)
+            )
+        }
+        EngineError::Unavailable { backend, .. } => {
+            format!("PkgDeck couldn't use {}", name(backend))
+        }
+        EngineError::Execution(E::Failed(done)) => {
+            format!("The package manager {}", done.ended())
+        }
+        // Its line names the repository, which can hold a token.
+        EngineError::Execution(E::Unreachable(_)) => {
+            "A repository couldn't be reached, so nothing was changed".into()
+        }
+        EngineError::Execution(E::Invalid(_)) => "The package manager reported a problem".into(),
+        EngineError::Execution(E::Io(_)) => {
+            "A file or a command PkgDeck needed couldn't be used".into()
+        }
+        EngineError::Execution(E::Disabled(_)) => "PkgDeck couldn't use the package manager".into(),
+        EngineError::Execution(E::Helper(_)) => {
+            "PkgDeck's system helper couldn't run this change".into()
+        }
+        EngineError::UnknownBackend(_)
+        | EngineError::DuplicateBackend(_)
+        | EngineError::Unsupported { .. }
+        | EngineError::Refused { .. }
+        | EngineError::NotFound
+        | EngineError::Ambiguous(_)
+        | EngineError::Incomplete(_)
+        | EngineError::Cancelled
+        | EngineError::Execution(
+            E::Cancelled
+            | E::RunsAsRoot
+            | E::TimedOut
+            | E::AuthorizationCancelled
+            | E::AuthorizationDenied
+            | E::LockBusy
+            | E::Interrupted,
+        ) => {
             let said = error.to_string();
             let mut letters = said.chars();
             let first = letters
@@ -334,6 +380,24 @@ fn ended_as(outcomes: &[Outcome]) -> State {
     } else {
         State::Finished
     }
+}
+/// The entries stored in `bytes`, or none when it can't be read. The
+/// reasons of failed changes an older PkgDeck stored are dropped: they could
+/// hold what a tool printed. An older PkgDeck still running leaves
+/// [`Entry::plain`] out when it writes, so then the reasons this one stored
+/// go too. That loses words, never shows a tool's.
+pub fn parse(bytes: &[u8]) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = serde_json::from_slice(bytes).unwrap_or_default();
+    for entry in entries.iter_mut().filter(|entry| !entry.plain) {
+        for (outcome, reason) in entry.outcomes.iter().zip(&mut entry.reasons) {
+            if *outcome == Outcome::Failed {
+                *reason = None;
+            }
+        }
+        entry.reasons = said(std::mem::take(&mut entry.reasons));
+        entry.plain = true;
+    }
+    entries
 }
 /// `reasons` or `names` as stored: nothing at all when none is known.
 fn said(reasons: Vec<Option<String>>) -> Vec<Option<String>> {
@@ -396,6 +460,62 @@ mod tests {
                 && entry.get("message").is_none()
                 // No names known, none listed.
                 && entry.get("names").is_none()));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn reasons_an_older_pkgdeck_kept_from_a_tool_are_dropped() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-older-activity-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        let older = |id: u64, reasons: serde_json::Value| {
+            serde_json::json!({
+                "id": id, "frontend": "cli", "operations": [], "started_at": 1,
+                "finished_at": 2, "state": "failed", "outcomes": ["failed", "skipped"],
+                "reasons": reasons, "owner_pid": 1,
+            })
+        };
+        let stored = serde_json::json!([
+            older(
+                1,
+                serde_json::json!([
+                    "The package manager exited with code 1: https://user:secret@example.invalid.",
+                    "Left alone.",
+                ])
+            ),
+            older(
+                2,
+                serde_json::json!(["The package manager exited with code 1: secret.", null])
+            ),
+        ]);
+        fs::write(path.join("activity.json"), stored.to_string()).unwrap();
+        let store = History::new(path.join("activity.json"));
+        let entries = store.entries().unwrap();
+        // What a skip says is PkgDeck's own; a failure's could be a tool's.
+        assert_eq!(entries[0].reasons, [None, Some("Left alone.".into())]);
+        assert!(entries[1].reasons.is_empty());
+        assert!(entries.iter().all(|entry| entry.plain));
+        // Reasons kept from now on stay.
+        let id = store
+            .record(
+                "cli",
+                vec![],
+                vec![],
+                1,
+                vec![(Outcome::Failed, Some("Kept.".into()))],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .entries()
+                .unwrap()
+                .last()
+                .map(|entry| (entry.id, entry.reasons.clone())),
+            Some((id, vec![Some("Kept.".into())]))
+        );
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -585,7 +705,6 @@ mod tests {
 
     #[test]
     fn how_a_change_ended_says_why_in_a_sentence_without_what_tools_said() {
-        use crate::process::ExecutionError;
         assert_eq!(
             ended(&Ok(OperationOutcome::default())),
             (Outcome::Finished, None)
@@ -615,15 +734,62 @@ mod tests {
                 Some("npm answered in a way PkgDeck didn't understand.".into())
             )
         );
+        // What a tool printed stays out: it can name a token or a path.
+        for (error, kept) in [
+            (
+                EngineError::Unavailable {
+                    backend: "docker".into(),
+                    reason: "Cannot connect to tcp://user:secret@host:2376".into(),
+                },
+                "PkgDeck couldn't use Docker images.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::Io(
+                    "Couldn't remove ~/x: fatal: secret".into(),
+                )),
+                "A file or a command PkgDeck needed couldn't be used.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::Invalid("secret".into())),
+                "The package manager reported a problem.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::Disabled("secret".into())),
+                "PkgDeck couldn't use the package manager.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::Helper("secret".into())),
+                "PkgDeck's system helper couldn't run this change.",
+            ),
+            (
+                EngineError::Execution(ExecutionError::RunsAsRoot),
+                crate::host::ROOT_REFUSAL,
+            ),
+            (
+                EngineError::Execution(ExecutionError::LockBusy),
+                "APT is busy; wait for the native manager, never remove lock files.",
+            ),
+        ] {
+            assert_eq!(reason(&error), kept);
+        }
         assert_eq!(
-            reason(&EngineError::Execution(ExecutionError::Io(
-                "couldn't remove ~/x".into()
+            reason(&EngineError::Execution(ExecutionError::Failed(
+                crate::process::Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"error: https://user:secret@example.invalid\n".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                }
             ))),
-            "Couldn't remove ~/x."
+            "The package manager exited with code 1."
         );
         assert_eq!(
-            reason(&EngineError::Execution(ExecutionError::Io(String::new()))),
-            "."
+            reason(&EngineError::Execution(ExecutionError::Unreachable(
+                "https://example.invalid/token/x86_64/APKINDEX.tar.gz".into()
+            ))),
+            "A repository couldn't be reached, so nothing was changed."
         );
     }
 }
