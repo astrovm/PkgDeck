@@ -20,16 +20,16 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 sha2.workspace = true
 hex.workspace = true
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-rfd = "=0.17.2"
+rfd = "=0.18.0"
 memmap2 = "=0.9.12"
 # The window's handle, to ask the desktop to blur behind glass styles.
 raw-window-handle = "=0.6.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "=0.3.7", default-features = false, features = ["async-io", "blocking"] }
-notify-rust = "=4.18.2"
+notify-rust = "=4.19.0"
 # Reads the desktop's reduce-motion setting through its settings portal.
-zbus = { version = "=6.2.1", default-features = false, features = ["default-rt"] }
+zbus = { version = "=6.3.0", default-features = false, features = ["default-rt"] }
 # Waits for the portal's signals on one thread.
 futures-util = { version = "=0.3.34", default-features = false }
 # Asks KWin on X11 to blur behind glass styles; winit only does it on Wayland.
@@ -37,10 +37,10 @@ x11rb = { version = "=0.14.0", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Lets tests run a fake settings portal on a private socket, with no bus.
-zbus = { version = "=6.2.1", default-features = false, features = ["default-rt", "bus-impl"] }
+zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "bus-impl"] }
 
 [build-dependencies]
-cc = "=1.11.1"
+cc = "=1.11.2"
 
 [dev-dependencies]
 egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }
