@@ -3067,19 +3067,142 @@ fn npm_lifecycle() {
             &mut |p| progress.push(p)
         )
         .is_err());
-    let writes = fixture.writes("npm");
-    assert!(writes.contains(&vec![
-        "install".into(),
-        "--global".into(),
-        "new-tool".into()
-    ]));
-    assert!(writes.contains(&vec!["update".into(), "--global".into(), "left-pad".into()]));
-    assert!(writes.contains(&vec![
-        "uninstall".into(),
-        "--global".into(),
-        "left-pad".into()
-    ]));
-    assert!(writes.contains(&vec!["update".into(), "--global".into()]));
+    assert_eq!(
+        fixture.writes("npm"),
+        [
+            ["install", "--global", "new-tool"],
+            ["install", "--global", "left-pad@1.3.1"],
+            ["uninstall", "--global", "left-pad"],
+            ["install", "--global", "left-pad@1.3.1"],
+        ]
+    );
+}
+
+#[test]
+fn npm_upgrade_skips_downgrades_in_single_and_bulk_updates() {
+    let fixture = DevFixture {
+        version: "12.2.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: r#"{"dependencies": {
+            "cf": {"version": "1.0.0-rc.0"},
+            "other-tool": {"version": "1.0.0"},
+            "local-tool": {"version": "1.0.0", "resolved": "file:../local-tool"},
+            "git-tool": {"version": "1.0.0", "resolved": "git+ssh://git@example.invalid/tool"},
+            "same-version": {"version": "1.0.0+old"},
+            "unknown-version": {"version": "local"}
+        }}"#
+        .into(),
+        outdated: Some(
+            r#"{
+            "cf": {"current": "1.0.0-rc.0", "wanted": "0.15.0", "latest": "0.15.0"},
+            "other-tool": {"wanted": "1.1.0", "latest": "2.0.0"},
+            "local-tool": {"wanted": "2.0.0"},
+            "git-tool": {"wanted": "2.0.0"},
+            "same-version": {"wanted": "1.0.0+new"},
+            "unknown-version": {"wanted": "2.0.0"}
+        }"#
+            .into(),
+        ),
+        ..DevFixture::default()
+    };
+    let cancel = Cancellation::default();
+    let mut backend = DevTool::npm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    let packages = backend.installed(&cancel).unwrap();
+    let ready: Vec<_> = packages
+        .iter()
+        .filter(|package| package.update == UpdateAvailability::Available)
+        .map(|package| package.id.name.as_str())
+        .collect();
+    assert_eq!(ready, ["other-tool"]);
+    let cf = packages
+        .iter()
+        .find(|package| package.id.name == "cf")
+        .unwrap();
+    assert_eq!(cf.candidate_version.as_deref(), Some("1.0.0-rc.0"));
+    backend
+        .execute(&Operation::Upgrade(cf.id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    assert!(fixture.writes("npm").is_empty());
+
+    let all = Operation::UpgradeAll {
+        backend: "npm".into(),
+    };
+    backend.execute(&all, &cancel, &mut |_| {}).unwrap();
+    assert_eq!(
+        fixture.writes("npm"),
+        [["install", "--global", "other-tool@1.1.0"]]
+    );
+
+    let fixture = DevFixture {
+        outdated: Some(r#"{"cf": {"wanted": "1.0.0-rc.1", "latest": "1.0.0-rc.1"}}"#.into()),
+        ..fixture
+    };
+    let mut backend = DevTool::npm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    assert_eq!(
+        backend
+            .details(&cf.id, &cancel)
+            .unwrap()
+            .package
+            .candidate_version
+            .as_deref(),
+        Some("1.0.0-rc.1")
+    );
+    backend
+        .execute(&Operation::Upgrade(cf.id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        fixture.writes("npm").last().unwrap(),
+        &["install", "--global", "cf@1.0.0-rc.1"]
+    );
+}
+
+#[test]
+fn npm_bulk_upgrade_continues_after_failure_and_stops_after_deferred_cancellation() {
+    let fixture = DevFixture {
+        version: "12.2.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list:
+            r#"{"dependencies": {"first": {"version": "1.0.0"}, "second": {"version": "1.0.0"}}}"#
+                .into(),
+        outdated: Some(r#"{"first": {"wanted": "2.0.0"}, "second": {"wanted": "2.0.0"}}"#.into()),
+        fail_writes: true,
+        ..DevFixture::default()
+    };
+    let cancel = Cancellation::default();
+    let all = Operation::UpgradeAll {
+        backend: "npm".into(),
+    };
+    let mut backend = DevTool::npm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    assert!(backend.execute(&all, &cancel, &mut |_| {}).is_err());
+    assert_eq!(
+        fixture.writes("npm"),
+        [
+            ["install", "--global", "first@2.0.0"],
+            ["install", "--global", "second@2.0.0"]
+        ]
+    );
+
+    let fixture = DevFixture {
+        fail_writes: false,
+        deferred_write: Some("install".into()),
+        calls: Default::default(),
+        ..fixture
+    };
+    let mut backend = DevTool::npm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    assert!(
+        backend
+            .execute(&all, &cancel, &mut |_| {})
+            .unwrap()
+            .cancellation_deferred
+    );
+    assert_eq!(
+        fixture.writes("npm"),
+        [["install", "--global", "first@2.0.0"]]
+    );
 }
 
 #[test]
@@ -3148,24 +3271,13 @@ fn pnpm_lifecycle() {
             &mut |p| progress.push(p)
         )
         .is_err());
-    let writes = fixture.writes("pnpm");
-    assert!(writes.contains(&vec!["add".into(), "--global".into(), "new-tool".into()]));
-    assert!(writes.contains(&vec![
-        "add".into(),
-        "--global".into(),
-        "typescript@latest".into()
-    ]));
-    assert!(writes.contains(&vec![
-        "remove".into(),
-        "--global".into(),
-        "typescript".into()
-    ]));
-    assert!(writes.contains(&vec![
-        "add".into(),
-        "--global".into(),
-        "typescript@latest".into()
-    ]));
-    assert!(!writes.contains(&vec!["update".into(), "--global".into()]));
+    assert_eq!(
+        fixture.writes("pnpm"),
+        [
+            ["add", "--global", "new-tool"],
+            ["remove", "--global", "typescript"]
+        ]
+    );
 }
 
 #[test]
@@ -3173,18 +3285,67 @@ fn pnpm_outdated_newer_reports_available() {
     let fixture = DevFixture {
         version: "10.0.0\n".into(),
         root: Some("/home/test/.local/share/pnpm/global/9".into()),
-        list: PNPM_LIST.into(),
+        list: r#"[{"dependencies": {
+            "typescript": {"from": "typescript", "version": "7.0.2"},
+            "ahead": {"from": "ahead", "version": "1.0.0-rc.0"},
+            "alias": {"from": "different-package", "version": "1.0.0"}
+        }}]"#
+            .into(),
         outdated: Some(
-            r#"{"typescript": {"current": "7.0.2", "wanted": "7.0.2", "latest": "7.1.0"}}"#.into(),
+            r#"{
+            "typescript": {"current": "7.0.2", "wanted": "7.0.2", "latest": "7.1.0"},
+            "ahead": {"latest": "0.15.0"},
+            "alias": {"latest": "2.0.0"}
+        }"#
+            .into(),
         ),
         ..DevFixture::default()
     };
-    let mut backend = DevTool::pnpm(fixture);
+    let mut backend = DevTool::pnpm(fixture.clone());
     let cancel = Cancellation::default();
     assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
     let installed = backend.installed(&cancel).unwrap();
-    assert_eq!(installed[0].update, UpdateAvailability::Available);
-    assert_eq!(installed[0].candidate_version.as_deref(), Some("7.1.0"));
+    let find = |name| {
+        installed
+            .iter()
+            .find(|package| package.id.name == name)
+            .unwrap()
+    };
+    let typescript = find("typescript");
+    assert_eq!(typescript.update, UpdateAvailability::Available);
+    assert_eq!(typescript.candidate_version.as_deref(), Some("7.1.0"));
+    for name in ["ahead", "alias"] {
+        let package = find(name);
+        assert_eq!(package.update, UpdateAvailability::Current);
+        backend
+            .execute(
+                &Operation::Upgrade(package.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+    }
+    assert!(fixture.writes("pnpm").is_empty());
+    backend
+        .execute(
+            &Operation::Upgrade(typescript.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "pnpm".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.writes("pnpm"),
+        [["add", "--global", "typescript@7.1.0"]; 2]
+    );
 }
 
 #[test]
@@ -3333,20 +3494,13 @@ fn bun_lifecycle() {
             &mut |p| progress.push(p)
         )
         .is_err());
-    let writes = fixture.writes("bun");
-    assert!(writes.contains(&vec!["add".into(), "--global".into(), "new-tool".into()]));
-    assert!(writes.contains(&vec![
-        "add".into(),
-        "--global".into(),
-        "alpha@latest".into()
-    ]));
-    assert!(writes.contains(&vec!["remove".into(), "--global".into(), "alpha".into()]));
-    assert!(writes.contains(&vec![
-        "add".into(),
-        "--global".into(),
-        "alpha@latest".into()
-    ]));
-    assert!(!writes.contains(&vec!["update".into(), "--global".into()]));
+    assert_eq!(
+        fixture.writes("bun"),
+        [
+            ["add", "--global", "new-tool"],
+            ["remove", "--global", "alpha"]
+        ]
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -3583,7 +3737,7 @@ fn bun_checks_the_registry_for_newer_versions() {
         backend: "bun".into(),
     };
     backend.execute(&all, &cancel, &mut |_| {}).unwrap();
-    assert_eq!(fixture.writes("bun"), [["add", "--global", "alpha@latest"]]);
+    assert_eq!(fixture.writes("bun"), [["add", "--global", "alpha@1.5.0"]]);
     // Cancelled while updating, it stops there.
     let stop = Cancellation::default();
     assert_eq!(
@@ -3595,6 +3749,26 @@ fn bun_checks_the_registry_for_newer_versions() {
         Err(EngineError::Cancelled)
     );
     assert_eq!(fixture.writes("bun").len(), 1);
+    for name in ["beta", "odd", "forked"] {
+        let id = find(name).id.clone();
+        backend
+            .execute(&Operation::Upgrade(id), &cancel, &mut |_| {})
+            .unwrap();
+    }
+    assert_eq!(fixture.writes("bun").len(), 1);
+    backend.set_release_age(48);
+    backend
+        .execute(&Operation::Upgrade(alpha), &cancel, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        fixture.writes("bun")[1],
+        [
+            "add",
+            "--global",
+            "alpha@1.5.0",
+            "--minimum-release-age=172800"
+        ]
+    );
     let mut offline = DevTool::bun(DevFixture {
         outdated: None,
         ..fixture.clone()

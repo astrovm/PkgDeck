@@ -184,6 +184,7 @@ fn npm_ls_problem(value: &serde_json::Value) -> String {
 #[derive(Deserialize)]
 struct NpmInstalled {
     version: String,
+    resolved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +201,8 @@ struct PnpmRoot {
 #[derive(Deserialize)]
 struct PnpmEntry {
     version: String,
+    from: Option<String>,
+    resolved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +251,24 @@ struct BunManifest {
 /// an `npm:` alias or `owner/repo`.
 fn registry_spec(spec: &serde_json::Value) -> bool {
     spec.as_str().is_some_and(|spec| !spec.contains([':', '/']))
+}
+
+fn semver_newer(candidate: &str, installed: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(installed),
+    ) {
+        (Ok(candidate), Ok(installed)) => candidate.cmp_precedence(&installed).is_gt(),
+        _ => false,
+    }
+}
+
+fn local_or_git_source(resolved: &str) -> bool {
+    resolved.starts_with('/')
+        || resolved.split_once(':').is_some_and(|(scheme, _)| {
+            matches!(scheme, "file" | "link" | "git" | "github" | "ssh")
+                || scheme.starts_with("git+")
+        })
 }
 
 /// PEP 508 bare project names for `pip`/`pipx`/`uv`: no options, paths,
@@ -946,13 +967,20 @@ impl<T: Transport> DevTool<T> {
         let outdated: std::collections::BTreeMap<String, NpmOutdated> =
             match self.lenient_json(&["outdated", "--global", "--json"], cancel) {
                 Ok((value, _)) => serde_json::from_value(value).map_err(|e| invalid(id, e))?,
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
                 // Registry metadata may be unreachable; installed state stays.
                 Err(_) => std::collections::BTreeMap::new(),
             };
         Ok(installed
             .into_iter()
             .map(|(name, entry)| {
-                let wanted = outdated.get(&name).map(|outdated| outdated.wanted.clone());
+                let wanted = outdated
+                    .get(&name)
+                    .filter(|outdated| {
+                        !entry.resolved.as_deref().is_some_and(local_or_git_source)
+                            && semver_newer(&outdated.wanted, &entry.version)
+                    })
+                    .map(|outdated| outdated.wanted.clone());
                 (name, (entry.version, wanted))
             })
             .collect())
@@ -965,10 +993,7 @@ impl<T: Transport> DevTool<T> {
         self.npm_table(cancel)?
             .into_iter()
             .map(|(name, (installed, wanted))| {
-                let candidate = match wanted {
-                    Some(wanted) if wanted != installed => wanted,
-                    _ => installed.clone(),
-                };
+                let candidate = wanted.unwrap_or_else(|| installed.clone());
                 self.detail(
                     home,
                     name,
@@ -991,24 +1016,28 @@ impl<T: Transport> DevTool<T> {
         let outdated: std::collections::BTreeMap<String, PnpmOutdated> =
             match self.lenient_json(&["outdated", "--global", "--json"], cancel) {
                 Ok((value, _)) => serde_json::from_value(value).map_err(|e| invalid(id, e))?,
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
                 // Registry metadata may be unreachable; installed state stays.
                 Err(_) => std::collections::BTreeMap::new(),
             };
         let mut details = Vec::new();
         for root in roots {
             for (name, entry) in root.dependencies {
-                let candidate = outdated.get(&name).map(|outdated| outdated.latest.clone());
-                let candidate = match candidate {
-                    Some(latest) if latest != entry.version => Some(latest),
-                    _ => Some(entry.version.clone()),
-                };
+                let candidate = outdated
+                    .get(&name)
+                    .filter(|outdated| {
+                        entry.from.as_ref().is_none_or(|from| from == &name)
+                            && !entry.resolved.as_deref().is_some_and(local_or_git_source)
+                            && semver_newer(&outdated.latest, &entry.version)
+                    })
+                    .map_or_else(|| entry.version.clone(), |outdated| outdated.latest.clone());
                 details.push(self.detail(
                     home,
                     name,
                     "pnpm-installed command-line tool".into(),
                     None,
                     entry.version,
-                    candidate,
+                    Some(candidate),
                 )?);
             }
         }
@@ -1118,14 +1147,7 @@ impl<T: Transport> DevTool<T> {
                 }
             }
         };
-        let newer = |latest: &str| match (
-            semver::Version::parse(latest),
-            semver::Version::parse(installed),
-        ) {
-            (Ok(latest), Ok(installed)) => latest > installed,
-            _ => false,
-        };
-        Ok(latest.filter(|latest| newer(latest)))
+        Ok(latest.filter(|latest| semver_newer(latest, installed)))
     }
     fn pip_inventory(
         &self,
@@ -1873,10 +1895,6 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        // pnpm and Bun keep pinned ranges, so plain `update` would not move
-        // explicitly versioned tools. Reinstalling at `@latest` is also what
-        // the reported candidate reflects. Composer re-requires the package
-        // for the same reason; pip reinstalls with `--upgrade`.
         let name = self.target(target)?;
         progress(Progress::Message(format!("Updating {name}…")));
         let home = self
@@ -1885,13 +1903,8 @@ impl<T: Transport> DevTool<T> {
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let result = match self.kind {
             DevKind::Cargo => self.cargo_reinstall(&home, name, cancel)?,
-            DevKind::Npm => self.call(&["update", "--global", name], cancel, true)?,
-            DevKind::Pnpm | DevKind::Bun => {
-                let latest = format!("{name}@latest");
-                let limit = self.bun_release_age();
-                let mut args = vec!["add", "--global", &latest];
-                args.extend(limit.as_deref());
-                self.call(&args, cancel, true)?
+            DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
+                return self.upgrade_javascript(Updates::Only(name), cancel, progress);
             }
             DevKind::Pip => self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?,
             DevKind::Pipx => self.call(&["upgrade", name], cancel, true)?,
@@ -1930,17 +1943,8 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        // Cargo and pip have no registry upgrade-all command; refresh every
-        // installed tool in place as the single per-backend transaction.
-        if self.kind == DevKind::Npm {
-            progress(Progress::Message(format!(
-                "Updating {} packages…",
-                self.kind.id()
-            )));
-            let result = self.call(&["update", "--global"], cancel, true)?;
-            return Ok(OperationOutcome {
-                cancellation_deferred: result.cancellation_deferred,
-            });
+        if matches!(self.kind, DevKind::Npm | DevKind::Pnpm | DevKind::Bun) {
+            return self.upgrade_javascript(Updates::All, cancel, progress);
         }
         if self.kind == DevKind::Pipx {
             progress(Progress::Message("Updating pipx packages…".into()));
@@ -2016,28 +2020,65 @@ impl<T: Transport> DevTool<T> {
             .home
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+        // Cargo and pip have no registry upgrade-all command. Update each
+        // outdated tool in place.
         self.each_outdated(cancel, &mut |name| {
             progress(Progress::Package(name.into()));
-            match self.kind {
-                DevKind::Cargo => {
-                    progress(Progress::Message(format!("Reinstalling {name}…")));
-                    self.cargo_reinstall(&home, name, cancel)?;
-                }
-                DevKind::Pip => {
-                    progress(Progress::Message(format!("Updating {name}…")));
-                    self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
-                }
-                _ => {
-                    progress(Progress::Message(format!("Updating {name} to latest…")));
-                    let latest = format!("{name}@latest");
-                    let limit = self.bun_release_age();
-                    let mut args = vec!["add", "--global", &latest];
-                    args.extend(limit.as_deref());
-                    self.call(&args, cancel, true)?;
-                }
+            if self.kind == DevKind::Cargo {
+                progress(Progress::Message(format!("Reinstalling {name}…")));
+                self.cargo_reinstall(&home, name, cancel)?;
+            } else {
+                progress(Progress::Message(format!("Updating {name}…")));
+                self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
             }
             Ok(())
         })
+    }
+    /// Resolve upgrades again just before writing. The age limit or a tag
+    /// change can make the default version older than what is installed.
+    /// An exact version prevents a second resolution from changing the target.
+    fn upgrade_javascript(
+        &self,
+        updates: Updates<'_>,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let command = if self.kind == DevKind::Npm {
+            "install"
+        } else {
+            "add"
+        };
+        let limit = self.bun_release_age();
+        let mut failed = None;
+        for detail in self.inventory(updates, cancel)? {
+            let package = detail.package;
+            let name = package.id.name;
+            let Some(version) = package.candidate_version.filter(|_| {
+                package.update == UpdateAvailability::Available && updates.covers(&name)
+            }) else {
+                continue;
+            };
+            if updates == Updates::All {
+                progress(Progress::Package(name.clone()));
+                progress(Progress::Message(format!("Updating {name}…")));
+            }
+            let spec = format!("{name}@{version}");
+            let mut args = vec![command, "--global", &spec];
+            args.extend(limit.as_deref());
+            match self.call(&args, cancel, true) {
+                Ok(result) if result.cancellation_deferred => {
+                    return Ok(OperationOutcome {
+                        cancellation_deferred: true,
+                    });
+                }
+                Ok(_) => {}
+                Err(ExecutionError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error) => {
+                    failed.get_or_insert_with(|| error.into());
+                }
+            }
+        }
+        failed.map_or(Ok(OperationOutcome::default()), Err)
     }
     /// Runs `update` for each tool its registry has a newer version of, and
     /// only those: a tool installed from git or a folder has none, and
@@ -2787,41 +2828,6 @@ mod release_age {
         let runs = manager.runs.lock().unwrap();
         assert_eq!(runs[0].2[0].0, "npm_config_before", "{runs:?}");
         assert_eq!(runs[1].2[0].0, "PIP_UPLOADED_PRIOR_TO", "{runs:?}");
-    }
-
-    #[test]
-    fn bun_updates_carry_its_limit_as_an_option() {
-        let manager = Manager {
-            env: BTreeMap::from([("HOME".to_owned(), OsString::from("/home/test"))]),
-            ..Default::default()
-        };
-        let mut bun = DevTool::bun(&manager);
-        let cancel = Cancellation::default();
-        bun.home = Some(PathBuf::from("/home/test/.bun/install/global"));
-        let id = PackageId {
-            backend: "bun".into(),
-            name: "tool".into(),
-            architecture: std::env::consts::ARCH.into(),
-            scope: Scope::Environment {
-                path: PathBuf::from("/home/test/.bun/install/global"),
-            },
-            remote: None,
-            reference: None,
-        };
-        bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
-        bun.set_release_age(48);
-        bun.upgrade(&id, &cancel, &mut |_| {}).unwrap();
-        let runs = manager.runs.lock().unwrap();
-        assert_eq!(runs[0].1, ["add", "--global", "tool@latest"]);
-        assert_eq!(
-            runs[1].1,
-            [
-                "add",
-                "--global",
-                "tool@latest",
-                "--minimum-release-age=172800"
-            ]
-        );
     }
 
     #[test]

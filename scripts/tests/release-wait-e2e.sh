@@ -107,6 +107,24 @@ echo "== npm"
 npm install -g --silent @anthropic-ai/claude-code@2.1.280 >/dev/null
 limited npm @anthropic-ai/claude-code
 
+echo "== npm prerelease fallback"
+npm install -g --silent cf@1.0.0-rc.0 is-number@6.0.0 >/dev/null
+# This cutoff admits rc.0 and excludes rc.1. npm's fallback still chooses
+# the last stable release. A fixed date keeps the case independent of today.
+npm config set before 2026-11-17T11:30:00Z
+npm_outdated=$(npm outdated -g --json cf || [[ $? == 1 ]])
+check "npm proposes an older release" 0.15.0 "$(jq -r '.cf.wanted' <<<"$npm_outdated")"
+check "PkgDeck skips that downgrade" '' "$(field npm cf candidate_version)"
+pkd --from npm --yes upgrade cf >/dev/null
+check "a named update keeps the prerelease" 1.0.0-rc.0 "$(installed npm cf)"
+pkd --from npm --yes upgrade >/dev/null
+check "a bulk update keeps the prerelease" 1.0.0-rc.0 "$(installed npm cf)"
+check "a bulk update installs the other update" 7.0.0 "$(installed npm is-number)"
+npm config delete before
+cf_latest=$(npm view cf version)
+pkd --from npm --yes upgrade cf >/dev/null
+check "PkgDeck installs the newer cf release when eligible" "$cf_latest" "$(installed npm cf)"
+
 echo "== uv"
 uv tool install -q ruff==0.16.0
 limited uv ruff
