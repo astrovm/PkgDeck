@@ -2665,6 +2665,84 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn apt_upgrades_refuse_kept_back_targets_and_downgrade_plans() {
+        use pkgdeck_core::backends::{Apt, Transport};
+        use pkgdeck_core::process::Completion;
+        use std::ffi::OsString;
+
+        struct AptPlan(&'static str);
+
+        fn completed(stdout: Vec<u8>) -> Completion {
+            Completion {
+                code: Some(0),
+                signal: None,
+                stdout,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            }
+        }
+
+        impl Transport for AptPlan {
+            fn apt_query(
+                &self,
+                mode: &str,
+                _: &str,
+                _: &str,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                if mode == "detect" {
+                    return Ok(completed(b"[]".to_vec()));
+                }
+                let mut source = fixture("apt");
+                let details = source
+                    .details(&source.package().id, &Cancellation::default())
+                    .unwrap();
+                Ok(completed(serde_json::to_vec(&[details]).unwrap()))
+            }
+
+            fn system_manager(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                assert_eq!(executable, "apt-get");
+                assert!(
+                    !write && args[0] == "--simulate" && args.last().unwrap() == "dist-upgrade"
+                );
+                Ok(completed(self.0.as_bytes().to_vec()))
+            }
+        }
+
+        for (words, plan, reason) in [
+            (
+                ["--from", "apt", "upgrade", "fixture"],
+                "0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n",
+                "APT kept back fixture.",
+            ),
+            (
+                ["--yes", "--from=apt", "upgrade", "--allow-removals"],
+                concat!(
+                    "1 upgraded, 0 newly installed, 1 downgraded, 0 to remove and 0 not upgraded.\n",
+                    "Inst fixture [1.0] (2.0 Synthetic [all])\n",
+                    "Inst dependency [2.0] (1.0 Synthetic [all])\n",
+                ),
+                "APT would downgrade installed packages.",
+            ),
+        ] {
+            let mut engine = Engine::default();
+            engine.register(Apt::new(AptPlan(plan))).unwrap();
+            let (data, code) = call(&mut engine, &words, true);
+            assert_eq!(code, 1, "{data}");
+            assert_eq!(data["error"]["Refused"]["backend"], "apt", "{data}");
+            assert!(data["message"].as_str().is_some_and(|message| message.contains(reason)), "{data}");
+        }
+    }
+
     #[test]
     fn source_ambiguity_partial_results_and_exit_codes() {
         let mut engine = engine();

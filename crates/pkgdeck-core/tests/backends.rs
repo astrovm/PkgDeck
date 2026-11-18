@@ -20,6 +20,7 @@ struct Fixture {
     grouped_apt_writes: Arc<Mutex<Vec<Vec<AptAction>>>>,
     apt_simulation: Option<String>,
     apt_simulation_failure: Option<ExecutionError>,
+    apt_held: bool,
     apt_private_lists: bool,
     apt_system_simulation: Option<String>,
     apt_system_queries: Arc<Mutex<usize>>,
@@ -51,7 +52,7 @@ impl Fixture {
                 },
                 display_name: "Synthetic fixture".into(),
                 summary: "Synthetic package".into(),
-                update: if installed.as_ref().is_some_and(|v| v != &candidate) {
+                update: if !self.apt_held && installed.as_ref().is_some_and(|v| v != &candidate) {
                     UpdateAvailability::Available
                 } else {
                     UpdateAvailability::Current
@@ -593,6 +594,35 @@ fn named_apt_upgrade_rechecks_the_system_lists_instead_of_the_private_copy() {
     assert!(!simulations[1]
         .1
         .contains(&"Dir::State::Lists=/synthetic/apt/lists".into()));
+    assert_eq!(fixture.installed.lock().unwrap().as_deref(), Some("1.0"));
+}
+
+#[test]
+fn named_apt_upgrade_refuses_held_packages_and_propagates_metadata_errors() {
+    let mut fixture = Fixture::new();
+    fixture.apt_held = true;
+    *fixture.installed.lock().unwrap() = Some("1.0".into());
+    *fixture.candidate.lock().unwrap() = "2.0".into();
+    let id = fixture.package().package.id;
+    let action = Operation::Upgrade(id);
+    let cancel = Cancellation::default();
+    let mut apt = Apt::new(fixture.clone());
+    let mut progress = Vec::new();
+    assert_eq!(
+        apt.execute(&action, &cancel, &mut |step| progress.push(step)),
+        Err(EngineError::Refused {
+            backend: "apt".into(),
+            refusal: Refusal::Explained("APT kept back synthetic-fixture.".into()),
+        })
+    );
+    *fixture.failure.lock().unwrap() = Some(ExecutionError::LockBusy);
+    assert_eq!(
+        apt.execute(&action, &cancel, &mut |step| progress.push(step)),
+        Err(EngineError::Execution(ExecutionError::LockBusy))
+    );
+    assert!(progress.is_empty());
+    assert!(fixture.simulations.lock().unwrap().is_empty());
+    assert_eq!(*fixture.apt_system_queries.lock().unwrap(), 2);
     assert_eq!(fixture.installed.lock().unwrap().as_deref(), Some("1.0"));
 }
 
