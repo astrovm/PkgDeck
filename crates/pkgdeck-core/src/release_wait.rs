@@ -246,9 +246,8 @@ pub fn hours_text(hours: u32) -> String {
 /// The cutoff some managers take: this long ago, as an RFC 3339 time.
 pub(crate) fn cutoff(hours: u32, now: u64) -> String {
     let seconds = now.saturating_sub(u64::from(hours) * HOUR);
-    chrono::DateTime::from_timestamp(i64::try_from(seconds).unwrap_or(0), 0)
+    jiff::Timestamp::from_second(i64::try_from(seconds).unwrap_or(0))
         .unwrap_or_default()
-        .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }
 

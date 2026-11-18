@@ -54,7 +54,7 @@ impl Trash {
         let entry = format!(
             "[Trash Info]\nPath={}\nDeletionDate={}\n",
             escaped(path),
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
+            jiff::ZonedDateTime::now().strftime("%Y-%m-%dT%H:%M:%S")
         );
         let mut attempt = 0u32;
         loop {
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(lines.next(), Some(path.as_str()));
         let date = lines.next().unwrap().strip_prefix("DeletionDate=").unwrap();
         assert!(
-            chrono::NaiveDateTime::parse_from_str(date, "%Y-%m-%dT%H:%M:%S").is_ok(),
+            jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", date).is_ok(),
             "{date}"
         );
         assert_eq!(lines.next(), None);
