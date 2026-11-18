@@ -2069,6 +2069,7 @@ struct DevFixture {
     list_after_write: Option<String>,
     outdated: Option<String>,
     bun_preview: Option<String>,
+    pnpm_exclusions: Option<String>,
     list_failed_stdout: Option<String>,
     fail: Option<ExecutionError>,
     fail_writes: bool,
@@ -2081,7 +2082,7 @@ struct DevFixture {
     /// `gem search --remote` keeps only the registry rows whose name
     /// contains the pattern, ignoring case, as RubyGems does.
     gem_matches: bool,
-    /// A read subcommand that behaves as if the user cancelled it.
+    /// A subcommand that behaves as if the user cancelled it.
     cancel_on: Option<String>,
     /// A write subcommand that finishes after the user asked to cancel.
     deferred_write: Option<String>,
@@ -2245,7 +2246,7 @@ impl Transport for DevFixture {
             }));
         }
         let first = rendered.first().map(String::as_str);
-        if !write && first.is_some() && first == self.cancel_on.as_deref() {
+        if first.is_some() && first == self.cancel_on.as_deref() {
             return Err(ExecutionError::Cancelled);
         }
         if write && first.is_some() && first == self.deferred_write.as_deref() {
@@ -2312,6 +2313,9 @@ impl Transport for DevFixture {
                     cancellation_deferred: false,
                 })),
             },
+            ("pnpm", Some("config")) => {
+                Ok(output(self.pnpm_exclusions.as_deref().unwrap_or("null")))
+            }
             ("pipx", Some("list")) if rendered.contains(&"--outdated".to_string()) => {
                 match &self.outdated {
                     Some(json) => Ok(output(json)),
@@ -3285,6 +3289,40 @@ fn npm_rechecks_installed_versions_and_refuses_failed_update_checks() {
 }
 
 #[test]
+fn npm_named_upgrade_uses_the_global_entry_and_reports_a_cancelled_write() {
+    let fixture = DevFixture {
+        version: "12.2.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: r#"{"dependencies":{"tool":{"version":"1.0.0"},"nested-only":{"version":"1.0.0"}}}"#.into(),
+        outdated: Some(r#"{
+            "tool": [
+                {"location":"/home/test/lib/node_modules/peer/node_modules/tool","wanted":"1.1.0"},
+                {"location":"/home/test/lib/node_modules/tool","wanted":"2.0.0"}
+            ],
+            "nested-only": {"location":"/home/test/lib/node_modules/peer/node_modules/nested-only","wanted":"2.0.0"}
+        }"#.into()),
+        cancel_on: Some("install".into()),
+        ..DevFixture::default()
+    };
+    let cancel = Cancellation::default();
+    let mut backend = DevTool::npm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages[0].update, UpdateAvailability::Current);
+    assert_eq!(packages[1].candidate_version.as_deref(), Some("2.0.0"));
+    let result = backend.execute(
+        &Operation::Upgrade(packages[1].id.clone()),
+        &cancel,
+        &mut |_| {},
+    );
+    assert_eq!(result, Err(EngineError::Cancelled));
+    assert_eq!(
+        fixture.writes("npm"),
+        [["install", "--global", "tool@2.0.0"]]
+    );
+}
+
+#[test]
 fn pnpm_lifecycle() {
     let fixture = DevFixture {
         version: "10.0.0\n".into(),
@@ -3361,16 +3399,24 @@ fn pnpm_lifecycle() {
 
 #[test]
 fn pnpm_outdated_newer_reports_available() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-pnpm-group-{}", std::process::id()));
+    let group = base.join("group");
+    std::fs::create_dir_all(&group).unwrap();
+    std::fs::write(
+        group.join("package.json"),
+        r#"{"dependencies":{"@scope/peer":"1.0.0","typescript":"7.0.2"}}"#,
+    )
+    .unwrap();
     let fixture = DevFixture {
-        version: "10.0.0\n".into(),
-        root: Some("/home/test/.local/share/pnpm/global/9".into()),
+        version: "12.21.0\n".into(),
+        root: Some(base.display().to_string()),
         list: r#"[{"path": "/global", "dependencies": {
             "typescript": {"from": "typescript", "version": "7.0.2", "path": "/global/group/node_modules/typescript"},
             "@scope/peer": {"from": "@scope/peer", "version": "1.0.0", "path": "/global/group/node_modules/@scope/peer"},
             "ahead": {"from": "ahead", "version": "1.0.0-rc.0"},
             "alias": {"from": "different-package", "version": "1.0.0"}
         }}]"#
-            .into(),
+            .replace("/global", &base.display().to_string()),
         outdated: Some(
             r#"{
             "typescript": {"current": "7.0.2", "wanted": "7.0.2", "latest": "7.1.0"},
@@ -3380,6 +3426,7 @@ fn pnpm_outdated_newer_reports_available() {
         }"#
             .into(),
         ),
+        pnpm_exclusions: Some(r#"["existing-package"]"#.into()),
         ..DevFixture::default()
     };
     let mut backend = DevTool::pnpm(fixture.clone());
@@ -3426,34 +3473,98 @@ fn pnpm_outdated_newer_reports_available() {
     assert_eq!(
         fixture.writes("pnpm"),
         [
-            ["add", "--global", "@scope/peer@1.0.0,typescript@7.1.0"],
-            ["add", "--global", "@scope/peer@2.0.0,typescript@7.1.0"],
+            vec![
+                "add",
+                "--global",
+                "@scope/peer@1.0.0,typescript@7.1.0",
+                "--config.minimumReleaseAgeExclude=existing-package",
+                "--config.minimumReleaseAgeExclude=@scope/peer@1.0.0"
+            ],
+            vec!["add", "--global", "@scope/peer@2.0.0,typescript@7.1.0"],
         ]
     );
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn pnpm_refuses_to_replace_a_group_with_a_non_registry_member() {
+    let base =
+        std::env::temp_dir().join(format!("pkgdeck-pnpm-local-group-{}", std::process::id()));
+    let group = base.join("group");
+    std::fs::create_dir_all(&group).unwrap();
     let fixture = DevFixture {
         version: "12.21.0\n".into(),
-        root: Some("/global".into()),
+        root: Some(base.display().to_string()),
         list: r#"[{"path": "/global", "dependencies": {
             "tool": {"from": "tool", "version": "1.0.0", "path": "/global/group/node_modules/tool"},
-            "alias": {"from": "other", "version": "1.0.0", "path": "/global/group/node_modules/alias"}
-        }}]"#.into(),
+            "local": {"from": "local", "version": "1.0.0", "path": "/global/group/node_modules/local"}
+        }}]"#.replace("/global", &base.display().to_string()),
         outdated: Some(r#"{"tool": {"latest": "2.0.0"}}"#.into()),
         ..DevFixture::default()
     };
     let cancel = Cancellation::default();
     let mut backend = DevTool::pnpm(fixture.clone());
     backend.detect(&cancel).unwrap();
-    let update = Operation::Upgrade(dev_id("pnpm", "tool", "/global"));
+    let update = Operation::Upgrade(dev_id("pnpm", "tool", &base.display().to_string()));
     let error = backend.execute(&update, &cancel, &mut |_| {}).unwrap_err();
     assert!(
-        error.to_string().contains("Cannot preserve alias"),
+        error
+            .to_string()
+            .contains("Missing global install manifest"),
+        "{error}"
+    );
+    std::fs::write(
+        group.join("package.json"),
+        r#"{"dependencies":{"local":"file:../local.tgz","tool":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let error = backend.execute(&update, &cancel, &mut |_| {}).unwrap_err();
+    assert!(
+        error.to_string().contains("Cannot preserve local"),
         "{error}"
     );
     assert!(fixture.writes("pnpm").is_empty());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn pnpm_rechecks_each_tool_after_a_write() {
+    let fixture = DevFixture {
+        version: "10.0.0\n".into(),
+        root: Some("/global".into()),
+        list: r#"[{"path":"/global","dependencies":{
+            "first":{"version":"1.0.0","path":"/global/group/node_modules/other"},
+            "second":{"version":"1.0.0","path":"/global/group/packages/second"},
+            "third":{"version":"1.0.0"},
+            "fourth":{"version":"1.0.0"}
+        }}]"#.into(),
+        list_after_write: Some(r#"[{"path":"/global","dependencies":{
+            "first":{"version":"2.0.0"},
+            "second":{"version":"1.0.0","path":"/global/group/packages/second"},
+            "third":{"version":"3.0.0"}
+        }}]"#.into()),
+        outdated: Some(r#"{"first":{"latest":"2.0.0"},"second":{"latest":"2.0.0"},"third":{"latest":"2.0.0"},"fourth":{"latest":"2.0.0"}}"#.into()),
+        ..DevFixture::default()
+    };
+    let cancel = Cancellation::default();
+    let mut backend = DevTool::pnpm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "pnpm".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.writes("pnpm"),
+        [
+            ["add", "--global", "first@2.0.0"],
+            ["add", "--global", "second@2.0.0"]
+        ]
+    );
 }
 
 #[test]

@@ -25,7 +25,7 @@ if [[ ${2:-} != --as-user ]]; then
     node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
     curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
         tar -xJ --strip-components=1 -C /usr/local
-    npm install -g npm@latest pnpm@latest
+    npm install -g --ignore-scripts npm@latest pnpm@latest
     npm --version
     useradd -m tester
     exec runuser -u tester -- bash /opt/e2e.sh --inside --as-user
@@ -140,6 +140,14 @@ check "pnpm leaves the other group member at its installed version" 3.0.0 "$(ins
 pkd --from pnpm --yes upgrade >/dev/null
 check "pnpm bulk update keeps the first group member" 7.0.0 "$(installed pnpm is-number)"
 check "pnpm bulk update updates the other group member" 3.0.1 "$(installed pnpm is-odd)"
+pnpm add --global --silent --config.minimumReleaseAge=0 is-number@5.0.0,picocolors@1.1.1 >/dev/null
+# The cutoff admits is-number 6.0.0. The installed group member is younger.
+pnpm_age=$(( ($(date +%s) - $(date -u -d 2018-05-01 +%s)) / 60 ))
+pnpm config set --global minimumReleaseAge "$pnpm_age"
+pkd --from pnpm --yes upgrade is-number >/dev/null
+check "pnpm updates an eligible tool in a younger group" 6.0.0 "$(installed pnpm is-number)"
+check "pnpm keeps the unchanged younger group member" 1.1.1 "$(installed pnpm picocolors)"
+pnpm config delete --global minimumReleaseAge
 
 echo "== mise"
 mkdir -p "$HOME/.config/mise"
