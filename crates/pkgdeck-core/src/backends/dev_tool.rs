@@ -194,6 +194,7 @@ struct NpmOutdated {
 
 #[derive(Deserialize)]
 struct PnpmRoot {
+    path: Option<PathBuf>,
     #[serde(default)]
     dependencies: std::collections::BTreeMap<String, PnpmEntry>,
 }
@@ -203,6 +204,32 @@ struct PnpmEntry {
     version: String,
     from: Option<String>,
     resolved: Option<String>,
+    path: Option<PathBuf>,
+}
+
+impl PnpmRoot {
+    /// pnpm 11 and later put each install group in a separate directory.
+    fn group<'a>(&'a self, name: &str, entry: &'a PnpmEntry) -> Option<&'a std::path::Path> {
+        let mut path = entry.path.as_deref()?;
+        for component in std::path::Path::new(name).components().rev() {
+            if path.file_name()? != component.as_os_str() {
+                return None;
+            }
+            path = path.parent()?;
+        }
+        if path.file_name()? != "node_modules" {
+            return None;
+        }
+        let group = path.parent()?;
+        (group.parent()? == self.path.as_deref()?).then_some(group)
+    }
+}
+
+impl PnpmEntry {
+    fn from_registry(&self, name: &str) -> bool {
+        self.from.as_deref().is_none_or(|from| from == name)
+            && !self.resolved.as_deref().is_some_and(local_or_git_source)
+    }
 }
 
 #[derive(Deserialize)]
@@ -947,10 +974,28 @@ impl<T: Transport> DevTool<T> {
         }
         Ok(details)
     }
-    fn npm_table(
+    fn javascript_outdated<R: serde::de::DeserializeOwned>(
+        &self,
+        for_upgrade: Option<Updates<'_>>,
+        cancel: &Cancellation,
+    ) -> Result<std::collections::BTreeMap<String, R>, EngineError> {
+        let mut args = vec!["outdated", "--global", "--json"];
+        if let Some(Updates::Only(name)) = for_upgrade {
+            args.push(name);
+        }
+        match self.lenient_json(&args, cancel) {
+            Ok((value, _)) => serde_json::from_value(value).map_err(|e| invalid(self.kind.id(), e)),
+            Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
+            Err(error) if for_upgrade.is_some() => Err(error),
+            // Keep the installed list when the registry is unreachable.
+            Err(_) => Ok(std::collections::BTreeMap::new()),
+        }
+    }
+
+    fn npm_installed(
         &self,
         cancel: &Cancellation,
-    ) -> Result<std::collections::BTreeMap<String, (String, Option<String>)>, EngineError> {
+    ) -> Result<std::collections::BTreeMap<String, NpmInstalled>, EngineError> {
         let id = self.kind.id();
         let (value, lenient) =
             self.lenient_json(&["ls", "--global", "--depth=0", "--json"], cancel)?;
@@ -959,76 +1004,65 @@ impl<T: Transport> DevTool<T> {
         // a bare failure downstream.
         let problem = npm_ls_problem(&value);
         let report: NpmLs = serde_json::from_value(value).map_err(|e| invalid(id, e))?;
-        let installed = match (report.dependencies, lenient) {
-            (Some(dependencies), _) => dependencies,
-            (None, false) => std::collections::BTreeMap::new(),
-            (None, true) => return Err(invalid(id, problem)),
-        };
-        let outdated: std::collections::BTreeMap<String, NpmOutdated> =
-            match self.lenient_json(&["outdated", "--global", "--json"], cancel) {
-                Ok((value, _)) => serde_json::from_value(value).map_err(|e| invalid(id, e))?,
-                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
-                // Registry metadata may be unreachable; installed state stays.
-                Err(_) => std::collections::BTreeMap::new(),
-            };
-        Ok(installed
+        match (report.dependencies, lenient) {
+            (Some(dependencies), _) => Ok(dependencies),
+            (None, false) => Ok(std::collections::BTreeMap::new()),
+            (None, true) => Err(invalid(id, problem)),
+        }
+    }
+
+    fn npm_inventory(
+        &self,
+        home: &std::path::Path,
+        for_upgrade: Option<Updates<'_>>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let installed = self.npm_installed(cancel)?;
+        let outdated = self.javascript_outdated::<NpmOutdated>(for_upgrade, cancel)?;
+        installed
             .into_iter()
+            .filter(|(name, _)| for_upgrade.is_none_or(|updates| updates.covers(name)))
             .map(|(name, entry)| {
-                let wanted = outdated
+                let candidate = outdated
                     .get(&name)
                     .filter(|outdated| {
                         !entry.resolved.as_deref().is_some_and(local_or_git_source)
                             && semver_newer(&outdated.wanted, &entry.version)
                     })
-                    .map(|outdated| outdated.wanted.clone());
-                (name, (entry.version, wanted))
-            })
-            .collect())
-    }
-    fn npm_inventory(
-        &self,
-        home: &std::path::Path,
-        cancel: &Cancellation,
-    ) -> Result<Vec<PackageDetails>, EngineError> {
-        self.npm_table(cancel)?
-            .into_iter()
-            .map(|(name, (installed, wanted))| {
-                let candidate = wanted.unwrap_or_else(|| installed.clone());
+                    .map_or_else(|| entry.version.clone(), |outdated| outdated.wanted.clone());
                 self.detail(
                     home,
                     name,
                     "npm-installed command-line tool".into(),
                     None,
-                    installed,
+                    entry.version,
                     Some(candidate),
                 )
             })
             .collect()
     }
+    fn pnpm_roots(&self, cancel: &Cancellation) -> Result<Vec<PnpmRoot>, EngineError> {
+        let (value, _) = self.lenient_json(&["ls", "--global", "--json", "--depth=0"], cancel)?;
+        serde_json::from_value(value).map_err(|e| invalid(self.kind.id(), e))
+    }
     fn pnpm_inventory(
         &self,
         home: &std::path::Path,
+        for_upgrade: Option<Updates<'_>>,
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
-        let id = self.kind.id();
-        let (value, _) = self.lenient_json(&["ls", "--global", "--json", "--depth=0"], cancel)?;
-        let roots: Vec<PnpmRoot> = serde_json::from_value(value).map_err(|e| invalid(id, e))?;
-        let outdated: std::collections::BTreeMap<String, PnpmOutdated> =
-            match self.lenient_json(&["outdated", "--global", "--json"], cancel) {
-                Ok((value, _)) => serde_json::from_value(value).map_err(|e| invalid(id, e))?,
-                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
-                // Registry metadata may be unreachable; installed state stays.
-                Err(_) => std::collections::BTreeMap::new(),
-            };
+        let roots = self.pnpm_roots(cancel)?;
+        let outdated = self.javascript_outdated::<PnpmOutdated>(for_upgrade, cancel)?;
         let mut details = Vec::new();
         for root in roots {
             for (name, entry) in root.dependencies {
+                if for_upgrade.is_some_and(|updates| !updates.covers(&name)) {
+                    continue;
+                }
                 let candidate = outdated
                     .get(&name)
                     .filter(|outdated| {
-                        entry.from.as_ref().is_none_or(|from| from == &name)
-                            && !entry.resolved.as_deref().is_some_and(local_or_git_source)
-                            && semver_newer(&outdated.latest, &entry.version)
+                        entry.from_registry(&name) && semver_newer(&outdated.latest, &entry.version)
                     })
                     .map_or_else(|| entry.version.clone(), |outdated| outdated.latest.clone());
                 details.push(self.detail(
@@ -1878,8 +1912,8 @@ impl<T: Transport> DevTool<T> {
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         match self.kind {
             DevKind::Cargo => self.cargo_inventory(&home, updates, cancel),
-            DevKind::Npm => self.npm_inventory(&home, cancel),
-            DevKind::Pnpm => self.pnpm_inventory(&home, cancel),
+            DevKind::Npm => self.npm_inventory(&home, None, cancel),
+            DevKind::Pnpm => self.pnpm_inventory(&home, None, cancel),
             DevKind::Bun => self.bun_inventory(&home, updates, cancel),
             DevKind::Pip => self.pip_inventory(&home, cancel),
             DevKind::Pipx => self.pipx_inventory(&home, cancel),
@@ -2043,33 +2077,70 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        let home = self
+            .home
+            .as_deref()
+            .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+        let details = match self.kind {
+            DevKind::Npm => self.npm_inventory(home, Some(updates), cancel)?,
+            DevKind::Pnpm => self.pnpm_inventory(home, Some(updates), cancel)?,
+            _ => self.bun_inventory(home, updates, cancel)?,
+        };
+        let candidates: std::collections::BTreeMap<_, _> = details
+            .iter()
+            .filter(|detail| detail.package.update == UpdateAvailability::Available)
+            .filter_map(|detail| {
+                let package = &detail.package;
+                Some((
+                    package.id.name.as_str(),
+                    package.candidate_version.as_deref()?,
+                ))
+            })
+            .collect();
         let command = if self.kind == DevKind::Npm {
             "install"
         } else {
             "add"
         };
         let limit = self.bun_release_age();
+        let mut handled = std::collections::BTreeSet::new();
         let mut failed = None;
-        for detail in self.inventory(updates, cancel)? {
-            let package = detail.package;
-            let name = package.id.name;
-            let Some(version) = package.candidate_version.filter(|_| {
-                package.update == UpdateAvailability::Available && updates.covers(&name)
-            }) else {
+        for (&name, &version) in &candidates {
+            if handled.contains(name) {
                 continue;
-            };
+            }
             if updates == Updates::All {
-                progress(Progress::Package(name.clone()));
+                progress(Progress::Package(name.into()));
                 progress(Progress::Message(format!("Updating {name}…")));
             }
-            let spec = format!("{name}@{version}");
+            let specs =
+                match self.javascript_upgrade_specs(home, name, version, &candidates, cancel) {
+                    Ok(specs) if specs.is_empty() => continue,
+                    Ok(specs) => specs,
+                    Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                    Err(error) => {
+                        failed.get_or_insert(error);
+                        continue;
+                    }
+                };
+            // A pnpm install group is replaced in one command. Each member
+            // uses an exact version, including tools that have no upgrade.
+            handled.extend(
+                specs
+                    .iter()
+                    .filter_map(|spec| spec.rsplit_once('@').map(|(name, _)| name.to_owned())),
+            );
+            let spec = specs.join(",");
             let mut args = vec![command, "--global", &spec];
             args.extend(limit.as_deref());
             match self.call(&args, cancel, true) {
                 Ok(result) if result.cancellation_deferred => {
-                    return Ok(OperationOutcome {
-                        cancellation_deferred: true,
-                    });
+                    return failed.map_or(
+                        Ok(OperationOutcome {
+                            cancellation_deferred: true,
+                        }),
+                        Err,
+                    );
                 }
                 Ok(_) => {}
                 Err(ExecutionError::Cancelled) => return Err(EngineError::Cancelled),
@@ -2079,6 +2150,121 @@ impl<T: Transport> DevTool<T> {
             }
         }
         failed.map_or(Ok(OperationOutcome::default()), Err)
+    }
+    fn javascript_upgrade_specs(
+        &self,
+        home: &std::path::Path,
+        name: &str,
+        version: &str,
+        candidates: &std::collections::BTreeMap<&str, &str>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<String>, EngineError> {
+        match self.kind {
+            DevKind::Npm => {
+                let installed = self.npm_installed(cancel)?;
+                Ok(installed
+                    .get(name)
+                    .filter(|entry| {
+                        !entry.resolved.as_deref().is_some_and(local_or_git_source)
+                            && semver_newer(version, &entry.version)
+                    })
+                    .map(|_| format!("{name}@{version}"))
+                    .into_iter()
+                    .collect())
+            }
+            DevKind::Pnpm => self.pnpm_upgrade_specs(name, version, candidates, cancel),
+            _ => {
+                let preview = self.bun_upgrade_version(name, cancel)?;
+                let fresh = self.bun_inventory(home, Updates::Only(name), cancel)?;
+                Ok(fresh
+                    .into_iter()
+                    .find(|detail| {
+                        let package = &detail.package;
+                        package.id.name == name
+                            && package.update == UpdateAvailability::Available
+                            && package
+                                .installed_version
+                                .as_deref()
+                                .is_some_and(|installed| semver_newer(&preview, installed))
+                    })
+                    .map(|_| format!("{name}@{preview}"))
+                    .into_iter()
+                    .collect())
+            }
+        }
+    }
+    fn pnpm_upgrade_specs(
+        &self,
+        name: &str,
+        version: &str,
+        candidates: &std::collections::BTreeMap<&str, &str>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<String>, EngineError> {
+        let roots = self.pnpm_roots(cancel)?;
+        let Some((root, entry)) = roots
+            .iter()
+            .find_map(|root| root.dependencies.get(name).map(|entry| (root, entry)))
+        else {
+            return Ok(vec![]);
+        };
+        if !entry.from_registry(name) || !semver_newer(version, &entry.version) {
+            return Ok(vec![]);
+        }
+        let Some(group) = root.group(name, entry) else {
+            return Ok(vec![format!("{name}@{version}")]);
+        };
+        root.dependencies
+            .iter()
+            .filter(|(member, entry)| root.group(member, entry) == Some(group))
+            .map(|(member, entry)| {
+                if !self.kind.valid_name(member)
+                    || !entry.from_registry(member)
+                    || semver::Version::parse(&entry.version).is_err()
+                {
+                    return Err(invalid(
+                        self.kind.id(),
+                        format!("Cannot preserve {member} in the global install group for {name}"),
+                    ));
+                }
+                let version = candidates
+                    .get(member.as_str())
+                    .copied()
+                    .filter(|candidate| semver_newer(candidate, &entry.version))
+                    .unwrap_or(&entry.version);
+                Ok(format!("{member}@{version}"))
+            })
+            .collect()
+    }
+    fn bun_upgrade_version(
+        &self,
+        name: &str,
+        cancel: &Cancellation,
+    ) -> Result<String, EngineError> {
+        let spec = format!("{name}@latest");
+        let limit = self.bun_release_age();
+        let mut args = vec!["add", "--global", &spec, "--dry-run"];
+        args.extend(limit.as_deref());
+        let result = self.call(&args, cancel, false)?;
+        let stdout = String::from_utf8(bytes(self.kind.id(), result)?)
+            .map_err(|error| invalid(self.kind.id(), error))?;
+        let prefix = format!("installed {name}@");
+        stdout
+            .lines()
+            .find_map(|line| {
+                let version = line
+                    .trim()
+                    .strip_prefix(&prefix)?
+                    .split_whitespace()
+                    .next()?;
+                semver::Version::parse(version).ok()?;
+                Some(version.to_owned())
+            })
+            .ok_or_else(|| {
+                invalid(
+                    self.kind.id(),
+                    format!("Bun did not report the version it would install for {name}"),
+                )
+            })
     }
     /// Runs `update` for each tool its registry has a newer version of, and
     /// only those: a tool installed from git or a folder has none, and

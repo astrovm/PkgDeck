@@ -133,6 +133,13 @@ echo "== pnpm"
 pnpm config set --global ignore-scripts true >/dev/null 2>&1 || true
 pnpm add --global --silent --config.minimumReleaseAge=0 @anthropic-ai/claude-code@2.1.280 >/dev/null
 limited pnpm @anthropic-ai/claude-code
+pnpm add --global --silent --config.minimumReleaseAge=0 is-number@6.0.0,is-odd@3.0.0 >/dev/null
+pkd --from pnpm --yes upgrade is-number >/dev/null
+check "pnpm updates the named tool in a group" 7.0.0 "$(installed pnpm is-number)"
+check "pnpm leaves the other group member at its installed version" 3.0.0 "$(installed pnpm is-odd)"
+pkd --from pnpm --yes upgrade >/dev/null
+check "pnpm bulk update keeps the first group member" 7.0.0 "$(installed pnpm is-number)"
+check "pnpm bulk update updates the other group member" 3.0.1 "$(installed pnpm is-odd)"
 
 echo "== mise"
 mkdir -p "$HOME/.config/mise"
@@ -183,6 +190,15 @@ check "Bun: upgrade leaves it" 2.1.280 "$(installed bun @anthropic-ai/claude-cod
 pkd --from bun --yes upgrade @anthropic-ai/claude-code >/dev/null 2>&1 || true
 differs "Bun: by name stays within the limit" "$(installed bun @anthropic-ai/claude-code)" "$(field bun @anthropic-ai/claude-code candidate_version)"
 pkd release-wait off >/dev/null
+
+echo "== Bun eligible fallback"
+bun add --global --silent is-number@5.0.0 >/dev/null
+# A cutoff between the 6.0.0 and 7.0.0 publication dates.
+minimum_age=$(( $(date +%s) - $(date -u -d 2018-05-01 +%s) ))
+printf '[install]\nminimumReleaseAge = %s\n' "$minimum_age" > "$HOME/.bunfig.toml"
+pkd --from bun --yes upgrade is-number >/dev/null
+check "Bun installs the newer release that passes the age limit" 6.0.0 "$(installed bun is-number)"
+rm "$HOME/.bunfig.toml"
 
 # RubyGems has no limit at all: only PkgDeck's wait stands in the way.
 echo "== RubyGems"
