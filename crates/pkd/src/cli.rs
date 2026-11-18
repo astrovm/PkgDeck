@@ -1101,6 +1101,9 @@ fn dispatch_command(
             Ok(plan) => plan,
             Err(error) => return failure(error),
         };
+        if let Err(error) = plan.check_no_downgrades() {
+            return failure(error);
+        }
         events(Event::Progress {
             operation: operation.clone(),
             // Shown under "Update all apt packages"; empty sections add nothing.

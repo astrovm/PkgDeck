@@ -12,6 +12,8 @@ pub struct Apt<T = NativeTransport> {
     /// Set during an update check, which refreshes the lists first.
     update_check: Option<u64>,
     upgrade_check_error: Option<EngineError>,
+    /// Once a write is prepared, its preview and execution use the same lists.
+    use_system_lists: bool,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -22,6 +24,7 @@ impl<T> Apt<T> {
             looked_up: vec![],
             update_check: None,
             upgrade_check_error: None,
+            use_system_lists: false,
         }
     }
 }
@@ -38,6 +41,22 @@ fn planned_upgrade(line: &str) -> Option<(&str, &str, &str, &str)> {
 }
 
 impl AptUpgradePlan {
+    pub fn has_downgrades(&self) -> bool {
+        apt_summary(&self.preview)
+            .and_then(|summary| apt_count(summary, "downgraded"))
+            .is_some_and(|count| count > 0)
+    }
+
+    pub fn check_no_downgrades(&self) -> Result<(), EngineError> {
+        if self.has_downgrades() {
+            return Err(EngineError::Refused {
+                backend: "apt".into(),
+                refusal: Refusal::Explained("APT would downgrade installed packages.".into()),
+            });
+        }
+        Ok(())
+    }
+
     pub fn upgrade_changes(&self) -> impl Iterator<Item = PlannedChange> + '_ {
         self.preview
             .lines()
@@ -68,19 +87,6 @@ fn apt_count(summary: &str, action: &str) -> Option<usize> {
             None
         }
     })
-}
-
-fn refuse_apt_downgrades(plan: &AptUpgradePlan) -> Result<(), EngineError> {
-    if apt_summary(&plan.preview)
-        .and_then(|summary| apt_count(summary, "downgraded"))
-        .is_some_and(|count| count > 0)
-    {
-        return Err(EngineError::Refused {
-            backend: "apt".into(),
-            refusal: Refusal::Explained("APT would downgrade installed packages.".into()),
-        });
-    }
-    Ok(())
 }
 
 pub(super) fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, EngineError> {
@@ -145,7 +151,7 @@ pub(super) fn parse_apt_transaction_plan(
     output: &[u8],
 ) -> Result<TransactionPlan, EngineError> {
     let parsed = parse_apt_upgrade_plan(output)?;
-    refuse_apt_downgrades(&parsed)?;
+    parsed.check_no_downgrades()?;
     let mut changes = Vec::new();
     for line in parsed.preview.lines() {
         let mut fields = line.split_whitespace();
@@ -264,6 +270,7 @@ impl<T: Transport> Apt<T> {
         ids: &[&PackageId],
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
+        self.use_system_lists = true;
         let mut found = self.query("installed", "", "", cancel)?;
         found.retain(|details| ids.contains(&&details.package.id));
         self.verify_upgrade_candidates(&mut found, cancel)?;
@@ -355,7 +362,10 @@ impl<T: Transport> Apt<T> {
         let mut args = ["--simulate", "-o", "Debug::NoLocking=1"]
             .map(OsString::from)
             .to_vec();
-        if let Some(dir) = self.transport.private_index("apt") {
+        if let Some(dir) = (!self.use_system_lists)
+            .then(|| self.transport.private_index("apt"))
+            .flatten()
+        {
             args.push("-o".into());
             args.push(format!("Dir::State::Lists={}", dir.join("lists").display()).into());
         }
@@ -368,11 +378,12 @@ impl<T: Transport> Apt<T> {
         arch: &str,
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
-        serde_json::from_slice(&bytes(
-            "apt",
-            self.transport.apt_query(mode, query, arch, cancel)?,
-        )?)
-        .map_err(|e| invalid("apt", e))
+        let result = if self.use_system_lists {
+            self.transport.apt_query_system(mode, query, arch, cancel)
+        } else {
+            self.transport.apt_query(mode, query, arch, cancel)
+        }?;
+        serde_json::from_slice(&bytes("apt", result)?).map_err(|e| invalid("apt", e))
     }
     fn target(&self, id: &PackageId) -> Result<String, EngineError> {
         if id.backend != "apt" || id.scope != Scope::System {
@@ -407,6 +418,9 @@ impl<T: Transport> Backend for Apt<T> {
     }
     fn arm_update_check(&mut self, token: Option<u64>) {
         self.update_check = token;
+        if token.is_some() {
+            self.use_system_lists = false;
+        }
     }
     fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
         if self.update_check.is_none() || self.refresh_without_password(cancel)? {
@@ -462,6 +476,8 @@ impl<T: Transport> Backend for Apt<T> {
         }
         let mut found = self.query("lookup", name, "", cancel)?;
         self.verify_upgrade_candidates(&mut found, cancel)?;
+        // Exact identity and details remain readable when update verification fails.
+        self.upgrade_check_error = None;
         let home = self.transport.env("HOME").map(PathBuf::from);
         let packages = found
             .iter()
@@ -546,9 +562,7 @@ impl<T: Transport> Backend for Apt<T> {
             .ok_or(EngineError::NotFound)
     }
     fn apt_upgrade_plan(&mut self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
-        let plan = self.simulated_upgrade(cancel)?;
-        refuse_apt_downgrades(&plan)?;
-        Ok(plan)
+        self.simulated_upgrade(cancel)
     }
     fn prepare(
         &mut self,
@@ -565,6 +579,7 @@ impl<T: Transport> Backend for Apt<T> {
         self.looked_up.clear();
         progress(Progress::Message("Refreshing package lists…".into()));
         self.transport.apt_write(AptAction::Refresh, cancel)?;
+        self.use_system_lists = true;
         Ok(())
     }
     fn operation_plan(
@@ -618,6 +633,9 @@ impl<T: Transport> Backend for Apt<T> {
             "Running apt-get. If you cancel, PkgDeck waits for APT to finish.".into(),
         ));
         let result = self.transport.apt_write(action, cancel)?;
+        if matches!(operation, Operation::Refresh { .. }) {
+            self.use_system_lists = true;
+        }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })

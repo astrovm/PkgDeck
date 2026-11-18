@@ -7218,6 +7218,68 @@ fn update_all_stops_when_the_fresh_apt_plan_is_empty() {
     assert!(controller.rust().pending.is_none());
     assert_eq!(controller.status().to_string(), "APT has no updates ready.");
 }
+
+#[test]
+fn update_all_omits_apt_when_its_plan_would_downgrade() {
+    let all = |backend: &str| Operation::UpgradeAll {
+        backend: backend.into(),
+    };
+    let plan = AptUpgradePlan {
+        preview: "1 upgraded, 0 newly installed, 1 downgraded, 0 to remove and 0 not upgraded."
+            .into(),
+        upgrades: vec!["powerdevil".into(), "other".into()],
+        installs: vec![],
+        removals: vec![],
+    };
+    let mut flatpak = fixture_row();
+    flatpak.id.backend = "flatpak".into();
+    flatpak.update = UpdateAvailability::Available;
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().packages = vec![flatpak];
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        vec![all("apt"), all("flatpak")],
+        2,
+        Some(plan),
+    )));
+    assert!(
+        matches!(&controller.rust().pending, Some(Job::UpgradeAll(operations, None)) if operations == &[all("flatpak")])
+    );
+    let confirmation = controller.confirmation().to_string();
+    assert!(confirmation.contains("APT is left out because it would downgrade"));
+    assert!(confirmation.starts_with("Update all 1 listed package?"));
+}
+
+#[test]
+fn update_all_waits_for_a_running_write_before_showing_the_apt_plan() {
+    let mut apt = fixture_row();
+    apt.id.backend = "apt".into();
+    apt.installed_version = Some("1.0".into());
+    apt.update = UpdateAvailability::Available;
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let (_sender, receiver) = mpsc::channel();
+    let rust = controller.as_mut().rust_mut();
+    rust.updates_view = true;
+    rust.packages = vec![apt];
+    rust.worker = Some(Worker {
+        handle: thread::spawn(|| {}),
+        receiver,
+        cancel: Cancellation::default(),
+        job: Job::Write(
+            Operation::Refresh {
+                backend: "fixture".into(),
+            },
+            None,
+        ),
+    });
+    controller.as_mut().propose("upgrade-all".into(), 0);
+    assert!(controller.rust().pending.is_none());
+    assert!(
+        matches!(&controller.rust().queued, Some(Job::PlanUpgrade(operations, 1)) if operations == &[Operation::UpgradeAll { backend: "apt".into() }])
+    );
+    assert!(controller.confirmation().to_string().is_empty());
+}
 #[test]
 fn automatic_runs_download_macos_updates_in_one_step() {
     let available = |backend: &str, name: &str| {

@@ -132,6 +132,66 @@ fn pacman_search_watches(root: &std::path::Path) -> Option<Vec<crate::cache::Wat
 }
 
 impl NativeTransport {
+    fn apt_query_from_lists(
+        &self,
+        mode: &str,
+        query: &str,
+        arch: &str,
+        cancel: &Cancellation,
+        copy: Option<PathBuf>,
+    ) -> Result<Completion, ExecutionError> {
+        if self.host.resolve("apt-get")?.is_none() {
+            return Err(ExecutionError::Disabled("APT not found".into()));
+        }
+        // Inside the Flatpak the bundled helper reads the host's /var as is,
+        // and its /etc under /run/host.
+        let env = apt_helper_env(
+            self.host.runtime == crate::host::Runtime::Flatpak,
+            copy.as_ref().map(|dir| dir.join("lists")),
+        );
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let executable = apt_query_executable(
+            &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
+            option_env!("PKGDECK_BUILT_APT_QUERY"),
+        )?;
+        // The helper opens APT's cache on every run (half a second or more).
+        // Its answer only depends on the APT and dpkg databases.
+        let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
+        let store = cacheable.then(crate::cache::Store::user).flatten();
+        let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);
+        let result = crate::cache::completion(
+            store.as_ref(),
+            "apt",
+            mode,
+            &[
+                query,
+                arch,
+                if copy.is_some() { "private" } else { "system" },
+            ],
+            &apt_watches(&self.host, copy),
+            &[helper.as_deref().unwrap_or_default()],
+            || {
+                self.host.read_bundled(
+                    &executable,
+                    &[mode.into(), query.into(), arch.into()],
+                    &env,
+                    Limits {
+                        timeout: Duration::from_secs(120),
+                        output_bytes: 32 * 1024 * 1024,
+                    },
+                    cancel,
+                )
+            },
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
     /// System manager commands, with pacman searches answered from `store`
     /// while the databases below `root` are unchanged.
     fn system_manager_cached(
@@ -280,53 +340,16 @@ impl Transport for NativeTransport {
         arch: &str,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        if self.host.resolve("apt-get")?.is_none() {
-            return Err(ExecutionError::Disabled("APT not found".into()));
-        }
-        // Inside the Flatpak the bundled helper reads the host's /var as is,
-        // and its /etc under /run/host.
-        let env = apt_helper_env(
-            self.host.runtime == crate::host::Runtime::Flatpak,
-            self.private_index("apt").map(|dir| dir.join("lists")),
-        );
-        let env: Vec<(&str, &str)> = env
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
-        let executable = apt_query_executable(
-            &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
-            option_env!("PKGDECK_BUILT_APT_QUERY"),
-        )?;
-        // The helper opens APT's cache on every run (half a second or more).
-        // Its answer only depends on the APT and dpkg databases.
-        let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
-        let store = cacheable.then(crate::cache::Store::user).flatten();
-        let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);
-        let result = crate::cache::completion(
-            store.as_ref(),
-            "apt",
-            mode,
-            &[query, arch],
-            &apt_watches(&self.host, crate::private_index::dir("apt")),
-            &[helper.as_deref().unwrap_or_default()],
-            || {
-                self.host.read_bundled(
-                    &executable,
-                    &[mode.into(), query.into(), arch.into()],
-                    &env,
-                    Limits {
-                        timeout: Duration::from_secs(120),
-                        output_bytes: 32 * 1024 * 1024,
-                    },
-                    cancel,
-                )
-            },
-        )?;
-        if result.code == Some(0) {
-            Ok(result)
-        } else {
-            Err(ExecutionError::Failed(result))
-        }
+        self.apt_query_from_lists(mode, query, arch, cancel, self.private_index("apt"))
+    }
+    fn apt_query_system(
+        &self,
+        mode: &str,
+        query: &str,
+        arch: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.apt_query_from_lists(mode, query, arch, cancel, None)
     }
     fn apt_write(
         &self,

@@ -20,6 +20,9 @@ struct Fixture {
     grouped_apt_writes: Arc<Mutex<Vec<Vec<AptAction>>>>,
     apt_simulation: Option<String>,
     apt_simulation_failure: Option<ExecutionError>,
+    apt_private_lists: bool,
+    apt_system_simulation: Option<String>,
+    apt_system_queries: Arc<Mutex<usize>>,
     simulations: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
     local_install: Arc<Mutex<Option<std::path::PathBuf>>>,
@@ -88,6 +91,9 @@ fn output(value: impl AsRef<[u8]>) -> Completion {
     }
 }
 impl Transport for Fixture {
+    fn private_index(&self, source: &str) -> Option<std::path::PathBuf> {
+        (self.apt_private_lists && source == "apt").then(|| "/synthetic/apt".into())
+    }
     fn apt_query(
         &self,
         mode: &str,
@@ -105,6 +111,16 @@ impl Transport for Fixture {
         Ok(output(
             serde_json::to_vec(&if matches { vec![details] } else { vec![] }).unwrap(),
         ))
+    }
+    fn apt_query_system(
+        &self,
+        mode: &str,
+        query: &str,
+        arch: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        *self.apt_system_queries.lock().unwrap() += 1;
+        self.apt_query(mode, query, arch, cancel)
     }
     fn apt_write(
         &self,
@@ -235,11 +251,14 @@ impl Transport for Fixture {
             {
                 return Err(error.clone());
             }
-            if let Some(simulation) = self
-                .apt_simulation
-                .as_ref()
-                .filter(|_| args.contains(&"--simulate".into()))
+            let simulation = if self.apt_private_lists
+                && !args.iter().any(|arg| arg.starts_with("Dir::State::Lists="))
             {
+                self.apt_system_simulation.as_ref()
+            } else {
+                self.apt_simulation.as_ref()
+            };
+            if let Some(simulation) = simulation.filter(|_| args.contains(&"--simulate".into())) {
                 self.simulations.lock().unwrap().push((
                     executable.into(),
                     args.iter()
@@ -536,9 +555,45 @@ fn apt_inventory_can_read_upgrades_even_when_the_full_plan_would_downgrade() {
     assert!(apt.installed(&cancel).unwrap()[0].update_ready());
     assert!(apt.query_errors().is_empty());
     assert!(matches!(
-        apt.apt_upgrade_plan(&cancel),
+        apt.apt_upgrade_plan(&cancel).unwrap().check_no_downgrades(),
         Err(EngineError::Refused { .. })
     ));
+}
+
+#[test]
+fn named_apt_upgrade_rechecks_the_system_lists_instead_of_the_private_copy() {
+    let mut fixture = Fixture::new();
+    *fixture.installed.lock().unwrap() = Some("1.0".into());
+    *fixture.candidate.lock().unwrap() = "2.0".into();
+    fixture.apt_private_lists = true;
+    fixture.apt_simulation = Some(
+        concat!(
+            "1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+            "Inst synthetic-fixture [1.0] (2.0 Synthetic [all])\n",
+        )
+        .into(),
+    );
+    fixture.apt_system_simulation =
+        Some("0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n".into());
+    let mut apt = Apt::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let row = apt.installed(&cancel).unwrap().remove(0);
+    assert!(row.update_ready());
+    let action = Operation::Upgrade(row.id);
+    apt.prepare(&action, &cancel, &mut |_| {}).unwrap();
+    assert!(matches!(
+        apt.execute(&action, &cancel, &mut |_| {}),
+        Err(EngineError::Refused { .. })
+    ));
+    assert_eq!(*fixture.apt_system_queries.lock().unwrap(), 1);
+    let simulations = fixture.simulations.lock().unwrap();
+    assert!(simulations[0]
+        .1
+        .contains(&"Dir::State::Lists=/synthetic/apt/lists".into()));
+    assert!(!simulations[1]
+        .1
+        .contains(&"Dir::State::Lists=/synthetic/apt/lists".into()));
+    assert_eq!(fixture.installed.lock().unwrap().as_deref(), Some("1.0"));
 }
 
 #[test]
@@ -556,6 +611,11 @@ fn apt_inventory_keeps_installed_rows_on_solver_failure_and_propagates_cancellat
         apt.query_errors(),
         [EngineError::Execution(ExecutionError::LockBusy)]
     );
+    assert_eq!(
+        apt.lookup("synthetic-fixture", &cancel).unwrap()[0].update,
+        UpdateAvailability::Unknown
+    );
+    assert!(apt.query_errors().is_empty());
     assert_eq!(apt.installed_for_removal(&cancel).unwrap().len(), 1);
     assert!(apt.query_errors().is_empty());
     let mut engine = Engine::default();

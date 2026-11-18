@@ -1614,6 +1614,8 @@ mod tests {
                 "--assume-yes",
                 "-o",
                 "DPkg::Lock::Timeout=0",
+                "-o",
+                "APT::Get::allow-downgrades=false",
                 "--no-remove",
                 "dist-upgrade"
             ]

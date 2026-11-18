@@ -1632,6 +1632,7 @@ impl Engine {
                 })?;
                 if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                     let current = backend.apt_upgrade_plan(cancel)?;
+                    current.check_no_downgrades()?;
                     if expected_apt.as_ref() != Some(&current) {
                         return Err(EngineError::Refused {
                             backend: "apt".into(),
@@ -1697,6 +1698,7 @@ impl Engine {
         let backend = self.ready(operation.backend(), operation.capability(), cancel)?;
         if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
             let current = backend.apt_upgrade_plan(cancel)?;
+            current.check_no_downgrades()?;
             if expected_apt.as_ref() != Some(&current) {
                 return Err(EngineError::Refused {
                     backend: "apt".into(),

@@ -662,6 +662,11 @@ fn main() {
                 .unwrap()
             })
             .collect();
+            app.background.available = if update == "available" {
+                app.rows.len() as u64
+            } else {
+                0
+            };
             offline(app, Page::Updates);
         });
     }

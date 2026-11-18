@@ -1341,7 +1341,10 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             // for Update all.
             let apt = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
             let held = if operations.iter().any(apt) {
-                match engine.plan_apt_upgrade(cancel) {
+                match engine.plan_apt_upgrade(cancel).and_then(|plan| {
+                    plan.check_no_downgrades()?;
+                    Ok(plan)
+                }) {
                     Ok(plan) if removals || plan.removals.is_empty() => None,
                     Ok(plan) => Some(Held::said(format!(
                         "Not updated automatically: it would remove {} {}. Review it with Update all.",
@@ -6775,10 +6778,17 @@ impl ffi::PackageController {
                 .filter(|package| package.update_ready())
                 .count()
                 - skipped;
-            if !writing && operations.iter().any(|operation| {
+            if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
-                self.start(Job::PlanUpgrade(operations, count));
+                let job = Job::PlanUpgrade(operations, count);
+                if writing {
+                    self.as_mut().rust_mut().queued = Some(job);
+                    self.as_mut().set_status("APT will check its plan after this operation.".into());
+                    self.sync_needs_poll();
+                } else {
+                    self.start(job);
+                }
             } else {
                 self.as_mut()
                     .apply(Ok(Payload::UpgradePreview(operations, count, None)));
@@ -7145,7 +7155,9 @@ impl ffi::PackageController {
                 // its plan removes anything.
                 let apt_all = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
                 let apt_omission = apt_plan.as_ref().and_then(|plan| {
-                    if !self.rust().allow_removals && !plan.removals.is_empty() {
+                    if plan.has_downgrades() {
+                        Some("\nAPT is left out because it would downgrade installed packages.".into())
+                    } else if !self.rust().allow_removals && !plan.removals.is_empty() {
                         Some(format!(
                             "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
                             plan.removals.join(", ")
@@ -7156,21 +7168,13 @@ impl ffi::PackageController {
                         None
                     }
                 });
-                let (operations, apt_plan, count, left_out) = match apt_omission {
+                let (operations, apt_plan, left_out) = match apt_omission {
                     Some(note) => {
-                        let apt_packages = self
-                            .rust()
-                            .packages
-                            .iter()
-                            .filter(|p| {
-                                p.id.backend == "apt" && p.update == UpdateAvailability::Available
-                            })
-                            .count();
                         let rest: Vec<_> =
                             operations.into_iter().filter(|op| !apt_all(op)).collect();
-                        (rest, None, count.saturating_sub(apt_packages), note)
+                        (rest, None, note)
                     }
-                    None => (operations, apt_plan, count, String::new()),
+                    None => (operations, apt_plan, String::new()),
                 };
                 if operations.is_empty() {
                     self.as_mut().set_status(left_out.trim().into());
@@ -7202,7 +7206,13 @@ impl ffi::PackageController {
                     let count = items.len();
                     (items, count)
                 } else {
-                    (update_items(&operations, &self.rust().packages), count)
+                    let items = update_items(&operations, &self.rust().packages);
+                    let count = if left_out.is_empty() {
+                        count
+                    } else {
+                        items.len()
+                    };
+                    (items, count)
                 };
                 let noun = if count == 1 { "package" } else { "packages" };
                 let warning = if count > 1 {

@@ -459,6 +459,16 @@ pub trait Transport: Send {
     ) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Disabled("APT not found".into()))
     }
+    /// Use the package lists read by the privileged APT command.
+    fn apt_query_system(
+        &self,
+        mode: &str,
+        query: &str,
+        arch: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.apt_query(mode, query, arch, cancel)
+    }
     fn apt_write(
         &self,
         _action: AptAction,
