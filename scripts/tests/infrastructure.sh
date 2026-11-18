@@ -44,8 +44,16 @@ expect_code() {
     cat >"$work/snap-bin/snap-fixture" <<'SNAP'
 #!/usr/bin/env bash
 printf '%s\n' attempt >>"$PKGDECK_SNAP_ATTEMPTS"
-if [[ $1 == recovered || $1 == reset ]] && (( $(wc -l <"$PKGDECK_SNAP_ATTEMPTS") > 1 )); then
+attempt=$(wc -l <"$PKGDECK_SNAP_ATTEMPTS")
+if [[ $1 == recovered || $1 == reset ]] && (( attempt == 2 )); then
     exit 0
+fi
+if [[ $1 == mixed ]] && (( attempt == 3 )); then
+    exit 0
+fi
+if [[ $1 == mixed ]] && (( attempt == 2 )); then
+    echo 'Post "https://api.snapcraft.io/v2/snaps/refresh": dial tcp: connect: connection refused' >&2
+    exit 42
 fi
 case $1 in
     permanent) echo 'error: cannot install snap: invalid package' >&2; exit 23 ;;
@@ -56,7 +64,7 @@ esac
 exit 42
 SNAP
     chmod +x "$work/snap-bin/"{sleep,snap-fixture}
-    for test_case in 'recovered 0 2' 'reset 0 2' 'timeout 42 3' 'permanent 23 1' 'other-host 42 1'; do
+    for test_case in 'recovered 0 2' 'reset 0 2' 'mixed 0 3' 'timeout 42 3' 'permanent 23 1' 'other-host 42 1'; do
         read -r kind status attempts <<<"$test_case"
         : >"$work/snap-attempts"
         PATH="$work/snap-bin:$PATH" PKGDECK_SNAP_ATTEMPTS="$work/snap-attempts" \
