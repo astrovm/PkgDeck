@@ -3483,6 +3483,30 @@ fn pnpm_outdated_newer_reports_available() {
             vec!["add", "--global", "@scope/peer@2.0.0,typescript@7.1.0"],
         ]
     );
+    let fixture = DevFixture {
+        version: "11.20.0\n".into(),
+        pnpm_exclusions: Some(String::new()),
+        calls: Default::default(),
+        ..fixture
+    };
+    let mut backend = DevTool::pnpm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    backend
+        .execute(
+            &Operation::Upgrade(typescript.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.writes("pnpm"),
+        [[
+            "add",
+            "--global",
+            "@scope/peer@1.0.0,typescript@7.1.0",
+            "--config.minimumReleaseAgeExclude=@scope/peer@1.0.0"
+        ]]
+    );
     std::fs::remove_dir_all(base).unwrap();
 }
 

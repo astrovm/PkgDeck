@@ -2308,9 +2308,13 @@ impl<T: Transport> DevTool<T> {
             "--json",
         ];
         let result = self.call(&args, cancel, false)?;
-        let configured: Option<Vec<String>> =
-            serde_json::from_slice(&bytes(self.kind.id(), result)?)
-                .map_err(|error| invalid(self.kind.id(), error))?;
+        let stdout = bytes(self.kind.id(), result)?;
+        // pnpm 11 prints nothing for an unset value. pnpm 12 prints null.
+        let configured: Option<Vec<String>> = if stdout.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            serde_json::from_slice(&stdout).map_err(|error| invalid(self.kind.id(), error))?
+        };
         let mut exclusions = configured.unwrap_or_default();
         exclusions.extend(preserved);
         Ok(exclusions
