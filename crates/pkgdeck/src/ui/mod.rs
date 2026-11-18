@@ -1257,8 +1257,13 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     .clicked()
             {
                 let rows = app.shown_rows();
-                let all: HashSet<String> =
-                    app.items.iter().map(|i| rows[i.raw].identity()).collect();
+                let all: HashSet<String> = app
+                    .items
+                    .iter()
+                    .map(|i| &rows[i.raw])
+                    .filter(|row| row.selectable_update())
+                    .map(model::Row::identity)
+                    .collect();
                 app.unchecked = all;
             }
         }

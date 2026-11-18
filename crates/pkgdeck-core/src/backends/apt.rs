@@ -28,40 +28,78 @@ impl<T> Apt<T> {
 
 /// APT may omit the architecture suffix for the native architecture, or for
 /// an architecture-independent package. The candidate itself always names it.
-fn planned_upgrade(line: &str) -> Option<(&str, &str, &str)> {
+fn planned_upgrade(line: &str) -> Option<(&str, &str, &str, &str)> {
     let (name, versions) = line.strip_prefix("Inst ")?.split_once(" [")?;
-    let (_, candidate) = versions.split_once("] (")?;
+    let (installed, candidate) = versions.split_once("] (")?;
     let (version, rest) = candidate.split_once(' ')?;
     let (before_end, _) = rest.split_once("])")?;
     let (_, arch) = before_end.rsplit_once('[')?;
-    let name = name.split_once(':').map_or(name, |(name, _)| name);
-    Some((name, arch, version))
+    Some((name, arch, installed, version))
+}
+
+impl AptUpgradePlan {
+    pub fn upgrade_changes(&self) -> impl Iterator<Item = PlannedChange> + '_ {
+        self.preview
+            .lines()
+            .filter_map(planned_upgrade)
+            .map(|(name, _, installed, version)| PlannedChange {
+                action: PlannedAction::Upgrade,
+                name: name.into(),
+                installed_version: Some(installed.into()),
+                candidate_version: Some(version.into()),
+            })
+    }
+}
+
+fn apt_summary(preview: &str) -> Option<&str> {
+    preview.lines().find(|line| {
+        line.contains(" upgraded, ")
+            && line.contains(" newly installed, ")
+            && line.contains(" to remove")
+    })
+}
+
+fn apt_count(summary: &str, action: &str) -> Option<usize> {
+    summary.split(',').find_map(|part| {
+        let (count, label) = part.trim().split_once(' ')?;
+        if label.starts_with(action) {
+            count.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn refuse_apt_downgrades(plan: &AptUpgradePlan) -> Result<(), EngineError> {
+    if apt_summary(&plan.preview)
+        .and_then(|summary| apt_count(summary, "downgraded"))
+        .is_some_and(|count| count > 0)
+    {
+        return Err(EngineError::Refused {
+            backend: "apt".into(),
+            refusal: Refusal::Explained("APT would downgrade installed packages.".into()),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, EngineError> {
     let preview = std::str::from_utf8(output)
         .map_err(|e| invalid("apt", e))?
         .trim();
-    let summary = preview
-        .lines()
-        .find(|line| {
-            line.contains(" upgraded, ")
-                && line.contains(" newly installed, ")
-                && line.contains(" to remove")
-        })
+    let summary = apt_summary(preview)
         .ok_or_else(|| invalid("apt", "simulation did not include a transaction summary"))?;
-    let counts: Vec<_> = summary
-        .split(',')
-        .take(3)
-        .map(|part| {
-            part.split_whitespace()
-                .next()
-                .and_then(|n| n.parse::<usize>().ok())
-        })
-        .collect();
-    let [Some(upgrades), Some(installs), Some(removals)] = counts.as_slice() else {
+    let (Some(upgrades), Some(installs), Some(removals)) = (
+        apt_count(summary, "upgraded"),
+        apt_count(summary, "newly installed"),
+        apt_count(summary, "to remove"),
+    ) else {
         return Err(invalid("apt", "invalid simulation counts"));
     };
+    let replacements = upgrades
+        .checked_add(apt_count(summary, "reinstalled").unwrap_or(0))
+        .and_then(|count| count.checked_add(apt_count(summary, "downgraded").unwrap_or(0)))
+        .ok_or_else(|| invalid("apt", "invalid simulation counts"))?;
     let mut plan = AptUpgradePlan {
         preview: preview.into(),
         upgrades: Vec::new(),
@@ -91,9 +129,9 @@ pub(super) fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, En
             _ => {}
         }
     }
-    if plan.upgrades.len() != *upgrades
-        || plan.installs.len() != *installs
-        || plan.removals.len() != *removals
+    if plan.upgrades.len() != replacements
+        || plan.installs.len() != installs
+        || plan.removals.len() != removals
     {
         return Err(invalid(
             "apt",
@@ -107,6 +145,7 @@ pub(super) fn parse_apt_transaction_plan(
     output: &[u8],
 ) -> Result<TransactionPlan, EngineError> {
     let parsed = parse_apt_upgrade_plan(output)?;
+    refuse_apt_downgrades(&parsed)?;
     let mut changes = Vec::new();
     for line in parsed.preview.lines() {
         let mut fields = line.split_whitespace();
@@ -176,8 +215,18 @@ impl<T: Transport> Apt<T> {
             result => result,
         };
         let upgrades = plan.as_ref().map_err(Clone::clone).and_then(|plan| {
-            let upgrades: std::collections::BTreeSet<_> =
-                plan.preview.lines().filter_map(planned_upgrade).collect();
+            let upgrades: std::collections::BTreeSet<_> = plan
+                .preview
+                .lines()
+                .filter_map(planned_upgrade)
+                .map(|(name, arch, _, version)| {
+                    (
+                        name.split_once(':').map_or(name, |(name, _)| name),
+                        arch,
+                        version,
+                    )
+                })
+                .collect();
             if upgrades.len() != plan.upgrades.len() {
                 return Err(invalid(
                     "apt",
@@ -206,6 +255,32 @@ impl<T: Transport> Apt<T> {
                 for package in candidates {
                     package.update = UpdateAvailability::Unknown;
                 }
+            }
+        }
+        Ok(())
+    }
+    fn check_named_upgrades(
+        &mut self,
+        ids: &[&PackageId],
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let mut found = self.query("installed", "", "", cancel)?;
+        found.retain(|details| ids.contains(&&details.package.id));
+        self.verify_upgrade_candidates(&mut found, cancel)?;
+        if let Some(error) = self.upgrade_check_error.take() {
+            return Err(error);
+        }
+        for details in found {
+            let package = details.package;
+            if package.update == UpdateAvailability::KeptBack
+                || (package.update == UpdateAvailability::Current
+                    && package.candidate_version.is_some()
+                    && package.candidate_version != package.installed_version)
+            {
+                return Err(EngineError::Refused {
+                    backend: "apt".into(),
+                    refusal: Refusal::Explained(format!("APT kept back {}.", package.id.name)),
+                });
             }
         }
         Ok(())
@@ -251,6 +326,27 @@ impl<T: Transport> Apt<T> {
                 .system_manager("apt-get", &args, cancel, false)?,
         )?;
         parse_apt_upgrade_plan(&output)
+    }
+    fn installed_metadata(&mut self, packages: Vec<PackageDetails>) -> Vec<Package> {
+        let home = self.transport.env("HOME").map(PathBuf::from);
+        packages
+            .into_iter()
+            .map(|mut d| {
+                if let Some(desktop) = self.desktop_entries().get(&d.package.id.name).cloned() {
+                    d.package.icon = desktop_icon(home.as_deref(), &desktop);
+                }
+                d.package.component_ids = self
+                    .component_map()
+                    .get(&d.package.id.name)
+                    .cloned()
+                    .unwrap_or_default();
+                // The native helper already reports the control-file
+                // homepage for every package: reuse it as a grouping key
+                // so CLI tools (no AppStream entry) group across managers.
+                d.package.homepages = d.homepage.into_iter().collect();
+                d.package
+            })
+            .collect()
     }
     /// A dry run reads a check's own copy of the lists while it's newer,
     /// like every other APT query. The change itself refreshes the
@@ -342,9 +438,9 @@ impl<T: Transport> Backend for Apt<T> {
         availability(self.transport.apt_query("detect", "", "", cancel))
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.upgrade_check_error = None;
-        Ok(self
-            .query("search", query, "", cancel)?
+        let mut found = self.query("search", query, "", cancel)?;
+        self.verify_upgrade_candidates(&mut found, cancel)?;
+        Ok(found
             .into_iter()
             .map(|mut d| {
                 let home = self.transport.env("HOME").map(PathBuf::from);
@@ -364,7 +460,8 @@ impl<T: Transport> Backend for Apt<T> {
         if name.contains(':') || AptAction::Install(name.into()).arguments().is_err() {
             return Ok(vec![]);
         }
-        let found = self.query("lookup", name, "", cancel)?;
+        let mut found = self.query("lookup", name, "", cancel)?;
+        self.verify_upgrade_candidates(&mut found, cancel)?;
         let home = self.transport.env("HOME").map(PathBuf::from);
         let packages = found
             .iter()
@@ -380,27 +477,17 @@ impl<T: Transport> Backend for Apt<T> {
         Ok(packages)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        let home = self.transport.env("HOME").map(PathBuf::from);
         let mut packages = self.query("installed", "", "", cancel)?;
         self.verify_upgrade_candidates(&mut packages, cancel)?;
-        Ok(packages
-            .into_iter()
-            .map(|mut d| {
-                if let Some(desktop) = self.desktop_entries().get(&d.package.id.name).cloned() {
-                    d.package.icon = desktop_icon(home.as_deref(), &desktop);
-                }
-                d.package.component_ids = self
-                    .component_map()
-                    .get(&d.package.id.name)
-                    .cloned()
-                    .unwrap_or_default();
-                // The native helper already reports the control-file
-                // homepage for every package: reuse it as a grouping key
-                // so CLI tools (no AppStream entry) group across managers.
-                d.package.homepages = d.homepage.clone().into_iter().collect();
-                d.package
-            })
-            .collect())
+        Ok(self.installed_metadata(packages))
+    }
+    fn installed_for_removal(
+        &mut self,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        self.upgrade_check_error = None;
+        let packages = self.query("installed", "", "", cancel)?;
+        Ok(self.installed_metadata(packages))
     }
     fn query_errors(&self) -> Vec<EngineError> {
         self.upgrade_check_error.iter().cloned().collect()
@@ -459,7 +546,9 @@ impl<T: Transport> Backend for Apt<T> {
             .ok_or(EngineError::NotFound)
     }
     fn apt_upgrade_plan(&mut self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
-        self.simulated_upgrade(cancel)
+        let plan = self.simulated_upgrade(cancel)?;
+        refuse_apt_downgrades(&plan)?;
+        Ok(plan)
     }
     fn prepare(
         &mut self,
@@ -513,7 +602,11 @@ impl<T: Transport> Backend for Apt<T> {
                 }
             }
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
-            Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
+            Operation::Upgrade(id) => {
+                let target = self.target(id)?;
+                self.check_named_upgrades(&[id], cancel)?;
+                AptAction::Upgrade(target)
+            }
             Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,
             Operation::Clean(id) if id.backend == "apt" && id.key == "autoremove" => {
                 AptAction::Autoremove
@@ -550,6 +643,16 @@ impl<T: Transport> Backend for Apt<T> {
                 })
                 .collect::<Result<Vec<_>, EngineError>>()?;
             AptAction::group_arguments(&actions)?;
+            let upgrades: Vec<_> = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    Operation::Upgrade(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            if !upgrades.is_empty() {
+                self.check_named_upgrades(&upgrades, cancel)?;
+            }
             progress(Progress::Message(format!(
                 "Updating {} APT packages in one transaction…",
                 actions.len()

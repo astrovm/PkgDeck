@@ -820,7 +820,7 @@ impl App {
         let count = self
             .rows
             .iter()
-            .filter(|row| row.selectable_update())
+            .filter(|row| row.has_update() && row.selectable_update())
             .count() as u64;
         if count == self.background.available && self.background.last_check.is_some() {
             return;
@@ -1845,7 +1845,10 @@ impl App {
         if self.checking_updates || self.updates_to_run() == 0 {
             return;
         }
-        if self.unchecked.is_empty() {
+        if self.items.iter().all(|item| {
+            let row = &self.shown_rows()[item.raw];
+            !row.selectable_update() || self.row_checked(row)
+        }) {
             self.propose("upgrade-all");
             return;
         }

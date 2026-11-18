@@ -82,7 +82,14 @@ apt_lifecycle() {
     apt_version 2.0 0
     write apt refresh
     cli apt list | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture" and .candidate_version=="2.0" and .update=="kept_back")'
+    cli apt search pkgdeck-fixture | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture" and .update=="kept_back")'
     cli apt upgrade | jq -e '.operations == []'
+    local named
+    if named=$(runuser -u pkgdeck-test -- /opt/pkgdeck-bin/pkd --json --yes --from apt upgrade pkgdeck-fixture); then
+        echo 'A named upgrade accepted a kept-back update' >&2
+        return 1
+    fi
+    jq -e '.data.message | contains("APT kept back pkgdeck-fixture")' <<<"$named"
     [[ $(dpkg-query -W '-f=${Version}' pkgdeck-fixture) == 1.0 ]]
     apt_version 2.0
     write apt refresh

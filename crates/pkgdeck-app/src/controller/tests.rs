@@ -7170,6 +7170,54 @@ fn update_all_leaves_apt_out_when_removals_are_off() {
         .to_string()
         .starts_with("APT is left out"));
 }
+
+#[test]
+fn update_all_confirms_the_versions_and_packages_in_the_fresh_apt_plan() {
+    let operation = Operation::UpgradeAll {
+        backend: "apt".into(),
+    };
+    let plan = AptUpgradePlan {
+        preview: "Inst powerdevil [1.0] (2.0 Ubuntu:stable [amd64])\nInst powerdevil-data [1.0] (2.1 Ubuntu:stable [all])".into(),
+        upgrades: vec!["powerdevil".into(), "powerdevil-data".into()],
+        installs: vec![],
+        removals: vec![],
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller
+        .as_mut()
+        .apply(Ok(Payload::UpgradePreview(vec![operation], 1, Some(plan))));
+    let confirmation: Value =
+        serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+    assert_eq!(confirmation["items"][0]["title"], "powerdevil");
+    assert_eq!(confirmation["items"][1]["title"], "powerdevil-data");
+    assert_eq!(confirmation["items"][1]["from"], "1.0");
+    assert_eq!(confirmation["items"][1]["to"], "2.1");
+    assert!(controller
+        .confirmation()
+        .to_string()
+        .starts_with("Update all 2 listed packages?"));
+}
+
+#[test]
+fn update_all_stops_when_the_fresh_apt_plan_is_empty() {
+    let operation = Operation::UpgradeAll {
+        backend: "apt".into(),
+    };
+    let plan = AptUpgradePlan {
+        preview: "0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.".into(),
+        upgrades: vec![],
+        installs: vec![],
+        removals: vec![],
+    };
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    controller
+        .as_mut()
+        .apply(Ok(Payload::UpgradePreview(vec![operation], 1, Some(plan))));
+    assert!(controller.rust().pending.is_none());
+    assert_eq!(controller.status().to_string(), "APT has no updates ready.");
+}
 #[test]
 fn automatic_runs_download_macos_updates_in_one_step() {
     let available = |backend: &str, name: &str| {
@@ -7382,6 +7430,20 @@ fn a_waiting_release_stays_out_of_update_all_and_keeps_its_source_apart() {
         &FailedUpdates::default(),
     );
     assert_eq!(plan, [Operation::Upgrade(ready_cask.id)]);
+}
+
+#[test]
+fn kept_back_apt_candidates_show_in_updates_without_triggering_an_upgrade() {
+    let mut powerdevil = synthetic_package("powerdevil", "PowerDevil");
+    powerdevil.id.backend = "apt".into();
+    powerdevil.installed_version = Some("1".into());
+    powerdevil.candidate_version = Some("2".into());
+    powerdevil.update = UpdateAvailability::KeptBack;
+    let rows = std::slice::from_ref(&powerdevil);
+    assert!(is_update_row(&powerdevil));
+    assert!(upgrade_plan(rows).is_empty());
+    assert!(automatic_plan(rows, &NeedsPassword::default(), &FailedUpdates::default()).is_empty());
+    assert_eq!(package_row(&powerdevil, &[], None)["update"], "kept_back");
 }
 
 #[test]

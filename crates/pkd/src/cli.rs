@@ -344,8 +344,7 @@ enum Lookup {
 struct Selection {
     result: Result<PackageId, EngineError>,
     offers: Vec<String>,
-    /// Its source checked and found nothing newer.
-    current: bool,
+    update: Option<UpdateAvailability>,
 }
 fn select(
     engine: &mut Engine,
@@ -385,16 +384,17 @@ fn select(
     } else {
         vec![]
     };
-    let current = result.as_ref().is_ok_and(|id| {
+    let update = result.as_ref().ok().and_then(|id| {
         report
             .packages
             .iter()
-            .any(|package| package.id == *id && package.update == UpdateAvailability::Current)
+            .find(|package| package.id == *id)
+            .map(|package| package.update.clone())
     });
     Selection {
         result,
         offers,
-        current,
+        update,
     }
 }
 /// "npm, pipx" → "--from npm or --from pipx".
@@ -949,9 +949,6 @@ fn dispatch_command(
                 };
                 for name in names {
                     let selection = select(engine, args, name, lookup, cancel);
-                    // As with upgrading everything, what's up to date stays
-                    // out of the plan, rather than counting as a change made.
-                    let current = selection.current && lookup == Lookup::Installed;
                     let id = match selection.result {
                         Ok(id) => id,
                         Err(error) => {
@@ -969,8 +966,20 @@ fn dispatch_command(
                     {
                         return Err(failure.error.clone());
                     }
-                    if current {
-                        continue;
+                    if lookup == Lookup::Installed {
+                        match selection.update {
+                            Some(UpdateAvailability::Current) => continue,
+                            Some(UpdateAvailability::KeptBack) => {
+                                return Err(EngineError::Refused {
+                                    backend: id.backend,
+                                    refusal: Refusal::Explained(format!(
+                                        "APT kept back {}.",
+                                        id.name
+                                    )),
+                                });
+                            }
+                            _ => {}
+                        }
                     }
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),

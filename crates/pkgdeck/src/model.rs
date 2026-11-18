@@ -133,7 +133,7 @@ impl Row {
         self.update == "kept_back"
     }
     pub fn selectable_update(&self) -> bool {
-        self.is_package() && self.has_update() && self.waiting_until().is_none()
+        self.is_package() && !self.kept_back() && self.waiting_until().is_none()
     }
     /// When this update stops waiting, if it's still too new.
     pub fn waiting_until(&self) -> Option<u64> {
@@ -1388,7 +1388,7 @@ pub fn row_action(row: &Row, page: Page, catalog: &[Source]) -> Option<Action> {
         };
     }
     if page == Page::Updates {
-        row.has_update().then_some(Action::Upgrade)
+        (!row.kept_back()).then_some(Action::Upgrade)
     } else if row.is_installed() {
         Some(Action::Remove)
     } else {

@@ -400,6 +400,28 @@ fn apt_kept_back_rows_show_a_reason_without_an_update_control() {
 }
 
 #[test]
+fn kept_back_rows_stay_out_of_select_none_and_update_all() {
+    let mut app = app();
+    app.c().set_rows(json!([
+        {"kind": "package", "name": "powerdevil", "source": "apt", "installed": "1", "candidate": "2", "update": "kept_back"},
+        {"kind": "package", "name": "htop", "source": "apt", "installed": "1", "candidate": "2", "update": "available"}
+    ]).to_string().into());
+    app.react();
+    app.page = Page::Updates;
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    harness.get_by_label("Select none").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.unchecked.len(), 1);
+    harness.get_by_label("Select htop").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.unchecked.is_empty());
+    assert!(harness.query_by_label("Update all").is_some());
+    assert!(harness.query_by_label("Select powerdevil").is_none());
+}
+
+#[test]
 fn updates_that_failed_or_need_the_password_are_marked() {
     let mut app = app();
     app.page = Page::Updates;

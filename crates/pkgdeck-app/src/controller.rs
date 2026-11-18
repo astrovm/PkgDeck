@@ -3736,6 +3736,19 @@ fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
         })
         .collect()
 }
+
+fn apt_update_items(plan: &AptUpgradePlan) -> impl Iterator<Item = Value> + '_ {
+    let changes: std::collections::HashMap<_, _> = plan
+        .upgrade_changes()
+        .map(|change| (change.name.clone(), change))
+        .collect();
+    plan.upgrades.iter().map(move |name| {
+        let change = changes.get(name);
+        json!({"group": source_display_name("apt"), "icon_name": "apt", "title": name,
+            "from": change.and_then(|change| change.installed_version.as_deref()),
+            "to": change.and_then(|change| change.candidate_version.as_deref())})
+    })
+}
 /// One line for progress and results, such as "Install htop (APT)".
 /// A change's title as it runs: "Update Beta App" reads "Updating Beta
 /// App…" on its progress card.
@@ -7131,8 +7144,20 @@ impl ffi::PackageController {
                 // With removals turned off in Settings, APT is left out when
                 // its plan removes anything.
                 let apt_all = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
-                let (operations, apt_plan, count, left_out) = match apt_plan {
-                    Some(plan) if !self.rust().allow_removals && !plan.removals.is_empty() => {
+                let apt_omission = apt_plan.as_ref().and_then(|plan| {
+                    if !self.rust().allow_removals && !plan.removals.is_empty() {
+                        Some(format!(
+                            "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
+                            plan.removals.join(", ")
+                        ))
+                    } else if plan.upgrades.is_empty() && plan.installs.is_empty() && plan.removals.is_empty() {
+                        Some("\nAPT has no updates ready.".into())
+                    } else {
+                        None
+                    }
+                });
+                let (operations, apt_plan, count, left_out) = match apt_omission {
+                    Some(note) => {
                         let apt_packages = self
                             .rust()
                             .packages
@@ -7141,15 +7166,11 @@ impl ffi::PackageController {
                                 p.id.backend == "apt" && p.update == UpdateAvailability::Available
                             })
                             .count();
-                        let note = format!(
-                            "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
-                            plan.removals.join(", ")
-                        );
                         let rest: Vec<_> =
                             operations.into_iter().filter(|op| !apt_all(op)).collect();
                         (rest, None, count.saturating_sub(apt_packages), note)
                     }
-                    plan => (operations, plan, count, String::new()),
+                    None => (operations, apt_plan, count, String::new()),
                 };
                 if operations.is_empty() {
                     self.as_mut().set_status(left_out.trim().into());
@@ -7168,6 +7189,19 @@ impl ffi::PackageController {
                         format!("\nRemoves: {}", plan.removals.join(", "))
                     }
                 });
+                let (items, count) = if let Some(plan) = apt_plan.as_ref() {
+                    let other_operations: Vec<_> = operations
+                        .iter()
+                        .filter(|op| !apt_all(op))
+                        .cloned()
+                        .collect();
+                    let mut items = update_items(&other_operations, &self.rust().packages);
+                    items.extend(apt_update_items(plan));
+                    let count = items.len();
+                    (items, count)
+                } else {
+                    (update_items(&operations, &self.rust().packages), count)
+                };
                 let noun = if count == 1 { "package" } else { "packages" };
                 let warning = if count > 1 {
                     "\nIf one update fails, the others can still finish."
@@ -7190,7 +7224,6 @@ impl ffi::PackageController {
                     };
                     format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
-                let items = update_items(&operations, &self.rust().packages);
                 self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}").trim(), "items": items})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed {noun}?{incomplete}{left_out}{apt}\n\n{labels}\n\nContinue?")
