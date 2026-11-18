@@ -896,7 +896,8 @@ jobs:
           build/snap-check/usr/bin/pkd </dev/null | grep -F 'Usage: pkd'
           sudo systemctl enable --now snapd.socket
           sudo snap wait system seed.loaded
-          sudo snap install --dangerous --classic build/artifacts/*.snap
+          source scripts/ci/snap-store-retry.sh
+          snap_store_retry sudo snap install --dangerous --classic build/artifacts/*.snap
           snap run pkgdeck.pkd --version
           snap run pkgdeck.pkd doctor
           scripts/tests/host-package.sh direct snap run pkgdeck.pkd

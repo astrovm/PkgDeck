@@ -37,6 +37,32 @@ expect_code() {
         exit 1
     }
 }
+(
+    source scripts/ci/snap-store-retry.sh
+    mkdir "$work/snap-bin"
+    printf '#!/bin/sh\nexit 0\n' >"$work/snap-bin/sleep"
+    cat >"$work/snap-bin/snap-fixture" <<'SNAP'
+#!/usr/bin/env bash
+printf '%s\n' attempt >>"$PKGDECK_SNAP_ATTEMPTS"
+if [[ $1 == recovered ]] && (( $(wc -l <"$PKGDECK_SNAP_ATTEMPTS") > 1 )); then
+    exit 0
+fi
+if [[ $1 == permanent ]]; then
+    echo 'error: cannot install snap: invalid package' >&2
+    exit 23
+fi
+echo 'Post "https://api.snapcraft.io/v2/snaps/refresh": Client.Timeout exceeded while awaiting headers' >&2
+exit 42
+SNAP
+    chmod +x "$work/snap-bin/"{sleep,snap-fixture}
+    for test_case in 'recovered 0 2' 'timeout 42 3' 'permanent 23 1'; do
+        read -r kind status attempts <<<"$test_case"
+        : >"$work/snap-attempts"
+        PATH="$work/snap-bin:$PATH" PKGDECK_SNAP_ATTEMPTS="$work/snap-attempts" \
+            expect_code "$status" snap_store_retry snap-fixture "$kind"
+        (( $(wc -l <"$work/snap-attempts") == attempts ))
+    done
+)
 for args in --help unknown 'fast --unknown'; do
     expected=2
     [[ $args != --help ]] || expected=0

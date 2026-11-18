@@ -5,6 +5,8 @@
 # Lifecycle state is confirmed through snap itself, never only PkgDeck output.
 # Usage: scripts/tests/snap-manager.sh <pkd>
 set -euo pipefail
+# shellcheck source=scripts/ci/snap-store-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../ci/snap-store-retry.sh"
 failed=''
 trap 'failed="line $LINENO: $BASH_COMMAND"; (( BASH_SUBSHELL )) || echo "snap-manager FAILED at $failed" >&2' ERR
 pkd=${1:?Usage: scripts/tests/snap-manager.sh <pkd>}
@@ -26,7 +28,7 @@ success sources
 success search hello-world
 success info hello-world
 success update
-success install hello-world
+snap_store_retry success install hello-world
 snap list hello-world
 success remove hello-world
 if snap list hello-world; then echo 'Snap still installed after removal' >&2; exit 1; fi
