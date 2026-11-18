@@ -25,8 +25,10 @@ if [[ ${2:-} != --as-user ]]; then
     node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
     curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
         tar -xJ --strip-components=1 -C /usr/local
-    npm install -g npm@latest pnpm@latest
+    npm install -g npm@latest
+    npm install -g --allow-scripts=pnpm pnpm@latest
     npm --version
+    pnpm --version
     useradd -m tester
     exec runuser -u tester -- bash /opt/e2e.sh --inside --as-user
 fi
@@ -107,14 +109,47 @@ echo "== npm"
 npm install -g --silent @anthropic-ai/claude-code@2.1.280 >/dev/null
 limited npm @anthropic-ai/claude-code
 
+echo "== npm prerelease fallback"
+npm install -g --silent cf@1.0.0-rc.0 is-number@6.0.0 >/dev/null
+# This cutoff admits rc.0 and excludes rc.1. npm's fallback still chooses
+# the last stable release. A fixed date keeps the case independent of today.
+npm config set before 2026-11-17T11:30:00Z
+npm_outdated=$(npm outdated -g --json cf || [[ $? == 1 ]])
+check "npm proposes an older release" 0.15.0 "$(jq -r '.cf.wanted' <<<"$npm_outdated")"
+check "PkgDeck skips that downgrade" '' "$(field npm cf candidate_version)"
+pkd --from npm --yes upgrade cf >/dev/null
+check "a named update keeps the prerelease" 1.0.0-rc.0 "$(installed npm cf)"
+pkd --from npm --yes upgrade >/dev/null
+check "a bulk update keeps the prerelease" 1.0.0-rc.0 "$(installed npm cf)"
+check "a bulk update installs the other update" 7.0.0 "$(installed npm is-number)"
+npm config delete before
+cf_latest=$(npm view cf version)
+pkd --from npm --yes upgrade cf >/dev/null
+check "PkgDeck installs the newer cf release when eligible" "$cf_latest" "$(installed npm cf)"
+
 echo "== uv"
 uv tool install -q ruff==0.16.0
 limited uv ruff
 
 echo "== pnpm"
 pnpm config set --global ignore-scripts true >/dev/null 2>&1 || true
-pnpm add --global --silent --config.minimumReleaseAge=0 @anthropic-ai/claude-code@2.1.280 >/dev/null
+pnpm add --global --config.minimumReleaseAge=0 @anthropic-ai/claude-code@2.1.280
 limited pnpm @anthropic-ai/claude-code
+pnpm add --global --silent --config.minimumReleaseAge=0 is-number@6.0.0,is-odd@3.0.0 >/dev/null
+pkd --from pnpm --yes upgrade is-number >/dev/null
+check "pnpm updates the named tool in a group" 7.0.0 "$(installed pnpm is-number)"
+check "pnpm leaves the other group member at its installed version" 3.0.0 "$(installed pnpm is-odd)"
+pkd --from pnpm --yes upgrade >/dev/null
+check "pnpm bulk update keeps the first group member" 7.0.0 "$(installed pnpm is-number)"
+check "pnpm bulk update updates the other group member" 3.0.1 "$(installed pnpm is-odd)"
+pnpm add --global --silent --config.minimumReleaseAge=0 is-number@5.0.0,picocolors@1.1.1 >/dev/null
+# The cutoff admits is-number 6.0.0. The installed group member is younger.
+pnpm_age=$(( ($(date +%s) - $(date -u -d 2018-05-01 +%s)) / 60 ))
+pnpm config set --global minimumReleaseAge "$pnpm_age"
+pkd --from pnpm --yes upgrade is-number >/dev/null
+check "pnpm updates an eligible tool in a younger group" 6.0.0 "$(installed pnpm is-number)"
+check "pnpm keeps the unchanged younger group member" 1.1.1 "$(installed pnpm picocolors)"
+pnpm config delete --global minimumReleaseAge
 
 echo "== mise"
 mkdir -p "$HOME/.config/mise"
@@ -165,6 +200,15 @@ check "Bun: upgrade leaves it" 2.1.280 "$(installed bun @anthropic-ai/claude-cod
 pkd --from bun --yes upgrade @anthropic-ai/claude-code >/dev/null 2>&1 || true
 differs "Bun: by name stays within the limit" "$(installed bun @anthropic-ai/claude-code)" "$(field bun @anthropic-ai/claude-code candidate_version)"
 pkd release-wait off >/dev/null
+
+echo "== Bun eligible fallback"
+bun add --global --silent is-number@5.0.0 >/dev/null
+# A cutoff between the 6.0.0 and 7.0.0 publication dates.
+minimum_age=$(( $(date +%s) - $(date -u -d 2018-05-01 +%s) ))
+printf '[install]\nminimumReleaseAge = %s\n' "$minimum_age" > "$HOME/.bunfig.toml"
+pkd --from bun --yes upgrade is-number >/dev/null
+check "Bun installs the newer release that passes the age limit" 6.0.0 "$(installed bun is-number)"
+rm "$HOME/.bunfig.toml"
 
 # RubyGems has no limit at all: only PkgDeck's wait stands in the way.
 echo "== RubyGems"

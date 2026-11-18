@@ -1104,7 +1104,7 @@ fn index_refresh_does_not_probe_npm_before_a_named_upgrade_lookup() {
         "npm ls --global --depth=0 --json" => {
             ok(r#"{"dependencies":{"eslint":{"version":"9.0.0"}}}"#)
         }
-        "npm outdated --global --json" => ok("{}"),
+        "npm outdated --global --json --all=false" => ok("{}"),
         other => panic!("unexpected {other}"),
     });
     let mut engine = Engine::default();
@@ -1126,7 +1126,7 @@ fn index_refresh_does_not_probe_npm_before_a_named_upgrade_lookup() {
         [
             "npm root --global",
             "npm ls --global --depth=0 --json",
-            "npm outdated --global --json"
+            "npm outdated --global --json --all=false"
         ]
     );
 }

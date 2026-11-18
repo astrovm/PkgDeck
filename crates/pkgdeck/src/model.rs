@@ -1239,12 +1239,8 @@ pub fn replaces_text(row: &Row) -> Option<String> {
 pub fn waiting_text(until: u64) -> String {
     let when = i64::try_from(until)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| {
-            time.with_timezone(&chrono::Local)
-                .format("%b %-d, %H:%M")
-                .to_string()
-        })
+        .and_then(local)
+        .map(|time| time.strftime("%b %-d, %H:%M").to_string())
         .unwrap_or_else(|| "later".into());
     format!("Waiting until {when}. Update all and automatic updates skip it for now.")
 }
@@ -1925,9 +1921,9 @@ pub fn failure_title(failures: &[Failure]) -> String {
 // ---------------------------------------------------------------------------
 // Time
 
-fn local(epoch: i64) -> Option<chrono::DateTime<chrono::Local>> {
-    use chrono::TimeZone;
-    chrono::Local.timestamp_opt(epoch, 0).single()
+fn local(epoch: i64) -> Option<jiff::ZonedDateTime> {
+    let timestamp = jiff::Timestamp::from_second(epoch).ok()?;
+    Some(timestamp.to_zoned_datetime(jiff::tz::TimeZone::system()))
 }
 
 pub fn now() -> i64 {
@@ -1940,15 +1936,15 @@ pub fn now() -> i64 {
 /// "Oct 8, 14:05".
 pub fn short_datetime(epoch: i64) -> String {
     local(epoch)
-        .map(|time| time.format("%b %-d, %H:%M").to_string())
+        .map(|time| time.strftime("%b %-d, %H:%M").to_string())
         .unwrap_or_default()
 }
 
 /// The time alone when it was today, else the date too.
 pub fn time_or_date(epoch: i64, now: i64) -> String {
     match (local(epoch), local(now)) {
-        (Some(time), Some(today)) if time.date_naive() == today.date_naive() => {
-            time.format("%H:%M").to_string()
+        (Some(time), Some(today)) if time.date() == today.date() => {
+            time.strftime("%H:%M").to_string()
         }
         _ => short_datetime(epoch),
     }

@@ -10,6 +10,11 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.15.4" date="2026-11-17">
+      <description>
+        <p>Updating npm, pnpm and Bun tools keeps the version you have when the available release is older.</p>
+      </description>
+    </release>
     <release version="0.15.3" date="2026-11-13">
       <description>
         <p>Automatic updates no longer fail while a Flatpak or Snap release waits.</p>
