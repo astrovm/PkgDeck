@@ -3910,6 +3910,25 @@ fn cargo_updates_only_outdated_crates_io_tools_with_their_features() {
         "vendored was installed from a folder, not crates.io. Update it the way you installed it."
     );
     assert_eq!(fixture.writes("cargo").len(), 2);
+    let cancelled = DevFixture {
+        calls: Default::default(),
+        ..fixture.clone()
+    };
+    let mut backend = DevTool::cargo(cancelled.clone());
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let stop = Cancellation::default();
+    assert_eq!(
+        backend.execute(&all, &stop, &mut |progress| {
+            if matches!(progress, Progress::Package(name) if name == "ripgrep") {
+                stop.cancel();
+            }
+        }),
+        Err(EngineError::Cancelled)
+    );
+    assert_eq!(
+        cancelled.writes("cargo"),
+        [["install", "--force", "--all-features", "bat"]]
+    );
     // One tool failing doesn't keep the next from updating.
     let failing = DevFixture {
         fail_writes: true,
