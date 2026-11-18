@@ -3277,7 +3277,7 @@ fn npm_rechecks_installed_versions_and_refuses_failed_update_checks() {
     assert!(offline
         .calls()
         .iter()
-        .any(|(_, args, _)| args == &["outdated", "--global", "--json", "first"]));
+        .any(|(_, args, _)| args == &["outdated", "--global", "--json", "--all=false"]));
     assert!(offline.writes("npm").is_empty());
 
     let mut backend = DevTool::npm(DevFixture {
@@ -3295,10 +3295,7 @@ fn npm_named_upgrade_uses_the_global_entry_and_reports_a_cancelled_write() {
         root: Some("/home/test/lib/node_modules".into()),
         list: r#"{"dependencies":{"tool":{"version":"1.0.0"},"nested-only":{"version":"1.0.0"}}}"#.into(),
         outdated: Some(r#"{
-            "tool": [
-                {"location":"/home/test/lib/node_modules/peer/node_modules/tool","wanted":"1.1.0"},
-                {"location":"/home/test/lib/node_modules/tool","wanted":"2.0.0"}
-            ],
+            "tool": {"location":"/home/test/lib/node_modules/tool","wanted":"2.0.0"},
             "nested-only": {"location":"/home/test/lib/node_modules/peer/node_modules/nested-only","wanted":"2.0.0"}
         }"#.into()),
         cancel_on: Some("install".into()),
@@ -3400,8 +3397,11 @@ fn pnpm_lifecycle() {
 #[test]
 fn pnpm_outdated_newer_reports_available() {
     let base = std::env::temp_dir().join(format!("pkgdeck-pnpm-group-{}", std::process::id()));
-    let group = base.join("group");
+    let actual = base.join("actual");
+    let group = actual.join("group");
+    let alias = base.join("alias");
     std::fs::create_dir_all(&group).unwrap();
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
     std::fs::write(
         group.join("package.json"),
         r#"{"dependencies":{"@scope/peer":"1.0.0","typescript":"7.0.2"}}"#,
@@ -3409,14 +3409,15 @@ fn pnpm_outdated_newer_reports_available() {
     .unwrap();
     let fixture = DevFixture {
         version: "12.21.0\n".into(),
-        root: Some(base.display().to_string()),
+        root: Some(alias.display().to_string()),
         list: r#"[{"path": "/global", "dependencies": {
             "typescript": {"from": "typescript", "version": "7.0.2", "path": "/global/group/node_modules/typescript"},
             "@scope/peer": {"from": "@scope/peer", "version": "1.0.0", "path": "/global/group/node_modules/@scope/peer"},
             "ahead": {"from": "ahead", "version": "1.0.0-rc.0"},
             "alias": {"from": "different-package", "version": "1.0.0"}
         }}]"#
-            .replace("/global", &base.display().to_string()),
+            .replacen("/global", &alias.display().to_string(), 1)
+            .replace("/global", &actual.display().to_string()),
         outdated: Some(
             r#"{
             "typescript": {"current": "7.0.2", "wanted": "7.0.2", "latest": "7.1.0"},
@@ -3589,6 +3590,24 @@ fn pnpm_rechecks_each_tool_after_a_write() {
             ["add", "--global", "second@2.0.0"]
         ]
     );
+    let fixture = DevFixture {
+        version: "12.21.0\n".into(),
+        calls: Default::default(),
+        ..fixture
+    };
+    let mut backend = DevTool::pnpm(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    let id = dev_id("pnpm", "first", "/global");
+    let error = backend
+        .execute(&Operation::Upgrade(id), &cancel, &mut |_| {})
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Cannot find the global install group"),
+        "{error}"
+    );
+    assert!(fixture.writes("pnpm").is_empty());
 }
 
 #[test]
@@ -4032,12 +4051,30 @@ fn bun_checks_the_registry_for_newer_versions() {
     let unrecognizable = DevFixture {
         bun_preview: Some("installed alpha@unknown\n".into()),
         calls: Default::default(),
-        ..fixture
+        ..fixture.clone()
     };
     let mut backend = DevTool::bun(unrecognizable.clone());
     backend.detect(&cancel).unwrap();
     assert!(backend.execute(&all, &cancel, &mut |_| {}).is_err());
     assert!(unrecognizable.writes("bun").is_empty());
+    let renamed = DevFixture {
+        calls: Default::default(),
+        ..fixture
+    };
+    let mut backend = DevTool::bun(renamed.clone());
+    backend.detect(&cancel).unwrap();
+    backend
+        .execute(&all, &cancel, &mut |progress| {
+            if matches!(progress, Progress::Package(_)) {
+                std::fs::write(
+                    global.join("node_modules/alpha/package.json"),
+                    r#"{"name":"different","version":"1.0.0"}"#,
+                )
+                .unwrap();
+            }
+        })
+        .unwrap();
+    assert!(renamed.writes("bun").is_empty());
     std::fs::remove_dir_all(&base).unwrap();
 }
 

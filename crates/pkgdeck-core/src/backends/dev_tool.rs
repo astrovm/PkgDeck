@@ -194,30 +194,6 @@ struct NpmOutdated {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum NpmOutdatedEntries {
-    Single(NpmOutdated),
-    Multiple(Vec<NpmOutdated>),
-}
-
-impl NpmOutdatedEntries {
-    fn wanted_at(&self, path: &std::path::Path) -> Option<&str> {
-        // A named npm check also finds nested dependencies with that name.
-        let entry = match self {
-            Self::Single(entry) => entry
-                .location
-                .as_deref()
-                .is_none_or(|location| location == path)
-                .then_some(entry),
-            Self::Multiple(entries) => entries
-                .iter()
-                .find(|entry| entry.location.as_deref() == Some(path)),
-        }?;
-        Some(&entry.wanted)
-    }
-}
-
-#[derive(Deserialize)]
 struct PnpmRoot {
     path: Option<PathBuf>,
     #[serde(default)]
@@ -246,7 +222,7 @@ impl PnpmRoot {
             return None;
         }
         let group = path.parent()?;
-        (group.parent()? == self.path.as_deref()?).then_some(group)
+        same_install_path(group.parent()?, self.path.as_deref()?).then_some(group)
     }
 }
 
@@ -319,6 +295,16 @@ fn semver_newer(candidate: &str, installed: &str) -> bool {
         (Ok(candidate), Ok(installed)) => candidate.cmp_precedence(&installed).is_gt(),
         _ => false,
     }
+}
+
+fn same_install_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || host_metadata_path(left)
+            .canonicalize()
+            .ok()
+            .is_some_and(|left| {
+                host_metadata_path(right).canonicalize().ok().as_deref() == Some(left.as_path())
+            })
 }
 
 fn local_or_git_source(resolved: &str) -> bool {
@@ -1011,7 +997,11 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<std::collections::BTreeMap<String, R>, EngineError> {
         let mut args = vec!["outdated", "--global", "--json"];
-        if let Some(Updates::Only(name)) = for_upgrade {
+        if self.kind == DevKind::Npm {
+            // npm's named query includes incoming edges from dependencies.
+            // List direct global installs and select the requested tool here.
+            args.push("--all=false");
+        } else if let Some(Updates::Only(name)) = for_upgrade {
             args.push(name);
         }
         match self.lenient_json(&args, cancel) {
@@ -1049,19 +1039,23 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let installed = self.npm_installed(cancel)?;
-        let outdated = self.javascript_outdated::<NpmOutdatedEntries>(for_upgrade, cancel)?;
+        let outdated = self.javascript_outdated::<NpmOutdated>(for_upgrade, cancel)?;
         installed
             .into_iter()
             .filter(|(name, _)| for_upgrade.is_none_or(|updates| updates.covers(name)))
             .map(|(name, entry)| {
                 let candidate = outdated
                     .get(&name)
-                    .and_then(|outdated| outdated.wanted_at(&home.join(&name)))
-                    .filter(|wanted| {
-                        !entry.resolved.as_deref().is_some_and(local_or_git_source)
-                            && semver_newer(wanted, &entry.version)
+                    .filter(|outdated| {
+                        let path = home.join(&name);
+                        outdated
+                            .location
+                            .as_deref()
+                            .is_none_or(|location| same_install_path(location, &path))
+                            && !entry.resolved.as_deref().is_some_and(local_or_git_source)
+                            && semver_newer(&outdated.wanted, &entry.version)
                     })
-                    .map_or_else(|| entry.version.clone(), str::to_owned);
+                    .map_or_else(|| entry.version.clone(), |outdated| outdated.wanted.clone());
                 self.detail(
                     home,
                     name,
@@ -2217,6 +2211,7 @@ impl<T: Transport> DevTool<T> {
                     manifest.dependencies.get(name).is_some_and(registry_spec)
                 });
                 self.bun_package(home, &home.join("node_modules").join(name))
+                    .filter(|detail| detail.package.id.name == name)
                     .and_then(|detail| detail.package.installed_version)
                     .filter(|installed| registry_source && semver_newer(&preview, installed))
                     .map(|_| format!("{name}@{preview}"))
@@ -2245,6 +2240,14 @@ impl<T: Transport> DevTool<T> {
             return Ok(JavascriptUpgrade::default());
         }
         let Some(group) = root.group(name, entry) else {
+            let result = self.call(&["--version"], cancel, false)?;
+            let version_output = String::from_utf8_lossy(&result.stdout);
+            if version_in(&version_output).is_none_or(|version| version >= (11, 0)) {
+                return Err(invalid(
+                    self.kind.id(),
+                    format!("Cannot find the global install group for {name}"),
+                ));
+            }
             return Ok(JavascriptUpgrade {
                 specs: vec![format!("{name}@{version}")],
                 extra_args: vec![],
@@ -2266,7 +2269,8 @@ impl<T: Transport> DevTool<T> {
                 .dependencies
                 .get(member)
                 .filter(|entry| {
-                    root.group(member, entry) == Some(group)
+                    root.group(member, entry)
+                        .is_some_and(|member_group| same_install_path(member_group, group))
                         && self.kind.valid_name(member)
                         && registry_spec(source)
                         && entry.is_registry_package(member)
