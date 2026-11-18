@@ -25,8 +25,10 @@ if [[ ${2:-} != --as-user ]]; then
     node=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts)][0].version')
     curl -fsSL "https://nodejs.org/dist/$node/node-$node-linux-x64.tar.xz" |
         tar -xJ --strip-components=1 -C /usr/local
-    npm install -g --ignore-scripts npm@latest pnpm@latest
+    npm install -g npm@latest
+    npm install -g --allow-scripts=pnpm pnpm@latest
     npm --version
+    pnpm --version
     useradd -m tester
     exec runuser -u tester -- bash /opt/e2e.sh --inside --as-user
 fi
@@ -131,7 +133,7 @@ limited uv ruff
 
 echo "== pnpm"
 pnpm config set --global ignore-scripts true >/dev/null 2>&1 || true
-pnpm add --global --silent --config.minimumReleaseAge=0 @anthropic-ai/claude-code@2.1.280 >/dev/null
+pnpm add --global --config.minimumReleaseAge=0 @anthropic-ai/claude-code@2.1.280
 limited pnpm @anthropic-ai/claude-code
 pnpm add --global --silent --config.minimumReleaseAge=0 is-number@6.0.0,is-odd@3.0.0 >/dev/null
 pkd --from pnpm --yes upgrade is-number >/dev/null
