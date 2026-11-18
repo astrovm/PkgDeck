@@ -226,7 +226,7 @@ impl PnpmRoot {
 }
 
 impl PnpmEntry {
-    fn from_registry(&self, name: &str) -> bool {
+    fn is_registry_package(&self, name: &str) -> bool {
         self.from.as_deref().is_none_or(|from| from == name)
             && !self.resolved.as_deref().is_some_and(local_or_git_source)
     }
@@ -1062,7 +1062,8 @@ impl<T: Transport> DevTool<T> {
                 let candidate = outdated
                     .get(&name)
                     .filter(|outdated| {
-                        entry.from_registry(&name) && semver_newer(&outdated.latest, &entry.version)
+                        entry.is_registry_package(&name)
+                            && semver_newer(&outdated.latest, &entry.version)
                     })
                     .map_or_else(|| entry.version.clone(), |outdated| outdated.latest.clone());
                 details.push(self.detail(
@@ -2207,7 +2208,7 @@ impl<T: Transport> DevTool<T> {
         else {
             return Ok(vec![]);
         };
-        if !entry.from_registry(name) || !semver_newer(version, &entry.version) {
+        if !entry.is_registry_package(name) || !semver_newer(version, &entry.version) {
             return Ok(vec![]);
         }
         let Some(group) = root.group(name, entry) else {
@@ -2218,7 +2219,7 @@ impl<T: Transport> DevTool<T> {
             .filter(|(member, entry)| root.group(member, entry) == Some(group))
             .map(|(member, entry)| {
                 if !self.kind.valid_name(member)
-                    || !entry.from_registry(member)
+                    || !entry.is_registry_package(member)
                     || semver::Version::parse(&entry.version).is_err()
                 {
                     return Err(invalid(
