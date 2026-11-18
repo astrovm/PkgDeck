@@ -248,7 +248,8 @@ enum Job {
     /// own data from its page.
     PlanCleanup(CleanupId),
     Write(Operation, Option<Box<TransactionPlan>>),
-    PlanUpgrade(Vec<Operation>, usize),
+    /// Carries the Updates rows if the plan waits while another page loads.
+    PlanUpgrade(Vec<Operation>, usize, Option<Vec<Package>>),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
     /// Updates a background check found, applied with nobody watching:
     /// system managers only through the upgrade-only helper. With `true`,
@@ -427,7 +428,12 @@ enum Payload {
     Batch(Batch),
     CheckedUpdates(Box<PackageReport>, Batch),
     Cleanup(CleanupReport),
-    UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
+    UpgradePreview(
+        Vec<Operation>,
+        usize,
+        Option<AptUpgradePlan>,
+        Option<Vec<Package>>,
+    ),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
     /// The cask package that adopts an app, its install and the adoption plan.
     AdoptionPreview(Box<Package>, Operation, Box<TransactionPlan>),
@@ -1224,15 +1230,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
-        Job::PlanUpgrade(operations, count) => {
+        Job::PlanUpgrade(operations, count, rows) => {
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
                 engine
                     .plan_apt_upgrade(cancel)
-                    .map(|plan| Payload::UpgradePreview(operations, count, Some(plan)))
+                    .map(|plan| Payload::UpgradePreview(operations, count, Some(plan), rows))
             } else {
-                Ok(Payload::UpgradePreview(operations, count, None))
+                Ok(Payload::UpgradePreview(operations, count, None, rows))
             }
         }
         Job::PlanOperation(operation) => engine
@@ -2561,7 +2567,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
         Job::ManifestPreview(_) => vec![],
-        Job::PlanUpgrade(operations, _)
+        Job::PlanUpgrade(operations, ..)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) => vec!["apt".into()],
@@ -2629,7 +2635,11 @@ fn repreview_changed_plan(
                 .iter()
                 .filter(|package| package.update_ready())
                 .count();
-            Some(Job::PlanUpgrade(operations.clone(), count))
+            Some(Job::PlanUpgrade(
+                operations.clone(),
+                count,
+                Some(packages.to_vec()),
+            ))
         }
         _ => None,
     }
@@ -2966,7 +2976,7 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
             operation_title_named(operation, names),
             vec![operation.clone()],
         ),
-        Job::PlanUpgrade(operations, _) => ("The update".to_owned(), operations.clone()),
+        Job::PlanUpgrade(operations, ..) => ("The update".to_owned(), operations.clone()),
         Job::PlanAdoption(app) => (
             format!(
                 "Managing {} with {}",
@@ -5740,9 +5750,11 @@ impl ffi::PackageController {
     fn validate_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
         let plan = match &entry.job {
             Job::Write(operation, _) => Job::PlanOperation(operation.clone()),
-            Job::UpgradeAll(operations, _) => {
-                Job::PlanUpgrade(operations.clone(), operations.len())
-            }
+            Job::UpgradeAll(operations, _) => Job::PlanUpgrade(
+                operations.clone(),
+                operations.len(),
+                Some(self.rust().packages.clone()),
+            ),
             Job::CleanAll(operations) => Job::PlanCleanAll(operations.clone()),
             _ => {
                 self.start_confirmed(entry);
@@ -6781,7 +6793,7 @@ impl ffi::PackageController {
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
-                let job = Job::PlanUpgrade(operations, count);
+                let job = Job::PlanUpgrade(operations, count, Some(self.rust().packages.clone()));
                 if writing {
                     self.as_mut().rust_mut().queued = Some(job);
                     self.as_mut().set_status("APT will check its plan after this operation.".into());
@@ -6791,7 +6803,7 @@ impl ffi::PackageController {
                 }
             } else {
                 self.as_mut()
-                    .apply(Ok(Payload::UpgradePreview(operations, count, None)));
+                    .apply(Ok(Payload::UpgradePreview(operations, count, None, None)));
             }
             return;
         }
@@ -7142,7 +7154,7 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation(summary.as_str().into());
                 self.rust_mut().pending = Some(Job::ImportRepository(import));
             }
-            Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
+            Ok(Payload::UpgradePreview(operations, count, apt_plan, rows)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
                     if matches!(&entry.job, Job::UpgradeAll(previous, plan) if previous == &operations && plan == &apt_plan)
                     {
@@ -7180,9 +7192,10 @@ impl ffi::PackageController {
                     self.as_mut().set_status(left_out.trim().into());
                     return;
                 }
+                let packages = rows.as_deref().unwrap_or(&self.rust().packages);
                 let labels = operations
                     .iter()
-                    .map(|operation| confirmation_label(operation, &self.rust().packages))
+                    .map(|operation| confirmation_label(operation, packages))
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 let apt = apt_plan.as_ref().map_or_else(String::new, apt_extra);
@@ -7201,12 +7214,12 @@ impl ffi::PackageController {
                         .filter(|op| !apt_all(op))
                         .cloned()
                         .collect();
-                    let mut items = update_items(&other_operations, &self.rust().packages);
+                    let mut items = update_items(&other_operations, packages);
                     items.extend(apt_update_items(plan));
                     let count = items.len();
                     (items, count)
                 } else {
-                    let items = update_items(&operations, &self.rust().packages);
+                    let items = update_items(&operations, packages);
                     let count = if left_out.is_empty() {
                         count
                     } else {
@@ -8527,8 +8540,9 @@ impl ffi::PackageController {
                                     .iter()
                                     .filter(|package| package.update_ready())
                                     .count();
+                                let rows = self.rust().packages.clone();
                                 self.as_mut().rust_mut().queued =
-                                    Some(Job::PlanUpgrade(operations, count));
+                                    Some(Job::PlanUpgrade(operations, count, Some(rows)));
                             }
                         }
                     }

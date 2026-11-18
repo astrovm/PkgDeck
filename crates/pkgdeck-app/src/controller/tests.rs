@@ -1681,6 +1681,7 @@ fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
         }],
         1,
         None,
+        None,
     )));
     assert!(controller
         .confirmation()
@@ -1884,7 +1885,7 @@ fn changed_plans_request_a_fresh_confirmation_for_the_same_targets() {
         }),
     );
     assert!(
-        matches!(repreview_changed_plan(&batch, &drift, &[package]), Some(Job::PlanUpgrade(next, 1)) if next == vec![operation])
+        matches!(repreview_changed_plan(&batch, &drift, &[package]), Some(Job::PlanUpgrade(next, 1, _)) if next == vec![operation])
     );
     assert!(repreview_changed_plan(&single, &Err(EngineError::NotFound), &[]).is_none());
     assert!(repreview_changed_plan(&Job::Load("Updates".into(), "".into()), &drift, &[]).is_none());
@@ -2024,6 +2025,7 @@ fn apt_removals_appear_first_in_update_confirmation() {
         }],
         1,
         Some(plan.clone()),
+        None,
     )));
     let confirmation = controller.confirmation().to_string();
     assert!(confirmation.contains("Remove (1): retired"));
@@ -3046,7 +3048,7 @@ fn queued_writes_wait_for_a_read_worker_then_revalidate_each_job_kind() {
         assert!(matches!(
             (index, &controller.rust().queued),
             (0, Some(Job::PlanOperation(_)))
-                | (1, Some(Job::PlanUpgrade(_, _)))
+                | (1, Some(Job::PlanUpgrade(..)))
                 | (2, Some(Job::PlanCleanAll(_)))
         ));
     }
@@ -3478,11 +3480,11 @@ fn jobs_route_to_their_own_sources_and_errors_have_a_kind() {
             vec![],
         ),
         (
-            Job::PlanUpgrade(vec![upgrade("flatpak"), upgrade("apt")], 2),
+            Job::PlanUpgrade(vec![upgrade("flatpak"), upgrade("apt")], 2, None),
             vec!["apt"],
         ),
         (
-            Job::PlanUpgrade(vec![upgrade("flatpak")], 1),
+            Job::PlanUpgrade(vec![upgrade("flatpak")], 1, None),
             vec!["filtered"],
         ),
         (Job::Details(id.clone()), vec!["apt"]),
@@ -3935,7 +3937,7 @@ fn finished_changes_explain_what_happened() {
     let prepared = preflight_notice(&plan, &E::LockBusy.into(), false, &Names::new()).unwrap();
     assert_eq!(prepared["title"], "Install htop (APT) couldn't be prepared");
     let denied_plan = preflight_notice(
-        &Job::PlanUpgrade(vec![], 0),
+        &Job::PlanUpgrade(vec![], 0, None),
         &E::AuthorizationDenied.into(),
         false,
         &Names::new(),
@@ -7139,6 +7141,7 @@ fn update_all_leaves_apt_out_when_removals_are_off() {
             vec![all("apt"), all("homebrew")],
             2,
             Some(plan.clone()),
+            None,
         )));
         let confirmation = controller.confirmation().to_string();
         let pending = expect!(
@@ -7161,9 +7164,12 @@ fn update_all_leaves_apt_out_when_removals_are_off() {
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
     controller.as_mut().set_allow_removals(false);
-    controller
-        .as_mut()
-        .apply(Ok(Payload::UpgradePreview(vec![all("apt")], 1, Some(plan))));
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        vec![all("apt")],
+        1,
+        Some(plan),
+        None,
+    )));
     assert!(controller.rust().pending.is_none());
     assert!(controller
         .status()
@@ -7184,9 +7190,12 @@ fn update_all_confirms_the_versions_and_packages_in_the_fresh_apt_plan() {
     };
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
-    controller
-        .as_mut()
-        .apply(Ok(Payload::UpgradePreview(vec![operation], 1, Some(plan))));
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        vec![operation],
+        1,
+        Some(plan),
+        None,
+    )));
     let confirmation: Value =
         serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
     assert_eq!(confirmation["items"][0]["title"], "powerdevil");
@@ -7212,15 +7221,18 @@ fn update_all_stops_when_the_fresh_apt_plan_is_empty() {
     };
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
-    controller
-        .as_mut()
-        .apply(Ok(Payload::UpgradePreview(vec![operation], 1, Some(plan))));
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        vec![operation],
+        1,
+        Some(plan),
+        None,
+    )));
     assert!(controller.rust().pending.is_none());
     assert_eq!(controller.status().to_string(), "APT has no updates ready.");
 }
 
 #[test]
-fn update_all_omits_apt_when_its_plan_would_downgrade() {
+fn a_queued_update_shows_the_original_non_apt_rows_if_apt_is_omitted() {
     let all = |backend: &str| Operation::UpgradeAll {
         backend: backend.into(),
     };
@@ -7236,11 +7248,12 @@ fn update_all_omits_apt_when_its_plan_would_downgrade() {
     flatpak.update = UpdateAvailability::Available;
     let mut controller = ffi::create_controller();
     let mut controller = controller.pin_mut();
-    controller.as_mut().rust_mut().packages = vec![flatpak];
+    assert!(controller.rust().packages.is_empty());
     controller.as_mut().apply(Ok(Payload::UpgradePreview(
         vec![all("apt"), all("flatpak")],
         2,
         Some(plan),
+        Some(vec![flatpak]),
     )));
     assert!(
         matches!(&controller.rust().pending, Some(Job::UpgradeAll(operations, None)) if operations == &[all("flatpak")])
@@ -7276,7 +7289,9 @@ fn update_all_waits_for_a_running_write_before_showing_the_apt_plan() {
     controller.as_mut().propose("upgrade-all".into(), 0);
     assert!(controller.rust().pending.is_none());
     assert!(
-        matches!(&controller.rust().queued, Some(Job::PlanUpgrade(operations, 1)) if operations == &[Operation::UpgradeAll { backend: "apt".into() }])
+        matches!(&controller.rust().queued, Some(Job::PlanUpgrade(operations, 1, Some(rows)))
+            if operations == &[Operation::UpgradeAll { backend: "apt".into() }]
+                && rows.len() == 1 && rows[0].id.backend == "apt")
     );
     assert!(controller.confirmation().to_string().is_empty());
 }
@@ -8253,17 +8268,17 @@ fn jobs_without_a_worker_engine_path_answer_directly() {
     };
     let replies = run_job(
         &mut engine,
-        Job::PlanUpgrade(vec![upgrade("fwupd")], 3),
+        Job::PlanUpgrade(vec![upgrade("fwupd")], 3, None),
         &cancel,
     );
     assert!(matches!(
         replies.last(),
-        Some(Reply::Done(Ok(Payload::UpgradePreview(operations, 3, None))))
+        Some(Reply::Done(Ok(Payload::UpgradePreview(operations, 3, None, None))))
             if operations == &[upgrade("fwupd")]
     ));
     let replies = run_job(
         &mut engine,
-        Job::PlanUpgrade(vec![upgrade("apt")], 1),
+        Job::PlanUpgrade(vec![upgrade("apt")], 1, None),
         &cancel,
     );
     assert!(matches!(
@@ -12101,7 +12116,7 @@ fn retried_update_sources_plan_the_update_they_were_retried_for() {
     };
     assert!(matches!(
         &controller.rust().worker,
-        Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1) if operations == std::slice::from_ref(&upgrade))
+        Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1, _) if operations == std::slice::from_ref(&upgrade))
     ));
     settle(&mut controller);
     assert!(matches!(
@@ -14403,7 +14418,7 @@ fn proposals_review_native_plans_and_retry_failed_sources_first() {
     controller.as_mut().propose("upgrade-all".into(), -1);
     assert!(matches!(
         &controller.rust().worker,
-        Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1)
+        Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1, _)
             if operations == &[Operation::UpgradeAll { backend: "apt".into() }])
     ));
     settle(&mut controller);
@@ -14488,9 +14503,12 @@ fn applied_results_change_only_what_they_describe() {
     };
     controller.as_mut().rust_mut().revalidating =
         Some(queued(Job::UpgradeAll(operations.clone(), None)));
-    controller
-        .as_mut()
-        .apply(Ok(Payload::UpgradePreview(operations.clone(), 1, None)));
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        operations.clone(),
+        1,
+        None,
+        None,
+    )));
     assert!(controller.rust().validated_confirmed.is_some());
     assert!(controller.rust().pending.is_none());
     controller.as_mut().rust_mut().validated_confirmed = None;
@@ -14514,6 +14532,7 @@ fn applied_results_change_only_what_they_describe() {
         operations.clone(),
         1,
         Some(plan.clone()),
+        None,
     )));
     assert!(controller.rust().revalidating.is_none());
     assert!(controller.rust().validated_confirmed.is_none());
@@ -14527,9 +14546,12 @@ fn applied_results_change_only_what_they_describe() {
         "Update 1 package\n2 sources could not be checked. Updates from them are not included."
     );
     controller.as_mut().rust_mut().failures.clear();
-    controller
-        .as_mut()
-        .apply(Ok(Payload::UpgradePreview(operations.clone(), 2, None)));
+    controller.as_mut().apply(Ok(Payload::UpgradePreview(
+        operations.clone(),
+        2,
+        None,
+        None,
+    )));
     let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
     assert_eq!(
         data["summary"],

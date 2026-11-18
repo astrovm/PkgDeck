@@ -789,7 +789,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.post_write_reload && !self.busy {
+        if self.post_write_reload && !self.busy && self.confirmation.is_none() {
             self.post_write_reload = false;
             self.reload(true, true);
         }

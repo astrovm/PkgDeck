@@ -436,11 +436,13 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
     assert!(upgrade.contains(&"--only-upgrade".into()));
     assert!(upgrade.contains(&"--no-remove".into()));
     assert!(upgrade.contains(&"APT::Get::allow-downgrades=false".into()));
+    assert!(upgrade.contains(&"APT::Get::Force-Yes=false".into()));
     assert_eq!(upgrade.last().unwrap(), "synthetic-fixture:amd64");
     let upgrade_all = AptAction::UpgradeAll.arguments().unwrap();
     assert_eq!(upgrade_all.last().unwrap(), "dist-upgrade");
     assert!(!upgrade_all.contains(&"--only-upgrade".into()));
     assert!(upgrade_all.contains(&"APT::Get::allow-downgrades=false".into()));
+    assert!(upgrade_all.contains(&"APT::Get::Force-Yes=false".into()));
     let autoremove = AptAction::Autoremove.arguments().unwrap();
     assert_eq!(autoremove.last().unwrap(), "autoremove");
     assert!(autoremove.contains(&"--assume-yes".into()));

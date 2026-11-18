@@ -341,6 +341,22 @@ fn a_single_target_batch_marks_nothing_and_reloads_the_page() {
 }
 
 #[test]
+fn a_post_write_reload_waits_until_the_next_confirmation_closes() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.post_write_reload = true;
+    app.c().set_confirmation("Review APT upgrade".into());
+    app.react();
+    assert!(app.confirmation.is_some());
+    assert!(app.post_write_reload);
+
+    app.c().set_confirmation("".into());
+    app.react();
+    assert!(app.confirmation.is_none());
+    assert!(!app.post_write_reload);
+}
+
+#[test]
 fn an_empty_first_run_batch_is_safe() {
     let mut app = app();
     app.page = Page::Updates;

@@ -139,6 +139,7 @@ impl NativeTransport {
         arch: &str,
         cancel: &Cancellation,
         copy: Option<PathBuf>,
+        use_cache: bool,
     ) -> Result<Completion, ExecutionError> {
         if self.host.resolve("apt-get")?.is_none() {
             return Err(ExecutionError::Disabled("APT not found".into()));
@@ -159,7 +160,7 @@ impl NativeTransport {
         )?;
         // The helper opens APT's cache on every run (half a second or more).
         // Its answer only depends on the APT and dpkg databases.
-        let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
+        let cacheable = use_cache && mode != "detect" && self.host.var("APT_CONFIG").is_none();
         let store = cacheable.then(crate::cache::Store::user).flatten();
         let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);
         let result = crate::cache::completion(
@@ -340,7 +341,7 @@ impl Transport for NativeTransport {
         arch: &str,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        self.apt_query_from_lists(mode, query, arch, cancel, self.private_index("apt"))
+        self.apt_query_from_lists(mode, query, arch, cancel, self.private_index("apt"), true)
     }
     fn apt_query_system(
         &self,
@@ -349,7 +350,9 @@ impl Transport for NativeTransport {
         arch: &str,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        self.apt_query_from_lists(mode, query, arch, cancel, None)
+        // APT can relocate its lists in its config. Re-read after a write-time
+        // refresh even if the usual list paths have not changed.
+        self.apt_query_from_lists(mode, query, arch, cancel, None, false)
     }
     fn apt_write(
         &self,

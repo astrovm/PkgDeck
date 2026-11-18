@@ -2761,6 +2761,8 @@ impl AptAction {
                     "DPkg::Lock::Timeout=0",
                     "-o",
                     "APT::Get::allow-downgrades=false",
+                    "-o",
+                    "APT::Get::Force-Yes=false",
                     "dist-upgrade",
                 ]
                 .map(OsString::from)
@@ -2827,7 +2829,13 @@ impl AptAction {
             args.push("--no-remove");
         }
         if matches!(self, Self::Upgrade(_)) {
-            args.extend(["-o", "APT::Get::allow-downgrades=false", "--only-upgrade"]);
+            args.extend([
+                "-o",
+                "APT::Get::allow-downgrades=false",
+                "-o",
+                "APT::Get::Force-Yes=false",
+                "--only-upgrade",
+            ]);
         }
         args.extend(["--", operation, package]);
         Ok(args.into_iter().map(OsString::from).collect())
