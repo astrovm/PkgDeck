@@ -813,6 +813,10 @@ mod tests {
         let refused = matches!(&error, ExecutionError::Failed(result) if result.code == Some(2));
         let missing = matches!(&error, ExecutionError::Disabled(reason) if reason.starts_with("APT helper is missing"));
         assert!(refused || missing, "{error:?}");
+        let system_error = native
+            .apt_query_system("erase", "", "", &Cancellation::default())
+            .unwrap_err();
+        assert_eq!(system_error, error);
         // A cancelled query never starts the helper.
         let cancel = Cancellation::default();
         cancel.cancel();

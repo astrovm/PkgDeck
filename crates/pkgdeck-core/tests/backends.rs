@@ -618,6 +618,14 @@ fn apt_inventory_keeps_installed_rows_on_solver_failure_and_propagates_cancellat
     assert!(apt.query_errors().is_empty());
     assert_eq!(apt.installed_for_removal(&cancel).unwrap().len(), 1);
     assert!(apt.query_errors().is_empty());
+    assert_eq!(
+        apt.execute(
+            &Operation::Upgrade(rows[0].id.clone()),
+            &cancel,
+            &mut |_| {}
+        ),
+        Err(EngineError::Execution(ExecutionError::LockBusy))
+    );
     let mut engine = Engine::default();
     engine.register(apt).unwrap();
     let report = engine.installed_for_removal("synthetic-fixture", &cancel);
