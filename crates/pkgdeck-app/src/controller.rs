@@ -7189,7 +7189,9 @@ impl ffi::PackageController {
                         format!("\nRemoves: {}", plan.removals.join(", "))
                     }
                 });
-                let (items, count) = if let Some(plan) = apt_plan.as_ref() {
+                let displayed_apt_plan =
+                    apt_plan.as_ref().filter(|_| operations.iter().any(apt_all));
+                let (items, count) = if let Some(plan) = displayed_apt_plan {
                     let other_operations: Vec<_> = operations
                         .iter()
                         .filter(|op| !apt_all(op))

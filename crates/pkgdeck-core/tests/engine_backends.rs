@@ -2228,6 +2228,34 @@ fn apt_plans_and_writes_cover_upgrades() {
     assert_eq!(script.calls(), ["w:apt UpgradeAll"]);
     struct Group(Arc<Mutex<String>>);
     impl Transport for Group {
+        fn apt_query(&self, mode: &str, _: &str, _: &str, _: &Cancellation) -> Reply {
+            assert_eq!(mode, "installed");
+            let rows: Vec<_> = ["tool", "other"].into_iter().map(|name| serde_json::json!({
+                "package": {"id": system_id("apt", name, "amd64"), "display_name": name,
+                    "summary": "", "installed_version": "0.9", "candidate_version": "1.0", "update": "available"},
+                "description": "", "dependencies": []
+            })).collect();
+            ok(&serde_json::to_string(&rows).unwrap())
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Reply {
+            assert_eq!(executable, "apt-get");
+            assert_eq!(
+                args.last().and_then(|arg| arg.to_str()),
+                Some("dist-upgrade")
+            );
+            assert!(!write);
+            ok(concat!(
+                "2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+                "Inst tool [0.9] (1.0 Debian:stable [amd64])\n",
+                "Inst other [0.9] (1.0 Debian:stable [amd64])\n",
+            ))
+        }
         fn apt_write_group(&self, actions: &[AptAction], _: &Cancellation) -> Reply {
             *self.0.lock().unwrap() = format!("{actions:?}");
             ok("")
