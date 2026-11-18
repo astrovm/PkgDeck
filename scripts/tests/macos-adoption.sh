@@ -136,9 +136,9 @@ installed
 "$pkd" --json --yes --from homebrew-cask remove "$cask" | grep -q '"exit_code":0'
 [[ ! -e $app ]]
 
-# 5. Recovery: this cask fails in postflight, after Homebrew took the app.
-# Homebrew's rollback deletes the adopted app; PkgDeck must put it back with
-# its permissions and extended attributes, and leave no copy behind.
+# 5. Recovery: this cask fails in postflight. If Homebrew removes the app
+# during rollback, PkgDeck must restore it. In either case, check that the
+# app keeps its permissions and extended attributes and no backup is left.
 cat > "$(brew --repository "$tap")/Casks/pkgdeck-adopt-failure.rb" <<EOF
 cask "pkgdeck-adopt-failure" do
   version "1.2.3"
@@ -158,9 +158,19 @@ EOF
 ditto "$bundle" "$app"
 xattr -w io.github.astrovm.pkgdeck.test kept "$app"
 chmod 700 "$app/Contents/Resources/pkgdeck-adopt-fixture"
+inode=$(/usr/bin/stat -f %i "$app")
 output=$("$pkd" --json --yes --from homebrew-cask install "$failing") || true
-grep -q 'PkgDeck put it back' <<<"$output" || { echo "Expected a restored app: $output" >&2; exit 1; }
+jq -e '.exit_code == 1 and (.data.operations[0].message | contains("/usr/bin/false"))' <<<"$output" >/dev/null || {
+    echo "Expected the postflight failure: $output" >&2
+    exit 1
+}
 [[ -d $app ]] || { echo 'The app is gone after the failed adoption' >&2; exit 1; }
+if grep -qF 'was left as it was' <<<"$output"; then
+    [[ $(/usr/bin/stat -f %i "$app") == "$inode" ]] || { echo 'The app was replaced during rollback' >&2; exit 1; }
+elif ! grep -qF 'PkgDeck put it back' <<<"$output"; then
+    echo "Expected PkgDeck to report the rollback outcome: $output" >&2
+    exit 1
+fi
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist") == io.github.astrovm.pkgdeck.adopt-fixture ]]
 [[ $(xattr -p io.github.astrovm.pkgdeck.test "$app") == kept ]]
 [[ $(/usr/bin/stat -f %Lp "$app/Contents/Resources/pkgdeck-adopt-fixture") == 700 ]]
