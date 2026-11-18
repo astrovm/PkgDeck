@@ -1358,6 +1358,9 @@ impl App {
     // Pages and loading
 
     pub fn open_page(&mut self, page: Page) {
+        if self.confirmation.is_some() {
+            return;
+        }
         self.drawer_open = false;
         // Going to a page leaves an opened file's page, as Back does.
         if self.opened.is_some() {
@@ -1408,7 +1411,7 @@ impl App {
     /// `keep_selection` keeps the open row selected.
     pub fn reload(&mut self, force: bool, keep_selection: bool) {
         let page = self.page;
-        if !page.lists() {
+        if !page.lists() || self.confirmation.is_some() {
             return;
         }
         let query = if page == Page::Search {
