@@ -820,8 +820,7 @@ impl App {
         let count = self
             .rows
             .iter()
-            .filter(|row| row.is_package() && row.has_update())
-            .filter(|row| row.waiting_until().is_none())
+            .filter(|row| row.selectable_update())
             .count() as u64;
         if count == self.background.available && self.background.last_check.is_some() {
             return;
@@ -1149,7 +1148,9 @@ impl App {
         } else {
             // What's still waiting isn't updated with the others, so it's
             // never shown as selected.
-            row.waiting_until().is_none() && !self.unchecked.contains(&row.identity())
+            !row.kept_back()
+                && row.waiting_until().is_none()
+                && !self.unchecked.contains(&row.identity())
         }
     }
     pub fn set_row_checked(&mut self, row: &Row, checked: bool) {
@@ -1162,7 +1163,7 @@ impl App {
                 checked,
             );
             self.sync_cleanup_preferences();
-        } else if row.waiting_until().is_some() {
+        } else if row.kept_back() || row.waiting_until().is_some() {
         } else if checked {
             self.unchecked.remove(&row.identity());
         } else {
@@ -1181,7 +1182,8 @@ impl App {
                 },
                 row.cleanup_opt_in,
             );
-        row.waiting_until().is_none()
+        !row.kept_back()
+            && row.waiting_until().is_none()
             && (self.page != Page::Clean || row.batch_cleanable())
             && !(waits && !self.row_checked(row))
     }

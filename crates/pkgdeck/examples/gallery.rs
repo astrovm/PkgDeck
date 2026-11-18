@@ -635,6 +635,36 @@ fn main() {
         app.rows = rows;
         app.invalidate();
     });
+    for (name, update) in [
+        ("apt-kept-back-before", "available"),
+        ("apt-kept-back-after", "kept_back"),
+    ] {
+        render(name, [1120.0, 640.0], true, |app| {
+            app.rows = [
+                (
+                    "libpowerdevilcore2",
+                    "Shared library for KDE power management",
+                ),
+                ("powerdevil", "KDE power management service"),
+                (
+                    "powerdevil-data",
+                    "Data files for the KDE power management service",
+                ),
+            ]
+            .into_iter()
+            .map(|(name, summary)| {
+                serde_json::from_value(json!({
+                    "kind": "package", "name": name, "source": "apt", "scope": "system",
+                    "scope_label": "System", "architecture": "amd64", "summary": summary,
+                    "installed": "4:6.6.6-0ubuntu0.1", "candidate": "4:6.6.7-0ubuntu0.1",
+                    "update": update,
+                }))
+                .unwrap()
+            })
+            .collect();
+            offline(app, Page::Updates);
+        });
+    }
     render("clean", [1500.0, 860.0], true, |app| {
         clean_rows(app);
         app.rows[3].preview =

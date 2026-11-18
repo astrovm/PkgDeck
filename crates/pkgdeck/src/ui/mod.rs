@@ -1189,7 +1189,7 @@ fn page_actions_height(app: &App) -> f32 {
     let shown =
         |keep: fn(&model::Row) -> bool| app.items.iter().any(|i| rows.get(i.raw).is_some_and(keep));
     let any = match app.page {
-        Page::Updates => shown(model::Row::is_package),
+        Page::Updates => shown(model::Row::selectable_update),
         Page::Clean => shown(model::Row::batch_cleanable),
         _ => false,
     };
@@ -1205,18 +1205,17 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
     match app.page {
         Page::Updates => {
             let rows = app.shown_rows();
-            // What's still waiting has a clock, not a checkbox.
-            let selectable = |row: &model::Row| row.is_package() && row.waiting_until().is_none();
             let total = app
                 .items
                 .iter()
-                .filter(|i| selectable(&rows[i.raw]))
+                .filter(|i| rows[i.raw].selectable_update())
                 .count();
             let unchecked = app
                 .items
                 .iter()
                 .filter(|i| {
-                    selectable(&rows[i.raw]) && app.unchecked.contains(&rows[i.raw].identity())
+                    rows[i.raw].selectable_update()
+                        && app.unchecked.contains(&rows[i.raw].identity())
                 })
                 .count();
             let checked = total - unchecked;

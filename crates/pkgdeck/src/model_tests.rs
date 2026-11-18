@@ -39,11 +39,13 @@ fn only_an_update_still_too_new_waits() {
 
 #[test]
 fn the_updates_count_keeps_apart_what_is_waiting() {
-    assert_eq!(updates_heading(1, 0), "1 update");
-    assert_eq!(updates_heading(3, 0), "3 updates");
-    assert_eq!(updates_heading(3, 1), "2 updates, 1 waiting");
-    assert_eq!(updates_heading(2, 1), "1 update, 1 waiting");
-    assert_eq!(updates_heading(2, 2), "2 waiting");
+    assert_eq!(updates_heading(1, 0, 0), "1 update");
+    assert_eq!(updates_heading(3, 0, 0), "3 updates");
+    assert_eq!(updates_heading(3, 1, 0), "2 updates, 1 waiting");
+    assert_eq!(updates_heading(2, 1, 0), "1 update, 1 waiting");
+    assert_eq!(updates_heading(2, 2, 0), "2 waiting");
+    assert_eq!(updates_heading(3, 0, 3), "3 kept back");
+    assert_eq!(updates_heading(4, 1, 2), "1 update, 1 waiting, 2 kept back");
 }
 
 #[test]

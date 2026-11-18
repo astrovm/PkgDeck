@@ -430,7 +430,70 @@ fn lifecycle(mut backend: impl Backend) {
 }
 #[test]
 fn apt_lifecycle() {
-    lifecycle(Apt::new(Fixture::new()));
+    let mut fixture = Fixture::new();
+    fixture.apt_simulation = Some(
+        concat!(
+            "1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+            "Inst synthetic-fixture [1.0] (2.0 Synthetic [all])\n"
+        )
+        .into(),
+    );
+    lifecycle(Apt::new(fixture));
+}
+
+#[test]
+fn apt_inventory_checks_that_the_full_upgrade_can_install_a_candidate() {
+    let mut fixture = Fixture::new();
+    *fixture.installed.lock().unwrap() = Some("1.0".into());
+    *fixture.candidate.lock().unwrap() = "2.0".into();
+    fixture.apt_simulation = Some(
+        concat!(
+            "The following packages have been kept back:\n",
+            "  synthetic-fixture\n",
+            "0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n"
+        )
+        .into(),
+    );
+    let mut apt = Apt::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let rows = apt.installed(&cancel).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].candidate_version.as_deref(), Some("2.0"));
+    assert_eq!(rows[0].update, UpdateAvailability::KeptBack);
+    assert!(!rows[0].update_ready());
+    assert_eq!(fixture.simulations.lock().unwrap().len(), 1);
+    assert!(apt.query_errors().is_empty());
+
+    for (action, expected) in [
+        (
+            "Inst synthetic-fixture [1.0] (2.0 Synthetic [all])",
+            UpdateAvailability::Available,
+        ),
+        (
+            "Inst synthetic-fixture:arm64 [1.0] (2.0 Synthetic [arm64])",
+            UpdateAvailability::KeptBack,
+        ),
+        (
+            "Inst synthetic-fixture [1.0] (1.5 Synthetic [all])",
+            UpdateAvailability::KeptBack,
+        ),
+        (
+            "Inst synthetic-fixture [1.0] (2.0)",
+            UpdateAvailability::Unknown,
+        ),
+    ] {
+        let mut fixture = fixture.clone();
+        fixture.apt_simulation = Some(format!(
+            "1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n{action}\n"
+        ));
+        let mut apt = Apt::new(fixture);
+        let row = apt.installed(&cancel).unwrap().remove(0);
+        assert_eq!(row.update, expected, "{action}");
+        assert_eq!(
+            apt.query_errors().len(),
+            usize::from(expected == UpdateAvailability::Unknown)
+        );
+    }
 }
 
 #[test]

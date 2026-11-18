@@ -1041,11 +1041,16 @@ fn plan_appimage_adoption(
         }),
     }
 }
+fn is_update_row(package: &Package) -> bool {
+    matches!(
+        package.update,
+        UpdateAvailability::Available | UpdateAvailability::KeptBack
+    )
+}
+
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
-        report
-            .packages
-            .retain(|p| p.update == UpdateAvailability::Available);
+        report.packages.retain(is_update_row);
     }
     // The Installed view filters client-side by substring; other views
     // ignore the query so stale field text never narrows them. Failures
@@ -7654,9 +7659,7 @@ impl ffi::PackageController {
         if !refreshed {
             return;
         }
-        report
-            .packages
-            .retain(|p| p.update == UpdateAvailability::Available);
+        report.packages.retain(is_update_row);
         let key = cache_key("Updates", "", &sources, sudo);
         self.as_mut()
             .rust_mut()

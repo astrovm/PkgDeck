@@ -371,6 +371,35 @@ fn what_is_still_waiting_gets_no_update_button() {
 }
 
 #[test]
+fn apt_kept_back_rows_show_a_reason_without_an_update_control() {
+    let mut app = app();
+    app.c().set_rows(
+        json!([{
+            "kind": "package", "name": "powerdevil", "source": "apt",
+            "architecture": "amd64", "scope": "system", "scope_label": "System",
+            "installed": "4:6.6.6-0ubuntu0.1", "candidate": "4:6.6.7-0ubuntu0.1",
+            "update": "kept_back",
+        }])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    app.page = Page::Updates;
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_label_contains("Update kept back by APT")
+        .is_some());
+    assert!(harness
+        .query_by_label_contains("Update powerdevil")
+        .is_none());
+    assert!(harness.query_by_label("Update all").is_none());
+    assert!(harness.query_by_label("Select all").is_none());
+    assert_eq!(harness.state().1.updates_to_run(), 0);
+}
+
+#[test]
 fn updates_that_failed_or_need_the_password_are_marked() {
     let mut app = app();
     app.page = Page::Updates;

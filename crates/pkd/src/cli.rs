@@ -629,18 +629,24 @@ fn refresh_report(
     let report = engine.installed_for_mutation(cancel);
     let mut failures = refreshed.index_failures;
     failures.extend(report.failures);
+    let kept_back: Vec<_> = report
+        .packages
+        .iter()
+        .filter(|p| p.update == UpdateAvailability::KeptBack)
+        .collect();
     let (waiting, updates): (Vec<_>, Vec<_>) = report
         .packages
-        .into_iter()
+        .iter()
         .filter(|p| p.update == UpdateAvailability::Available)
-        .partition(Package::waiting);
+        .partition(|p| p.waiting());
     let code = if refreshed.code == 0 && !failures.is_empty() {
         8
     } else {
         refreshed.code
     };
     (
-        json!({"operations": refreshed.operations, "updates": updates, "waiting": waiting, "failures": failures}),
+        json!({"operations": refreshed.operations, "updates": updates, "waiting": waiting,
+            "kept_back": kept_back, "failures": failures}),
         code,
     )
 }

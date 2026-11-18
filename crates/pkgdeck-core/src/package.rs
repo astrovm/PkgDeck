@@ -30,6 +30,8 @@ pub enum UpdateAvailability {
     Unknown,
     Current,
     Available,
+    /// The package manager has a newer candidate but keeps it out of its upgrade plan.
+    KeptBack,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]

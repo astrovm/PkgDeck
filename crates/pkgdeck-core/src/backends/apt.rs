@@ -11,6 +11,7 @@ pub struct Apt<T = NativeTransport> {
     looked_up: Vec<PackageDetails>,
     /// Set during an update check, which refreshes the lists first.
     update_check: Option<u64>,
+    upgrade_check_error: Option<EngineError>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -20,8 +21,21 @@ impl<T> Apt<T> {
             components: None,
             looked_up: vec![],
             update_check: None,
+            upgrade_check_error: None,
         }
     }
+}
+
+/// APT may omit the architecture suffix for the native architecture, or for
+/// an architecture-independent package. The candidate itself always names it.
+fn planned_upgrade(line: &str) -> Option<(&str, &str, &str)> {
+    let (name, versions) = line.strip_prefix("Inst ")?.split_once(" [")?;
+    let (_, candidate) = versions.split_once("] (")?;
+    let (version, rest) = candidate.split_once(' ')?;
+    let (before_end, _) = rest.split_once("])")?;
+    let (_, arch) = before_end.rsplit_once('[')?;
+    let name = name.split_once(':').map_or(name, |(name, _)| name);
+    Some((name, arch, version))
 }
 
 pub(super) fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, EngineError> {
@@ -143,6 +157,59 @@ pub(super) fn parse_apt_transaction_plan(
 }
 
 impl<T: Transport> Apt<T> {
+    fn verify_upgrade_candidates(
+        &mut self,
+        packages: &mut [PackageDetails],
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        self.upgrade_check_error = None;
+        let candidates = packages
+            .iter_mut()
+            .map(|details| &mut details.package)
+            .filter(|package| package.update == UpdateAvailability::Available);
+        let mut candidates = candidates.peekable();
+        if candidates.peek().is_none() {
+            return Ok(());
+        }
+        let plan = match self.simulated_upgrade(cancel) {
+            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+            result => result,
+        };
+        let upgrades = plan.as_ref().map_err(Clone::clone).and_then(|plan| {
+            let upgrades: std::collections::BTreeSet<_> =
+                plan.preview.lines().filter_map(planned_upgrade).collect();
+            if upgrades.len() != plan.upgrades.len() {
+                return Err(invalid(
+                    "apt",
+                    "could not read the planned upgrade versions",
+                ));
+            }
+            Ok(upgrades)
+        });
+        match upgrades {
+            Ok(upgrades) => {
+                for package in candidates {
+                    let planned = package.candidate_version.as_deref().is_some_and(|version| {
+                        upgrades.contains(&(
+                            package.id.name.as_str(),
+                            package.id.architecture.as_str(),
+                            version,
+                        ))
+                    });
+                    if !planned {
+                        package.update = UpdateAvailability::KeptBack;
+                    }
+                }
+            }
+            Err(error) => {
+                self.upgrade_check_error = Some(error);
+                for package in candidates {
+                    package.update = UpdateAvailability::Unknown;
+                }
+            }
+        }
+        Ok(())
+    }
     fn simulated_operation(
         &self,
         operation: &Operation,
@@ -275,6 +342,7 @@ impl<T: Transport> Backend for Apt<T> {
         availability(self.transport.apt_query("detect", "", "", cancel))
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.upgrade_check_error = None;
         Ok(self
             .query("search", query, "", cancel)?
             .into_iter()
@@ -290,6 +358,7 @@ impl<T: Transport> Backend for Apt<T> {
     /// Every architecture of one exact name, with the full details search
     /// rows leave out, kept for the details call that usually follows.
     fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.upgrade_check_error = None;
         self.looked_up.clear();
         // A name APT can't have is never sent to it.
         if name.contains(':') || AptAction::Install(name.into()).arguments().is_err() {
@@ -312,7 +381,8 @@ impl<T: Transport> Backend for Apt<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let packages = self.query("installed", "", "", cancel)?;
+        let mut packages = self.query("installed", "", "", cancel)?;
+        self.verify_upgrade_candidates(&mut packages, cancel)?;
         Ok(packages
             .into_iter()
             .map(|mut d| {
@@ -331,6 +401,9 @@ impl<T: Transport> Backend for Apt<T> {
                 d.package
             })
             .collect())
+    }
+    fn query_errors(&self) -> Vec<EngineError> {
+        self.upgrade_check_error.iter().cloned().collect()
     }
     fn details(
         &mut self,
