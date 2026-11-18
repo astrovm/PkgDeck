@@ -1056,6 +1056,9 @@ fn percent(segment: &str) -> String {
 }
 
 fn update_state(app: &App, row: &Row) -> String {
+    if row.kept_back() {
+        return "Update kept back by APT".into();
+    }
     if row.has_update() {
         let state = model::update_text(row);
         return match row.waiting_until() {

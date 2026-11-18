@@ -129,6 +129,12 @@ impl Row {
     pub fn has_update(&self) -> bool {
         self.update == "available"
     }
+    pub fn kept_back(&self) -> bool {
+        self.update == "kept_back"
+    }
+    pub fn selectable_update(&self) -> bool {
+        self.is_package() && !self.kept_back() && self.waiting_until().is_none()
+    }
     /// When this update stops waiting, if it's still too new.
     pub fn waiting_until(&self) -> Option<u64> {
         let now = pkgdeck_core::release_wait::now();
@@ -1382,7 +1388,7 @@ pub fn row_action(row: &Row, page: Page, catalog: &[Source]) -> Option<Action> {
         };
     }
     if page == Page::Updates {
-        Some(Action::Upgrade)
+        (!row.kept_back()).then_some(Action::Upgrade)
     } else if row.is_installed() {
         Some(Action::Remove)
     } else {
@@ -1972,14 +1978,20 @@ fn plural(count: i64, noun: &str) -> Option<String> {
     })
 }
 
-/// The count on the Updates page, which keeps apart what's still waiting.
-pub fn updates_heading(total: usize, waiting: usize) -> String {
-    let ready = plural(total.saturating_sub(waiting) as i64, "update").unwrap_or_default();
-    match (total, waiting) {
-        (_, 0) => ready,
-        _ if total == waiting => format!("{waiting} waiting"),
-        _ => format!("{ready}, {waiting} waiting"),
+/// The counts on the Updates page, including releases still held back.
+pub fn updates_heading(total: usize, waiting: usize, kept_back: usize) -> String {
+    let ready = total - waiting - kept_back;
+    let mut parts = Vec::new();
+    if ready > 0 || total == 0 {
+        parts.extend(plural(ready as i64, "update"));
     }
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting"));
+    }
+    if kept_back > 0 {
+        parts.push(format!("{kept_back} kept back"));
+    }
+    parts.join(", ")
 }
 
 /// "42 s", "3 min 5 s", "1 h 2 min".

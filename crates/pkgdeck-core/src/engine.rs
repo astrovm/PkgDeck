@@ -18,6 +18,19 @@ pub struct BackendFailure {
     pub error: EngineError,
 }
 
+#[derive(Clone, Copy)]
+enum PackageQuery<'a> {
+    Installed,
+    Removal,
+    Search(&'a str),
+    Lookup(&'a str),
+}
+impl<'a> PackageQuery<'a> {
+    fn from_search(query: Option<&'a str>) -> Self {
+        query.map_or(Self::Installed, Self::Search)
+    }
+}
+
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum EngineError {
     UnknownBackend(String),
@@ -357,6 +370,13 @@ pub trait Backend: Send {
     }
     fn installed(&mut self, _cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Err(self.unsupported(Capability::Installed))
+    }
+    /// Installed identities for removal need no upgrade verification.
+    fn installed_for_removal(
+        &mut self,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        self.installed(cancel)
     }
     /// Join an update check. Backends that share one refresh (Homebrew
     /// formulae and casks share `brew update`) keep `token` until the check
@@ -1049,7 +1069,7 @@ impl Engine {
     /// Mutation planning excludes inventory-only sources, including their
     /// errors: they cannot contribute an operation or an ambiguous target.
     pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
-        self.query_where(None, false, cancel, &|backend| {
+        self.query_where(PackageQuery::Installed, cancel, &|backend| {
             !crate::backends::inventory_only(backend.id())
         })
     }
@@ -1058,8 +1078,10 @@ impl Engine {
     /// an exact lookup in the inventory-only sources that could hold `name`
     /// (a macOS app's path). Other names never read those inventories.
     pub fn installed_for_removal(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        let mut report = self.installed_for_mutation(cancel);
-        let inventory = self.query_where(Some(name), true, cancel, &|backend| {
+        let mut report = self.query_where(PackageQuery::Removal, cancel, &|backend| {
+            !crate::backends::inventory_only(backend.id())
+        });
+        let inventory = self.query_where(PackageQuery::Lookup(name), cancel, &|backend| {
             crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         });
         report.packages.extend(inventory.packages);
@@ -1071,7 +1093,7 @@ impl Engine {
         report
     }
     pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        self.query_where(Some(name), true, cancel, &|backend| {
+        self.query_where(PackageQuery::Lookup(name), cancel, &|backend| {
             !crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         })
     }
@@ -1181,7 +1203,11 @@ impl Engine {
         self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
-        self.query_where(query, false, cancel, &|_: &dyn Backend| true)
+        self.query_where(
+            PackageQuery::from_search(query),
+            cancel,
+            &|_: &dyn Backend| true,
+        )
     }
     /// Search for one exact package name. Backends whose package names can
     /// never be `name` (see [`Backend::may_have`]), or that can't search at
@@ -1189,14 +1215,15 @@ impl Engine {
     /// successful sources. Selection on the result behaves as on a full
     /// [`search`](Self::search).
     pub fn lookup(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        self.query_where(Some(name), true, cancel, &|backend: &dyn Backend| {
-            can_look_up(backend, name)
-        })
+        self.query_where(
+            PackageQuery::Lookup(name),
+            cancel,
+            &|backend: &dyn Backend| can_look_up(backend, name),
+        )
     }
     fn query_where(
         &mut self,
-        query: Option<&str>,
-        exact: bool,
+        query: PackageQuery<'_>,
         cancel: &Cancellation,
         ask: &(dyn Fn(&dyn Backend) -> bool + Sync),
     ) -> PackageReport {
@@ -1217,7 +1244,6 @@ impl Engine {
                             id,
                             &mut noted,
                             query,
-                            exact,
                             watch,
                             cancel,
                         );
@@ -1287,6 +1313,7 @@ impl Engine {
         cancel: &Cancellation,
         emit: &mut dyn FnMut(PackageReport),
     ) -> PackageReport {
+        let query = PackageQuery::from_search(query);
         // Workers own their backends so queries run concurrently; the engine
         // reassembles itself afterwards for reuse.
         let backends = std::mem::take(&mut self.backends);
@@ -1302,15 +1329,8 @@ impl Engine {
                 let tx = tx.clone();
                 let mut noted = noted.get(&id).cloned();
                 s.spawn(move || {
-                    let result = Self::query_backend(
-                        &mut *backend,
-                        &id,
-                        &mut noted,
-                        query,
-                        false,
-                        watch,
-                        cancel,
-                    );
+                    let result =
+                        Self::query_backend(&mut *backend, &id, &mut noted, query, watch, cancel);
                     let _ = tx.send((id, backend, noted, result));
                 });
             }
@@ -1375,15 +1395,15 @@ impl Engine {
         backend: &mut dyn Backend,
         id: &str,
         noted: &mut Option<Availability>,
-        query: Option<&str>,
-        exact: bool,
+        query: PackageQuery<'_>,
         watch: Option<&crate::release_wait::ReleaseWatch>,
         cancel: &Cancellation,
     ) -> Result<(Vec<Package>, Vec<EngineError>), EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        let capability = if query.is_some() {
+        let inventory = matches!(query, PackageQuery::Installed | PackageQuery::Removal);
+        let capability = if !inventory {
             Capability::Search
         } else {
             Capability::Installed
@@ -1395,7 +1415,7 @@ impl Engine {
         // An update check refreshes before listing. A fetch failure still
         // lists what is already known and reports the failure beside those rows.
         let mut index_error = None;
-        if query.is_none() {
+        if inventory {
             match read_again_once(cancel, || backend.refresh_update_index(cancel)) {
                 Ok(()) => {}
                 Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
@@ -1403,15 +1423,16 @@ impl Engine {
             }
         }
         let mut packages = read_again_once(cancel, || match query {
-            Some(name) if exact => backend.lookup(name, cancel),
-            Some(query) => backend.search(query, cancel),
-            None => backend.installed(cancel),
+            PackageQuery::Lookup(name) => backend.lookup(name, cancel),
+            PackageQuery::Search(query) => backend.search(query, cancel),
+            PackageQuery::Installed => backend.installed(cancel),
+            PackageQuery::Removal => backend.installed_for_removal(cancel),
         })?;
         let mut seen = BTreeSet::new();
         if packages.iter().any(|p| {
             p.id.backend != id
                 || !seen.insert(&p.id)
-                || (query.is_none() && p.installed_version.is_none())
+                || (inventory && p.installed_version.is_none())
         }) {
             return Err(EngineError::InvalidResponse {
                 backend: id.into(),
@@ -1424,7 +1445,7 @@ impl Engine {
         }
         // Only an installed list says what's new. A name someone asked for
         // by itself never waits.
-        if let Some(watch) = watch.filter(|watch| query.is_none() && watch.wait().applies_to(id)) {
+        if let Some(watch) = watch.filter(|watch| inventory && watch.wait().applies_to(id)) {
             if !backend.limits_release_age(cancel) {
                 let now = crate::release_wait::now();
                 watch.mark(id, &mut packages, errors.is_empty(), now);
@@ -1611,6 +1632,7 @@ impl Engine {
                 })?;
                 if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                     let current = backend.apt_upgrade_plan(cancel)?;
+                    current.check_no_downgrades()?;
                     if expected_apt.as_ref() != Some(&current) {
                         return Err(EngineError::Refused {
                             backend: "apt".into(),
@@ -1676,6 +1698,7 @@ impl Engine {
         let backend = self.ready(operation.backend(), operation.capability(), cancel)?;
         if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
             let current = backend.apt_upgrade_plan(cancel)?;
+            current.check_no_downgrades()?;
             if expected_apt.as_ref() != Some(&current) {
                 return Err(EngineError::Refused {
                     backend: "apt".into(),

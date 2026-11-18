@@ -390,7 +390,8 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
             .flatten()
             .any(|item| item["result"].get("Err").is_some());
     let waiting = data["waiting"].as_array().map_or(&[][..], Vec::as_slice);
-    let mut output = if updates.is_empty() && !waiting.is_empty() {
+    let kept_back = data["kept_back"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut output = if updates.is_empty() && (!waiting.is_empty() || !kept_back.is_empty()) {
         String::new()
     } else if updates.is_empty() && incomplete {
         "No updates found in the sources that answered.".to_string()
@@ -425,6 +426,14 @@ fn refresh_summary(data: &Value, paint: Paint) -> String {
             output.push('\n');
         }
         output.push_str(&note);
+    }
+    if !kept_back.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let count = kept_back.len();
+        let noun = if count == 1 { "update" } else { "updates" };
+        output.push_str(&format!("APT kept back {count} {noun}."));
     }
     for failure in failures {
         output.push_str(&failure_line(paint, &failure_text(failure)));
@@ -1845,6 +1854,26 @@ mod tests {
             upgraded.contains("2 new releases are still waiting"),
             "{upgraded}"
         );
+    }
+
+    #[test]
+    fn refresh_text_reports_apt_updates_kept_back() {
+        let package = json!({"id": {"name": "powerdevil", "backend": "apt"}});
+        for (packages, expected) in [
+            (vec![package.clone()], "APT kept back 1 update."),
+            (vec![package.clone(), package], "APT kept back 2 updates."),
+        ] {
+            let result = operations_summary(
+                &json!({"operations": [], "updates": [], "kept_back": packages, "failures": []}),
+                false,
+            );
+            assert_eq!(result, expected);
+        }
+        let mixed = operations_summary(
+            &json!({"operations": [], "updates": [{}], "kept_back": [{}], "failures": []}),
+            false,
+        );
+        assert!(mixed.ends_with("\nAPT kept back 1 update."), "{mixed}");
     }
 
     #[test]

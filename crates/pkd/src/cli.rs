@@ -344,8 +344,7 @@ enum Lookup {
 struct Selection {
     result: Result<PackageId, EngineError>,
     offers: Vec<String>,
-    /// Its source checked and found nothing newer.
-    current: bool,
+    update: Option<UpdateAvailability>,
 }
 fn select(
     engine: &mut Engine,
@@ -385,16 +384,17 @@ fn select(
     } else {
         vec![]
     };
-    let current = result.as_ref().is_ok_and(|id| {
+    let update = result.as_ref().ok().and_then(|id| {
         report
             .packages
             .iter()
-            .any(|package| package.id == *id && package.update == UpdateAvailability::Current)
+            .find(|package| package.id == *id)
+            .map(|package| package.update.clone())
     });
     Selection {
         result,
         offers,
-        current,
+        update,
     }
 }
 /// "npm, pipx" → "--from npm or --from pipx".
@@ -629,18 +629,24 @@ fn refresh_report(
     let report = engine.installed_for_mutation(cancel);
     let mut failures = refreshed.index_failures;
     failures.extend(report.failures);
+    let kept_back: Vec<_> = report
+        .packages
+        .iter()
+        .filter(|p| p.update == UpdateAvailability::KeptBack)
+        .collect();
     let (waiting, updates): (Vec<_>, Vec<_>) = report
         .packages
-        .into_iter()
+        .iter()
         .filter(|p| p.update == UpdateAvailability::Available)
-        .partition(Package::waiting);
+        .partition(|p| p.waiting());
     let code = if refreshed.code == 0 && !failures.is_empty() {
         8
     } else {
         refreshed.code
     };
     (
-        json!({"operations": refreshed.operations, "updates": updates, "waiting": waiting, "failures": failures}),
+        json!({"operations": refreshed.operations, "updates": updates, "waiting": waiting,
+            "kept_back": kept_back, "failures": failures}),
         code,
     )
 }
@@ -943,9 +949,6 @@ fn dispatch_command(
                 };
                 for name in names {
                     let selection = select(engine, args, name, lookup, cancel);
-                    // As with upgrading everything, what's up to date stays
-                    // out of the plan, rather than counting as a change made.
-                    let current = selection.current && lookup == Lookup::Installed;
                     let id = match selection.result {
                         Ok(id) => id,
                         Err(error) => {
@@ -963,8 +966,20 @@ fn dispatch_command(
                     {
                         return Err(failure.error.clone());
                     }
-                    if current {
-                        continue;
+                    if lookup == Lookup::Installed {
+                        match selection.update {
+                            Some(UpdateAvailability::Current) => continue,
+                            Some(UpdateAvailability::KeptBack) => {
+                                return Err(EngineError::Refused {
+                                    backend: id.backend,
+                                    refusal: Refusal::Explained(format!(
+                                        "APT kept back {}.",
+                                        id.name
+                                    )),
+                                });
+                            }
+                            _ => {}
+                        }
                     }
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),
@@ -1086,6 +1101,9 @@ fn dispatch_command(
             Ok(plan) => plan,
             Err(error) => return failure(error),
         };
+        if let Err(error) = plan.check_no_downgrades() {
+            return failure(error);
+        }
         events(Event::Progress {
             operation: operation.clone(),
             // Shown under "Update all apt packages"; empty sections add nothing.
@@ -2647,6 +2665,84 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn apt_upgrades_refuse_kept_back_targets_and_downgrade_plans() {
+        use pkgdeck_core::backends::{Apt, Transport};
+        use pkgdeck_core::process::Completion;
+        use std::ffi::OsString;
+
+        struct AptPlan(&'static str);
+
+        fn completed(stdout: Vec<u8>) -> Completion {
+            Completion {
+                code: Some(0),
+                signal: None,
+                stdout,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            }
+        }
+
+        impl Transport for AptPlan {
+            fn apt_query(
+                &self,
+                mode: &str,
+                _: &str,
+                _: &str,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                if mode == "detect" {
+                    return Ok(completed(b"[]".to_vec()));
+                }
+                let mut source = fixture("apt");
+                let details = source
+                    .details(&source.package().id, &Cancellation::default())
+                    .unwrap();
+                Ok(completed(serde_json::to_vec(&[details]).unwrap()))
+            }
+
+            fn system_manager(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                assert_eq!(executable, "apt-get");
+                assert!(
+                    !write && args[0] == "--simulate" && args.last().unwrap() == "dist-upgrade"
+                );
+                Ok(completed(self.0.as_bytes().to_vec()))
+            }
+        }
+
+        for (words, plan, reason) in [
+            (
+                ["--from", "apt", "upgrade", "fixture"],
+                "0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n",
+                "APT kept back fixture.",
+            ),
+            (
+                ["--yes", "--from=apt", "upgrade", "--allow-removals"],
+                concat!(
+                    "1 upgraded, 0 newly installed, 1 downgraded, 0 to remove and 0 not upgraded.\n",
+                    "Inst fixture [1.0] (2.0 Synthetic [all])\n",
+                    "Inst dependency [2.0] (1.0 Synthetic [all])\n",
+                ),
+                "APT would downgrade installed packages.",
+            ),
+        ] {
+            let mut engine = Engine::default();
+            engine.register(Apt::new(AptPlan(plan))).unwrap();
+            let (data, code) = call(&mut engine, &words, true);
+            assert_eq!(code, 1, "{data}");
+            assert_eq!(data["error"]["Refused"]["backend"], "apt", "{data}");
+            assert!(data["message"].as_str().is_some_and(|message| message.contains(reason)), "{data}");
+        }
+    }
+
     #[test]
     fn source_ambiguity_partial_results_and_exit_codes() {
         let mut engine = engine();

@@ -133,7 +133,12 @@ fn heading_text(app: &App) -> String {
             .iter()
             .filter(|item| rows[item.raw].waiting_until().is_some())
             .count();
-        return model::updates_heading(count, waiting);
+        let kept_back = app
+            .items
+            .iter()
+            .filter(|item| rows[item.raw].kept_back())
+            .count();
+        return model::updates_heading(count, waiting, kept_back);
     }
     let noun = match app.page {
         Page::Clean => "cleanup task",
@@ -944,7 +949,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     if let (Some(tick), Some(until)) = (cols.tick, waiting) {
         let mark = Rect::from_center_size(tick.center(), Vec2::splat(18.0));
         waiting_mark(ui, until, mark, id);
-    } else if let Some(tick) = cols.tick {
+    } else if let Some(tick) = cols.tick.filter(|_| !row.kept_back()) {
         let enabled = app.page != Page::Clean || row.batch_cleanable();
         let checked = enabled && app.row_checked(&row);
         let tick_rect = Rect::from_center_size(tick.center(), Vec2::splat(22.0));
@@ -1013,7 +1018,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     if compact {
         // Version in its own colour, then the summary in what's left. Every
         // task here is a cache unless it says otherwise.
-        let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
+        let version = if row.kept_back() {
+            "Kept back".to_owned()
+        } else if row.kind == "cleanup" && version == model::cleanup_type("") {
             String::new()
         } else {
             version.clone()
@@ -1043,16 +1050,21 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     if let Some(v) = cols.version {
         // An update reads the same on every page: the new version, and
         // what it replaces under it.
-        if row.has_update() {
+        if row.has_update() || row.kept_back() {
             let new = model::new_version(&row);
             let left = v.left();
-            let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
+            let galley = one_line(ui, &new, theme::mono(13.0), version_color, v.width());
             painter.galley(
                 pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
                 galley,
-                palette.accent,
+                version_color,
             );
-            if let Some(replaces) = model::replaces_text(&row) {
+            let replaces = if row.kept_back() {
+                Some("Kept back".to_owned())
+            } else {
+                model::replaces_text(&row)
+            };
+            if let Some(replaces) = replaces {
                 let galley = one_line(ui, &replaces, theme::font(12.0), palette.muted, v.width());
                 painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
             }
@@ -1185,7 +1197,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             .map(|held| format!("{} ", held.tip()))
             .or_else(|| waiting.map(|until| format!("{} ", model::waiting_text(until))))
             .unwrap_or_default(),
-        if row.has_update() {
+        if row.kept_back() {
+            "Update kept back by APT. "
+        } else if row.has_update() {
             "Update available. "
         } else if row.is_installed() {
             "Installed. "

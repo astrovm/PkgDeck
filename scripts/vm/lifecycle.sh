@@ -46,17 +46,26 @@ brew_refresh() {
         sleep 30
     done
 }
-apt_version() {
-    local version=$1 package=/tmp/pkgdeck-package repo=/opt/pkgdeck-fixture-repo
-    mkdir -p "$package/DEBIAN" "$package/usr/share/pkgdeck-fixture" "$repo"
-    printf '%s\n' "$version" >"$package/usr/share/pkgdeck-fixture/version"
-    printf 'Package: pkgdeck-fixture\nVersion: %s\nArchitecture: all\nMaintainer: Synthetic <fixture@example.invalid>\nDescription: Disposable host execution fixture\n' "$version" >"$package/DEBIAN/control"
-    local deb="$repo/pkgdeck-fixture_${version}_all.deb"
-    dpkg-deb --build --root-owner-group "$package" "$deb"
+apt_package() {
+    local name=$1 version=$2 depends=$3 phase=$4 repo=/opt/pkgdeck-fixture-repo
+    local package="/tmp/$name" deb="$repo/${name}_${version}_all.deb"
+    mkdir -p "$package/DEBIAN" "$package/usr/share/$name" "$repo"
+    printf '%s\n' "$version" >"$package/usr/share/$name/version"
+    printf 'Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: Synthetic <fixture@example.invalid>\nDescription: Disposable host execution fixture\n' "$name" "$version" >"$package/DEBIAN/control"
+    if [[ -n $depends ]]; then printf 'Depends: %s\n' "$depends" >>"$package/DEBIAN/control"; fi
+    dpkg-deb --build --root-owner-group "$package" "$deb" >&2
     {
         cat "$package/DEBIAN/control"
+        if [[ -n $phase ]]; then printf 'Phased-Update-Percentage: %s\n' "$phase"; fi
         printf 'Filename: %s\nSize: %s\nSHA256: %s\n\n' "${deb##*/}" "$(stat -c %s "$deb")" "$(sha256sum "$deb" | cut -d ' ' -f1)"
-    } >"$repo/Packages"
+    }
+}
+apt_version() {
+    mkdir -p /opt/pkgdeck-fixture-repo
+    {
+        apt_package pkgdeck-fixture "$1" "pkgdeck-fixture-dependency (= $1)" ''
+        apt_package pkgdeck-fixture-dependency "$1" '' "${2:-}"
+    } > /opt/pkgdeck-fixture-repo/Packages
 }
 apt_fixture() {
     apt_version 1.0
@@ -68,6 +77,19 @@ apt_lifecycle() {
     cli apt search pkgdeck-fixture | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture")'
     cli apt info pkgdeck-fixture | jq -e '.package.candidate_version=="1.0"'
     write apt install pkgdeck-fixture
+    [[ $(dpkg-query -W '-f=${Version}' pkgdeck-fixture) == 1.0 ]]
+    printf 'APT::Get::Never-Include-Phased-Updates "true";\n' >/etc/apt/apt.conf.d/99pkgdeck-fixture-phasing
+    apt_version 2.0 0
+    write apt refresh
+    cli apt list | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture" and .candidate_version=="2.0" and .update=="kept_back")'
+    cli apt search pkgdeck-fixture | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture" and .update=="kept_back")'
+    cli apt upgrade | jq -e '.operations == []'
+    local named
+    if named=$(runuser -u pkgdeck-test -- /opt/pkgdeck-bin/pkd --json --yes --from apt upgrade pkgdeck-fixture); then
+        echo 'A named upgrade accepted a kept-back update' >&2
+        return 1
+    fi
+    jq -e '.data.message | contains("APT kept back pkgdeck-fixture")' <<<"$named"
     [[ $(dpkg-query -W '-f=${Version}' pkgdeck-fixture) == 1.0 ]]
     apt_version 2.0
     write apt refresh

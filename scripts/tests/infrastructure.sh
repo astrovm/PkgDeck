@@ -37,6 +37,41 @@ expect_code() {
         exit 1
     }
 }
+(
+    source scripts/ci/snap-store-retry.sh
+    mkdir "$work/snap-bin"
+    printf '#!/bin/sh\nexit 0\n' >"$work/snap-bin/sleep"
+    cat >"$work/snap-bin/snap-fixture" <<'SNAP'
+#!/usr/bin/env bash
+printf '%s\n' attempt >>"$PKGDECK_SNAP_ATTEMPTS"
+attempt=$(wc -l <"$PKGDECK_SNAP_ATTEMPTS")
+if [[ $1 == recovered || $1 == reset ]] && (( attempt == 2 )); then
+    exit 0
+fi
+if [[ $1 == mixed ]] && (( attempt == 3 )); then
+    exit 0
+fi
+if [[ $1 == mixed ]] && (( attempt == 2 )); then
+    echo 'Post "https://api.snapcraft.io/v2/snaps/refresh": dial tcp: connect: connection refused' >&2
+    exit 42
+fi
+case $1 in
+    permanent) echo 'error: cannot install snap: invalid package' >&2; exit 23 ;;
+    reset) echo 'Get "https://api.snapcraft.io/api/v1/snaps/download/snapd.snap": read: connection reset by peer' >&2 ;;
+    other-host) echo 'Get "https://example.invalid/snapd.snap": read: connection reset by peer' >&2 ;;
+    *) echo 'Post "https://api.snapcraft.io/v2/snaps/refresh": Client.Timeout exceeded while awaiting headers' >&2 ;;
+esac
+exit 42
+SNAP
+    chmod +x "$work/snap-bin/"{sleep,snap-fixture}
+    for test_case in 'recovered 0 2' 'reset 0 2' 'mixed 0 3' 'timeout 42 3' 'permanent 23 1' 'other-host 42 1'; do
+        read -r kind status attempts <<<"$test_case"
+        : >"$work/snap-attempts"
+        PATH="$work/snap-bin:$PATH" PKGDECK_SNAP_ATTEMPTS="$work/snap-attempts" \
+            expect_code "$status" snap_store_retry snap-fixture "$kind"
+        (( $(wc -l <"$work/snap-attempts") == attempts ))
+    done
+)
 for args in --help unknown 'fast --unknown'; do
     expected=2
     [[ $args != --help ]] || expected=0

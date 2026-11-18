@@ -248,7 +248,8 @@ enum Job {
     /// own data from its page.
     PlanCleanup(CleanupId),
     Write(Operation, Option<Box<TransactionPlan>>),
-    PlanUpgrade(Vec<Operation>, usize),
+    /// Carries the Updates rows if the plan waits while another page loads.
+    PlanUpgrade(Vec<Operation>, usize, Option<Vec<Package>>),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
     /// Updates a background check found, applied with nobody watching:
     /// system managers only through the upgrade-only helper. With `true`,
@@ -427,7 +428,12 @@ enum Payload {
     Batch(Batch),
     CheckedUpdates(Box<PackageReport>, Batch),
     Cleanup(CleanupReport),
-    UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
+    UpgradePreview(
+        Vec<Operation>,
+        usize,
+        Option<AptUpgradePlan>,
+        Option<Vec<Package>>,
+    ),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
     /// The cask package that adopts an app, its install and the adoption plan.
     AdoptionPreview(Box<Package>, Operation, Box<TransactionPlan>),
@@ -1041,11 +1047,16 @@ fn plan_appimage_adoption(
         }),
     }
 }
+fn is_update_row(package: &Package) -> bool {
+    matches!(
+        package.update,
+        UpdateAvailability::Available | UpdateAvailability::KeptBack
+    )
+}
+
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
-        report
-            .packages
-            .retain(|p| p.update == UpdateAvailability::Available);
+        report.packages.retain(is_update_row);
     }
     // The Installed view filters client-side by substring; other views
     // ignore the query so stale field text never narrows them. Failures
@@ -1219,15 +1230,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
-        Job::PlanUpgrade(operations, count) => {
+        Job::PlanUpgrade(operations, count, rows) => {
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
                 engine
                     .plan_apt_upgrade(cancel)
-                    .map(|plan| Payload::UpgradePreview(operations, count, Some(plan)))
+                    .map(|plan| Payload::UpgradePreview(operations, count, Some(plan), rows))
             } else {
-                Ok(Payload::UpgradePreview(operations, count, None))
+                Ok(Payload::UpgradePreview(operations, count, None, rows))
             }
         }
         Job::PlanOperation(operation) => engine
@@ -1336,7 +1347,10 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             // for Update all.
             let apt = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
             let held = if operations.iter().any(apt) {
-                match engine.plan_apt_upgrade(cancel) {
+                match engine.plan_apt_upgrade(cancel).and_then(|plan| {
+                    plan.check_no_downgrades()?;
+                    Ok(plan)
+                }) {
                     Ok(plan) if removals || plan.removals.is_empty() => None,
                     Ok(plan) => Some(Held::said(format!(
                         "Not updated automatically: it would remove {} {}. Review it with Update all.",
@@ -2553,7 +2567,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
         Job::ManifestPreview(_) => vec![],
-        Job::PlanUpgrade(operations, _)
+        Job::PlanUpgrade(operations, ..)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) => vec!["apt".into()],
@@ -2621,7 +2635,11 @@ fn repreview_changed_plan(
                 .iter()
                 .filter(|package| package.update_ready())
                 .count();
-            Some(Job::PlanUpgrade(operations.clone(), count))
+            Some(Job::PlanUpgrade(
+                operations.clone(),
+                count,
+                Some(packages.to_vec()),
+            ))
         }
         _ => None,
     }
@@ -2958,7 +2976,7 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
             operation_title_named(operation, names),
             vec![operation.clone()],
         ),
-        Job::PlanUpgrade(operations, _) => ("The update".to_owned(), operations.clone()),
+        Job::PlanUpgrade(operations, ..) => ("The update".to_owned(), operations.clone()),
         Job::PlanAdoption(app) => (
             format!(
                 "Managing {} with {}",
@@ -3730,6 +3748,19 @@ fn update_items(operations: &[Operation], packages: &[Package]) -> Vec<Value> {
             item
         })
         .collect()
+}
+
+fn apt_update_items(plan: &AptUpgradePlan) -> impl Iterator<Item = Value> + '_ {
+    let changes: std::collections::HashMap<_, _> = plan
+        .upgrade_changes()
+        .map(|change| (change.name.clone(), change))
+        .collect();
+    plan.upgrades.iter().map(move |name| {
+        let change = changes.get(name);
+        json!({"group": source_display_name("apt"), "icon_name": "apt", "title": name,
+            "from": change.and_then(|change| change.installed_version.as_deref()),
+            "to": change.and_then(|change| change.candidate_version.as_deref())})
+    })
 }
 /// One line for progress and results, such as "Install htop (APT)".
 /// A change's title as it runs: "Update Beta App" reads "Updating Beta
@@ -5719,9 +5750,11 @@ impl ffi::PackageController {
     fn validate_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
         let plan = match &entry.job {
             Job::Write(operation, _) => Job::PlanOperation(operation.clone()),
-            Job::UpgradeAll(operations, _) => {
-                Job::PlanUpgrade(operations.clone(), operations.len())
-            }
+            Job::UpgradeAll(operations, _) => Job::PlanUpgrade(
+                operations.clone(),
+                operations.len(),
+                Some(self.rust().packages.clone()),
+            ),
             Job::CleanAll(operations) => Job::PlanCleanAll(operations.clone()),
             _ => {
                 self.start_confirmed(entry);
@@ -6757,13 +6790,20 @@ impl ffi::PackageController {
                 .filter(|package| package.update_ready())
                 .count()
                 - skipped;
-            if !writing && operations.iter().any(|operation| {
+            if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
-                self.start(Job::PlanUpgrade(operations, count));
+                let job = Job::PlanUpgrade(operations, count, Some(self.rust().packages.clone()));
+                if writing {
+                    self.as_mut().rust_mut().queued = Some(job);
+                    self.as_mut().set_status("APT will check its plan after this operation.".into());
+                    self.sync_needs_poll();
+                } else {
+                    self.start(job);
+                }
             } else {
                 self.as_mut()
-                    .apply(Ok(Payload::UpgradePreview(operations, count, None)));
+                    .apply(Ok(Payload::UpgradePreview(operations, count, None, None)));
             }
             return;
         }
@@ -7114,7 +7154,7 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation(summary.as_str().into());
                 self.rust_mut().pending = Some(Job::ImportRepository(import));
             }
-            Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
+            Ok(Payload::UpgradePreview(operations, count, apt_plan, rows)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
                     if matches!(&entry.job, Job::UpgradeAll(previous, plan) if previous == &operations && plan == &apt_plan)
                     {
@@ -7126,33 +7166,36 @@ impl ffi::PackageController {
                 // With removals turned off in Settings, APT is left out when
                 // its plan removes anything.
                 let apt_all = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
-                let (operations, apt_plan, count, left_out) = match apt_plan {
-                    Some(plan) if !self.rust().allow_removals && !plan.removals.is_empty() => {
-                        let apt_packages = self
-                            .rust()
-                            .packages
-                            .iter()
-                            .filter(|p| {
-                                p.id.backend == "apt" && p.update == UpdateAvailability::Available
-                            })
-                            .count();
-                        let note = format!(
+                let apt_omission = apt_plan.as_ref().and_then(|plan| {
+                    if plan.has_downgrades() {
+                        Some("\nAPT is left out because it would downgrade installed packages.".into())
+                    } else if !self.rust().allow_removals && !plan.removals.is_empty() {
+                        Some(format!(
                             "\nAPT is left out: it would remove {}. Turn on Allow removals in Settings to include it.",
                             plan.removals.join(", ")
-                        );
+                        ))
+                    } else if plan.upgrades.is_empty() && plan.installs.is_empty() && plan.removals.is_empty() {
+                        Some("\nAPT has no updates ready.".into())
+                    } else {
+                        None
+                    }
+                });
+                let (operations, apt_plan, left_out) = match apt_omission {
+                    Some(note) => {
                         let rest: Vec<_> =
                             operations.into_iter().filter(|op| !apt_all(op)).collect();
-                        (rest, None, count.saturating_sub(apt_packages), note)
+                        (rest, None, note)
                     }
-                    plan => (operations, plan, count, String::new()),
+                    None => (operations, apt_plan, String::new()),
                 };
                 if operations.is_empty() {
                     self.as_mut().set_status(left_out.trim().into());
                     return;
                 }
+                let packages = rows.as_deref().unwrap_or(&self.rust().packages);
                 let labels = operations
                     .iter()
-                    .map(|operation| confirmation_label(operation, &self.rust().packages))
+                    .map(|operation| confirmation_label(operation, packages))
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 let apt = apt_plan.as_ref().map_or_else(String::new, apt_extra);
@@ -7163,6 +7206,27 @@ impl ffi::PackageController {
                         format!("\nRemoves: {}", plan.removals.join(", "))
                     }
                 });
+                let displayed_apt_plan =
+                    apt_plan.as_ref().filter(|_| operations.iter().any(apt_all));
+                let (items, count) = if let Some(plan) = displayed_apt_plan {
+                    let other_operations: Vec<_> = operations
+                        .iter()
+                        .filter(|op| !apt_all(op))
+                        .cloned()
+                        .collect();
+                    let mut items = update_items(&other_operations, packages);
+                    items.extend(apt_update_items(plan));
+                    let count = items.len();
+                    (items, count)
+                } else {
+                    let items = update_items(&operations, packages);
+                    let count = if left_out.is_empty() {
+                        count
+                    } else {
+                        items.len()
+                    };
+                    (items, count)
+                };
                 let noun = if count == 1 { "package" } else { "packages" };
                 let warning = if count > 1 {
                     "\nIf one update fails, the others can still finish."
@@ -7185,7 +7249,6 @@ impl ffi::PackageController {
                     };
                     format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
-                let items = update_items(&operations, &self.rust().packages);
                 self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}").trim(), "items": items})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed {noun}?{incomplete}{left_out}{apt}\n\n{labels}\n\nContinue?")
@@ -7654,9 +7717,7 @@ impl ffi::PackageController {
         if !refreshed {
             return;
         }
-        report
-            .packages
-            .retain(|p| p.update == UpdateAvailability::Available);
+        report.packages.retain(is_update_row);
         let key = cache_key("Updates", "", &sources, sudo);
         self.as_mut()
             .rust_mut()
@@ -8479,8 +8540,9 @@ impl ffi::PackageController {
                                     .iter()
                                     .filter(|package| package.update_ready())
                                     .count();
+                                let rows = self.rust().packages.clone();
                                 self.as_mut().rust_mut().queued =
-                                    Some(Job::PlanUpgrade(operations, count));
+                                    Some(Job::PlanUpgrade(operations, count, Some(rows)));
                             }
                         }
                     }

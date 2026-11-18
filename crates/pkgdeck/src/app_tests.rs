@@ -341,6 +341,51 @@ fn a_single_target_batch_marks_nothing_and_reloads_the_page() {
 }
 
 #[test]
+fn a_post_write_reload_waits_until_the_next_confirmation_closes() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.post_write_reload = true;
+    app.c().set_confirmation("Review APT upgrade".into());
+    app.react();
+    assert!(app.confirmation.is_some());
+    assert!(app.post_write_reload);
+
+    app.c().set_confirmation("".into());
+    app.react();
+    assert!(app.confirmation.is_none());
+    assert!(!app.post_write_reload);
+}
+
+#[test]
+fn navigation_keeps_a_visible_package_confirmation_until_it_is_answered() {
+    let mut app = app();
+    app.page = Page::Updates;
+    rows(
+        &mut app,
+        json!([row("tool", json!({"update": "available"}))]),
+    );
+    app.choose(0, true);
+    let page = app.page_key().unwrap();
+    app.review_on = ReviewOn::Page(page.clone());
+    app.c().set_confirmation("Update Tool?".into());
+    app.react();
+    assert!(app.review_on_page);
+
+    app.open_page(Page::Installed);
+    assert_eq!(app.page, Page::Updates);
+    assert_eq!(app.page_key().as_ref(), Some(&page));
+    assert_eq!(app.confirmation_text(), "Update Tool?");
+    app.reload(false, false);
+    assert_eq!(app.page_key().as_ref(), Some(&page));
+    assert_eq!(app.confirmation_text(), "Update Tool?");
+
+    app.confirm(false);
+    app.open_page(Page::Installed);
+    assert_eq!(app.page, Page::Installed);
+    assert!(!app.review_on_page);
+}
+
+#[test]
 fn an_empty_first_run_batch_is_safe() {
     let mut app = app();
     app.page = Page::Updates;
