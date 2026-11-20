@@ -99,6 +99,7 @@ else
         # was; what the window decides is measured like the rest.
         coverage_ignore='pkgdeck-tools|pkgdeck/src/(ui/|platform\.rs|main\.rs)|pkgdeck/build\.rs'
         mkdir -p coverage
+        stage coverage-reset scripts/coverage-reset.sh
         stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex "$coverage_ignore" --locked --lcov --output-path coverage/lcov.info
         # The 100% gate counts every platform together (CI's Coverage /
         # Combined); code for other platforms is not built here, so this one

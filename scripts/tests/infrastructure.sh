@@ -311,6 +311,30 @@ rm "$results/missed.txt"
 rm -r "$results"
 comment 99
 grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls"
+# The coverage build folder goes when another rustc built it, and stays when
+# this rustc built it or nothing says which one did.
+mkdir -p "$work/rustc-bin"
+printf '#!/bin/sh\necho "rustc 1.100.0 (0ef1bc386 2026-11-09)"\n' >"$work/rustc-bin/rustc"
+chmod +x "$work/rustc-bin/rustc"
+reset_folder() {
+    mkdir -p "$work/llvm-cov-target/debug/deps"
+    : >"$work/llvm-cov-target/debug/deps/pkgdeck_core-0123456789abcdef"
+    [[ -z $1 ]] || jq -n --arg out "$1" \
+        '{rustc_fingerprint: 1, outputs: {"2": {success: true, status: "", code: 0, stdout: "___\nlib___.rlib\n", stderr: ""}, "1": {success: true, status: "", code: 0, stdout: $out, stderr: ""}}}' \
+        >"$work/llvm-cov-target/.rustc_info.json"
+}
+reset_folder $'rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\nrelease: 1.99.1\n'
+PATH="$work/rustc-bin:$PATH" scripts/coverage-reset.sh "$work/llvm-cov-target" >"$work/output"
+[[ ! -e $work/llvm-cov-target ]]
+grep -q 'rustc 1.99.1 (58cf8f9c3 2026-10-13) built it, and this build uses rustc 1.100.0' "$work/output"
+reset_folder $'rustc 1.100.0 (0ef1bc386 2026-11-09)\nbinary: rustc\nrelease: 1.100.0\n'
+PATH="$work/rustc-bin:$PATH" scripts/coverage-reset.sh "$work/llvm-cov-target" >"$work/output"
+[[ -e $work/llvm-cov-target/debug/deps/pkgdeck_core-0123456789abcdef && ! -s $work/output ]]
+rm -r "$work/llvm-cov-target"
+reset_folder ''
+PATH="$work/rustc-bin:$PATH" scripts/coverage-reset.sh "$work/llvm-cov-target" >"$work/output"
+[[ -e $work/llvm-cov-target/debug/deps/pkgdeck_core-0123456789abcdef && ! -s $work/output ]]
+rm -r "$work/llvm-cov-target"
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
 echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'
