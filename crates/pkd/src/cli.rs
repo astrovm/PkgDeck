@@ -3411,6 +3411,95 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
+    fn upgrade_plans_one_source_update_once_and_scope_or_arch_names_each_package() {
+        let row = |name: &str| Package {
+            id: PackageId {
+                backend: "dnf".into(),
+                name: name.into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+            waiting_until: None,
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(
+                pkgdeck_core::fake::Fake::new(
+                    "dnf",
+                    &[
+                        Capability::Installed,
+                        Capability::Search,
+                        Capability::Upgrade,
+                    ],
+                )
+                .listing(vec![row("one"), row("two")]),
+            )
+            .unwrap();
+        // Two updates from one source make one source update.
+        let (data, code) = call(&mut engine, &["upgrade"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["operations"].as_array().unwrap().len(), 1, "{data}");
+        assert_eq!(
+            data["operations"][0]["operation"],
+            json!({"upgrade_all": {"backend": "dnf"}})
+        );
+        // A scope or architecture names each matching package instead.
+        let (data, code) = call(
+            &mut engine,
+            &["--scope", "system", "--arch", "amd64", "upgrade"],
+            true,
+        );
+        assert_eq!(code, 0, "{data}");
+        let names: Vec<_> = data["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["operation"]["upgrade"]["name"].clone())
+            .collect();
+        assert_eq!(names, [json!("one"), json!("two")], "{data}");
+        // Export keeps only packages of that scope and architecture.
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck inventory scoped {} {:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_text = path.to_str().unwrap();
+        let (data, code) = call(
+            &mut engine,
+            &[
+                "--scope",
+                "system",
+                "--arch",
+                "amd64",
+                "inventory",
+                "export",
+                path_text,
+                "two",
+            ],
+            false,
+        );
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(manifest::read(&path).unwrap().packages[0].name, "two");
+        let (data, code) = call(
+            &mut engine,
+            &["--arch", "arm64", "inventory", "export", path_text, "two"],
+            false,
+        );
+        assert_ne!(code, 0, "{data}");
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn running_no_operations_records_no_activity() {
         let root = std::env::temp_dir().join(format!(
             "pkgdeck-cli-empty-history-{}-{:?}",
@@ -3530,6 +3619,10 @@ mod tests {
     #[test]
     fn a_source_the_engine_cannot_build_is_reported() {
         let mut args = Args::try_parse_from(["pkd", "--json", "list"]).unwrap();
+        args.from = vec!["synthetic-unknown".into()];
+        assert_eq!(run(&args), 1);
+        // A command without a working status, in text mode, fails the same way.
+        let mut args = Args::try_parse_from(["pkd", "doctor"]).unwrap();
         args.from = vec!["synthetic-unknown".into()];
         assert_eq!(run(&args), 1);
     }
