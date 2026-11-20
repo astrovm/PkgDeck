@@ -215,11 +215,8 @@ impl ReleaseWatch {
 }
 
 fn default_seen_path() -> Option<PathBuf> {
-    Some(
-        crate::activity::default_path()?
-            .parent()?
-            .join("release-wait-seen.json"),
-    )
+    // The activity history always has a file name, so this is its folder.
+    crate::activity::default_path().map(|path| path.with_file_name("release-wait-seen.json"))
 }
 
 /// Replaces a file whole, so a crash or another process never sees half of
@@ -314,6 +311,23 @@ mod tests {
             },
             Some(dir.join("seen.json")),
         )
+    }
+
+    #[test]
+    fn a_check_that_panicked_while_marking_does_not_stop_the_next() {
+        let dir = scratch();
+        let watch = watch(dir.path(), 2);
+        std::thread::scope(|scope| {
+            let marking = scope.spawn(|| {
+                let _writing = watch.writing.lock().unwrap();
+                panic!("a check panicked while marking");
+            });
+            assert!(marking.join().is_err());
+        });
+        assert!(watch.writing.is_poisoned());
+        let mut rows = [update("tool", "2")];
+        watch.mark("npm", &mut rows, true, NOW);
+        assert_eq!(rows[0].waiting_until, Some(NOW + 2 * DAY));
     }
 
     #[test]

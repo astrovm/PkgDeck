@@ -659,6 +659,10 @@ mod tests {
             "deb [trusted=yes] https://example.invalid/repo stable main"
         )
         .is_err());
+        // A deb822 source may say Trusted: no, but never Trusted: yes.
+        let signed = "Types: deb\nURIs: https://example.invalid/repo\nSigned-By: /etc/apt/keyrings/example.gpg\n";
+        assert!(validate("sources", &format!("{signed}Trusted: no\n")).is_ok());
+        assert!(validate("sources", &format!("{signed}Trusted: YES\n")).is_err());
         assert!(validate("ymp", "<!DOCTYPE metapackage><metapackage/>").is_err());
         fs::remove_dir_all(base).unwrap();
     }
@@ -845,10 +849,10 @@ mod tests {
         ];
         let wrong: Vec<_> = rows
             .iter()
-            .filter(|(name, plain, repo)| {
-                safe_name(name) != *plain || safe_repo_name(name) != *repo
+            .filter_map(|(name, plain, repo)| {
+                (safe_name(name) != *plain || safe_repo_name(name) != *repo)
+                    .then_some(name.chars().take(12).collect::<String>())
             })
-            .map(|(name, _, _)| name.chars().take(12).collect::<String>())
             .collect();
         assert!(wrong.is_empty(), "wrong answers for {wrong:?}");
     }
@@ -926,8 +930,7 @@ mod tests {
         ];
         let wrong: Vec<_> = rows
             .iter()
-            .filter(|(suffix, text, _)| validate(suffix, text).is_ok())
-            .map(|(_, _, why)| *why)
+            .filter_map(|(suffix, text, why)| validate(suffix, text).is_ok().then_some(*why))
             .collect();
         assert!(wrong.is_empty(), "accepted: {wrong:?}");
 
@@ -967,8 +970,7 @@ mod tests {
         ];
         let wrong: Vec<_> = lines
             .iter()
-            .filter(|(line, _)| validate("list", line).is_ok())
-            .map(|(_, why)| *why)
+            .filter_map(|(line, why)| validate("list", line).is_ok().then_some(*why))
             .collect();
         assert!(wrong.is_empty(), "accepted: {wrong:?}");
         assert!(validate(

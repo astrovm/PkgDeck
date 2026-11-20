@@ -316,9 +316,8 @@ impl Layout {
                         .filter_map(|bin| bin.as_str())
                         .any(|bin| Some(bin) == file.to_str())
                     {
-                        if let Some(name) = key.split(' ').next() {
-                            records.push(("cargo".into(), name.to_owned()));
-                        }
+                        let name = key.split(' ').next().expect("a split has a first piece");
+                        records.push(("cargo".into(), name.to_owned()));
                     }
                 }
             }
@@ -1139,7 +1138,8 @@ mod tests {
         fs::write(&config, b"abc").unwrap();
         fs::write(temp.0.join("etc/unique.conf"), b"four").unwrap();
         symlink(&config, temp.0.join("etc/synthetic-link")).unwrap();
-        let status = "Package: removed-pkg\nStatus: deinstall ok config-files\nConffiles:\n /etc/synthetic.conf deadbeef\n /etc/synthetic-link deadbeef\n /etc/unique.conf deadbeef\n /etc/missing deadbeef\n\nPackage: installed-pkg\nStatus: install ok installed\nConffiles:\n /etc/synthetic.conf deadbeef\n";
+        // A blank conffile line names nothing.
+        let status = "Package: removed-pkg\nStatus: deinstall ok config-files\nConffiles:\n /etc/synthetic.conf deadbeef\n /etc/synthetic-link deadbeef\n /etc/unique.conf deadbeef\n  \n /etc/missing deadbeef\n\nPackage: installed-pkg\nStatus: install ok installed\nConffiles:\n /etc/synthetic.conf deadbeef\n";
         let leftovers = dpkg_residuals(status, &temp.0);
         assert_eq!(leftovers.len(), 2);
         assert!(leftovers

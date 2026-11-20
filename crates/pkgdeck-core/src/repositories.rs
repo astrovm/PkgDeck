@@ -734,6 +734,8 @@ mod repository_file_tests {
         let directory = root.join("etc/zypp/repos.d");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("synthetic.repo"), "# synthetic\n[vendor:one]\nname=First repo\nbaseurl=https://example.invalid/one\nenabled=1\n[bad name]\nbaseurl=https://example.invalid/bad\n[two]\nmetalink=https://example.invalid/meta\nenabled=0\n").unwrap();
+        // A file with no sections adds nothing.
+        std::fs::write(directory.join("comments.repo"), "# no sections\n").unwrap();
         std::fs::write(
             directory.join("ignored.txt"),
             "[ignored]\nbaseurl=https://example.invalid/ignored\n",
