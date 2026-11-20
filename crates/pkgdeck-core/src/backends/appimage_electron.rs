@@ -148,6 +148,10 @@ mod tests {
         );
         let github = Feed::parse("owner: example\nrepo: 'app'\nprovider: github\n").unwrap();
         assert_eq!(
+            Feed::parse("owner: \"example\"\nrepo: app\nprovider: github\n"),
+            Some(github.clone())
+        );
+        assert_eq!(
             github.url("x86_64"),
             "https://github.com/example/app/releases/latest/download/latest-linux.yml"
         );

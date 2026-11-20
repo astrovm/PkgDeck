@@ -535,9 +535,30 @@ mod tests {
             read(&path).unwrap_err(),
             "AppImage has no embedded filesystem"
         );
+        let mut cut = elf.clone();
+        cut.extend_from_slice(b"hs");
+        std::fs::write(&path, &cut).unwrap();
+        assert_eq!(read(&path).unwrap_err(), "failed to fill whole buffer");
+        for (magic, error) in [
+            (b"hsqs", "cannot read the AppImage's SquashFS: "),
+            (b"DWAR", "cannot read the AppImage's DwarFS: "),
+        ] {
+            let mut broken = elf.clone();
+            broken.extend_from_slice(magic);
+            broken.extend_from_slice(&[0xff; 32]);
+            std::fs::write(&path, &broken).unwrap();
+            let message = read(&path).unwrap_err();
+            assert!(message.starts_with(error), "{message}");
+        }
         elf.extend_from_slice(b"nope");
         std::fs::write(&path, &elf).unwrap();
         assert_eq!(read(&path).unwrap_err(), "unknown AppImage filesystem");
+        // A section table that ends past the largest offset.
+        elf[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        elf[58..60].copy_from_slice(&64_u16.to_le_bytes());
+        elf[60..62].copy_from_slice(&1_u16.to_le_bytes());
+        std::fs::write(&path, &elf).unwrap();
+        assert_eq!(read(&path).unwrap_err(), "invalid ELF section table");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
