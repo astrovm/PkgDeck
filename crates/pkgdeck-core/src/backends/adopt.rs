@@ -530,7 +530,7 @@ pub(super) mod tests {
 
     /// An app folder described in memory, plus a log of what ran.
     #[derive(Clone)]
-    pub(super) struct Fake {
+    pub(in crate::backends) struct Fake {
         present: Arc<Mutex<bool>>,
         receipt: bool,
         bundle: &'static str,
@@ -545,7 +545,7 @@ pub(super) mod tests {
     }
     const APP: &str = "/Applications/Visual Studio Code.app";
     const CODE: &str = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-    pub(super) fn fake() -> Fake {
+    pub(in crate::backends) fn fake() -> Fake {
         Fake {
             present: Arc::new(Mutex::new(true)),
             receipt: false,
@@ -1052,8 +1052,12 @@ pub(super) mod tests {
         root["artifacts"][1]["target"] = "/".into();
         let mut io = fake();
         io.taken = vec!["/"];
-        assert!(reason(plan(&io, &root, &cancel))
-            .starts_with("visual-studio-code is already installed"));
+        let named = reason(plan(&io, &root, &cancel));
+        assert!(
+            named.contains("visual-studio-code is already installed"),
+            "{named}"
+        );
+        assert!(named.contains("/ is not an app folder"), "{named}");
         let mut unplaced = cask();
         unplaced["artifacts"][2] = serde_json::json!({"binary": [CODE]});
         assert!(

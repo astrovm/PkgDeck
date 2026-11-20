@@ -1195,13 +1195,7 @@ impl MacApps {
         if cancel.requested() || matches!(&ownership, Err(EngineError::Cancelled)) {
             return Err(EngineError::Cancelled);
         }
-        self.describe(
-            &id.name,
-            &canonical,
-            &id.scope,
-            &ownership,
-            cancel,
-        )
+        self.describe(&id.name, &canonical, &id.scope, &ownership, cancel)
     }
 }
 
@@ -2536,7 +2530,7 @@ mod tests {
     fn remove(
         backend: &mut MacApps,
         path: &Path,
-    ) -> (Result<OperationOutcome, EngineError>, Vec<String>) {
+    ) -> (Result<OperationOutcome, EngineError>, Vec<Progress>) {
         let mut messages = vec![];
         let result = backend.execute(&removal(path), &Cancellation::default(), &mut |p| {
             messages.push(p)
@@ -2598,7 +2592,9 @@ mod tests {
         fs::create_dir_all(f.0.join("home")).unwrap();
         let (result, messages) = remove(&mut backend, &first);
         result.unwrap();
-        assert!(matches!(&messages[0], Progress::Message(text) if text.contains("macOS asks for an administrator password")));
+        assert!(
+            matches!(&messages[0], Progress::Message(text) if text.contains("macOS asks for an administrator password"))
+        );
         // A missing Trash is created for its owner only.
         assert_eq!(
             fs::metadata(&trash).unwrap().permissions().mode() & 0o777,
@@ -2940,7 +2936,10 @@ mod tests {
                 host: Host::new(crate::host::Runtime::Native, env),
                 authorization: crate::host::Authorization::SudoNonInteractive,
             });
-            assert_eq!(apps.roots, [(PathBuf::from("/Applications"), Scope::System)]);
+            assert_eq!(
+                apps.roots,
+                [(PathBuf::from("/Applications"), Scope::System)]
+            );
         }
     }
 
