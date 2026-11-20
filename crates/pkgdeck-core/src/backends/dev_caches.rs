@@ -716,12 +716,8 @@ mod tests {
             "android-image:android-36/default/x86_64".to_owned(),
         ];
         // Only a disk that records reads can tell a model is unused.
-        if items
-            .iter()
-            .any(|item| item.id.key == "hugging-face:models--org--m")
-        {
-            expected.push("hugging-face:models--org--m".into());
-        }
+        let model = "hugging-face:models--org--m".to_owned();
+        expected.extend(keys.contains(&model).then_some(model));
         expected.sort();
         assert_eq!(keys, expected);
         for item in &items {

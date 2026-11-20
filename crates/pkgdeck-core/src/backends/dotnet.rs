@@ -736,6 +736,11 @@ Installed an ASP.NET Core HTTPS development certificate.
         assert!(newest_stable(down, "dotnetsay")
             .unwrap_err()
             .contains("Unable to load the service index"));
+        let refused = r#"{"version":2,"problems":[{"text":"The search was refused.","problemType":"Error"}],"searchResult":[]}"#;
+        assert_eq!(
+            newest_stable(refused, "dotnetsay"),
+            Err("The search was refused.".into())
+        );
     }
 
     #[test]
@@ -771,6 +776,8 @@ Installed an ASP.NET Core HTTPS development certificate.
         runtime_only: bool,
         /// Tools list no commands.
         no_commands: bool,
+        /// Writes print nothing.
+        quiet: bool,
         /// One command line that fails, and how.
         fail: Option<Failure>,
     }
@@ -883,10 +890,12 @@ Installed an ASP.NET Core HTTPS development certificate.
                             tools.retain(|(name, _)| name != id);
                         }
                     }
-                    Ok(done(
-                        &format!("Skipping NuGet package signature verification.\nTool '{id}' was successfully {verb}ed.\n"),
-                        0,
-                    ))
+                    let said = if self.quiet {
+                        String::new()
+                    } else {
+                        format!("Skipping NuGet package signature verification.\nTool '{id}' was successfully {verb}ed.\n")
+                    };
+                    Ok(done(&said, 0))
                 }
             }
         }
@@ -943,6 +952,28 @@ Installed an ASP.NET Core HTTPS development certificate.
             .unwrap()
             .iter()
             .any(|call| call.starts_with("tool update")));
+    }
+
+    #[test]
+    fn a_write_that_prints_nothing_adds_no_message() {
+        let mut fake = fake(&[("dotnetsay", "2.1.7")]);
+        fake.quiet = true;
+        let mut dotnet = backend(fake);
+        let rows = dotnet.installed(&Cancellation::default()).unwrap();
+        let mut messages = vec![];
+        dotnet
+            .execute(
+                &Operation::Upgrade(rows[0].id.clone()),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert_eq!(
+            messages,
+            [Progress::Message(
+                "Updating dotnetsay with dotnet tool…".into()
+            )]
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::{
     process::{Cancellation, ExecutionError},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Condvar, Mutex,
@@ -242,14 +242,13 @@ struct IndexRefresh {
     finished: bool,
     error: Option<EngineError>,
 }
-static UPDATE_CHECKS: Mutex<Option<HashMap<u64, IndexRefresh>>> = Mutex::new(None);
+static UPDATE_CHECKS: Mutex<BTreeMap<u64, IndexRefresh>> = Mutex::new(BTreeMap::new());
 static UPDATE_CHECK_TURN: Condvar = Condvar::new();
 static NEXT_UPDATE_CHECK: AtomicU64 = AtomicU64::new(1);
 
-fn update_checks() -> std::sync::MutexGuard<'static, Option<HashMap<u64, IndexRefresh>>> {
-    UPDATE_CHECKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Nothing panics while it holds the checks, so the lock is never poisoned.
+fn update_checks() -> std::sync::MutexGuard<'static, BTreeMap<u64, IndexRefresh>> {
+    UPDATE_CHECKS.lock().expect("update checks never panic")
 }
 /// How long a read waits before its second try.
 const READ_AGAIN_AFTER: std::time::Duration =
@@ -277,7 +276,7 @@ pub(crate) fn read_again_once<T>(
 }
 pub(crate) fn begin_update_check_token() -> u64 {
     let token = NEXT_UPDATE_CHECK.fetch_add(1, Ordering::Relaxed);
-    update_checks().get_or_insert_with(HashMap::new).insert(
+    update_checks().insert(
         token,
         IndexRefresh {
             started: false,
@@ -288,9 +287,7 @@ pub(crate) fn begin_update_check_token() -> u64 {
     token
 }
 pub(crate) fn end_update_check_token(token: u64) {
-    if let Some(checks) = update_checks().as_mut() {
-        checks.remove(&token);
-    }
+    update_checks().remove(&token);
 }
 /// Run `refresh` once for `token`. A second caller with the same token waits
 /// and returns the first result, so two backends cannot fetch twice. If the
@@ -301,7 +298,7 @@ pub(crate) fn once_per_check(
 ) -> Result<(), EngineError> {
     loop {
         let mut checks = update_checks();
-        let Some(gate) = checks.as_mut().and_then(|map| map.get_mut(&token)) else {
+        let Some(gate) = checks.get_mut(&token) else {
             return Ok(());
         };
         if gate.finished {
@@ -314,7 +311,7 @@ pub(crate) fn once_per_check(
             drop(
                 UPDATE_CHECK_TURN
                     .wait(checks)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    .expect("update checks never panic"),
             );
             continue;
         }
@@ -344,10 +341,7 @@ impl Drop for CheckFinish {
                 "update check stopped before it finished".into(),
             ))),
         };
-        if let Some(gate) = update_checks()
-            .as_mut()
-            .and_then(|checks| checks.get_mut(&self.token))
-        {
+        if let Some(gate) = update_checks().get_mut(&self.token) {
             gate.finished = true;
             gate.error = error;
         }
@@ -3647,6 +3641,21 @@ mod update_check_tests {
     fn a_check_without_a_live_token_does_not_refresh() {
         assert_eq!(
             once_per_check(0, || panic!("no live check, nothing to refresh")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_check_ended_during_its_refresh_returns_the_refresh_result() {
+        let token = begin_update_check_token();
+        let result = once_per_check(token, || {
+            end_update_check_token(token);
+            Err(EngineError::Cancelled)
+        });
+        assert_eq!(result, Err(EngineError::Cancelled));
+        // The check is gone, so nothing more refreshes for it.
+        assert_eq!(
+            once_per_check(token, || panic!("the check has ended")),
             Ok(())
         );
     }

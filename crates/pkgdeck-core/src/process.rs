@@ -241,8 +241,10 @@ impl From<io::Error> for ExecutionError {
     }
 }
 
-fn nonblocking(pipe: &impl AsFd) -> io::Result<()> {
-    let flags = rustix::fs::fcntl_getfl(pipe)? | rustix::fs::OFlags::NONBLOCK;
+/// Make reads from `pipe` return at once when `on`, or wait for bytes again.
+pub(crate) fn set_nonblocking(pipe: &impl AsFd, on: bool) -> io::Result<()> {
+    let mut flags = rustix::fs::fcntl_getfl(pipe)?;
+    flags.set(rustix::fs::OFlags::NONBLOCK, on);
     Ok(rustix::fs::fcntl_setfl(pipe, flags)?)
 }
 
@@ -331,8 +333,8 @@ pub(crate) fn run_observed(
         }
     };
     let supervise = (|| {
-        nonblocking(&stdout)?;
-        nonblocking(&stderr)?;
+        set_nonblocking(&stdout, true)?;
+        set_nonblocking(&stderr, true)?;
         let cap = limits.output_bytes;
         // Whether either stream may hold more that would still be kept.
         let mut drain_both = |result: &mut Completion| -> io::Result<bool> {
@@ -491,18 +493,38 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn everything_left_in_a_grown_pipe_is_read_after_the_program_exits() {
-        // uutils' head grows its pipe like this, then exits at once.
-        if std::path::Path::new("/usr/bin/python3").exists() {
-            grown_pipe();
-        }
-    }
-    #[cfg(target_os = "linux")]
-    fn grown_pipe() {
-        let mut command = Command::new("/usr/bin/python3");
-        command.args([
-            "-c",
-            "import fcntl, os; fcntl.fcntl(1, 1031, 1 << 20); os.write(1, bytes(900_000))",
-        ]);
+        // uutils' head grows its pipe, then writes and exits at once. Here
+        // the test grows the shell's output pipe while the shell waits.
+        let dir = std::env::temp_dir().join(format!("pkgdeck-grown-pipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The program has exited when the test ends, so it writes no `pid`
+        // for the cleanup to stop.
+        let _shell = Shell(dir.clone());
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1/next\"; mv \"$1/next\" \"$1/shell\"; \
+                 while [ ! -e \"$1/grown\" ]; do sleep 0.01; done; \
+                 exec head -c 900000 /dev/zero",
+                "sh",
+            ])
+            .arg(&dir);
+        let grower = std::thread::spawn(move || {
+            assert!(wait_for(Duration::from_secs(10), || dir
+                .join("shell")
+                .exists()));
+            let pid = std::fs::read_to_string(dir.join("shell")).unwrap();
+            let output = std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/{}/fd/1", pid.trim()))
+                .unwrap();
+            rustix::pipe::fcntl_setpipe_size(&output, 1 << 20).unwrap();
+            // Only the program may hold the pipe open, or it never ends.
+            drop(output);
+            std::fs::write(dir.join("grown"), "").unwrap();
+        });
         let result = run(
             command,
             Limits {
@@ -513,6 +535,7 @@ mod tests {
             false,
         )
         .unwrap();
+        grower.join().unwrap();
         assert_eq!(result.code, Some(0));
         assert_eq!((result.stdout.len(), result.truncated), (900_000, false));
     }

@@ -196,6 +196,15 @@ fn verified_path_with(
     cancel: &Cancellation,
     host: &Host,
 ) -> Result<Option<PathBuf>, EngineError> {
+    Ok(reviewed_with(id, cancel, host)?.map(|(_, path)| path))
+}
+/// The archive a `local-deb:` reference names, with the hash it had at
+/// preview, once its bytes and package identity still match.
+fn reviewed_with<'a>(
+    id: &'a PackageId,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<Option<(&'a str, PathBuf)>, EngineError> {
     let Some(reference) = id
         .reference
         .as_deref()
@@ -214,7 +223,7 @@ fn verified_path_with(
     if current.id != *id {
         return Err(invalid("Debian package identity changed since preview"));
     }
-    Ok(Some(path))
+    Ok(Some((expected, path)))
 }
 
 /// Hold a private copy of the reviewed bytes for the entire APT transaction.
@@ -240,16 +249,9 @@ fn stage_with(
     cancel: &Cancellation,
     host: &Host,
 ) -> Result<Option<StagedArchive>, EngineError> {
-    let Some(source) = verified_path_with(id, cancel, host)? else {
+    let Some((expected, source)) = reviewed_with(id, cancel, host)? else {
         return Ok(None);
     };
-    let expected = id
-        .reference
-        .as_deref()
-        .and_then(|value| value.strip_prefix("local-deb:"))
-        .and_then(|value| value.split_once(':'))
-        .map(|(hash, _)| hash)
-        .ok_or_else(|| invalid("invalid local archive reference"))?;
     let path = std::env::temp_dir().join(format!(
         "pkgdeck-deb-{}-{}.deb",
         std::process::id(),
@@ -408,6 +410,24 @@ mod tests {
             b"!<arch>\nsynthetic payload"
         );
         drop(staged);
+        assert_eq!(
+            verified_path_with(&package.id, &cancel, &host).unwrap(),
+            Some(archive.clone())
+        );
+        // A reference without the hash, and a host without dpkg-deb.
+        let unhashed = PackageId {
+            reference: Some(format!("local-deb:{}", archive.display())),
+            ..package.id.clone()
+        };
+        assert!(matches!(
+            verified_path_with(&unhashed, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason == "invalid local archive reference"
+        ));
+        let bare = Host::new(crate::host::Runtime::Native, [(OsString::from("PATH"), OsString::new())].into());
+        assert!(matches!(
+            inspect_with(&archive, &cancel, &bare),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason == "dpkg-deb is unavailable"
+        ));
         control("Package: other\nVersion: 1.0\nArchitecture: all\n");
         assert!(matches!(
             verified_path_with(&package.id, &cancel, &host),

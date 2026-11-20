@@ -23,10 +23,7 @@ pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> i
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("the executable writer has no standard input"))?;
+    let mut stdin = child.stdin.take().expect("stdin was set to a pipe");
     let written = stdin.write_all(contents.as_ref());
     drop(stdin);
     let output = child.wait_with_output()?;
@@ -107,5 +104,17 @@ mod tests {
         assert!(error.to_string().contains("absent"), "{error}");
         assert!(!dir.join("copy").exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_writer_that_fails_without_saying_why_gives_its_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: vec![],
+            stderr: b" \n".to_vec(),
+        };
+        let error = finish(Path::new("/x"), &output).unwrap_err();
+        assert_eq!(error.to_string(), "writing /x: exit status: 1");
     }
 }

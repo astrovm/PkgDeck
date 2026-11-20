@@ -404,6 +404,15 @@ mod tests {
             uid: rustix::process::getuid().as_raw().saturating_add(1),
         };
         assert!(verified_source(&other_user, &cancel).is_err());
+        // A reference without its hash names nothing to compare.
+        let unhashed = PackageId {
+            reference: Some(format!("flatpakref:{}", path.display())),
+            ..package.id.clone()
+        };
+        assert_eq!(
+            verified_source(&unhashed, &cancel),
+            Err(invalid("invalid Flatpak reference identity"))
+        );
         fs::write(
             &path,
             "[Flatpak Ref]\nName=org.example.Other\nUrl=https://example.org/repo\n",
@@ -554,6 +563,9 @@ mod tests {
             [PathBuf::from("/var/lib/flatpak")]
         );
         assert_eq!(installations(None), [PathBuf::from("/var/lib/flatpak")]);
+        // Text that is not UTF-8 is not read.
+        fs::write(base.join("binary"), [0xff, 0xfe]).unwrap();
+        assert_eq!(read_text(&base.join("binary"), 16), None);
         fs::remove_dir_all(base).unwrap();
     }
 }

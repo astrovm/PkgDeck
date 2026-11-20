@@ -152,17 +152,24 @@ impl<T: Transport> Conda<T> {
         }
     }
 
+    /// The manager `detect` found.
+    fn manager(&self) -> Result<&'static str, EngineError> {
+        self.manager
+            .ok_or_else(|| invalid(ID, "no conda-family manager detected"))
+    }
+
     fn run(
         &self,
         args: &[&OsString],
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Vec<u8>, EngineError> {
-        let manager = self
-            .manager
-            .ok_or_else(|| invalid(ID, "no conda-family manager detected"))?;
         let args: Vec<OsString> = args.iter().map(|arg| (*arg).clone()).collect();
-        bytes(ID, self.transport.dev_tool(manager, &args, cancel, write)?)
+        bytes(
+            ID,
+            self.transport
+                .dev_tool(self.manager()?, &args, cancel, write)?,
+        )
     }
 
     fn read(
@@ -432,13 +439,9 @@ impl<T: Transport> Backend for Conda<T> {
             "--yes".into(),
             "--json".into(),
         ];
-        let completion = self.transport.dev_tool(
-            self.manager
-                .ok_or_else(|| invalid(ID, "no conda-family manager detected"))?,
-            &args,
-            cancel,
-            true,
-        )?;
+        let completion = self
+            .transport
+            .dev_tool(self.manager()?, &args, cancel, true)?;
         let deferred = completion.cancellation_deferred;
         bytes(ID, completion)?;
         // Native writes may complete after cancellation; verification still runs.
@@ -798,6 +801,16 @@ mod tests {
             detect(|| ExecutionError::TimedOut),
             Err(EngineError::Execution(ExecutionError::TimedOut))
         ));
+    }
+
+    #[test]
+    fn nothing_runs_before_a_manager_is_detected() {
+        let fake = fake("conda");
+        let error = backend(fake.clone())
+            .installed(&Cancellation::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("no conda-family manager detected"));
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[test]

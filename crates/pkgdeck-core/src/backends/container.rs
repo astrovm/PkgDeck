@@ -1289,6 +1289,16 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_docker_build_cache_offers_no_cache_cleanup() {
+        let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
+        fixture.build_cache = Some(String::new());
+        let mut backend = Container::docker(fixture);
+        let plans = backend.cleanup(&Cancellation::default()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id.key, "dangling-images");
+    }
+
+    #[test]
     fn docker_build_cache_cancellation_aborts_discovery() {
         let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
         fixture.build_cache = Some(String::new());
@@ -1441,6 +1451,7 @@ mod tests {
         let fixture = Fixture::new(
             r#"{"ID":"sha256:0123456789abcdef","Repository":"registry.example/app","Tag":"latest","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}
 {"ID":"sha256:0123456789abcdef","Repository":"registry.example/app","Tag":"stable","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}
+{"ID":"sha256:0123456789abcdef","Repository":"registry.example/app","Tag":"latest","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}
 {"ID":"sha256:fedcba9876543210","Repository":"<none>","Tag":"<none>","Digest":"<none>","Size":"9MB","CreatedSince":"3 days ago"}"#,
         );
         let calls = fixture.calls.clone();
@@ -1454,7 +1465,10 @@ mod tests {
             images[0].id.reference.as_deref(),
             Some("registry.example/app:latest")
         );
-        assert!(images[0].summary.contains("registry.example/app:stable"));
+        // A tag listed twice is shown once.
+        assert!(images[0].summary.starts_with(
+            "Tags: registry.example/app:latest, registry.example/app:stable. Digests: sha256:aaaa. "
+        ));
         assert!(images[1].summary.starts_with("Dangling"));
         backend
             .execute(

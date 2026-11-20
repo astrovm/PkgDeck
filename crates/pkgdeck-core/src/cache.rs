@@ -90,9 +90,9 @@ fn visit(path: &Path, depth: usize, hash: &mut Sha256, budget: &mut usize) -> Op
                 .as_bytes(),
             );
             if kind == "l" {
-                if let Ok(target) = fs::read_link(path) {
-                    hash.update(target.as_os_str().as_encoded_bytes());
-                }
+                // A link removed since its metadata was read adds no target.
+                let target = fs::read_link(path).unwrap_or_default();
+                hash.update(target.as_os_str().as_encoded_bytes());
             }
             if meta.is_dir() && depth > 0 {
                 let mut names: Vec<_> = fs::read_dir(path)
@@ -323,7 +323,11 @@ pub fn completion(
 
 /// Drop a source's cached answers in the user's cache after a change.
 pub fn invalidate(source: &str) {
-    if let Some(store) = Store::user() {
+    invalidate_in(Store::user().as_ref(), source);
+}
+/// Drop a source's cached answers in `store`, when caching is on.
+fn invalidate_in(store: Option<&Store>, source: &str) {
+    if let Some(store) = store {
         store.invalidate(source);
     }
 }
@@ -586,6 +590,8 @@ mod tests {
             None
         );
         invalidate("pkgdeck-test-source-that-never-exists");
+        // With caching off there is nothing to drop.
+        invalidate_in(None, "apt");
     }
 
     #[test]

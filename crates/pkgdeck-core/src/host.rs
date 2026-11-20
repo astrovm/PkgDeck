@@ -558,10 +558,11 @@ mod repository_install_tests {
         ];
         let accepted: Vec<_> = rows
             .iter()
-            .filter(|(path, digest, _)| {
-                repository_install_args(path, "apt", "sources", digest).is_ok()
+            .filter_map(|(path, digest, why)| {
+                repository_install_args(path, "apt", "sources", digest)
+                    .is_ok()
+                    .then_some(*why)
             })
-            .map(|(_, _, why)| *why)
             .collect();
         assert!(accepted.is_empty(), "accepted: {accepted:?}");
         // A digest that could leave the folder never reaches the destination.
@@ -1391,9 +1392,9 @@ impl Host {
                     .user_install(executable)?
                     .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
                 // npm and pnpm start the `node` next to them, through PATH.
-                if let Some(dir) = path.parent() {
-                    host.to_mut().add_to_path(dir, true);
-                }
+                // An install is found by its file name, so it has a folder.
+                let dir = path.parent().expect("a found install has a folder");
+                host.to_mut().add_to_path(dir, true);
                 path
             }
         };
@@ -2426,6 +2427,10 @@ mod flatpak_bridge_tests {
     #[test]
     fn source_editor_reports_the_child_result() {
         assert!(Host::run_source_editor(Command::new("/usr/bin/true")).is_ok());
+        assert!(matches!(
+            Host::run_source_editor(Command::new("/nonexistent/editor")),
+            Err(ExecutionError::Io(_))
+        ));
         let mut rejected = Command::new("/bin/sh");
         rejected.args(["-c", "exit 7"]);
         assert!(matches!(

@@ -481,4 +481,10 @@ pub(crate) mod tests {
         }
         assert!(cases > 1000);
     }
+
+    #[test]
+    fn a_bundle_shorter_than_its_stated_size_is_malformed() {
+        let mut short = Cursor::new(vec![0_u8; 4]);
+        assert_eq!(read_from(&mut short, 100).err(), Some(malformed()));
+    }
 }

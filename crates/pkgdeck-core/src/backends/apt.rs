@@ -686,3 +686,95 @@ impl<T: Transport> Backend for Apt<T> {
         Some(grouped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Answers every APT lookup with one installed package.
+    struct Installed(Vec<u8>);
+    impl Transport for Installed {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: self.0.clone(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    #[test]
+    fn simulation_counts_too_large_to_add_are_invalid() {
+        let error = parse_apt_upgrade_plan(
+            b"18446744073709551615 upgraded, 1 reinstalled, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid simulation counts"));
+    }
+
+    #[test]
+    fn a_removal_without_a_package_name_is_invalid() {
+        let error = parse_apt_upgrade_plan(
+            b"0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\nRemv\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("incomplete removal action"));
+    }
+
+    #[test]
+    fn disarming_the_update_check_keeps_the_lists_in_use() {
+        let mut apt = Apt::new(Installed(vec![]));
+        apt.use_system_lists = true;
+        apt.arm_update_check(None);
+        assert!(apt.use_system_lists);
+        assert_eq!(apt.update_check, None);
+        apt.arm_update_check(Some(3));
+        assert!(!apt.use_system_lists);
+    }
+
+    #[test]
+    fn installed_packages_without_a_desktop_entry_have_no_icon() {
+        let id = PackageId {
+            backend: "apt".into(),
+            name: "pkgdeck-fixture-tool".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        let details = PackageDetails {
+            package: Package {
+                id: id.clone(),
+                display_name: "pkgdeck-fixture-tool".into(),
+                summary: "Fixture".into(),
+                installed_version: Some("1.0".into()),
+                candidate_version: Some("1.0".into()),
+                update: UpdateAvailability::Current,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+                adopt_with: None,
+                waiting_until: None,
+            },
+            description: "Fixture".into(),
+            homepage: Some("https://example.invalid/tool".into()),
+            dependencies: vec![],
+            data: None,
+        };
+        let mut apt = Apt::new(Installed(serde_json::to_vec(&[details]).unwrap()));
+        apt.desktop_entries = Some(Default::default());
+        apt.components = Some(Default::default());
+        let found = apt.details(&id, &Cancellation::default()).unwrap();
+        assert_eq!(found.package.icon, None);
+        assert_eq!(found.package.homepages, ["https://example.invalid/tool"]);
+    }
+}

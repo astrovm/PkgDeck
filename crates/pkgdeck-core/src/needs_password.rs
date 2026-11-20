@@ -116,4 +116,13 @@ mod tests {
         assert_eq!(NeedsPassword::at(&path).casks().count(), 0);
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn a_store_that_cannot_be_saved_still_remembers_until_it_closes() {
+        // The root folder has no parent and cannot be written as a file.
+        let mut store = NeedsPassword::at(Path::new("/"));
+        store.update(&[pair("example-app", "2.0")], &[]);
+        assert!(store.skips("example-app", "2.0"));
+        assert!(!NeedsPassword::at(Path::new("/")).skips("example-app", "2.0"));
+    }
 }

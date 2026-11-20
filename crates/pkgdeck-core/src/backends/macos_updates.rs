@@ -336,6 +336,8 @@ mod tests {
     struct Fake {
         listing: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<Call>>>,
+        /// Writes print nothing.
+        silent: bool,
     }
     impl Transport for Fake {
         fn system_manager(
@@ -356,6 +358,7 @@ mod tests {
             let stdout = match executable {
                 "sw_vers" => "26.0.1\n".into(),
                 "softwareupdate" if !write => self.listing.lock().unwrap().clone(),
+                _ if self.silent => String::new(),
                 _ => "Done.\n".into(),
             };
             Ok(Completion {
@@ -489,11 +492,7 @@ mod tests {
         let mut backend = MacUpdates::new(fake.clone());
         let rows = backend.installed(&Cancellation::default()).unwrap();
         let mut messages = vec![];
-        let mut record = |progress| {
-            if let Progress::Message(text) = progress {
-                messages.push(text);
-            }
-        };
+        let mut record = |progress: Progress| messages.push(progress);
         for row in &rows[..2] {
             backend
                 .execute(
@@ -530,7 +529,9 @@ mod tests {
                 vec!["--install", "--no-scan", "Safari26.1TahoeAuto-26.1"],
             ]
         );
-        assert!(messages.iter().any(|m| m.contains("System Settings")));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Progress::Message(text) if text.contains("System Settings"))));
     }
 
     #[test]
@@ -539,11 +540,7 @@ mod tests {
         let mut backend = MacUpdates::new(fake.clone());
         let all = Operation::UpgradeAll { backend: ID.into() };
         let mut messages = vec![];
-        let mut record = |progress| {
-            if let Progress::Message(text) = progress {
-                messages.push(text);
-            }
-        };
+        let mut record = |progress: Progress| messages.push(progress);
         backend
             .execute(&all, &Cancellation::default(), &mut record)
             .unwrap();
@@ -566,6 +563,45 @@ mod tests {
             .execute(&all, &Cancellation::default(), &mut record)
             .unwrap();
         assert_eq!(writes(&fake), [crate::unattended::DOWNLOAD_MACOS_UPDATES]);
-        assert!(messages.iter().any(|m| m.contains("downloaded")));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Progress::Message(text) if text.contains("downloaded"))));
+    }
+
+    #[test]
+    fn silent_updates_only_report_what_pkgdeck_says() {
+        let fake = Fake {
+            silent: true,
+            ..Fake::default()
+        };
+        *fake.listing.lock().unwrap() = LISTING.into();
+        let mut backend = MacUpdates::new(fake);
+        let rows = backend.installed(&Cancellation::default()).unwrap();
+        let safari = rows
+            .iter()
+            .find(|row| row.id.name == "Safari26.1TahoeAuto-26.1")
+            .unwrap();
+        let mut messages = vec![];
+        backend
+            .execute(
+                &Operation::Upgrade(safari.id.clone()),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        backend
+            .execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert_eq!(
+            messages,
+            [
+                Progress::Message(format!("Installing {}…", safari.display_name)),
+                Progress::Message("macOS updates are downloaded. Install them from PkgDeck or System Settings > General > Software Update.".into()),
+            ]
+        );
     }
 }

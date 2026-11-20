@@ -819,13 +819,13 @@ impl MacApps {
             if path.extension().is_some_and(|e| e == "app") && path.is_dir() {
                 // Identities are strings; a lossy name would point elsewhere
                 // and could collide with another bundle's identity.
-                if path.to_str().is_none() {
+                let Some(name) = path.to_str() else {
                     walk.errors.push(invalid(
                         ID,
                         format!("skipped entry {}: path is not valid UTF-8", path.display()),
                     ));
                     continue;
-                }
+                };
                 let canonical = match self.io.canonicalize(&path) {
                     Ok(canonical) => canonical,
                     Err(error) => {
@@ -837,7 +837,7 @@ impl MacApps {
                     }
                 };
                 if walk.seen.insert(canonical.clone()) {
-                    let app = self.describe(&path, &canonical, scope, walk.ownership, cancel)?;
+                    let app = self.describe(name, &canonical, scope, walk.ownership, cancel)?;
                     walk.apps.push(app);
                 }
                 // Never recurse into app bundles and list their helper apps.
@@ -853,14 +853,16 @@ impl MacApps {
         Ok(())
     }
 
+    /// The listing for the bundle at `name`, a path.
     fn describe(
         &self,
-        path: &Path,
+        name: &str,
         canonical: &Path,
         scope: &Scope,
         ownership: &Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
         cancel: &Cancellation,
     ) -> Result<Listed, EngineError> {
+        let path = Path::new(name);
         let metadata = self.io.plist(&path.join("Contents/Info.plist"), cancel);
         if cancel.requested() || matches!(&metadata, Err(EngineError::Cancelled)) {
             return Err(EngineError::Cancelled);
@@ -929,9 +931,6 @@ impl MacApps {
             description.push("Part of macOS, so PkgDeck won't remove it.".into());
         }
         description.push("PkgDeck can't install or update apps from this source. Removing an app moves it to the Trash; Homebrew uninstalls the apps it manages.".into());
-        let name = path
-            .to_str()
-            .ok_or_else(|| invalid(ID, format!("{} is not valid UTF-8", path.display())))?;
         let summary = format!(
             "{owner}{} · {}",
             suggestion
@@ -1001,7 +1000,7 @@ impl MacApps {
         if cancel.requested() || matches!(&ownership, Err(EngineError::Cancelled)) {
             return Err(EngineError::Cancelled);
         }
-        let now = self.describe(path, &canonical, &id.scope, &ownership, cancel)?;
+        let now = self.describe(&id.name, &canonical, &id.scope, &ownership, cancel)?;
         if let Some(listed) = listed
             .filter(|listed| listed.bundle_id != now.bundle_id || listed.canonical != now.canonical)
         {
@@ -1197,7 +1196,7 @@ impl MacApps {
             return Err(EngineError::Cancelled);
         }
         self.describe(
-            Path::new(&id.name),
+            &id.name,
             &canonical,
             &id.scope,
             &ownership,
@@ -2008,6 +2007,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A link to an app that is gone owns nothing.
+        fs::remove_dir(stage.join("Editor.app")).unwrap();
+        symlink(f.0.join("Gone.app"), stage.join("Editor.app")).unwrap();
+        assert!(
+            owners(&root, vec![record("editor", "Editor.app", json!("1.0"))])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2532,9 +2539,7 @@ mod tests {
     ) -> (Result<OperationOutcome, EngineError>, Vec<String>) {
         let mut messages = vec![];
         let result = backend.execute(&removal(path), &Cancellation::default(), &mut |p| {
-            if let Progress::Message(text) = p {
-                messages.push(text);
-            }
+            messages.push(p)
         });
         (result, messages)
     }
@@ -2557,7 +2562,10 @@ mod tests {
             .0
             .join("home/.Trash/Editor.app/Contents/Info.plist")
             .is_file());
-        assert_eq!(messages, ["Moving Fixture App to the Trash…"]);
+        assert_eq!(
+            messages,
+            [Progress::Message("Moving Fixture App to the Trash…".into())]
+        );
         assert_eq!(
             mover.calls(),
             [
@@ -2590,7 +2598,7 @@ mod tests {
         fs::create_dir_all(f.0.join("home")).unwrap();
         let (result, messages) = remove(&mut backend, &first);
         result.unwrap();
-        assert!(messages[0].contains("macOS asks for an administrator password"));
+        assert!(matches!(&messages[0], Progress::Message(text) if text.contains("macOS asks for an administrator password")));
         // A missing Trash is created for its owner only.
         assert_eq!(
             fs::metadata(&trash).unwrap().permissions().mode() & 0o777,
@@ -2711,7 +2719,9 @@ mod tests {
         assert!(!owned.exists());
         assert_eq!(
             messages,
-            ["Uninstalling Fixture App with Homebrew (tap/tools/owned)…"]
+            [Progress::Message(
+                "Uninstalling Fixture App with Homebrew (tap/tools/owned)…".into()
+            )]
         );
         assert_eq!(
             mover.calls().last().unwrap(),
@@ -2918,6 +2928,20 @@ mod tests {
             "Finder is part of macOS, so PkgDeck won't remove it."
         );
         assert!(finder.is_dir());
+    }
+
+    #[test]
+    fn without_an_absolute_home_only_the_system_folder_is_scanned() {
+        for env in [
+            BTreeMap::new(),
+            BTreeMap::from([("HOME".into(), "relative".into())]),
+        ] {
+            let apps = MacApps::native(NativeTransport {
+                host: Host::new(crate::host::Runtime::Native, env),
+                authorization: crate::host::Authorization::SudoNonInteractive,
+            });
+            assert_eq!(apps.roots, [(PathBuf::from("/Applications"), Scope::System)]);
+        }
     }
 
     #[test]

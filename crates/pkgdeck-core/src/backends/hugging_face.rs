@@ -375,6 +375,46 @@ mod tests {
     }
 
     #[test]
+    fn files_that_vanish_while_the_hub_is_read_count_for_nothing() {
+        use std::io::Write;
+        let home = scratch("vanish");
+        let hub = home.join("hub");
+        let folder = "models--org--gone";
+        let store = "dd".repeat(32);
+        cached(&hub, folder, &store, &[folder], 30);
+        // A ref and a file that lead nowhere.
+        std::os::unix::fs::symlink("missing", hub.join(folder).join("refs/dangling")).unwrap();
+        std::os::unix::fs::symlink("missing", hub.join(folder).join("blobs/dangling")).unwrap();
+        // The shared file is deleted while its list is being read.
+        let shared = hub.join("blobs/dd").join(&store);
+        let list = shared.with_extension("refs");
+        fs::remove_file(&list).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &list,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let writer = std::thread::spawn({
+            let (list, shared) = (list.clone(), shared.clone());
+            let line = format!("{folder}/blobs/{store}\n");
+            move || {
+                let mut fifo = fs::OpenOptions::new().write(true).open(&list).unwrap();
+                fs::remove_file(&shared).unwrap();
+                fifo.write_all(line.as_bytes()).unwrap();
+            }
+        });
+        let host = host(&home, &[("HF_HUB_CACHE", &hub)]);
+        let found = item(&host, folder, SystemTime::now(), &Cancellation::default()).unwrap();
+        writer.join().unwrap();
+        assert_eq!(found.summary, "Not used for 4 weeks");
+        assert!(found.bytes.unwrap() < 64 * 1024);
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn the_hub_is_where_the_library_looks() {
         let home = Path::new("/home/me");
         assert_eq!(

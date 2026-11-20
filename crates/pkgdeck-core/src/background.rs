@@ -430,6 +430,9 @@ mod tests {
         let history = schedule.notification_history();
         let mut restarted = Schedule::default();
         restarted.restore_notifications(&history);
+        // A history that does not parse leaves the one in memory.
+        restarted.restore_notifications("not json");
+        assert_eq!(restarted.notification_history(), history);
         assert!(!restarted.complete(&report).notify);
         report.packages[0].candidate_version = Some("3".into());
         assert!(restarted.complete(&report).notify);
@@ -480,6 +483,8 @@ mod tests {
         assert!(fs::read_to_string(&path)
             .unwrap()
             .contains("\nExec=snap run pkgdeck --background\n"));
+        let error = set_autostart_for(Path::new("/"), true, Runtime::Snap, None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         let blocked = path.join("app.desktop");
         assert!(set_autostart(&blocked, true).is_err());
         let agent = path.with_file_name("io.github.astrovm.PkgDeck.plist");

@@ -324,10 +324,11 @@ fn runner_commands(
         for (operation, commands) in operations.iter().zip(&mut commands) {
             if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                 // The upgrade, after the refresh.
-                if let Some(command) = commands.last_mut() {
-                    let verb = command.args.len() - 1;
-                    command.args.insert(verb, "--no-remove".into());
-                }
+                let command = commands
+                    .last_mut()
+                    .expect("an APT update runs the refresh, then the update");
+                let verb = command.args.len() - 1;
+                command.args.insert(verb, "--no-remove".into());
             }
         }
     }
@@ -955,19 +956,28 @@ fn prepare(
     } else {
         None
     };
-    let runner = appimage
-        .map(|path| (path, true))
-        .or_else(|| runner_path(host).map(|path| (path, false)))
-        .or_else(|| self_runner(host, mode));
     start_runner(
         host,
         authorization,
         mode,
-        runner,
+        choose_runner(host, mode, appimage),
         operations,
         commands,
         cancel,
     )
+}
+/// The runner to start: the AppImage's launcher, else the packaged runner,
+/// else this debug build itself. `true` marks a program that runs it with
+/// `--batch-runner`.
+fn choose_runner(
+    host: &Host,
+    mode: BatchMode,
+    appimage: Option<PathBuf>,
+) -> Option<(PathBuf, bool)> {
+    appimage
+        .map(|path| (path, true))
+        .or_else(|| runner_path(host).map(|path| (path, false)))
+        .or_else(|| self_runner(host, mode))
 }
 /// A debug build run from its build folder has no packaged runner, which
 /// would ask for the password once per source. It starts itself as the
@@ -1109,9 +1119,7 @@ fn start_session(
         commands,
     };
     let start = Instant::now();
-    let flags = rustix::fs::fcntl_getfl(&output).map_err(|e| ExecutionError::Io(e.to_string()))?;
-    rustix::fs::fcntl_setfl(&output, flags | rustix::fs::OFlags::NONBLOCK)
-        .map_err(|e| ExecutionError::Io(e.to_string()))?;
+    crate::process::set_nonblocking(&output, true)?;
     let mut frame = Vec::new();
     let ready = loop {
         if cancel.requested() {
@@ -1131,18 +1139,7 @@ fn start_session(
         let mut chunk = [0; 8192];
         let count = match output.read(&mut chunk) {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                // Wake as soon as a partial ready frame has more bytes, while
-                // bounding the wait so cancellation and child exit stay responsive.
-                let mut fds = [rustix::event::PollFd::new(
-                    &output,
-                    rustix::event::PollFlags::IN,
-                )];
-                let timeout = rustix::event::Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 20_000_000,
-                };
-                unless_interrupted(rustix::event::poll(&mut fds, Some(&timeout)))
-                    .map_err(|error| ExecutionError::Io(error.to_string()))?;
+                wait_readable(&output)?;
                 continue;
             }
             result => result?,
@@ -1159,9 +1156,7 @@ fn start_session(
                 .map_err(|e| ExecutionError::Io(e.to_string()))?;
         }
     };
-    let flags = rustix::fs::fcntl_getfl(&output).map_err(|e| ExecutionError::Io(e.to_string()))?;
-    rustix::fs::fcntl_setfl(&output, flags & !rustix::fs::OFlags::NONBLOCK)
-        .map_err(|e| ExecutionError::Io(e.to_string()))?;
+    crate::process::set_nonblocking(&output, false)?;
     if !matches!(ready, Response::Ready { protocol: PROTOCOL }) {
         return Err(ExecutionError::AuthorizationDenied);
     }
@@ -1172,6 +1167,20 @@ fn start_session(
         *cell.borrow_mut() = Some(std::sync::Arc::new(session));
         Ok(Some(ScopeGuard))
     })
+}
+
+/// Wake as soon as a partial ready frame has more bytes, while bounding
+/// the wait so cancellation and child exit stay responsive.
+fn wait_readable(output: &impl std::os::fd::AsFd) -> std::io::Result<()> {
+    let mut fds = [rustix::event::PollFd::new(
+        output,
+        rustix::event::PollFlags::IN,
+    )];
+    let timeout = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 20_000_000,
+    };
+    Ok(unless_interrupted(rustix::event::poll(&mut fds, Some(&timeout)))?)
 }
 
 /// A wait cut short by a signal is not an error; the caller waits again.
@@ -2921,13 +2930,8 @@ done"#;
     #[cfg(target_os = "linux")]
     #[test]
     fn apt_updates_send_the_refresh_then_the_update_in_one_session() {
-        // The host must have APT for its commands to be built.
-        if Path::new("/usr/bin/apt-get").exists() {
-            apt_session();
-        }
-    }
-    #[cfg(target_os = "linux")]
-    fn apt_session() {
+        // APT builds these commands: Linux development hosts and CI have it
+        // (docs/development.md lists libapt-pkg-dev).
         use crate::engine::Backend;
         use std::collections::BTreeMap;
         let log = std::env::temp_dir().join(format!("pkgdeck-apt-session-{}", std::process::id()));
@@ -3824,5 +3828,65 @@ done"#,
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn a_runner_that_does_not_start_or_answers_garbage_fails_the_helper() {
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        let missing = Command::new("/nonexistent/pkgdeck-runner");
+        assert!(matches!(
+            begin_session(missing, &operations, commands.clone(), &Cancellation::default()),
+            Err(ExecutionError::Helper(_))
+        ));
+        let mut garbage = Command::new("/bin/sh");
+        garbage
+            .arg("-c")
+            .arg("IFS= read -r start; printf 'not json\\n'; sleep 1");
+        assert!(matches!(
+            begin_session(garbage, &operations, commands, &Cancellation::default()),
+            Err(ExecutionError::Helper(_))
+        ));
+    }
+
+    #[test]
+    fn a_reply_nobody_waits_for_is_dropped() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer
+            .write_all(b"{\"type\":\"completed\",\"operation\":7,\"completion\":{\"code\":0,\"signal\":null,\"stdout\":[],\"stderr\":[],\"truncated\":false,\"cancellation_deferred\":false}}\n")
+            .unwrap();
+        drop(writer);
+        let replies = SharedReplies::default();
+        read_replies(reader, std::sync::Arc::clone(&replies));
+        let replies = replies.lock().unwrap();
+        assert!(replies.closed);
+        assert!(replies.waiting.is_empty());
+    }
+
+    #[test]
+    fn a_joined_apt_change_with_a_bad_package_builds_no_command() {
+        let user = PackageId {
+            scope: Scope::User { uid: 1000 },
+            ..id("apt", "two")
+        };
+        assert_eq!(
+            group_commands(&[
+                Operation::Install(id("apt", "one")),
+                Operation::Install(user),
+            ]),
+            Err(invalid("invalid system package identity"))
+        );
+    }
+
+    #[test]
+    fn an_appimage_runs_its_own_launcher_as_the_runner() {
+        let host = Host::new(Runtime::AppImage, Default::default());
+        let launcher = PathBuf::from("/tmp/.mount_pkgdeck/AppRun");
+        assert_eq!(
+            choose_runner(&host, BatchMode::Reviewed, Some(launcher.clone())),
+            Some((launcher, true))
+        );
     }
 }
