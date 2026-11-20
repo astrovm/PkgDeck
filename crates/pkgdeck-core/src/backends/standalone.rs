@@ -2863,9 +2863,7 @@ mod tests {
                 fixture.installed.lock().unwrap().as_ref().unwrap().version,
                 Version::new(2, 0, 0)
             );
-            let says = |progress: &Progress, text: &str| {
-                matches!(progress, Progress::Message(message) if message.contains(text))
-            };
+            let says = |progress: &Progress, text: &str| matches!(progress, Progress::Message(message) if message.contains(text));
             assert!(says(said.last().unwrap(), "updated to 2.0.0"), "{said:?}");
             if let Some(expected) = expected {
                 assert!(said.iter().any(|p| says(p, expected)), "{said:?}");
@@ -3080,7 +3078,10 @@ mod tests {
                 &Cancellation::default(),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("no-such-shell not found"), "{error}");
+        assert!(
+            error.to_string().contains("no-such-shell not found"),
+            "{error}"
+        );
     }
     #[test]
     fn versions_are_asked_once_per_binary() {

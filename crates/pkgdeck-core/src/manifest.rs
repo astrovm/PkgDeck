@@ -545,7 +545,11 @@ mod tests {
         assert!(json.contains("\"scope\":\"user\""));
         assert!(!json.contains("4242"));
         // Only the picked packages are saved.
-        let other = package("org.example.Other", Scope::User { uid: 4242 }, Some("flathub"));
+        let other = package(
+            "org.example.Other",
+            Scope::User { uid: 4242 },
+            Some("flathub"),
+        );
         let picked = export(
             &[selected.clone(), other],
             std::slice::from_ref(&selected.id),
@@ -567,7 +571,10 @@ mod tests {
         let error = write_lines(file, b"{}", &path).unwrap_err();
         assert_eq!(
             error,
-            ManifestError::Io(format!("Can't write {}: bad file descriptor.", path.display()))
+            ManifestError::Io(format!(
+                "Can't write {}: bad file descriptor.",
+                path.display()
+            ))
         );
         std::fs::remove_file(path).unwrap();
     }

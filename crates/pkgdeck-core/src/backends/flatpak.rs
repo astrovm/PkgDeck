@@ -1254,10 +1254,8 @@ mod tests {
         }
     }
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "pkgdeck-flatpak-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1269,7 +1267,13 @@ mod tests {
         let file = dir.join("app.flatpakref");
         let calls = Calls::default();
         Flatpak::new(calls.clone())
-            .install_flatpakref_at(&file, b"[Flatpak Ref]\n", "--user", false, &Cancellation::default())
+            .install_flatpakref_at(
+                &file,
+                b"[Flatpak Ref]\n",
+                "--user",
+                false,
+                &Cancellation::default(),
+            )
             .unwrap();
         let path = file.to_string_lossy().into_owned();
         assert_eq!(

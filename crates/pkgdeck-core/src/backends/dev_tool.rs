@@ -3147,11 +3147,11 @@ mod manager_answers {
             Err(ExecutionError::Disabled("pipx home not found".into()))
         );
         let manager = Manager::answering(vec![
-                ("tool dir", b"\xff"),
-                ("config --global home", b"\xff"),
-                ("env", b"\xff"),
-                ("root --global", b"\xff"),
-            ]);
+            ("tool dir", b"\xff"),
+            ("config --global home", b"\xff"),
+            ("env", b"\xff"),
+            ("root --global", b"\xff"),
+        ]);
         for tool in [
             DevTool::uv(&manager),
             DevTool::composer(&manager),
@@ -3190,15 +3190,18 @@ mod manager_answers {
     #[test]
     fn a_broken_pip_update_list_is_an_error() {
         let manager = Manager::answering(vec![
-                ("list --format=json", b"[]"),
-                ("list --outdated --format=json", b"not json"),
-            ]);
+            ("list --format=json", b"[]"),
+            ("list --outdated --format=json", b"not json"),
+        ]);
         let mut pip = DevTool::pip(&manager);
         pip.home = home("/venv");
         let error = pip
             .inventory(Updates::All, &Cancellation::default())
             .unwrap_err();
-        assert!(matches!(error, EngineError::InvalidResponse { .. }), "{error}");
+        assert!(
+            matches!(error, EngineError::InvalidResponse { .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3208,7 +3211,11 @@ mod manager_answers {
         std::fs::create_dir_all(base.join("specifications")).unwrap();
         // Sorted as text, 10.0 comes before 9.0.
         for version in ["10.0", "9.0"] {
-            std::fs::write(base.join(format!("specifications/rake-{version}.gemspec")), "").unwrap();
+            std::fs::write(
+                base.join(format!("specifications/rake-{version}.gemspec")),
+                "",
+            )
+            .unwrap();
         }
         let manager = Manager::default();
         let mut gem = DevTool::gem(&manager);
@@ -3223,7 +3230,10 @@ mod manager_answers {
 
     #[test]
     fn mise_offers_no_exact_name_it_cannot_install() {
-        let manager = Manager::answering(vec![("ls --global --json", b"{}"), ("registry --json", b"[]")]);
+        let manager = Manager::answering(vec![
+            ("ls --global --json", b"{}"),
+            ("registry --json", b"[]"),
+        ]);
         let mut mise = DevTool::mise(&manager);
         mise.home = home("/mise");
         let found = mise.search("not a tool", &Cancellation::default()).unwrap();
@@ -3234,11 +3244,14 @@ mod manager_answers {
     fn bun_reads_the_version_it_would_install() {
         let cancel = Cancellation::default();
         let manager = Manager::answering(vec![(
-                "add --global left-pad@latest --dry-run",
-                b"installed left-pad@\ninstalled left-pad@1.3.0 with binaries\n",
-            )]);
+            "add --global left-pad@latest --dry-run",
+            b"installed left-pad@\ninstalled left-pad@1.3.0 with binaries\n",
+        )]);
         let bun = DevTool::bun(&manager);
-        assert_eq!(bun.bun_upgrade_version("left-pad", &cancel).unwrap(), "1.3.0");
+        assert_eq!(
+            bun.bun_upgrade_version("left-pad", &cancel).unwrap(),
+            "1.3.0"
+        );
         let manager = Manager::answering(vec![("add --global left-pad@latest --dry-run", b"\xff")]);
         let error = DevTool::bun(&manager)
             .bun_upgrade_version("left-pad", &cancel)

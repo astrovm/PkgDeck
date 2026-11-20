@@ -355,9 +355,7 @@ impl AppImage {
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
         Self::copy_bounded(input, output, cancel)?;
-        output
-            .sync_all()
-            .map_err(|e| Self::invalid(e.to_string()))
+        output.sync_all().map_err(|e| Self::invalid(e.to_string()))
     }
     /// Makes `temporary` executable and puts it at `target` with `put`.
     fn place(
@@ -612,11 +610,11 @@ impl AppImage {
     /// `path`, with `~` for `home`.
     fn shown_under(path: &Path, home: Option<std::ffi::OsString>) -> String {
         home.and_then(|home| {
-                path.strip_prefix(home)
-                    .ok()
-                    .map(|rest| format!("~/{}", rest.display()))
-            })
-            .unwrap_or_else(|| path.display().to_string())
+            path.strip_prefix(home)
+                .ok()
+                .map(|rest| format!("~/{}", rest.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string())
     }
     fn existing_import(
         destination: &Path,
@@ -4878,7 +4876,10 @@ esac
     #[cfg(target_os = "linux")]
     fn a_copy_that_cannot_reach_the_disk_is_an_error() {
         // /dev/null takes the bytes but can't be synced.
-        let mut null = fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+        let mut null = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
         let error = AppImage::copy_durably(&mut &b"data"[..], &mut null, &Cancellation::default());
         assert!(error.is_err());
     }

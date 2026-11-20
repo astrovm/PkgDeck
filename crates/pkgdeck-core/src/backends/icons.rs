@@ -264,7 +264,8 @@ mod tests {
         }
         std::fs::create_dir_all(&yaml).unwrap();
         let name = format!("{}.yml.gz", "a".repeat(243));
-        let dir = rustix::fs::open(&yaml, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).unwrap();
+        let dir =
+            rustix::fs::open(&yaml, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).unwrap();
         rustix::fs::openat(
             &dir,
             name.as_str(),

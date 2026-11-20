@@ -423,7 +423,10 @@ mod tests {
             verified_path_with(&unhashed, &cancel, &host),
             Err(EngineError::InvalidResponse { reason, .. }) if reason == "invalid local archive reference"
         ));
-        let bare = Host::new(crate::host::Runtime::Native, [(OsString::from("PATH"), OsString::new())].into());
+        let bare = Host::new(
+            crate::host::Runtime::Native,
+            [(OsString::from("PATH"), OsString::new())].into(),
+        );
         assert!(matches!(
             inspect_with(&archive, &cancel, &bare),
             Err(EngineError::InvalidResponse { reason, .. }) if reason == "dpkg-deb is unavailable"

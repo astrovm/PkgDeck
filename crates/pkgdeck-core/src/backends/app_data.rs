@@ -313,7 +313,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             messages,
-            [Progress::Message("Moving Firefox data to the Trash…".into())]
+            [Progress::Message(
+                "Moving Firefox data to the Trash…".into()
+            )]
         );
         assert!(!home.join("snap/firefox").exists());
         assert!(home

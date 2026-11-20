@@ -809,7 +809,9 @@ mod tests {
         let error = backend(fake.clone())
             .installed(&Cancellation::default())
             .unwrap_err();
-        assert!(error.to_string().contains("no conda-family manager detected"));
+        assert!(error
+            .to_string()
+            .contains("no conda-family manager detected"));
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 

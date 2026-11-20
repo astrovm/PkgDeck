@@ -876,10 +876,9 @@ mod tests {
                 .as_slice()
             {
                 ["version"] => Ok(done("go version go1.25.1 linux/arm64\n", 0)),
-                ["env", "-json", "GOBIN", "GOPATH"] if self.no_bin_dir => Ok(done(
-                    "{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"go\"\n}\n",
-                    0,
-                )),
+                ["env", "-json", "GOBIN", "GOPATH"] if self.no_bin_dir => {
+                    Ok(done("{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"go\"\n}\n", 0))
+                }
                 ["env", "-json", "GOBIN", "GOPATH"] if self.gopath_only => Ok(done(
                     &format!(
                         "{{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"{}:/else\"\n}}\n",
@@ -1393,7 +1392,9 @@ mod tests {
         let error = backend(fake)
             .installed(&Cancellation::default())
             .unwrap_err();
-        assert!(error.to_string().contains("neither GOBIN nor an absolute GOPATH"));
+        assert!(error
+            .to_string()
+            .contains("neither GOBIN nor an absolute GOPATH"));
     }
 
     #[test]
@@ -1444,7 +1445,11 @@ mod tests {
             reference: Some("github.com/nobody/x".into()),
         };
         assert!(go
-            .execute(&Operation::Install(id), &Cancellation::default(), &mut ignore)
+            .execute(
+                &Operation::Install(id),
+                &Cancellation::default(),
+                &mut ignore
+            )
             .is_err());
         assert!(fake
             .calls()

@@ -410,7 +410,11 @@ mod tests {
     struct Fake(Vec<(&'static str, &'static [u8])>);
 
     impl Fake {
-        fn answer(&self, executable: &str, args: &[OsString]) -> Result<Completion, ExecutionError> {
+        fn answer(
+            &self,
+            executable: &str,
+            args: &[OsString],
+        ) -> Result<Completion, ExecutionError> {
             let line = std::iter::once(executable.to_owned())
                 .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
                 .collect::<Vec<_>>()
@@ -526,7 +530,10 @@ mod tests {
         ]))
         .cleanup_cache(&cancel)
         .unwrap();
-        assert!(items[0].bytes.is_some_and(|bytes| bytes >= 4096), "{items:?}");
+        assert!(
+            items[0].bytes.is_some_and(|bytes| bytes >= 4096),
+            "{items:?}"
+        );
         // Without the folder the size is unknown, not zero.
         let items = DevTool::npm(Fake(vec![(
             "npm cache ls",

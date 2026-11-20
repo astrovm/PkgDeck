@@ -1180,7 +1180,10 @@ fn wait_readable(output: &impl std::os::fd::AsFd) -> std::io::Result<()> {
         tv_sec: 0,
         tv_nsec: 20_000_000,
     };
-    Ok(unless_interrupted(rustix::event::poll(&mut fds, Some(&timeout)))?)
+    Ok(unless_interrupted(rustix::event::poll(
+        &mut fds,
+        Some(&timeout),
+    ))?)
 }
 
 /// A wait cut short by a signal is not an error; the caller waits again.
@@ -3838,7 +3841,12 @@ done"#,
         let commands = batch_commands(&operations).unwrap();
         let missing = Command::new("/nonexistent/pkgdeck-runner");
         assert!(matches!(
-            begin_session(missing, &operations, commands.clone(), &Cancellation::default()),
+            begin_session(
+                missing,
+                &operations,
+                commands.clone(),
+                &Cancellation::default()
+            ),
             Err(ExecutionError::Helper(_))
         ));
         let mut garbage = Command::new("/bin/sh");
