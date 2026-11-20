@@ -84,7 +84,7 @@ pub use system_image::SystemImage;
 /// Start an installed Flatpak app, detached, as its menu entry would.
 pub fn launch_flatpak(id: &PackageId) -> Result<(), EngineError> {
     let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
-        .then(|| std::path::Path::new("flatpak-spawn"));
+        .then_some(std::path::Path::new("flatpak-spawn"));
     start_flatpak(id, "flatpak", bridge)
 }
 

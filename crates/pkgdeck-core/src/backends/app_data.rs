@@ -308,14 +308,13 @@ mod tests {
                 &apps,
                 Some(trash),
                 &cancel,
-                &mut |progress| {
-                    if let Progress::Message(message) = progress {
-                        messages.push(message);
-                    }
-                },
+                &mut |progress| messages.push(progress),
             )
             .unwrap();
-        assert_eq!(messages, ["Moving Firefox data to the Trash…"]);
+        assert_eq!(
+            messages,
+            [Progress::Message("Moving Firefox data to the Trash…".into())]
+        );
         assert!(!home.join("snap/firefox").exists());
         assert!(home
             .join(".local/share/Trash/files/firefox/common")

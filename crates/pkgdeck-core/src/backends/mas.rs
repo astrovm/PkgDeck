@@ -642,17 +642,15 @@ mod tests {
             .execute(
                 &Operation::Remove(id("1")),
                 &Cancellation::default(),
-                &mut |progress| {
-                    if let Progress::Message(text) = progress {
-                        messages.push(text);
-                    }
-                },
+                &mut |progress| messages.push(progress),
             )
             .unwrap();
         let trashed = installed.root.join("home/.Trash/Alpha.app");
         assert!(!installed.app.exists());
         assert!(trashed.join("Contents/_MASReceipt/receipt").is_file());
-        assert!(messages[0].starts_with("Moving Alpha to the Trash."));
+        assert!(
+            matches!(&messages[0], Progress::Message(text) if text.starts_with("Moving Alpha to the Trash."))
+        );
         assert_eq!(
             fake.mover.calls(),
             [
@@ -866,9 +864,7 @@ mod tests {
         let mut messages = vec![];
         let outcomes = store
             .execute_group(&operations, &Cancellation::default(), &mut |progress| {
-                if let Progress::Message(text) = progress {
-                    messages.push(text);
-                }
+                messages.push(progress)
             })
             .unwrap()
             .unwrap();
@@ -877,8 +873,8 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "Updating Alpha from the App Store…",
-                "==> Installed Alpha (2.0)\n"
+                Progress::Message("Updating Alpha from the App Store…".into()),
+                Progress::Message("==> Installed Alpha (2.0)\n".into())
             ]
         );
         // Beta is current, so only Alpha is passed to mas.
@@ -1013,6 +1009,24 @@ mod tests {
             store.details(&foreign, &Cancellation::default()),
             Err(EngineError::NotFound)
         ));
+        // Records without a bundle identifier leave that line out.
+        let fake = fake();
+        fake.list.lock().unwrap()[1] =
+            app(2, "Beta", "1.0").replace(r#""bundleID":"com.example.Beta","#, "");
+        let details = MacAppStore::new(fake)
+            .details(&id("2"), &Cancellation::default())
+            .unwrap();
+        assert!(!details.description.contains("Bundle identifier"));
+    }
+
+    #[test]
+    fn output_that_is_not_mas_json_is_reported_as_invalid() {
+        let fake = fake();
+        *fake.outdated.lock().unwrap() = vec!["not json".into()];
+        let error = MacAppStore::new(fake)
+            .installed(&Cancellation::default())
+            .unwrap_err();
+        assert!(matches!(error, EngineError::InvalidResponse { .. }));
     }
 
     #[test]

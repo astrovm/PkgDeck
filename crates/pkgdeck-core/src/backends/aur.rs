@@ -787,6 +787,14 @@ mod tests {
         assert!(details.description.contains("orphaned"));
         assert!(details.description.contains("Flagged out of date"));
         assert!(details.description.contains("Review what changed"));
+        // A newer AUR version that nobody flagged is offered as an update.
+        let details = aur.details(&rows[2].id, &Cancellation::default()).unwrap();
+        assert!(!details.description.contains("Flagged out of date"));
+        assert_eq!(details.package.update, UpdateAvailability::Available);
+        assert_eq!(
+            details.package.candidate_version.as_deref(),
+            Some("13.0.1-1")
+        );
         // Without an AUR helper there is nothing to build with.
         let error = aur
             .execute(
@@ -891,6 +899,19 @@ mod tests {
             .iter()
             .all(|row| row.update == UpdateAvailability::Unknown));
         assert_eq!(aur.query_errors().len(), 1);
+    }
+
+    #[test]
+    fn aur_packages_without_a_description_get_a_plain_summary() {
+        let mut aur = Aur::new(Fake {
+            rpc: Some(Ok(done(
+                r#"{"resultcount":1,"results":[{"Name":"yay","Version":"12.0.0-1","Maintainer":"jguer","OutOfDate":null}],"type":"multiinfo","version":5}"#,
+            ))),
+            ..Fake::default()
+        });
+        let rows = aur.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[2].id.name, "yay");
+        assert_eq!(rows[2].summary, "AUR package");
     }
 
     #[test]

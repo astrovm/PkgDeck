@@ -259,3 +259,70 @@ impl<T: Transport> Backend for Firmware<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Answers fwupdmgr with fixed device and update lists; writes print
+    /// nothing.
+    struct Fwupd {
+        updates: &'static str,
+    }
+    impl Transport for Fwupd {
+        fn system_manager(
+            &self,
+            _: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let text = if args.iter().any(|arg| arg == "get-devices") {
+                r#"{"Devices":[]}"#
+            } else if args.iter().any(|arg| arg == "get-updates") {
+                self.updates
+            } else {
+                ""
+            };
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: text.as_bytes().to_vec(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    #[test]
+    fn an_update_list_without_devices_is_invalid() {
+        let error = Firmware::new(Fwupd { updates: "{}" })
+            .installed(&Cancellation::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("missing updates Devices"));
+    }
+
+    #[test]
+    fn a_silent_refresh_only_reports_that_it_finished() {
+        let mut messages = vec![];
+        Firmware::new(Fwupd {
+            updates: r#"{"Devices":[]}"#,
+        })
+        .execute(
+            &Operation::Refresh {
+                backend: "fwupd".into(),
+            },
+            &Cancellation::default(),
+            &mut |progress| messages.push(progress),
+        )
+        .unwrap();
+        assert_eq!(
+            messages,
+            [Progress::Message(
+                "Firmware update finished. Restart or shut down if the messages above say so."
+                    .into()
+            )]
+        );
+    }
+}

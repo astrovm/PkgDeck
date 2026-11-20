@@ -524,13 +524,13 @@ impl AdoptIo for NativeAdopt {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
     /// An app folder described in memory, plus a log of what ran.
     #[derive(Clone)]
-    struct Fake {
+    pub(super) struct Fake {
         present: Arc<Mutex<bool>>,
         receipt: bool,
         bundle: &'static str,
@@ -545,7 +545,7 @@ mod tests {
     }
     const APP: &str = "/Applications/Visual Studio Code.app";
     const CODE: &str = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-    fn fake() -> Fake {
+    pub(super) fn fake() -> Fake {
         Fake {
             present: Arc::new(Mutex::new(true)),
             receipt: false,
@@ -1047,6 +1047,13 @@ mod tests {
         let mut io = fake();
         io.taken = vec!["Visual Studio Code.app"];
         assert!(reason(plan(&io, &relative, &cancel)).contains("is not an app folder"));
+        // A target with no file name is named after the cask.
+        let mut root = cask();
+        root["artifacts"][1]["target"] = "/".into();
+        let mut io = fake();
+        io.taken = vec!["/"];
+        assert!(reason(plan(&io, &root, &cancel))
+            .starts_with("visual-studio-code is already installed"));
         let mut unplaced = cask();
         unplaced["artifacts"][2] = serde_json::json!({"binary": [CODE]});
         assert!(

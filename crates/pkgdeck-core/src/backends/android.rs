@@ -420,6 +420,8 @@ mod tests {
             &avds.join("gradle-managed/dev.avd/config.ini"),
             "image.sysdir.1=system-images/android-37.0/google_apis/x86_64/\n",
         );
+        // Folders deeper than Gradle's are not searched.
+        fs::create_dir_all(avds.join("gradle-managed/deeper/old.avd")).unwrap();
         // Left behind: a folder with no settings, and an entry for a
         // folder that's gone.
         write(
@@ -504,6 +506,18 @@ mod tests {
             assert!(image_item(&host, image, &cancel).is_none(), "{image}");
         }
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn removing_an_image_never_removes_the_system_images_folder() {
+        let home = scratch("shallow");
+        let root = home.join("sdk/system-images");
+        fs::create_dir_all(root.join("lone")).unwrap();
+        let host = host(&home, &[("ANDROID_HOME", &home.join("sdk"))]);
+        remove(&host, "android-image:lone").unwrap();
+        assert!(!root.join("lone").exists());
+        assert!(root.exists());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
