@@ -141,7 +141,7 @@ expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAI
 repo="$work/repo"
 git init -q "$repo"
 repo=$(cd "$repo" && pwd -P)
-git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m init
+git -C "$repo" -c core.hooksPath=/dev/null -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m init
 git -C "$repo" worktree add -q --relative-paths --detach "$work/tree"
 mkdir -p "$work/tree/scripts" "$work/tree/containers"
 cp scripts/container.sh scripts/setup-dev.sh scripts/dev-env.sh scripts/prune-container-caches.sh "$work/tree/scripts/"
@@ -335,6 +335,22 @@ reset_folder ''
 PATH="$work/rustc-bin:$PATH" scripts/coverage-reset.sh "$work/llvm-cov-target" >"$work/output"
 [[ -e $work/llvm-cov-target/debug/deps/pkgdeck_core-0123456789abcdef && ! -s $work/output ]]
 rm -r "$work/llvm-cov-target"
+# The portable container builds the release programs in its own cache.
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/portable" scripts/container.sh portable
+grep -Fxq "$work/portable/target:/workspace/target:rw" "$work/args"
+tail -n 5 "$work/args" | tr '\n' ' ' | grep -Fq 'cargo build --workspace --release --locked'
+[[ $(PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/portable" scripts/container.sh portable --release-dir) == "$work/portable/target/release" ]]
+grep -q 'ubuntu:22.04@' containers/portable.Containerfile
+if grep -q 'libapt-pkg-dev' containers/portable.Containerfile; then echo 'The portable container must not build the APT reader'; exit 1; fi
+# check-glibc.sh skips folders that ship their own glibc, and only those.
+mkdir -p "$work/glibc/private"
+printf '\177ELF' >"$work/glibc/stub"
+libc=$(ldd /bin/sh | awk '/libc\.so/ {print $3}')
+cp "$libc" "$work/glibc/private/libc.so.6"
+expect_code 1 scripts/ci/check-glibc.sh "$work/glibc" 2.0
+grep -Fq 'private/libc.so.6 needs glibc' "$work/output"
+expect_code 0 scripts/ci/check-glibc.sh "$work/glibc" 2.0 private
+expect_code 2 scripts/ci/check-glibc.sh "$work/glibc" 2.0 missing
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
-echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'
+echo 'PASS verifier arguments, failure, timeout, portable build, glibc check, and hosted-runner guard'

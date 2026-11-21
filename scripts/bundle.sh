@@ -4,10 +4,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 out=build/AppDir
 rm -rf -- "$out"
 mkdir -p "$out/usr/"{bin,lib,libexec}
+# CI builds these in `scripts/container.sh portable` and passes its release
+# folder, so they work with glibc 2.35 (docs/distribution.md).
+release=${PKGDECK_RELEASE_DIR:-${CARGO_TARGET_DIR:-target}/release}
 scripts/appimage-updater.sh "$out/usr"
-scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
-cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
-cp "${CARGO_TARGET_DIR:-target}/release/pkgdeck-host-runner" "$out/usr/libexec/"
+cp "$release/"{pkd,pkgdeck} "$out/usr/bin/"
+cp "$release/pkgdeck-host-runner" "$out/usr/libexec/"
+# The APT reader brings its own libraries, glibc and loader, like the CLI
+# archive. So it can use a newer APT than the oldest supported system has.
+scripts/bundle-apt.sh "$out/usr"
 cp packaging/appimage/AppRun "$out/AppRun"
 chmod +x "$out/AppRun"
 for pair in desktop:applications metainfo.xml:metainfo svg:icons/hicolor/scalable/apps; do
@@ -23,7 +28,7 @@ done
 # binaries link directly is bundled below.
 LD_LIBRARY_PATH="$(realpath "$out/usr/lib")"
 export LD_LIBRARY_PATH
-mapfile -d '' queue < <(find "$out" -type f \( -name '*.so*' -o -name pkd -o -name pkgdeck -o -name pkgdeck-apt-query -o -name pkgdeck-host-runner \) -print0)
+queue=("$out/usr/bin/pkd" "$out/usr/bin/pkgdeck" "$out/usr/libexec/pkgdeck-host-runner")
 for ((i = 0; i < ${#queue[@]}; i++)); do
     path=${queue[i]}
     links=$(ldd "$path") || {
@@ -48,7 +53,3 @@ cp LICENSE "$out/usr/share/licenses/pkgdeck/"
 cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$out/usr/share/licenses/pkgdeck/INTER-OFL"
 cp crates/pkgdeck/assets/fonts/Selawik-LICENSE.txt "$out/usr/share/licenses/pkgdeck/SELAWIK-OFL"
 cp crates/pkgdeck/assets/fonts/W95FA-LICENSE.txt "$out/usr/share/licenses/pkgdeck/W95FA-OFL"
-cp native/COPYING "$out/usr/share/licenses/pkgdeck/APT-HELPER-GPL-2"
-apt_library=$(ldd "$out/usr/bin/pkgdeck-apt-query" | awk '/libapt-pkg/{print $1}')
-apt_package=$(dpkg-query -S "/usr/lib/$(gcc -dumpmachine)/$apt_library" | head -1 | cut -d: -f1)
-cp "/usr/share/doc/$apt_package/copyright" "$out/usr/share/licenses/pkgdeck/APT-COPYRIGHT"

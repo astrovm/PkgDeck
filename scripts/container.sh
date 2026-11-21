@@ -3,9 +3,11 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 command -v podman >/dev/null || { echo 'Podman is required for --engine podman.' >&2; exit 1; }
 [[ $(podman info --format '{{.Host.Security.Rootless}}') == true ]] || { echo 'Run Podman as an unprivileged user.' >&2; exit 1; }
-kind=${1:?Expected development or lifecycle}; shift
+kind=${1:?Expected development, portable or lifecycle}; shift
 case "$kind" in
     development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh) ;;
+    # Builds the AppImage and Snap programs against Ubuntu 22.04's older glibc.
+    portable) recipe=containers/portable.Containerfile; inputs=("$recipe" rust-toolchain.toml) ;;
     lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/ci/apt-mirrors.sh scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac
@@ -59,8 +61,11 @@ run_container() {
     if wait "$!"; then status=0; else status=$?; fi
     exit "$status"
 }
-if [[ "$kind" == development ]]; then
+if [[ "$kind" == development || "$kind" == portable ]]; then
     workspace_key=$(printf '%s' "$PWD" | sha256sum | cut -c1-12)
+    # Each kind keeps its own caches, so pruning one kind's old recipes
+    # never deletes the other kind's current cache.
+    [[ $kind == development ]] || workspace_key+="-$kind"
     caches="${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/containers"
     cache="${PKGDECK_CONTAINER_CACHE:-$caches/$workspace_key/$key-$(uname -m)}"
     mkdir -p "$cache/cargo"
@@ -85,7 +90,9 @@ if [[ "$kind" == development ]]; then
         scripts/prune-container-caches.sh "$caches" "$workspace_key" "$key-$(uname -m)" "$PWD"
     fi
     if [[ "${1:-}" == --binary-dir ]]; then printf '%s/target/debug\n' "$cache"; exit 0; fi
+    if [[ "${1:-}" == --release-dir ]]; then printf '%s/target/release\n' "$cache"; exit 0; fi
     command=(scripts/verify.sh "$@")
+    [[ $kind == development ]] || command=(cargo build --workspace --release --locked)
     interactive=()
     if [[ "${1:-}" == --exec ]]; then
         shift

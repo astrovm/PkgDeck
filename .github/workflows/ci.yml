@@ -767,8 +767,9 @@ jobs:
     if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     # Usually under 12 minutes; a slow Ubuntu mirror has stretched it past 30.
     timeout-minutes: 45
-    # The AppImage and Snap use the system's glibc, so they're built on the
-    # oldest Ubuntu they support. A newer runner makes them need its glibc.
+    # The AppImage and Snap use the system's glibc, so their programs are built
+    # in an Ubuntu 22.04 container: the oldest Ubuntu LTS in standard support,
+    # where the AppImage catalog tests. The APT reader brings its own glibc.
     strategy:
       fail-fast: false
       matrix:
@@ -778,6 +779,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    env:
+      # Under target, so the Rust cache below keeps the Ubuntu 22.04 build too.
+      PKGDECK_CONTAINER_CACHE: ${{ github.workspace }}/target/portable
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -791,8 +795,8 @@ jobs:
         uses: ./.github/actions/setup-desktop
         with:
           packaging: 'true'
-      - name: Build release binaries
-        run: scripts/verify.sh full --only release
+      - name: Build release binaries on Ubuntu 22.04
+        run: scripts/container.sh portable
       - name: Build GUI test helper
         run: |
           source scripts/dev-env.sh
@@ -801,9 +805,9 @@ jobs:
         if: needs.reviewed.outputs.tested != 'true'
         run: |
           source scripts/dev-env.sh
-          scripts/bundle.sh
-          # Ubuntu 24.04 has glibc 2.39.
-          scripts/ci/check-glibc.sh build/AppDir 2.39
+          PKGDECK_RELEASE_DIR=$(scripts/container.sh portable --release-dir) scripts/bundle.sh
+          # Ubuntu 22.04 has glibc 2.35. The APT reader ships its own glibc.
+          scripts/ci/check-glibc.sh build/AppDir 2.35 usr/lib/pkgdeck/apt
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
           test -x build/AppDir/usr/libexec/pkgdeck-host-runner
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
@@ -869,14 +873,17 @@ jobs:
         if: needs.reviewed.outputs.tested != 'true'
         run: |
           images=(build/artifacts/PkgDeck-v*-${{ matrix.arch }}.AppImage)
-          # Debian 13 has a newer glibc and APT 3, and Ubuntu 26.04 is the newest
-          # release. Containers have no FUSE, so the AppImage extracts itself.
-          for system in ubuntu:24.04 debian:13 ubuntu:26.04; do
+          # Ubuntu 22.04 is the oldest supported system, Debian 13 has APT 3,
+          # and Ubuntu 26.04 is the newest release. Containers have no FUSE, so
+          # the AppImage extracts itself.
+          for system in ubuntu:22.04 ubuntu:24.04 debian:13 ubuntu:26.04; do
             echo "Testing on $system"
             docker run --rm -e APPIMAGE_EXTRACT_AND_RUN=1 -v "$PWD/${images[0]}:/PkgDeck.AppImage:ro" "$system" sh -euc '
               cd /tmp
               /PkgDeck.AppImage --appimage-extract >/dev/null
               for file in squashfs-root/usr/bin/* squashfs-root/usr/libexec/*; do
+                # The APT reader is a script that starts its own loader.
+                [ "$(head -c 4 "$file" | od -An -c | tr -d " ")" = 177ELF ] || continue
                 links=$(LD_LIBRARY_PATH=squashfs-root/usr/lib ldd "$file")
                 case $links in *"not found"*) echo "$file: $links" >&2; exit 1 ;; esac
               done
