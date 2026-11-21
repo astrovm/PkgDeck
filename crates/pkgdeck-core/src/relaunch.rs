@@ -487,7 +487,10 @@ mod tests {
         let program = dir.join("program");
         crate::test_support::write_executable(
             &program,
-            format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display()),
+            format!(
+                "#!/bin/sh\nsleep 0.2\necho \"$@\" > '{}'\n",
+                marker.display()
+            ),
         )
         .unwrap();
         let install = Install::detect(&env(&[]), None, &program).unwrap();

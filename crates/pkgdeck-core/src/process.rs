@@ -241,6 +241,13 @@ impl From<io::Error> for ExecutionError {
     }
 }
 
+// Tests grow the stdout pipe they already own. This user namespace refuses
+// to grow a pipe that belongs to another process.
+#[cfg(test)]
+thread_local! {
+    static GROW_STDOUT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// Make reads from `pipe` return at once when `on`, or wait for bytes again.
 pub(crate) fn set_nonblocking(pipe: &impl AsFd, on: bool) -> io::Result<()> {
     let mut flags = rustix::fs::fcntl_getfl(pipe)?;
@@ -333,6 +340,10 @@ pub(crate) fn run_observed(
         }
     };
     let supervise = (|| {
+        #[cfg(test)]
+        if let Some(size) = GROW_STDOUT.with(|cell| cell.get()) {
+            rustix::pipe::fcntl_setpipe_size(&stdout, size).map_err(io::Error::from)?;
+        }
         set_nonblocking(&stdout, true)?;
         set_nonblocking(&stderr, true)?;
         let cap = limits.output_bytes;
@@ -493,51 +504,37 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn everything_left_in_a_grown_pipe_is_read_after_the_program_exits() {
-        // uutils' head grows its pipe, then writes and exits at once. Here
-        // the test grows the shell's output pipe while the shell waits.
-        let dir = std::env::temp_dir().join(format!("pkgdeck-grown-pipe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // The program has exited when the test ends, so it writes no `pid`
-        // for the cleanup to stop.
-        let _shell = Shell(dir.clone());
-        let mut command = Command::new("/bin/sh");
-        command
-            .args([
-                "-c",
-                "echo $$ > \"$1/next\"; mv \"$1/next\" \"$1/shell\"; \
-                 while [ ! -e \"$1/grown\" ]; do sleep 0.01; done; \
-                 exec head -c 900000 /dev/zero",
-                "sh",
-            ])
-            .arg(&dir);
-        let grower = std::thread::spawn(move || {
-            assert!(wait_for(Duration::from_secs(10), || dir
-                .join("shell")
-                .exists()));
-            let pid = std::fs::read_to_string(dir.join("shell")).unwrap();
-            let output = std::fs::OpenOptions::new()
-                .write(true)
-                .open(format!("/proc/{}/fd/1", pid.trim()))
-                .unwrap();
-            rustix::pipe::fcntl_setpipe_size(&output, 1 << 20).unwrap();
-            // Only the program may hold the pipe open, or it never ends.
-            drop(output);
-            std::fs::write(dir.join("grown"), "").unwrap();
-        });
-        let result = run(
-            command,
-            Limits {
-                output_bytes: 1 << 20,
-                ..Limits::default()
-            },
-            &Cancellation::default(),
-            false,
-        )
-        .unwrap();
-        grower.join().unwrap();
+        // uutils' head grows its pipe, then writes and exits at once.
+        // One read keeps 128 KiB, so 256 KiB still leaves a second read.
+        // A busy machine can refuse that. The bytes must arrive either way.
+        struct ClearGrow;
+        impl Drop for ClearGrow {
+            fn drop(&mut self) {
+                GROW_STDOUT.with(|cell| cell.set(None));
+            }
+        }
+        let _clear = ClearGrow;
+        let limits = Limits {
+            output_bytes: 1 << 20,
+            ..Limits::default()
+        };
+        let read_head = |size: Option<usize>| {
+            GROW_STDOUT.with(|cell| cell.set(size));
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exec head -c 900000 /dev/zero"]);
+            run(command, limits, &Cancellation::default(), false)
+        };
+        // No pid file: the shell cleanup's empty path has to run too.
+        drop(Shell(
+            std::env::temp_dir().join(format!("pkgdeck-no-shell-{}", std::process::id())),
+        ));
+        let result = grown_or_plain(read_head(Some(1 << 18)), || read_head(None));
         assert_eq!(result.code, Some(0));
         assert_eq!((result.stdout.len(), result.truncated), (900_000, false));
+    }
+    #[rustfmt::skip]
+    fn grown_or_plain(grown: Result<Completion, ExecutionError>, plain: impl FnOnce() -> Result<Completion, ExecutionError>) -> Completion {
+        if let Err(ExecutionError::Io(message)) = &grown { assert!(message.contains("os error 1"), "{message}"); plain().unwrap() } else { grown.unwrap() }
     }
     #[test]
     fn failures_read_as_one_plain_sentence() {

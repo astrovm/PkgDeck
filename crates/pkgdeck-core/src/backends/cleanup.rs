@@ -544,4 +544,42 @@ mod tests {
         assert_eq!(items[0].bytes, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// `npm config get cache` ran, and npm said it failed.
+    struct NpmConfigFailed;
+    impl Transport for NpmConfigFailed {
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = std::iter::once(executable.to_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let failed = line.starts_with("npm config get cache");
+            Ok(Completion {
+                code: Some(if failed { 1 } else { 0 }),
+                signal: None,
+                stdout: if failed {
+                    vec![]
+                } else {
+                    b"make-fetch-happen:request-cache:x\n".to_vec()
+                },
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    #[test]
+    fn npm_cache_size_is_unknown_when_its_config_fails() {
+        let items = DevTool::npm(NpmConfigFailed)
+            .cleanup_cache(&Cancellation::default())
+            .unwrap();
+        assert_eq!(items[0].bytes, None);
+    }
 }

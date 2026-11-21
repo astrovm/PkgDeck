@@ -548,14 +548,11 @@ impl Catalog {
                     .map(|name| format!("pkg:{name}")),
             )
             .collect();
-        let Some(canonical) = keys
+        let canonical = keys
             .iter()
             .find_map(|key| self.aliases.get(key))
             .cloned()
-            .or_else(|| keys.first().cloned())
-        else {
-            return None;
-        };
+            .or_else(|| keys.first().cloned())?;
         if let Some(previous) = self.apps.get(&canonical) {
             info.fill_missing(previous);
         }

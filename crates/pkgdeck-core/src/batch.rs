@@ -696,6 +696,14 @@ thread_local! {
     static SESSION: RefCell<Option<std::sync::Arc<Session>>> = const { RefCell::new(None) };
     /// The operation this thread is running, see [`set_operation`].
     static CURRENT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests run this program as the helper, with no password prompt.
+    #[cfg(test)]
+    static DIRECT_RUNNER: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_direct_runner(path: Option<PathBuf>) {
+    DIRECT_RUNNER.with(|cell| *cell.borrow_mut() = path);
 }
 
 impl Drop for ScopeGuard {
@@ -909,6 +917,10 @@ fn find_runner(runtime: Runtime, executable: &Path, flatpak_info: &str) -> Optio
     None
 }
 pub(crate) fn runner_path(host: &Host) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = DIRECT_RUNNER.with(|cell| cell.borrow().clone()) {
+        return Some(path);
+    }
     let info = if host.runtime == Runtime::Flatpak {
         fs::read_to_string("/.flatpak-info").ok()?
     } else {
@@ -1035,6 +1047,12 @@ fn runner_command(
     let Some((path, appimage)) = runner else {
         return Ok(None);
     };
+    #[cfg(test)]
+    if DIRECT_RUNNER.with(|cell| cell.borrow().is_some()) {
+        let mut command = host.command(&path, &[])?;
+        command.stderr(Io::Null).process_group();
+        return Ok(Some(command));
+    }
     let (program, mut args) = authorization.prefix(&path);
     if appimage {
         args.push("--batch-runner".into());

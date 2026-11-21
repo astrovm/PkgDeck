@@ -39,6 +39,8 @@ Version         : 1-1\n";
         ]
     );
     assert!(pacman_pins("").is_empty());
+    // A continuation before any field, and a line that is not a field.
+    assert!(pacman_pins("  orphan\nNot a field\n").is_empty());
 }
 
 #[test]

@@ -1336,6 +1336,39 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_cask_looks_in_the_home_applications_folder() {
+        let home = std::env::temp_dir().join(format!("pkgdeck-cask-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("Applications")).unwrap();
+        struct BrewHome(PathBuf);
+        impl Transport for BrewHome {
+            fn brew(
+                &self,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: br#"{"casks":[{"full_token":"firefox","name":["Firefox"],"desc":"Web browser","homepage":null,"version":"2.0","installed":"2.0","outdated":false}]}"#.to_vec(),
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+            fn env(&self, name: &str) -> Option<OsString> {
+                (name == "HOME").then(|| self.0.clone().into())
+            }
+        }
+        let mut casks = HomebrewCask::new(BrewHome(home.clone()));
+        casks.prefix = Some(PREFIX.into());
+        let rows = casks.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[0].icon, None);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn cask_info_that_is_not_json_blocks_adoption() {
         let mut casks = HomebrewCask::new(Brew(|_| b"not json"));
         casks.prefix = Some(PREFIX.into());

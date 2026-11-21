@@ -224,6 +224,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use zbus::connection::Builder;
 
+    fn refuse_bus() -> std::future::Ready<zbus::Result<Connection>> {
+        panic!("asked the bus")
+    }
+
+    #[test]
+    #[should_panic(expected = "asked the bus")]
+    fn the_refused_bus_panics_if_someone_asks() {
+        std::mem::drop(refuse_bus());
+    }
+
     /// How the fake daemon behaves.
     #[derive(Clone)]
     struct Daemon {
@@ -238,6 +248,8 @@ mod tests {
         fails: &'static str,
         /// Whether the daemon goes away once the refresh starts.
         hangs_up: bool,
+        /// An ErrorCode body that is not a code and a message.
+        garbled_error: bool,
         /// How long the refresh takes.
         takes: Duration,
     }
@@ -251,6 +263,7 @@ mod tests {
                 honours_cancel: true,
                 fails: "",
                 hangs_up: false,
+                garbled_error: false,
                 takes: Duration::ZERO,
             }
         }
@@ -320,13 +333,23 @@ mod tests {
                         std::thread::sleep(daemon.takes);
                         if let Some((exit, error)) = daemon.finish {
                             if let Some(error) = error {
-                                let _ = zbus::block_on(server.emit_signal(
-                                    None::<()>,
-                                    TID,
-                                    TRANSACTION,
-                                    "ErrorCode",
-                                    &(7u32, error),
-                                ));
+                                let _ = if daemon.garbled_error {
+                                    zbus::block_on(server.emit_signal(
+                                        None::<()>,
+                                        TID,
+                                        TRANSACTION,
+                                        "ErrorCode",
+                                        &"not-a-pair",
+                                    ))
+                                } else {
+                                    zbus::block_on(server.emit_signal(
+                                        None::<()>,
+                                        TID,
+                                        TRANSACTION,
+                                        "ErrorCode",
+                                        &(7u32, error),
+                                    ))
+                                };
                             }
                             finish(exit);
                         }
@@ -461,9 +484,11 @@ mod tests {
         let fake = || std::future::ready(Ok(serve(Daemon::default()).0));
         assert_eq!(refresh_with("apt", &cancel, false, fake), Ok(true));
         // In a container the bus is the host's, and so are its lists.
-        let never = || -> std::future::Ready<zbus::Result<Connection>> { panic!("asked the bus") };
-        assert_eq!(refresh_with("apt", &cancel, true, never), Ok(false));
-        assert_eq!(refresh_with("flatpak", &cancel, false, never), Ok(false));
+        assert_eq!(refresh_with("apt", &cancel, true, refuse_bus), Ok(false));
+        assert_eq!(
+            refresh_with("flatpak", &cancel, false, refuse_bus),
+            Ok(false)
+        );
         let absent = || std::future::ready(Err(zbus::Error::Unsupported));
         assert_eq!(refresh_with("apt", &cancel, false, absent), Ok(false));
         // Sources PackageKit doesn't refresh never reach the bus.
@@ -523,6 +548,19 @@ mod tests {
             refresh_on(&bus, "apt", &Cancellation::default(), TIMEOUT),
             Err(ExecutionError::Failed(_))
         ));
+    }
+
+    #[test]
+    fn an_error_that_is_not_a_code_and_text_is_ignored() {
+        let (bus, _) = serve(Daemon {
+            garbled_error: true,
+            finish: Some((SUCCESS, Some("ignored"))),
+            ..Daemon::default()
+        });
+        assert_eq!(
+            refresh_on(&bus, "apt", &Cancellation::default(), TIMEOUT),
+            Ok(true)
+        );
     }
 
     #[test]

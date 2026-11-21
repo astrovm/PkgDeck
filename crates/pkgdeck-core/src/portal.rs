@@ -39,13 +39,10 @@ enum Route {
     #[cfg(test)]
     Fixed(Option<Arc<Bus>>),
 }
+#[rustfmt::skip]
 impl std::fmt::Debug for Portal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self.0 {
-            Route::Session => "Portal(session)",
-            #[cfg(test)]
-            Route::Fixed(_) => "Portal(fake)",
-        })
+        f.write_str(match &self.0 { Route::Session => "Portal(session)", #[cfg(test)] Route::Fixed(_) => "Portal(fake)" })
     }
 }
 
@@ -220,6 +217,16 @@ fn lost() -> io::Error {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_LISTENER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_the_next_listener() {
+    FAIL_LISTENER.with(|flag| flag.set(true));
+}
+
 /// One connection to the portal and what it said about commands ending.
 pub(crate) struct Bus {
     connection: Connection,
@@ -233,6 +240,12 @@ struct State {
     /// Commands nobody waits for any more; their end is dropped.
     abandoned: HashSet<u32>,
     lost: bool,
+}
+
+/// A panicked holder must not stick every later command.
+#[inline(never)]
+fn recover<T>(result: Result<T, std::sync::PoisonError<T>>) -> T {
+    result.unwrap_or_else(|poison| poison.into_inner())
 }
 
 impl Bus {
@@ -253,11 +266,19 @@ impl Bus {
             changed: Condvar::new(),
         });
         let weak = Arc::downgrade(&bus);
-        std::thread::Builder::new()
-            .name("pkgdeck-host-commands".into())
-            .spawn(move || Self::listen(ends, weak))
-            .map_err(|error| zbus::Error::InputOutput(Arc::new(error)))?;
+        #[cfg(test)]
+        if FAIL_LISTENER.with(|flag| flag.replace(false)) {
+            return Err(zbus::Error::InputOutput(Arc::new(io::Error::other(
+                "the host-command listener did not start",
+            ))));
+        }
+        Self::start_listener(ends, weak)?;
         Ok(bus)
+    }
+
+    #[rustfmt::skip]
+    fn start_listener(ends: MessageStream, bus: Weak<Self>) -> zbus::Result<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new().name("pkgdeck-host-commands".into()).spawn(move || Self::listen(ends, bus)).map_err(|error| zbus::Error::InputOutput(Arc::new(error)))
     }
 
     fn listen(mut ends: MessageStream, bus: Weak<Self>) {
@@ -275,9 +296,7 @@ impl Bus {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        recover(self.state.lock())
     }
 
     fn lost(&self) -> bool {
@@ -393,11 +412,7 @@ impl HostChild {
             if state.lost {
                 return Err(lost());
             }
-            state = self
-                .bus
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poison| poison.into_inner());
+            state = recover(self.bus.changed.wait(state));
         }
     }
 
@@ -604,6 +619,7 @@ mod tests {
     use std::cell::Cell;
     use std::net::Shutdown;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -631,6 +647,12 @@ mod tests {
         Portal(Route::Fixed(Some(Bus::open(peer.client).unwrap())))
     }
 
+    #[rustfmt::skip]
+    fn bus_of(portal: &Portal) -> Arc<Bus> {
+        let Route::Fixed(Some(bus)) = &portal.0 else { unreachable!("fake portal") };
+        Arc::clone(bus)
+    }
+
     fn method_error(name: &str) -> zbus::Error {
         let message = zbus::Message::method_call("/", "Call").build(&()).unwrap();
         zbus::Message::error(&message.header(), name)
@@ -641,6 +663,64 @@ mod tests {
 
     fn broken() -> zbus::Error {
         zbus::Error::InputOutput(Arc::new(io::Error::from(io::ErrorKind::WouldBlock)))
+    }
+
+    #[test]
+    fn the_listener_thread_can_fail_to_start() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let peer = fake::Peer::new(&bridge, Vec::new());
+        struct ClearFail;
+        impl Drop for ClearFail {
+            fn drop(&mut self) {
+                FAIL_LISTENER.with(|flag| flag.set(false));
+            }
+        }
+        let _clear = ClearFail;
+        fail_the_next_listener();
+        let error = Bus::open(peer.client)
+            .err()
+            .map(|error| error.to_string())
+            .expect("the listener thread was started");
+        assert!(error.contains("did not start"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_host_command_end_that_is_not_a_status_is_ignored() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let peer = fake::Peer::new(&bridge, Vec::new());
+        let server = peer.server.clone();
+        let portal = portal(peer);
+        zbus::block_on(server.emit_signal(
+            None::<&str>,
+            PATH,
+            INTERFACE,
+            "HostCommandExited",
+            &"not-a-pair",
+        ))
+        .unwrap();
+        let mut child = program(&portal, "exit 0").start(null(), false).unwrap();
+        assert!(child.wait().unwrap().success());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_panicked_waiter_does_not_stick_the_portal() {
+        let dir = dir();
+        let bridge = fake_bridge(&dir);
+        let portal = fake(&bridge);
+        let bus = bus_of(&portal);
+        let bus2 = Arc::clone(&bus);
+        let panicked = std::thread::spawn(move || {
+            let _guard = bus2.state();
+            panic!("poison the portal lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(!bus.lost());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

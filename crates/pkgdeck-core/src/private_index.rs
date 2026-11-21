@@ -455,4 +455,28 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_lock_whose_parent_is_a_file_names_that_path() {
+        let root = scratch("lock-file");
+        let blocker = root.join("not-dir");
+        fs::write(&blocker, b"x").unwrap();
+        let error = lock(&blocker.join("lock"), &Cancellation::default()).unwrap_err();
+        assert!(error.to_string().contains("not-dir"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepare_fills_the_user_copy_when_this_is_not_root() {
+        let cancel = Cancellation::default();
+        let copy = prepare("apt", &cancel).unwrap().expect("user copy");
+        assert!(
+            copy.dir.ends_with("pkgdeck/indexes/apt"),
+            "{}",
+            copy.dir.display()
+        );
+        let dir = copy.dir.clone();
+        drop(copy);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

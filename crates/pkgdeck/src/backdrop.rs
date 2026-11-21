@@ -321,6 +321,31 @@ mod tests {
         *WALLPAPER.lock().unwrap() = None;
         *WALLPAPER_CACHE.lock().unwrap() = None;
         *REPAINT.lock().unwrap() = None;
+        // No window is waiting, so a repaint has nowhere to go.
+        blur_known(true);
+        assert!(can_blur());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = WALLPAPER_CACHE.lock().unwrap();
+            panic!("poison cache");
+        }));
+        allow_wallpaper(Some("/ignored".into()));
+        assert!(wallpaper_cache().is_none());
+        *WALLPAPER_CACHE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = WALLPAPER.lock().unwrap();
+            panic!("poison wallpaper");
+        }));
+        wallpaper_loaded(Wallpaper {
+            size: [1, 1],
+            pixels: vec![[9, 9, 9, 255]],
+        });
+        assert!(current_wallpaper().is_none());
+        *WALLPAPER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        *REPAINT.lock().unwrap() = None;
         CAN_BLUR.store(UNKNOWN, Ordering::Relaxed);
     }
 
@@ -362,6 +387,10 @@ mod tests {
         let empty = "[Containments][3][Wallpaper][org.kde.image][General]\nImage=\n";
         assert_eq!(plasma_wallpaper(empty), None);
         assert_eq!(plasma_wallpaper(""), None);
+        // lastScreen under the wallpaper section is not the containment's screen.
+        let misplaced = "[Containments][28][Wallpaper][org.kde.image][General]\n\
+            lastScreen=0\nImage=/w/only.png\n";
+        assert_eq!(plasma_wallpaper(misplaced).as_deref(), Some("/w/only.png"));
     }
 
     #[test]
@@ -401,6 +430,25 @@ mod tests {
         let again = load_wallpaper(&picture, Some(&cache)).unwrap();
         assert_eq!(again.pixels[0], [0, 255, 0, 255]);
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+        let garbage = dir.join("notes.txt");
+        std::fs::write(&garbage, b"this is not an image").unwrap();
+        assert!(load_wallpaper(&garbage, None).is_none());
+        // A pipe cannot seek, so guessing the format fails before decode.
+        let fifo = dir.join("wall.fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let fifo_write = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            let _file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(fifo_write)
+                .unwrap();
+        });
+        assert!(load_wallpaper(&fifo, None).is_none());
+        writer.join().unwrap();
         let mode = |path: &std::path::Path| {
             use std::os::unix::fs::PermissionsExt;
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777

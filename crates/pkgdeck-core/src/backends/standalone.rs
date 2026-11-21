@@ -1773,6 +1773,13 @@ mod tests {
             cancellation_deferred: false,
         }
     }
+    #[test]
+    fn forgetting_a_version_without_a_store_clears_only_memory() {
+        let versions = Versions::new(None);
+        versions.seen().insert("fp".into(), ok("1"));
+        versions.forget(StandaloneTool::Codex);
+        assert!(versions.seen().is_empty());
+    }
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {

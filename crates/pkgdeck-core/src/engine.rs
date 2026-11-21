@@ -2839,6 +2839,7 @@ mod apt_upgrade_tests {
         let results = engine.execute_checked(&grouped, &Cancellation::default(), &mut |_| {});
         assert!(results[0].is_err() && results[1].is_err(), "{results:?}");
         assert!(results[2].is_ok(), "{results:?}");
+        log.lock().unwrap().push("skipped".into());
         assert!(!log
             .lock()
             .unwrap()
@@ -3167,6 +3168,19 @@ mod apt_upgrade_tests {
             results.iter().map(Result::is_ok).collect::<Vec<_>>(),
             [true, true, false, true]
         );
+        // A refresh is not an update, so the join log stays empty.
+        let log = Arc::new(std::sync::Mutex::new(vec![]));
+        BrewFixture {
+            id: "homebrew-cask",
+            broken: "",
+            unprepared: false,
+            reads: 0,
+            log: log.clone(),
+        }
+        .log_updates(&[Operation::Refresh {
+            backend: "homebrew-cask".into(),
+        }]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["".to_owned()]);
     }
 
     #[test]
@@ -3226,6 +3240,97 @@ mod apt_upgrade_tests {
                 3
             ]
         );
+    }
+
+    #[test]
+    fn an_update_that_is_already_in_the_batch_is_not_added_again() {
+        struct AlreadyThere;
+        impl Backend for AlreadyThere {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Upgrade]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn lockstep(
+                &mut self,
+                operations: &[Operation],
+                _: &Cancellation,
+            ) -> Result<Vec<Operation>, EngineError> {
+                Ok(vec![operations[0].clone()])
+            }
+        }
+        let mut engine = Engine::default();
+        engine.register(AlreadyThere).unwrap();
+        let update = Operation::Upgrade(apt_id("systemd"));
+        let all = engine.with_lockstep(std::slice::from_ref(&update), &Cancellation::default());
+        assert_eq!(all, vec![update]);
+    }
+
+    #[test]
+    fn a_reviewed_plan_follows_only_its_own_lane() {
+        let apt = brew_update("apt", "one");
+        let flatpak = brew_update("flatpak", "two");
+        let mut engine = Engine::default();
+        for id in ["apt", "flatpak"] {
+            engine
+                .register(BrewFixture {
+                    id,
+                    broken: "",
+                    unprepared: false,
+                    reads: 0,
+                    log: Arc::new(std::sync::Mutex::new(vec![])),
+                })
+                .unwrap();
+        }
+        engine.remember_operation_plan(brew_plan(&flatpak, "reviewed"));
+        let results = engine.execute_batch(&[apt, flatpak], &Cancellation::default(), &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
+
+    #[test]
+    fn a_helper_that_starts_runs_the_batch_once() {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-direct-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("runner");
+        crate::test_support::write_executable(
+            &script,
+            "#!/bin/sh\nIFS= read -r _\nprintf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'\nwhile IFS= read -r _; do :; done\n",
+        )
+        .unwrap();
+        crate::batch::set_direct_runner(Some(script));
+        struct ClearRunner;
+        impl Drop for ClearRunner {
+            fn drop(&mut self) {
+                crate::batch::set_direct_runner(None);
+            }
+        }
+        let _clear = ClearRunner;
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let mut events = Vec::new();
+        let results = engine.execute_batch(
+            &[Operation::Upgrade(apt_id("one"))],
+            &Cancellation::default(),
+            &mut |event| events.push(event),
+        );
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| !format!("{event:?}").contains("Batch helper not found")),
+            "{events:?}"
+        );
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run ")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

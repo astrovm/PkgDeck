@@ -373,4 +373,31 @@ mod tests {
         };
         assert!(SystemFiles::new(garbled).cleanup(&cancel).is_err());
     }
+
+    #[test]
+    fn a_find_listing_that_is_not_text_is_invalid() {
+        struct Binary;
+        impl Transport for Binary {
+            fn system_manager(
+                &self,
+                _: &str,
+                _: &[std::ffi::OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![0xff],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+        }
+        let error = SystemFiles::new(Binary)
+            .cleanup(&Cancellation::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("utf-8"), "{error}");
+    }
 }

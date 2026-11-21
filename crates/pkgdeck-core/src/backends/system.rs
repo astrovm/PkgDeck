@@ -363,6 +363,26 @@ fn held_snaps(listing: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    static SNAP_REVISION_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_snap_revision_dir(dir: Option<std::path::PathBuf>) {
+    SNAP_REVISION_DIR.with(|cell| *cell.borrow_mut() = dir);
+}
+
+/// Where Snap stores one revision. Tests point this at a temporary folder.
+fn snap_revision_file(name: &str, revision: &str) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = SNAP_REVISION_DIR.with(|cell| cell.borrow().clone()) {
+        return dir.join(format!("{name}_{revision}.snap"));
+    }
+    std::path::PathBuf::from(format!("/var/lib/snapd/snaps/{name}_{revision}.snap"))
+}
+
 /// Revisions `snap list --all` marks disabled, with their versions: what
 /// Snap keeps to go back to after an update.
 fn disabled_revisions(listing: &str) -> Vec<(String, String, String)> {
@@ -954,7 +974,7 @@ impl<T: Transport> SystemManager<T> {
         let sizes: Vec<u64> = revisions
             .iter()
             .filter_map(|(name, revision, _)| {
-                std::fs::metadata(format!("/var/lib/snapd/snaps/{name}_{revision}.snap")).ok()
+                std::fs::metadata(snap_revision_file(name, revision)).ok()
             })
             .map(|metadata| metadata.len())
             .collect();
@@ -1262,10 +1282,10 @@ impl<T: Transport> Backend for SystemManager<T> {
                     path,
                 ],
                 // Snap: the other managers were refused before staging.
+                // A staged snap always has its assertion: staging copies it
+                // before it can succeed.
                 _ => {
-                    let assertion = staged
-                        .assertion()
-                        .ok_or_else(|| invalid("snap", "matching assertion is required"))?;
+                    let assertion = staged.assertion().expect("a staged snap has its assertion");
                     bytes(
                         "snap",
                         self.call(
@@ -1548,4 +1568,61 @@ pub(super) fn same_pacman_version(candidate: &str, pinned: &str) -> bool {
             && candidate
                 .rsplit_once('-')
                 .is_some_and(|(version, _)| version == pinned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Bytes(Vec<u8>);
+    impl Transport for Bytes {
+        fn system_manager(
+            &self,
+            _: &str,
+            _: &[std::ffi::OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: self.0.clone(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    #[test]
+    fn a_snap_list_that_is_not_text_is_invalid() {
+        let error = SystemManager::snap(Bytes(vec![0xff]))
+            .snap_listing(&Cancellation::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("utf-8"), "{error}");
+    }
+
+    #[test]
+    fn an_old_snap_revision_counts_its_file() {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-snap-revisions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        set_snap_revision_dir(Some(dir.clone()));
+        struct ClearDir;
+        impl Drop for ClearDir {
+            fn drop(&mut self) {
+                set_snap_revision_dir(None);
+            }
+        }
+        let _clear = ClearDir;
+        std::fs::write(dir.join("pkgdecktest_1.snap"), b"01234567").unwrap();
+        let listing = "Name Version Rev Tracking Publisher Notes\n\
+            pkgdecktest 1.0 1 latest publisher disabled\n";
+        let item = SystemManager::snap(Bytes(listing.as_bytes().to_vec()))
+            .old_revisions(listing)
+            .expect("one disabled revision");
+        assert_eq!(item.bytes, Some(8));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

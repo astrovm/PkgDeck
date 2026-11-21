@@ -658,6 +658,10 @@ mod tests {
         assert_eq!(row.installed_version.as_deref(), Some("44.20260920.0"));
         assert_eq!(row.candidate_version.as_deref(), Some("44.20260927.0"));
         assert_eq!(row.update, UpdateAvailability::Available);
+        let plain = image.details(&row.id, &Cancellation::default()).unwrap();
+        assert!(plain.description.contains("Running:"));
+        assert!(!plain.description.contains("After restart"));
+        assert!(!plain.description.contains("Previous (rollback)"));
         let mut staged = SystemImage::new(fake(Some(BOOTC_STAGED), None));
         let row = staged
             .installed(&Cancellation::default())
@@ -836,6 +840,8 @@ mod tests {
         let bootc = parse_bootc(&serde_json::json!({"status": {"booted": {"image": {}}}})).unwrap();
         assert_eq!(bootc.booted.source, "bootc image");
         assert_eq!(bootc.booted.version, None);
+        let unnamed = SystemImage::<Fake>::package(Tool::Bootc, &bootc);
+        assert_eq!(unnamed.installed_version.as_deref(), Some("unknown"));
         // The cached update is known by digest when it has no version.
         let digest = parse_bootc(&serde_json::json!({"status": {"booted": {
             "image": {"version": "44.1"},
