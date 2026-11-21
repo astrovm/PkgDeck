@@ -8,4 +8,7 @@ publish = false
 
 [dependencies]
 serde_json.workspace = true
-libc = "=0.2.191"
+rustix.workspace = true
+
+[lints]
+workspace = true

@@ -14,3 +14,6 @@ pkgdeck-core = { path = "..", features = ["test-support"] }
 path = "lib.rs"
 test = false
 doctest = false
+
+[lints]
+workspace = true

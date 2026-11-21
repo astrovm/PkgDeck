@@ -17,6 +17,8 @@ struct State {
     /// Columns covered by the spinner line, erased with spaces so no cursor
     /// escape codes are written when color is off.
     drawn: usize,
+    /// The spinner frame the animation thread drew last.
+    frame: usize,
     stop: bool,
 }
 
@@ -51,18 +53,16 @@ impl Live {
         let state = Arc::new(Mutex::new(State::default()));
         let thread = animated.then(|| {
             let state = Arc::clone(&state);
-            std::thread::spawn(move || {
-                let mut frame = 0;
-                loop {
-                    std::thread::sleep(Duration::from_millis(80));
-                    let mut state = state.lock().unwrap();
-                    if state.stop {
-                        break;
-                    }
-                    if state.label.is_some() {
-                        frame = (frame + 1) % FRAMES.len();
-                        draw(&mut state, frame, width, color);
-                    }
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(80));
+                let mut state = state.lock().unwrap();
+                if state.stop {
+                    break;
+                }
+                if state.label.is_some() {
+                    let frame = (state.frame + 1) % FRAMES.len();
+                    state.frame = frame;
+                    draw(&mut state, frame, width, color);
                 }
             })
         });
@@ -221,7 +221,13 @@ mod tests {
             live.status("Installing a package with a long name");
             live.detail("line one\n\nUnpacking tool\n");
             assert_eq!(live.state.lock().unwrap().detail, "Unpacking tool");
-            std::thread::sleep(Duration::from_millis(200));
+            // Wait for the animation thread to draw a frame. A busy test
+            // machine can delay it well past one 80 ms tick.
+            let start = Instant::now();
+            while live.state.lock().unwrap().frame == 0 {
+                assert!(start.elapsed() < Duration::from_secs(30));
+                std::thread::sleep(Duration::from_millis(5));
+            }
             live.line("✓ Install tool");
             let mut state = live.state.lock().unwrap();
             state.since = Some(Instant::now() - Duration::from_secs(3));
