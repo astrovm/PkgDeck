@@ -136,10 +136,14 @@ GitHub Releases also have AppImage and Snap packages:
   updater looks for an old file name. From v0.1.2 on, updates work
   automatically.
 - The Snap is only published on GitHub, not the Snap Store.
-- The AppImage and Snap are built on Ubuntu 24.04, so they need glibc 2.39
-  or newer, like Ubuntu 24.04 or Debian 13. CI checks every bundled program
-  and library for that and runs the AppImage on Ubuntu 24.04, Debian 13 and
-  Ubuntu 26.04.
+- The AppImage and Snap programs are built in an Ubuntu 22.04 container
+  (`scripts/container.sh portable`), so they need glibc 2.35 or newer, like
+  Ubuntu 22.04 or Debian 12. Ubuntu 22.04 is the oldest Ubuntu LTS in standard
+  support, and the AppImage catalog tests on it. The APT reader ships with its
+  own libraries and loader, like the CLI archive, so it uses a newer APT than
+  Ubuntu 22.04 has. CI checks every other bundled program and library for
+  glibc 2.35 and runs the AppImage on Ubuntu 22.04, Ubuntu 24.04, Debian 13
+  and Ubuntu 26.04.
 
 To build the packages, use the same environment as CI:
 

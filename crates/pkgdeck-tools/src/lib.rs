@@ -2,7 +2,6 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::{Child, Command},
     thread::sleep,
@@ -682,19 +681,14 @@ pub fn apt_lock_probe() {
             .trim(),
         "github-hosted-ubuntu-26.04"
     );
-    assert_eq!(unsafe { libc::geteuid() }, 0);
+    assert!(rustix::process::geteuid().is_root());
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/var/lib/dpkg/lock-frontend")
         .unwrap();
-    let mut spec: libc::flock = unsafe { std::mem::zeroed() };
-    spec.l_type = libc::F_WRLCK as _;
-    spec.l_whence = libc::SEEK_SET as _;
-    assert_eq!(
-        unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_SETLK, &spec) },
-        0
-    );
+    // The same whole-file F_SETLK write lock that dpkg and APT take.
+    rustix::fs::fcntl_lock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
     let out = Command::new("runuser")
         .args([
             "-u",

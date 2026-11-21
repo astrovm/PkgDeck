@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-scripts/bundle-cli-apt.sh "$work/original"
+scripts/bundle-apt.sh "$work/original"
 mv "$work/original" "$work/relocated prefix"
 prefix="$work/relocated prefix"
 test -s "$prefix/share/licenses/pkgdeck/apt/APT-HELPER-GPL-2"
