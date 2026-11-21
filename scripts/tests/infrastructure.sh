@@ -342,6 +342,55 @@ tail -n 5 "$work/args" | tr '\n' ' ' | grep -Fq 'cargo build --workspace --relea
 # It also copies the X11 libraries the window opens at run time from Ubuntu 22.04.
 tail -n 5 "$work/args" | grep -Fxq 'scripts/bundle-libs.sh target/release/runtime-libs window'
 grep -q 'libxkbcommon-x11-0' containers/portable.Containerfile
+# bundle-libs.sh copies the window libraries of this architecture and what they
+# need, and leaves out the AppImage exclude list. Fake ldconfig, ldd and uname
+# describe the system; each fake ldd answer is a file named after the library.
+mkdir -p "$work/libs-bin" "$work/libs-sys" "$work/libs-ldd"
+cat >"$work/libs-bin/ldconfig" <<'LDCONFIG'
+#!/usr/bin/env bash
+# Over 64 KiB of other libraries first, more than a pipe holds.
+for i in $(seq 3000); do printf '\tlibfiller%s.so.1 (libc6,x86-64) => /usr/lib/libfiller%s.so.1\n' "$i" "$i"; done
+for name in libxkbcommon.so.0 libxkbcommon-x11.so.0 libXcursor.so.1 libXi.so.6; do
+    # The 32-bit copy comes first, as on a multiarch system.
+    printf '\t%s (libc6) => %s/i386/%s\n' "$name" "$LIBS_SYS" "$name"
+    [[ $name == "${LIBS_MISSING:-}" ]] || printf '\t%s (libc6,x86-64, OS ABI: Linux 3.2.0) => %s/%s\n' "$name" "$LIBS_SYS" "$name"
+done
+LDCONFIG
+cat >"$work/libs-bin/ldd" <<'LDD'
+#!/usr/bin/env bash
+answer=$LIBS_LDD/${1##*/}
+[[ -f $answer ]] || { echo "not a dynamic executable" >&2; exit 1; }
+sed "s|SYS|$LIBS_SYS|g" "$answer"
+LDD
+printf '#!/bin/sh\necho x86_64\n' >"$work/libs-bin/uname"
+chmod +x "$work/libs-bin/"*
+for name in libxkbcommon.so.0 libxkbcommon-x11.so.0 libXcursor.so.1 libXi.so.6 libXrender.so.1 libxcb.so.1 libc.so.6 libstdc++.so.6 ld-linux-x86-64.so.2; do
+    echo "$name" >"$work/libs-sys/$name"
+done
+printf '\tlibc.so.6 => SYS/libc.so.6 (0x1)\n\t/lib64/ld-linux-x86-64.so.2 (0x2)\n' >"$work/libs-ldd/libxkbcommon.so.0"
+printf '\tlibxkbcommon.so.0 => SYS/libxkbcommon.so.0 (0x1)\n\tlibxcb.so.1 => SYS/libxcb.so.1 (0x2)\n\tlibc.so.6 => SYS/libc.so.6 (0x3)\n' >"$work/libs-ldd/libxkbcommon-x11.so.0"
+printf '\tlibXrender.so.1 => SYS/libXrender.so.1 (0x1)\n\tlibstdc++.so.6 => SYS/libstdc++.so.6 (0x2)\n' >"$work/libs-ldd/libXcursor.so.1"
+printf '\tlibc.so.6 => SYS/libc.so.6 (0x1)\n' >"$work/libs-ldd/libXi.so.6"
+printf '\tlibc.so.6 => SYS/libc.so.6 (0x1)\n' >"$work/libs-ldd/libXrender.so.1"
+printf '\tlibmissing.so.1 => not found\n' >"$work/libs-ldd/broken"
+touch "$work/broken" "$work/static"
+bundle_libs() { env PATH="$work/libs-bin:$PATH" LIBS_SYS="$work/libs-sys" LIBS_LDD="$work/libs-ldd" "$@" scripts/bundle-libs.sh "$work/bundled" window; }
+expect_code 0 bundle_libs
+[[ $(find "$work/bundled" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ') == 'libXcursor.so.1 libXi.so.6 libXrender.so.1 libxkbcommon-x11.so.0 libxkbcommon.so.0 ' ]] || {
+    find "$work/bundled" -mindepth 1 -printf "%f\n"
+    echo 'bundle-libs.sh must copy the window libraries and libXrender, and nothing on the exclude list'
+    exit 1
+}
+[[ $(cat "$work/bundled/libXi.so.6") == libXi.so.6 ]]
+rm -r "$work/bundled"
+expect_code 1 bundle_libs LIBS_MISSING=libXi.so.6
+grep -Fxq 'Missing libXi.so.6 on this system' "$work/output"
+expect_code 1 env PATH="$work/libs-bin:$PATH" LIBS_SYS="$work/libs-sys" LIBS_LDD="$work/libs-ldd" scripts/bundle-libs.sh "$work/bundled" "$work/broken"
+grep -q "Unresolved dependency in $work/broken" "$work/output"
+expect_code 1 env PATH="$work/libs-bin:$PATH" LIBS_SYS="$work/libs-sys" LIBS_LDD="$work/libs-ldd" scripts/bundle-libs.sh "$work/bundled" "$work/static"
+grep -Fxq "Cannot inspect $work/static" "$work/output"
+expect_code 2 scripts/bundle-libs.sh "$work/bundled"
+rm -r "$work/bundled"
 [[ $(PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/portable" scripts/container.sh portable --release-dir) == "$work/portable/target/release" ]]
 grep -q 'ubuntu:22.04@' containers/portable.Containerfile
 if grep -q 'libapt-pkg-dev' containers/portable.Containerfile; then echo 'The portable container must not build the APT reader'; exit 1; fi
