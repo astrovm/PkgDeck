@@ -6,5 +6,13 @@
   "minimumReleaseAge": "3 days",
   "minimumReleaseAgeBehaviour": "timestamp-optional",
   "groupSingleUpdates": true,
-  "semanticCommits": "enabled"
+  "semanticCommits": "enabled",
+  "packageRules": [
+    {
+      "description": "The AppImage and Snap programs are built on Ubuntu 22.04, the oldest Ubuntu LTS in standard support, for its older glibc. Update only that image's digest.",
+      "matchFileNames": ["containers/portable.Containerfile"],
+      "matchDepNames": ["docker.io/library/ubuntu"],
+      "allowedVersions": "22.04"
+    }
+  ]
 }
