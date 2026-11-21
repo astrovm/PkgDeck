@@ -17,7 +17,7 @@ struct State {
     /// Columns covered by the spinner line, erased with spaces so no cursor
     /// escape codes are written when color is off.
     drawn: usize,
-    /// The spinner frame the animation thread drew last.
+    /// The spinner frame the animation thread showed last.
     frame: usize,
     stop: bool,
 }
@@ -59,11 +59,10 @@ impl Live {
                 if state.stop {
                     break;
                 }
-                if state.label.is_some() {
-                    let frame = (state.frame + 1) % FRAMES.len();
-                    state.frame = frame;
-                    draw(&mut state, frame, width, color);
-                }
+                // draw shows nothing while there is no status.
+                let frame = (state.frame + 1) % FRAMES.len();
+                state.frame = frame;
+                draw(&mut state, frame, width, color);
             })
         });
         Self {
