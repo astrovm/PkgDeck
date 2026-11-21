@@ -10,6 +10,11 @@
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.15.7" date="2026-11-21">
+      <description>
+        <p>The AppImage opens its window on systems without some X11 keyboard and cursor libraries, such as a minimal Ubuntu 22.04.</p>
+      </description>
+    </release>
     <release version="0.15.6" date="2026-11-21">
       <description>
         <p>The AppImage and Snap now start on older systems, such as Ubuntu 22.04.</p>

@@ -10,6 +10,7 @@ COPY scripts/ci/apt-mirrors.sh /opt/pkgdeck/apt-mirrors.sh
 RUN bash /opt/pkgdeck/apt-mirrors.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config ca-certificates \
+    libxkbcommon0 libxkbcommon-x11-0 libxcursor1 libxi6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=rust /usr/local/rustup /opt/rustup
 COPY --from=rust /usr/local/cargo/bin/ /usr/local/bin/
