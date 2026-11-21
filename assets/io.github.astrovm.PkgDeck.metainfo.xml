@@ -12,7 +12,7 @@
   <releases>
     <release version="0.15.6" date="2026-11-21">
       <description>
-        <p>The AppImage and Snap start on older systems again, such as Ubuntu 22.04.</p>
+        <p>The AppImage and Snap now start on older systems, such as Ubuntu 22.04.</p>
       </description>
     </release>
     <release version="0.15.5" date="2026-11-18">
