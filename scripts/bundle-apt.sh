@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Keep the static CLI portable while giving its separate APT reader a private
-# library closure, including glibc and its loader. No host libraries are used.
+# Give the separate APT reader a private library closure, including glibc and
+# its loader, so no host libraries are used. The static CLI archive and the
+# AppImage and Snap ship it, and work on systems with an older glibc or APT.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-prefix=${1:?Usage: bundle-cli-apt.sh PREFIX}
+prefix=${1:?Usage: bundle-apt.sh PREFIX}
 private=$prefix/lib/pkgdeck/apt
 licenses=$prefix/share/licenses/pkgdeck/apt
 mkdir -p "$prefix/bin" "$private" "$licenses"

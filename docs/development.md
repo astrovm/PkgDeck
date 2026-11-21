@@ -270,8 +270,9 @@ Flatpak/Snap bridges, FUSE, or a real display.
   test tools don't count toward the 100% coverage gate.
 - `scripts/build-apt.sh` builds the separate APT reader (GPL-2.0-or-later)
   from `libapt-pkg-dev`. It stays a separate program so APT isn't linked into
-  the app. `scripts/bundle.sh` bundles its libraries and license notices, so
-  users don't need development headers. Package changes still use the
+  the app. `scripts/bundle-apt.sh` bundles its libraries, glibc, loader and
+  license notices for the CLI archive, AppImage and Snap, so users don't need
+  development headers or a matching APT version. Package changes still use the
   system's own package manager and password prompt.
 - `scripts/check-no-python.sh` rejects Python scripts and Python calls in
   this project. It doesn't apply to the OS, cloud-init, or package
