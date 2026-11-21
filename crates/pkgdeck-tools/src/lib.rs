@@ -322,6 +322,17 @@ impl Desktop {
                 }
             }
         }
+        // "Failed to open connection to X server" alone does not say whether
+        // the X server stopped or its socket went away.
+        let errors = fs::read_to_string(self.dir.0.join("xvfb.log")).unwrap_or_default();
+        match self.server.0.try_wait() {
+            Ok(Some(status)) => text.push_str(&format!("\nXvfb stopped ({status}): {errors}")),
+            _ => {
+                let socket = format!("/tmp/.X11-unix/X{}", &self.display[1..]);
+                let present = Path::new(&socket).exists();
+                text.push_str(&format!("\nXvfb running, {socket} present: {present}"));
+            }
+        }
         text
     }
     /// Wait until the app has settled: no helper process is running and the
