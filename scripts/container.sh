@@ -92,7 +92,11 @@ if [[ "$kind" == development || "$kind" == portable ]]; then
     if [[ "${1:-}" == --binary-dir ]]; then printf '%s/target/debug\n' "$cache"; exit 0; fi
     if [[ "${1:-}" == --release-dir ]]; then printf '%s/target/release\n' "$cache"; exit 0; fi
     command=(scripts/verify.sh "$@")
-    [[ $kind == development ]] || command=(cargo build --workspace --release --locked)
+    # The portable build also copies the X11 libraries the window opens at run
+    # time from Ubuntu 22.04, for scripts/bundle.sh.
+    [[ $kind == development ]] || command=(bash -ec 'cargo build --workspace --release --locked
+rm -rf target/release/runtime-libs
+scripts/bundle-libs.sh target/release/runtime-libs window')
     interactive=()
     if [[ "${1:-}" == --exec ]]; then
         shift

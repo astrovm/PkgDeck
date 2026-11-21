@@ -24,30 +24,23 @@ for pair in desktop:applications metainfo.xml:metainfo svg:icons/hicolor/scalabl
     if [[ $suffix != metainfo.xml ]]; then cp "assets/$name" "$out/"; fi
 done
 # The window draws with OpenGL and talks to X11 or Wayland through the
-# system's own libraries, which it loads at run time; everything the
-# binaries link directly is bundled below.
-LD_LIBRARY_PATH="$(realpath "$out/usr/lib")"
-export LD_LIBRARY_PATH
-queue=("$out/usr/bin/pkd" "$out/usr/bin/pkgdeck" "$out/usr/libexec/pkgdeck-host-runner")
-for ((i = 0; i < ${#queue[@]}; i++)); do
-    path=${queue[i]}
-    links=$(ldd "$path") || {
-        echo "Cannot inspect $path" >&2
-        exit 1
-    }
-    if [[ $links == *'not found'* ]]; then
-        echo "Unresolved dependency in $path: $links" >&2
-        exit 1
-    fi
-    while read -r name arrow source rest; do
-        [[ $arrow == '=>' && $source == /* ]] || continue
-        [[ $name =~ ^(ld-linux.*|lib(c|m|dl|pthread|rt|resolv|util|anl)\.so\..*|lib(GL|EGL|GLX|GLdispatch|OpenGL)\.so\..*)$ ]] && continue
-        if [[ ! -e $out/usr/lib/$name ]]; then
-            cp "$source" "$out/usr/lib/$name"
-            queue+=("$out/usr/lib/$name")
-        fi
-    done <<<"$links"
-done
+# system's own libraries, which it loads at run time. The X11 keyboard and
+# cursor libraries are not on every system, so the AppImage brings them, from
+# the Ubuntu 22.04 build when CI made one. Everything the binaries link
+# directly is bundled too.
+if [[ -d $release/runtime-libs ]]; then
+    mkdir -p "$out/usr/lib"
+    cp -a "$release/runtime-libs/." "$out/usr/lib/"
+else
+    scripts/bundle-libs.sh "$out/usr/lib" window
+fi
+scripts/bundle-libs.sh "$out/usr/lib" "$out/usr/bin/pkd" "$out/usr/bin/pkgdeck" "$out/usr/libexec/pkgdeck-host-runner"
+# File managers and the AppImage catalog show .DirIcon as the thumbnail, and
+# the catalog wants a PNG. appimagetool links it to the SVG, unless it exists.
+icon=usr/share/icons/hicolor/256x256/apps/io.github.astrovm.PkgDeck.png
+mkdir -p "$out/${icon%/*}"
+rsvg-convert -w 256 -h 256 -o "$out/$icon" assets/io.github.astrovm.PkgDeck.svg
+ln -sfn "$icon" "$out/.DirIcon"
 mkdir -p "$out/usr/share/licenses/pkgdeck"
 cp LICENSE "$out/usr/share/licenses/pkgdeck/"
 cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$out/usr/share/licenses/pkgdeck/INTER-OFL"

@@ -144,6 +144,17 @@ GitHub Releases also have AppImage and Snap packages:
   Ubuntu 22.04 has. CI checks every other bundled program and library for
   glibc 2.35 and runs the AppImage on Ubuntu 22.04, Ubuntu 24.04, Debian 13
   and Ubuntu 26.04.
+- The window opens the X11 keyboard and cursor libraries at run time, and
+  minimal systems don't have them. The portable build copies them from
+  Ubuntu 22.04 ([`scripts/bundle-libs.sh`](../scripts/bundle-libs.sh)), and
+  the AppImage and Snap bring them. Libraries on the AppImage exclude list,
+  such as glibc, OpenGL, libX11 and libxcb, come from the system.
+- CI runs the AppImage catalog's own test on the x86_64 AppImage
+  ([`scripts/ci/appimage-catalog-test.sh`](../scripts/ci/appimage-catalog-test.sh)),
+  so a release also passes there. It fails on any warning that is not known.
+  The known ones are the APT reader's own glibc, the missing `appdata.xml`
+  (PkgDeck ships a `.metainfo.xml` file) and the dark window. It changes the
+  host as root, so it runs only on GitHub Actions.
 
 To build the packages, use the same environment as CI:
 

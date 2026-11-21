@@ -136,6 +136,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64. On main it only builds the CLI, to save the cache both backend groups restore |
 | `Test / Backends / dev (linux-x86_64, linux-aarch64)` | Real lifecycle tests for every development manager on Linux; the job summary lists each backend's result |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
+| `Package / AppImage catalog test` | Runs the AppImage catalog's own test (`code/worker.sh` from appimage.github.io, pinned) on the x86_64 AppImage on Ubuntu 22.04. It fails on a missing screenshot or a warning the script does not list as known |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
 | `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, window, controller, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
 | `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |

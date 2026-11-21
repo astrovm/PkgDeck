@@ -921,6 +921,33 @@ jobs:
           path: build/artifacts/*
           if-no-files-found: error
 
+  package-appimage-catalog:
+    # The AppImage catalog (appimage.github.io) runs its own test on every
+    # entry: lint, firejail, a screenshot and checks on it, on Ubuntu 22.04.
+    # This runs that test, so that a release does not fail there.
+    name: Package / AppImage catalog test
+    needs: [changes, reviewed, package-bundles]
+    if: "!cancelled() && needs.package-bundles.result == 'success' && needs.reviewed.outputs.tested != 'true'"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download AppImage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages-linux-bundles-x86_64
+          path: build/artifacts
+      - name: Run the AppImage catalog test
+        run: scripts/ci/appimage-catalog-test.sh build/artifacts/PkgDeck-v*-x86_64.AppImage PkgDeck
+      - name: Upload catalog test result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage-catalog-test
+          path: appimage-catalog-result
+          if-no-files-found: ignore
+
   package-flatpak:
     name: Package / Flatpak (${{ matrix.arch }})
     needs: changes
@@ -1042,10 +1069,11 @@ jobs:
       !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
       needs.release-gate.result == 'success' &&
       needs.package-bundles.result == 'success' &&
+      needs.package-appimage-catalog.result == 'success' &&
       needs.package-flatpak.result == 'success' &&
       needs.package-macos.result == 'success' &&
       needs.package-linux-cli.result == 'success'
-    needs: [release-gate, package-bundles, package-flatpak, package-macos, package-linux-cli]
+    needs: [release-gate, package-bundles, package-appimage-catalog, package-flatpak, package-macos, package-linux-cli]
     runs-on: ubuntu-26.04
     permissions:
       contents: write
@@ -1120,6 +1148,7 @@ jobs:
       - package-linux-cli
       - test-homebrew
       - package-bundles
+      - package-appimage-catalog
       - package-flatpak
     runs-on: ubuntu-26.04
     timeout-minutes: 5
