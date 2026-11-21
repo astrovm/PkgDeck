@@ -7,7 +7,7 @@ kind=${1:?Expected development, portable or lifecycle}; shift
 case "$kind" in
     development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh) ;;
     # Builds the AppImage and Snap programs against Ubuntu 22.04's older glibc.
-    portable) recipe=containers/portable.Containerfile; inputs=("$recipe" rust-toolchain.toml) ;;
+    portable) recipe=containers/portable.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/ci/apt-mirrors.sh) ;;
     lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/ci/apt-mirrors.sh scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac

@@ -785,6 +785,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The portable build and the AppImage tests pull images from Docker Hub.
+      - name: Pull Docker Hub images through a mirror
+        uses: ./.github/actions/registry-mirror
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
         with:

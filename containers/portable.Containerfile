@@ -6,6 +6,8 @@
 FROM docker.io/library/rust:1.99.1-slim@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS rust
 FROM docker.io/library/ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
 ENV DEBIAN_FRONTEND=noninteractive
+COPY scripts/ci/apt-mirrors.sh /opt/pkgdeck/apt-mirrors.sh
+RUN bash /opt/pkgdeck/apt-mirrors.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config ca-certificates \
     && rm -rf /var/lib/apt/lists/*

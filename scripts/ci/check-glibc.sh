@@ -6,6 +6,7 @@
 set -euo pipefail
 usage='Usage: scripts/ci/check-glibc.sh <directory> <newest allowed glibc> [skipped folder...]'
 root=${1:?$usage}
+root=${root%/}
 allowed=${2:?$usage}
 shift 2
 skipped=()

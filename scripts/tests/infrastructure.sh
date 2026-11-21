@@ -350,6 +350,7 @@ cp "$libc" "$work/glibc/private/libc.so.6"
 expect_code 1 scripts/ci/check-glibc.sh "$work/glibc" 2.0
 grep -Fq 'private/libc.so.6 needs glibc' "$work/output"
 expect_code 0 scripts/ci/check-glibc.sh "$work/glibc" 2.0 private
+expect_code 0 scripts/ci/check-glibc.sh "$work/glibc/" 2.0 private/
 expect_code 2 scripts/ci/check-glibc.sh "$work/glibc" 2.0 missing
 expect_code 1 scripts/tests/host-authorization.sh
 grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
