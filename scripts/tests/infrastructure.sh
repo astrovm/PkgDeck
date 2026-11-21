@@ -339,6 +339,9 @@ rm -r "$work/llvm-cov-target"
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/portable" scripts/container.sh portable
 grep -Fxq "$work/portable/target:/workspace/target:rw" "$work/args"
 tail -n 5 "$work/args" | tr '\n' ' ' | grep -Fq 'cargo build --workspace --release --locked'
+# It also copies the X11 libraries the window opens at run time from Ubuntu 22.04.
+tail -n 5 "$work/args" | grep -Fxq 'scripts/bundle-libs.sh target/release/runtime-libs window'
+grep -q 'libxkbcommon-x11-0' containers/portable.Containerfile
 [[ $(PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/portable" scripts/container.sh portable --release-dir) == "$work/portable/target/release" ]]
 grep -q 'ubuntu:22.04@' containers/portable.Containerfile
 if grep -q 'libapt-pkg-dev' containers/portable.Containerfile; then echo 'The portable container must not build the APT reader'; exit 1; fi
