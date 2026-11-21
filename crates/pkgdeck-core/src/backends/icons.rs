@@ -251,8 +251,12 @@ pub(super) fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use rustix::fs::{Mode, OFlags};
 
+    // The directory sits just under Linux PATH_MAX (4096). macOS rejects
+    // that directory before the too-long list name can be created.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_list_whose_path_is_too_long_to_resolve_is_still_scanned() {
         let base = std::env::temp_dir().join(format!("pkgdeck-icons-long-{}", std::process::id()));

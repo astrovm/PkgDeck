@@ -1441,10 +1441,7 @@ nothexnothex | bad | Up | x\n";
     fn availability_follows_the_tool() {
         let cancel = Cancellation::default();
         let available = DevContainers::toolbox(fake()).detect(&cancel).unwrap();
-        assert_eq!(
-            DevContainers::distrobox(fake()).detect(&cancel).unwrap(),
-            available
-        );
+        let present = DevContainers::distrobox(fake()).detect(&cancel).unwrap();
         let missing = DevContainers::distrobox(Fake {
             missing: true,
             ..fake()
@@ -1452,14 +1449,23 @@ nothexnothex | bad | Up | x\n";
         .detect(&cancel)
         .unwrap();
         if cfg!(target_os = "linux") {
+            assert_eq!(present, available);
             assert_eq!(available, Availability::Available);
             assert_eq!(
                 missing,
                 Availability::Unavailable("distrobox not found".into())
             );
         } else {
-            assert!(matches!(available, Availability::Unavailable(_)));
-            assert!(matches!(missing, Availability::Unavailable(_)));
+            // Each tool names itself. Off Linux neither one is probed.
+            assert_eq!(
+                available,
+                Availability::Unavailable("Toolbx containers run on Linux".into())
+            );
+            assert_eq!(
+                present,
+                Availability::Unavailable("Distrobox containers run on Linux".into())
+            );
+            assert_eq!(missing, present);
         }
     }
 
