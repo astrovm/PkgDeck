@@ -242,8 +242,9 @@ impl From<io::Error> for ExecutionError {
 }
 
 // Tests grow the stdout pipe they already own. This user namespace refuses
-// to grow a pipe that belongs to another process.
-#[cfg(test)]
+// to grow a pipe that belongs to another process. rustix exposes the call
+// only on Linux.
+#[cfg(all(test, target_os = "linux"))]
 thread_local! {
     static GROW_STDOUT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -340,7 +341,7 @@ pub(crate) fn run_observed(
         }
     };
     let supervise = (|| {
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "linux"))]
         if let Some(size) = GROW_STDOUT.with(|cell| cell.get()) {
             rustix::pipe::fcntl_setpipe_size(&stdout, size).map_err(io::Error::from)?;
         }
@@ -532,6 +533,7 @@ mod tests {
         assert_eq!(result.code, Some(0));
         assert_eq!((result.stdout.len(), result.truncated), (900_000, false));
     }
+    #[cfg(target_os = "linux")]
     #[rustfmt::skip]
     fn grown_or_plain(grown: Result<Completion, ExecutionError>, plain: impl FnOnce() -> Result<Completion, ExecutionError>) -> Completion {
         if let Err(ExecutionError::Io(message)) = &grown { assert!(message.contains("os error 1"), "{message}"); plain().unwrap() } else { grown.unwrap() }

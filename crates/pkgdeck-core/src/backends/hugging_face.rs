@@ -374,6 +374,9 @@ mod tests {
         fs::remove_dir_all(&home).unwrap();
     }
 
+    // `mknodat` exists only on Linux. The combined report counts this line
+    // once any platform hits it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn files_that_vanish_while_the_hub_is_read_count_for_nothing() {
         use std::io::Write;
