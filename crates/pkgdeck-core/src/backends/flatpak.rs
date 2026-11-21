@@ -445,14 +445,28 @@ impl<T: Transport + Sync> Flatpak<T> {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let mut file = std::fs::OpenOptions::new()
+        self.install_flatpakref_at(&temporary, bytes, scope, system, cancel)
+    }
+    /// Installs from `bytes` written to `temporary`, a new file that is
+    /// removed afterwards. A file already there is left alone.
+    fn install_flatpakref_at(
+        &self,
+        temporary: &std::path::Path,
+        bytes: &[u8],
+        scope: &str,
+        system: bool,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        use std::io::Write;
+        let mut created = false;
+        let written = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temporary)
-            .map_err(|e| invalid("flatpak", e))?;
-        use std::io::Write;
-        let written = file.write_all(bytes);
-        drop(file);
+            .open(temporary)
+            .and_then(|mut file| {
+                created = true;
+                file.write_all(bytes)
+            });
         let source = temporary.to_string_lossy().into_owned();
         let result = written
             .map_err(|error| invalid("flatpak", error))
@@ -472,7 +486,9 @@ impl<T: Transport + Sync> Flatpak<T> {
                     system,
                 )
             });
-        let _ = std::fs::remove_file(&temporary);
+        if created {
+            let _ = std::fs::remove_file(temporary);
+        }
         result
     }
     /// Installs an app into the installation without its repository, adding
@@ -1079,8 +1095,8 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
                     }
                     _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
                 };
-                let missing = || invalid("flatpak", "missing bundle");
-                let staged = crate::artifact::stage(id, cancel)?.ok_or_else(missing)?;
+                let staged = crate::artifact::stage(id, cancel)?
+                    .expect("artifact references always stage a file or fail");
                 progress(Progress::Message(format!(
                     "Installing Flatpak bundle {}…",
                     id.name
@@ -1206,5 +1222,116 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Answers every Flatpak call with success and records its arguments.
+    #[derive(Clone, Default)]
+    struct Calls(Arc<Mutex<Vec<Vec<String>>>>);
+    impl Transport for Calls {
+        fn flatpak(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let args = args.iter().map(|arg| arg.to_string_lossy().into());
+            self.0.lock().unwrap().push(args.collect());
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: vec![],
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_flatpakref_is_installed_from_a_file_removed_afterwards() {
+        let dir = scratch("ref");
+        let file = dir.join("app.flatpakref");
+        let calls = Calls::default();
+        Flatpak::new(calls.clone())
+            .install_flatpakref_at(
+                &file,
+                b"[Flatpak Ref]\n",
+                "--user",
+                false,
+                &Cancellation::default(),
+            )
+            .unwrap();
+        let path = file.to_string_lossy().into_owned();
+        assert_eq!(
+            *calls.0.lock().unwrap(),
+            [[
+                "--user",
+                "install",
+                "--noninteractive",
+                "--assumeyes",
+                "--reinstall",
+                "--from",
+                path.as_str()
+            ]]
+        );
+        assert!(!file.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_flatpakref_file_that_cannot_be_made_is_an_error_and_nothing_runs() {
+        let dir = scratch("taken");
+        // Someone else's file at that path stays.
+        let taken = dir.join("app.flatpakref");
+        std::fs::write(&taken, "theirs").unwrap();
+        // A folder that isn't there can't hold one.
+        let missing = dir.join("missing/app.flatpakref");
+        let calls = Calls::default();
+        let flatpak = Flatpak::new(calls.clone());
+        for file in [&taken, &missing] {
+            let error = flatpak
+                .install_flatpakref_at(file, b"", "--user", false, &Cancellation::default())
+                .unwrap_err();
+            assert!(matches!(error, EngineError::InvalidResponse { .. }));
+        }
+        assert!(calls.0.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "theirs");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_ref_that_is_not_a_flatpak_ref_is_refused_before_running() {
+        let calls = Calls::default();
+        let id = PackageId {
+            backend: "flatpak".into(),
+            name: "org.example.App".into(),
+            architecture: "x86_64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: Some("not a ref".into()),
+        };
+        let error = Flatpak::new(calls.clone())
+            .execute(
+                &Operation::Remove(id),
+                &Cancellation::default(),
+                &mut drop::<Progress>,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid native ref"));
+        assert!(calls.0.lock().unwrap().is_empty());
     }
 }

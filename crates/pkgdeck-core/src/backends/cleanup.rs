@@ -400,3 +400,186 @@ impl<T: Transport> Apt<T> {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Answers commands whose line starts with a known prefix; any other
+    /// command is not found.
+    struct Fake(Vec<(&'static str, &'static [u8])>);
+
+    impl Fake {
+        fn answer(
+            &self,
+            executable: &str,
+            args: &[OsString],
+        ) -> Result<Completion, ExecutionError> {
+            let line = std::iter::once(executable.to_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let (_, output) = self
+                .0
+                .iter()
+                .find(|(prefix, _)| line.starts_with(prefix))
+                .ok_or_else(|| ExecutionError::Disabled(format!("{line}: not found")))?;
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: output.to_vec(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    impl Transport for Fake {
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.answer(executable, args)
+        }
+        fn venv_pip(
+            &self,
+            _: &std::path::Path,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.answer("pip", args)
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.answer(executable, args)
+        }
+    }
+
+    fn reason(error: EngineError) -> String {
+        error.to_string()
+    }
+
+    #[test]
+    fn pip_cache_needs_a_virtual_environment() {
+        let error = DevTool::pip(Fake(vec![]))
+            .cleanup_cache(&Cancellation::default())
+            .unwrap_err();
+        assert!(reason(error).contains("manager home not detected"));
+    }
+
+    #[test]
+    fn pip_cache_size_adds_every_size_line() {
+        let mut pip = DevTool::pip(Fake(vec![(
+            "pip cache info",
+            b"Package index page cache size: 2 MB\nNumber of HTTP files: 3\nWheels size: 10 kB\nNumber of locally built wheels: 0\n",
+        )]));
+        pip.home = Some(PathBuf::from("/venv"));
+        let items = pip.cleanup_cache(&Cancellation::default()).unwrap();
+        assert_eq!(items[0].bytes, Some(2_010_000));
+    }
+
+    #[test]
+    fn cache_inventories_must_be_text() {
+        let cancel = Cancellation::default();
+        let error = DevTool::uv(Fake(vec![("uv cache size", b"\xff")]))
+            .cleanup_cache(&cancel)
+            .unwrap_err();
+        assert!(reason(error).contains("invalid utf-8"));
+        for (command, key) in [
+            ("apt-get --simulate", "autoremove"),
+            ("apt-config shell", "clean"),
+        ] {
+            let error = Apt::new(Fake(vec![(command, b"\xff")]))
+                .cleanup_apt_task(key, &cancel)
+                .unwrap_err();
+            assert!(reason(error).contains("invalid utf-8"), "{command}");
+        }
+        let error = Apt::new(Fake(vec![
+            (
+                "apt-config shell",
+                b"ROOT='/'\nCACHE='var/cache/apt/'\nARCHIVES='archives/'\n",
+            ),
+            ("find /var/cache/apt/archives", b"\xff"),
+        ]))
+        .cleanup_apt_task("clean", &cancel)
+        .unwrap_err();
+        assert!(reason(error).contains("invalid utf-8"));
+    }
+
+    #[test]
+    fn npm_cache_size_is_its_cacache_folder() {
+        let cancel = Cancellation::default();
+        let dir = std::env::temp_dir().join(format!("pkgdeck-npm-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("_cacache")).unwrap();
+        std::fs::write(dir.join("_cacache/entry"), [0_u8; 4096]).unwrap();
+        let config = format!("{}\n", dir.display()).leak().as_bytes();
+        let items = DevTool::npm(Fake(vec![
+            ("npm cache ls", b"make-fetch-happen:request-cache:x\n"),
+            ("npm config get cache", config),
+        ]))
+        .cleanup_cache(&cancel)
+        .unwrap();
+        assert!(
+            items[0].bytes.is_some_and(|bytes| bytes >= 4096),
+            "{items:?}"
+        );
+        // Without the folder the size is unknown, not zero.
+        let items = DevTool::npm(Fake(vec![(
+            "npm cache ls",
+            b"make-fetch-happen:request-cache:x\n",
+        )]))
+        .cleanup_cache(&cancel)
+        .unwrap();
+        assert_eq!(items[0].bytes, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `npm config get cache` ran, and npm said it failed.
+    struct NpmConfigFailed;
+    impl Transport for NpmConfigFailed {
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = std::iter::once(executable.to_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let failed = line.starts_with("npm config get cache");
+            Ok(Completion {
+                code: Some(if failed { 1 } else { 0 }),
+                signal: None,
+                stdout: if failed {
+                    vec![]
+                } else {
+                    b"make-fetch-happen:request-cache:x\n".to_vec()
+                },
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    #[test]
+    fn npm_cache_size_is_unknown_when_its_config_fails() {
+        let items = DevTool::npm(NpmConfigFailed)
+            .cleanup_cache(&Cancellation::default())
+            .unwrap();
+        assert_eq!(items[0].bytes, None);
+    }
+}

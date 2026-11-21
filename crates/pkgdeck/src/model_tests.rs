@@ -1143,6 +1143,7 @@ fn the_same_app_from_several_sources_sits_together() {
         row(
             json!({"name": "firefox", "display_name": "Firefox", "installed": "1", "same_app_group": "firefox"}),
         ),
+        row(json!({"name": "firefox-esr", "installed": "1", "same_app_group": "firefox"})),
         row(json!({"name": "htop", "installed": "1"})),
         row(
             json!({"name": "org.mozilla.firefox", "source": "flatpak", "installed": "1", "same_app_group": "firefox"}),
@@ -1164,6 +1165,7 @@ fn the_same_app_from_several_sources_sits_together() {
         names(&rows, &items),
         [
             "firefox",
+            "firefox-esr",
             "org.mozilla.firefox",
             "htop",
             "lonely",
@@ -1176,7 +1178,7 @@ fn the_same_app_from_several_sources_sits_together() {
     assert_eq!(heading.sources, ["APT", "Flatpak"]);
     assert!(items[1].group.is_none() && items[3].group.is_none());
     // Without a display name, the shortest name titles the group.
-    assert_eq!(items[4].group.as_ref().unwrap().title, "vim");
+    assert_eq!(items[5].group.as_ref().unwrap().title, "vim");
     // A filter that matches one member keeps the whole group.
     let filtered = visible(
         &rows,
@@ -1186,7 +1188,10 @@ fn the_same_app_from_several_sources_sits_together() {
             ..ViewOptions::default()
         },
     );
-    assert_eq!(names(&rows, &filtered), ["firefox", "org.mozilla.firefox"]);
+    assert_eq!(
+        names(&rows, &filtered),
+        ["firefox", "firefox-esr", "org.mozilla.firefox"]
+    );
 }
 
 #[test]

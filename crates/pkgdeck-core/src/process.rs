@@ -241,8 +241,18 @@ impl From<io::Error> for ExecutionError {
     }
 }
 
-fn nonblocking(pipe: &impl AsFd) -> io::Result<()> {
-    let flags = rustix::fs::fcntl_getfl(pipe)? | rustix::fs::OFlags::NONBLOCK;
+// Tests grow the stdout pipe they already own. This user namespace refuses
+// to grow a pipe that belongs to another process. rustix exposes the call
+// only on Linux.
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static GROW_STDOUT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Make reads from `pipe` return at once when `on`, or wait for bytes again.
+pub(crate) fn set_nonblocking(pipe: &impl AsFd, on: bool) -> io::Result<()> {
+    let mut flags = rustix::fs::fcntl_getfl(pipe)?;
+    flags.set(rustix::fs::OFlags::NONBLOCK, on);
     Ok(rustix::fs::fcntl_setfl(pipe, flags)?)
 }
 
@@ -331,8 +341,12 @@ pub(crate) fn run_observed(
         }
     };
     let supervise = (|| {
-        nonblocking(&stdout)?;
-        nonblocking(&stderr)?;
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(size) = GROW_STDOUT.with(|cell| cell.get()) {
+            rustix::pipe::fcntl_setpipe_size(&stdout, size).map_err(io::Error::from)?;
+        }
+        set_nonblocking(&stdout, true)?;
+        set_nonblocking(&stderr, true)?;
         let cap = limits.output_bytes;
         // Whether either stream may hold more that would still be kept.
         let mut drain_both = |result: &mut Completion| -> io::Result<bool> {
@@ -491,30 +505,38 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn everything_left_in_a_grown_pipe_is_read_after_the_program_exits() {
-        // uutils' head grows its pipe like this, then exits at once.
-        if std::path::Path::new("/usr/bin/python3").exists() {
-            grown_pipe();
+        // uutils' head grows its pipe, then writes and exits at once.
+        // One read keeps 128 KiB, so 256 KiB still leaves a second read.
+        // A busy machine can refuse that. The bytes must arrive either way.
+        struct ClearGrow;
+        impl Drop for ClearGrow {
+            fn drop(&mut self) {
+                GROW_STDOUT.with(|cell| cell.set(None));
+            }
         }
-    }
-    #[cfg(target_os = "linux")]
-    fn grown_pipe() {
-        let mut command = Command::new("/usr/bin/python3");
-        command.args([
-            "-c",
-            "import fcntl, os; fcntl.fcntl(1, 1031, 1 << 20); os.write(1, bytes(900_000))",
-        ]);
-        let result = run(
-            command,
-            Limits {
-                output_bytes: 1 << 20,
-                ..Limits::default()
-            },
-            &Cancellation::default(),
-            false,
-        )
-        .unwrap();
+        let _clear = ClearGrow;
+        let limits = Limits {
+            output_bytes: 1 << 20,
+            ..Limits::default()
+        };
+        let read_head = |size: Option<usize>| {
+            GROW_STDOUT.with(|cell| cell.set(size));
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exec head -c 900000 /dev/zero"]);
+            run(command, limits, &Cancellation::default(), false)
+        };
+        // No pid file: the shell cleanup's empty path has to run too.
+        drop(Shell(
+            std::env::temp_dir().join(format!("pkgdeck-no-shell-{}", std::process::id())),
+        ));
+        let result = grown_or_plain(read_head(Some(1 << 18)), || read_head(None));
         assert_eq!(result.code, Some(0));
         assert_eq!((result.stdout.len(), result.truncated), (900_000, false));
+    }
+    #[cfg(target_os = "linux")]
+    #[rustfmt::skip]
+    fn grown_or_plain(grown: Result<Completion, ExecutionError>, plain: impl FnOnce() -> Result<Completion, ExecutionError>) -> Completion {
+        if let Err(ExecutionError::Io(message)) = &grown { assert!(message.contains("os error 1"), "{message}"); plain().unwrap() } else { grown.unwrap() }
     }
     #[test]
     fn failures_read_as_one_plain_sentence() {

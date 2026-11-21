@@ -529,7 +529,14 @@ impl Catalog {
             }
         }
     }
-    fn insert(&mut self, ids: Vec<String>, packages: Vec<String>, mut info: AppInfo) {
+    /// Stores `info` in the record its ids or packages already lead to, or
+    /// in a new one, and returns that record's key.
+    fn insert(
+        &mut self,
+        ids: Vec<String>,
+        packages: Vec<String>,
+        mut info: AppInfo,
+    ) -> Option<String> {
         let keys: Vec<_> = ids
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -541,14 +548,11 @@ impl Catalog {
                     .map(|name| format!("pkg:{name}")),
             )
             .collect();
-        let Some(canonical) = keys
+        let canonical = keys
             .iter()
             .find_map(|key| self.aliases.get(key))
             .cloned()
-            .or_else(|| keys.first().cloned())
-        else {
-            return;
-        };
+            .or_else(|| keys.first().cloned())?;
         if let Some(previous) = self.apps.get(&canonical) {
             info.fill_missing(previous);
         }
@@ -556,6 +560,7 @@ impl Catalog {
         for key in keys {
             self.aliases.insert(key, canonical.clone());
         }
+        Some(canonical)
     }
     fn resolve_icon(&self, name: &str, kind: &str) -> Option<PathBuf> {
         match kind {
@@ -774,7 +779,7 @@ impl Catalog {
         if let Some(flatpak) = fields.get("X-Flatpak") {
             ids.push((*flatpak).into());
         }
-        self.insert(
+        let key = self.insert(
             ids,
             vec![],
             AppInfo {
@@ -786,10 +791,9 @@ impl Catalog {
                 ..AppInfo::default()
             },
         );
-        if let Some(snap) = fields.get("X-SnapInstanceName") {
-            if let Some(key) = self.aliases.get(&format!("id:{id}")).cloned() {
-                self.aliases.insert(format!("source:snap:{snap}"), key);
-            }
+        // The snap it belongs to finds the same record by its name.
+        if let (Some(snap), Some(key)) = (fields.get("X-SnapInstanceName"), key) {
+            self.aliases.insert(format!("source:snap:{snap}"), key);
         }
     }
     /// Reads catalogs under `root`. The running host's environment adds its
@@ -1422,11 +1426,18 @@ Description: '&invalid;'
         let info = detail_info(&snap, local.clone(), &cancel, |_| r#"{"snap":{"name":"player","title":"Remote Player","media":[{"type":"screenshot","url":"https://example.invalid/player.png"}]}}"#.into()).unwrap();
         assert_eq!(info.name, "Local Player");
         assert_eq!(info.screenshots.len(), 1);
-        let offline = |_: &str| -> String { unreachable!("no request expected") };
+        // A provider that can't be reached; it counts each request.
+        let requests = std::cell::Cell::new(0);
+        let offline = |_: &str| -> String {
+            requests.set(requests.get() + 1);
+            "HTTP failure".into()
+        };
+        // Screenshots are already there: no request.
         detail_info(&snap, info, &cancel, offline);
-        let fallback =
-            detail_info(&snap, local.clone(), &cancel, |_| "HTTP failure".into()).unwrap();
+        assert_eq!(requests.get(), 0);
+        let fallback = detail_info(&snap, local.clone(), &cancel, offline).unwrap();
         assert_eq!(fallback.description, local.description);
+        assert_eq!(requests.get(), 1);
         let unsupported = package("apt", "player");
         detail_info(&unsupported, local.clone(), &cancel, offline);
         assert!(detail_info(&snap, local.clone(), &cancel, |_| {
@@ -1435,6 +1446,7 @@ Description: '&invalid;'
         })
         .is_none());
         assert!(detail_info(&snap, local, &cancel, offline).is_none());
+        assert_eq!(requests.get(), 1);
     }
     #[test]
     fn warming_loads_the_catalog_once_in_the_background() {
@@ -1470,7 +1482,6 @@ Description: '&invalid;'
     fn opened_details_cache_provider_data_until_metadata_changes() {
         let store = Store::new();
         let cancel = Cancellation::default();
-        let offline = |_: &str| -> String { unreachable!("no request expected") };
         let requests = std::cell::Cell::new(0);
         let reply = |url: &str| {
             assert_eq!(url, "https://api.snapcraft.io/v2/snaps/info/player");
@@ -1478,8 +1489,13 @@ Description: '&invalid;'
             r#"{"snap":{"name":"player","title":"Remote Player","summary":"Remote summary"}}"#
                 .to_owned()
         };
+        let loads = std::cell::Cell::new(0);
+        let load = || {
+            loads.set(loads.get() + 1);
+            Catalog::default()
+        };
         let mut app = package("snap", "player");
-        store.details(&mut app, &cancel, Catalog::default, reply);
+        store.details(&mut app, &cancel, load, reply);
         assert_eq!(app.display_name, "Remote Player");
         assert_eq!(requests.get(), 1);
         assert_eq!(
@@ -1490,9 +1506,9 @@ Description: '&invalid;'
         let mut row = package("snap", "player");
         store.enrich_cached(&mut row);
         assert_eq!(row.display_name, "Remote Player");
-        let cached = || -> Catalog { unreachable!("catalog is cached") };
-        store.details(&mut row, &cancel, cached, offline);
+        store.details(&mut row, &cancel, load, reply);
         assert_eq!(requests.get(), 1);
+        assert_eq!(loads.get(), 1);
 
         // A metadata change while the request runs discards its answer.
         let mut app = package("snap", "player");
@@ -1505,13 +1521,13 @@ Description: '&invalid;'
         assert!(store.cached_info(&app).is_none());
         let cancelled = Cancellation::default();
         cancelled.cancel();
-        store.details(&mut app, &cancelled, Catalog::default, offline);
+        store.details(&mut app, &cancelled, Catalog::default, reply);
         assert!(store.cached_info(&app).is_none());
 
         // Local-only packages are remembered too, within a bounded cache.
         for index in 0..128 {
             let mut local = package("apt", &format!("local-{index}"));
-            store.details(&mut local, &cancel, Catalog::default, offline);
+            store.details(&mut local, &cancel, Catalog::default, reply);
             assert_eq!(local.display_name, format!("local-{index}"));
         }
         assert_eq!(store.remote.lock().unwrap().len(), 128);
@@ -1519,8 +1535,9 @@ Description: '&invalid;'
             &mut package("apt", "overflow"),
             &cancel,
             Catalog::default,
-            offline,
+            reply,
         );
+        assert_eq!(requests.get(), 2);
         let remote = store.remote.lock().unwrap();
         assert_eq!(
             remote.keys().map(|id| id.name.as_str()).collect::<Vec<_>>(),
@@ -1543,6 +1560,12 @@ Description: '&invalid;'
         let data_dir = temp.0.join("data-dir");
         desktop(&data_home, "home-app", "Home App");
         desktop(&data_dir, "shared-app", "Shared App");
+        // Other files beside the entries, and a catalog link to nothing,
+        // are left out.
+        fs::write(data_home.join("applications/mimeinfo.cache"), "").unwrap();
+        fs::create_dir_all(data_home.join("metainfo")).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("gone.xml"), data_home.join("metainfo/gone.xml"))
+            .unwrap();
         let dirs = std::env::join_paths([Path::new("relative/share"), &data_dir]).unwrap();
         let host = |data_home: &Path| {
             Host::new(
@@ -1563,10 +1586,80 @@ Description: '&invalid;'
             catalog.find(&package("apt", "shared-app")).unwrap().name,
             "Shared App"
         );
+        assert_eq!(catalog.apps.len(), 2);
         let catalog = Catalog::load(&root, None, Some(&host(Path::new("data-home"))));
         assert!(catalog.find(&package("apt", "home-app")).is_none());
         assert!(catalog.find(&package("apt", "shared-app")).is_some());
         assert!(Catalog::load(&root, None, None).apps.is_empty());
+    }
+    #[test]
+    fn known_details_stay_when_another_source_fills_the_rest() {
+        let mut info = AppInfo {
+            icon: Some("/own.png".into()),
+            name: "Own".into(),
+            description: "Own description".into(),
+            homepage: Some("https://own.invalid".into()),
+            publisher: Some("Own Studio".into()),
+            license: Some("MIT".into()),
+            screenshots: vec![Screenshot {
+                url: "https://own.invalid/shot.png".into(),
+                caption: String::new(),
+            }],
+        };
+        info.fill_missing(&AppInfo {
+            icon: Some("/other.png".into()),
+            name: "Other".into(),
+            license: Some("GPL-3.0".into()),
+            ..AppInfo::default()
+        });
+        assert_eq!(info.icon.as_deref(), Some(Path::new("/own.png")));
+        assert_eq!(info.name, "Own");
+        assert_eq!(info.license.as_deref(), Some("MIT"));
+        assert_eq!(info.screenshots.len(), 1);
+        // A row keeps its own icon and takes the catalog's name.
+        let mut catalog = Catalog::default();
+        catalog.xml(APP);
+        let mut row = package("apt", "player-bin");
+        row.icon = Some("/row.png".into());
+        catalog.enrich(&mut row);
+        assert_eq!(row.icon.as_deref(), Some(Path::new("/row.png")));
+        assert_eq!(row.display_name, "Example Player");
+    }
+    #[test]
+    fn opening_an_app_asks_its_provider_only_for_missing_screenshots() {
+        let store = Store::new();
+        let mut catalog = Catalog::default();
+        catalog.xml(APP);
+        store.catalog.get(|| catalog);
+        let mut player = package("flatpak", "org.example.Player");
+        player.id.remote = Some("flathub".into());
+        // The catalog already shows it, screenshots and all.
+        assert!(!store.will_fetch(&player));
+        let mut other = package("flatpak", "org.example.Other");
+        other.id.remote = Some("flathub".into());
+        assert!(store.will_fetch(&other));
+    }
+    #[test]
+    fn opened_details_ask_the_provider_the_sources_name() {
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        fn fetch(url: &str, _: &Cancellation) -> String {
+            assert_eq!(
+                url,
+                "https://api.snapcraft.io/v2/snaps/info/pkgdeck-sources-fixture"
+            );
+            ASKED.store(true, Ordering::SeqCst);
+            String::new()
+        }
+        let mut app = package("snap", "pkgdeck-sources-fixture");
+        details(
+            &mut app,
+            &Cancellation::default(),
+            Sources {
+                catalog: Catalog::default,
+                fetch,
+            },
+        );
+        assert!(ASKED.load(Ordering::SeqCst));
     }
     #[test]
     fn catalog_merges_records_and_ignores_unusable_entries() {

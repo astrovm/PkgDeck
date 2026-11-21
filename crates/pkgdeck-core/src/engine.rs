@@ -5,7 +5,7 @@ use crate::{
     process::{Cancellation, ExecutionError},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Condvar, Mutex,
@@ -242,14 +242,13 @@ struct IndexRefresh {
     finished: bool,
     error: Option<EngineError>,
 }
-static UPDATE_CHECKS: Mutex<Option<HashMap<u64, IndexRefresh>>> = Mutex::new(None);
+static UPDATE_CHECKS: Mutex<BTreeMap<u64, IndexRefresh>> = Mutex::new(BTreeMap::new());
 static UPDATE_CHECK_TURN: Condvar = Condvar::new();
 static NEXT_UPDATE_CHECK: AtomicU64 = AtomicU64::new(1);
 
-fn update_checks() -> std::sync::MutexGuard<'static, Option<HashMap<u64, IndexRefresh>>> {
-    UPDATE_CHECKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Nothing panics while it holds the checks, so the lock is never poisoned.
+fn update_checks() -> std::sync::MutexGuard<'static, BTreeMap<u64, IndexRefresh>> {
+    UPDATE_CHECKS.lock().expect("update checks never panic")
 }
 /// How long a read waits before its second try.
 const READ_AGAIN_AFTER: std::time::Duration =
@@ -277,7 +276,7 @@ pub(crate) fn read_again_once<T>(
 }
 pub(crate) fn begin_update_check_token() -> u64 {
     let token = NEXT_UPDATE_CHECK.fetch_add(1, Ordering::Relaxed);
-    update_checks().get_or_insert_with(HashMap::new).insert(
+    update_checks().insert(
         token,
         IndexRefresh {
             started: false,
@@ -288,9 +287,7 @@ pub(crate) fn begin_update_check_token() -> u64 {
     token
 }
 pub(crate) fn end_update_check_token(token: u64) {
-    if let Some(checks) = update_checks().as_mut() {
-        checks.remove(&token);
-    }
+    update_checks().remove(&token);
 }
 /// Run `refresh` once for `token`. A second caller with the same token waits
 /// and returns the first result, so two backends cannot fetch twice. If the
@@ -301,7 +298,7 @@ pub(crate) fn once_per_check(
 ) -> Result<(), EngineError> {
     loop {
         let mut checks = update_checks();
-        let Some(gate) = checks.as_mut().and_then(|map| map.get_mut(&token)) else {
+        let Some(gate) = checks.get_mut(&token) else {
             return Ok(());
         };
         if gate.finished {
@@ -314,7 +311,7 @@ pub(crate) fn once_per_check(
             drop(
                 UPDATE_CHECK_TURN
                     .wait(checks)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    .expect("update checks never panic"),
             );
             continue;
         }
@@ -344,10 +341,7 @@ impl Drop for CheckFinish {
                 "update check stopped before it finished".into(),
             ))),
         };
-        if let Some(gate) = update_checks()
-            .as_mut()
-            .and_then(|checks| checks.get_mut(&self.token))
-        {
+        if let Some(gate) = update_checks().get_mut(&self.token) {
             gate.finished = true;
             gate.error = error;
         }
@@ -2845,6 +2839,7 @@ mod apt_upgrade_tests {
         let results = engine.execute_checked(&grouped, &Cancellation::default(), &mut |_| {});
         assert!(results[0].is_err() && results[1].is_err(), "{results:?}");
         assert!(results[2].is_ok(), "{results:?}");
+        log.lock().unwrap().push("skipped".into());
         assert!(!log
             .lock()
             .unwrap()
@@ -3173,6 +3168,19 @@ mod apt_upgrade_tests {
             results.iter().map(Result::is_ok).collect::<Vec<_>>(),
             [true, true, false, true]
         );
+        // A refresh is not an update, so the join log stays empty.
+        let log = Arc::new(std::sync::Mutex::new(vec![]));
+        BrewFixture {
+            id: "homebrew-cask",
+            broken: "",
+            unprepared: false,
+            reads: 0,
+            log: log.clone(),
+        }
+        .log_updates(&[Operation::Refresh {
+            backend: "homebrew-cask".into(),
+        }]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["".to_owned()]);
     }
 
     #[test]
@@ -3232,6 +3240,97 @@ mod apt_upgrade_tests {
                 3
             ]
         );
+    }
+
+    #[test]
+    fn an_update_that_is_already_in_the_batch_is_not_added_again() {
+        struct AlreadyThere;
+        impl Backend for AlreadyThere {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Upgrade]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn lockstep(
+                &mut self,
+                operations: &[Operation],
+                _: &Cancellation,
+            ) -> Result<Vec<Operation>, EngineError> {
+                Ok(vec![operations[0].clone()])
+            }
+        }
+        let mut engine = Engine::default();
+        engine.register(AlreadyThere).unwrap();
+        let update = Operation::Upgrade(apt_id("systemd"));
+        let all = engine.with_lockstep(std::slice::from_ref(&update), &Cancellation::default());
+        assert_eq!(all, vec![update]);
+    }
+
+    #[test]
+    fn a_reviewed_plan_follows_only_its_own_lane() {
+        let apt = brew_update("apt", "one");
+        let flatpak = brew_update("flatpak", "two");
+        let mut engine = Engine::default();
+        for id in ["apt", "flatpak"] {
+            engine
+                .register(BrewFixture {
+                    id,
+                    broken: "",
+                    unprepared: false,
+                    reads: 0,
+                    log: Arc::new(std::sync::Mutex::new(vec![])),
+                })
+                .unwrap();
+        }
+        engine.remember_operation_plan(brew_plan(&flatpak, "reviewed"));
+        let results = engine.execute_batch(&[apt, flatpak], &Cancellation::default(), &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
+
+    #[test]
+    fn a_helper_that_starts_runs_the_batch_once() {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-direct-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("runner");
+        crate::test_support::write_executable(
+            &script,
+            "#!/bin/sh\nIFS= read -r _\nprintf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'\nwhile IFS= read -r _; do :; done\n",
+        )
+        .unwrap();
+        crate::batch::set_direct_runner(Some(script));
+        struct ClearRunner;
+        impl Drop for ClearRunner {
+            fn drop(&mut self) {
+                crate::batch::set_direct_runner(None);
+            }
+        }
+        let _clear = ClearRunner;
+        let (mut engine, log) = lists_engine(Ok(()), true);
+        let mut events = Vec::new();
+        let results = engine.execute_batch(
+            &[Operation::Upgrade(apt_id("one"))],
+            &Cancellation::default(),
+            &mut |event| events.push(event),
+        );
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| !format!("{event:?}").contains("Batch helper not found")),
+            "{events:?}"
+        );
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("run ")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3647,6 +3746,21 @@ mod update_check_tests {
     fn a_check_without_a_live_token_does_not_refresh() {
         assert_eq!(
             once_per_check(0, || panic!("no live check, nothing to refresh")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_check_ended_during_its_refresh_returns_the_refresh_result() {
+        let token = begin_update_check_token();
+        let result = once_per_check(token, || {
+            end_update_check_token(token);
+            Err(EngineError::Cancelled)
+        });
+        assert_eq!(result, Err(EngineError::Cancelled));
+        // The check is gone, so nothing more refreshes for it.
+        assert_eq!(
+            once_per_check(token, || panic!("the check has ended")),
             Ok(())
         );
     }

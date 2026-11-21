@@ -556,6 +556,9 @@ mod tests {
         assert_eq!(keys("full").map(|keys| keys.len()), Some(limit));
         std::fs::write(repo.join("huge.trustedkeys.gpg"), vec![7; limit + 1]).unwrap();
         assert_eq!(keys("huge"), None);
+        // A folder in its place can't be read.
+        std::fs::create_dir(repo.join("folder.trustedkeys.gpg")).unwrap();
+        assert_eq!(keys("folder"), None);
         // Inside a sandbox, that path isn't the installation's.
         let sandboxed = NativeTransport {
             host: Host::new(
@@ -605,6 +608,34 @@ mod tests {
         script(&bin.join("podman"), "exit 0");
         std::os::unix::fs::symlink(bin.join("podman"), bin.join("docker")).unwrap();
         assert!(native.docker_is_podman());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_missing_git_is_named_as_people_know_it() {
+        let base = temp_dir("git");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let native = transport(&bin, &base);
+        assert!(matches!(
+            native.dev_tool("git", &["--version".into()], &Cancellation::default(), false),
+            Err(ExecutionError::Disabled(reason)) if reason == "Git not found"
+        ));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_lookup_in_a_private_copy_of_the_lists_runs_nothing() {
+        let base = temp_dir("apt-copy");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("apt-get"), "exit 0");
+        let native = transport(&bin, &base);
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(native
+            .apt_query_from_lists("installed", "", "", &cancel, Some(base.join("copy")), false)
+            .is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
 

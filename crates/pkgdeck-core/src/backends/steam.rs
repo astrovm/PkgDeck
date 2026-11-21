@@ -420,4 +420,17 @@ mod tests {
         );
         fs::remove_dir_all(&home).unwrap();
     }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn two_steam_folders_that_are_the_same_place_count_once() {
+        let home = scratch("same");
+        let real = home.join(".local/share/Steam");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(home.join(".steam")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".steam/steam")).unwrap();
+        let roots = steam(&home).roots();
+        assert_eq!(roots, vec![home.join(".local/share/Steam")]);
+        fs::remove_dir_all(&home).unwrap();
+    }
 }

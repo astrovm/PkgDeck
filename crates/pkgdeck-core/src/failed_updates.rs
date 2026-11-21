@@ -216,4 +216,14 @@ mod tests {
         assert!(FailedUpdates::at(&path).updates().is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn a_store_that_cannot_be_saved_still_remembers_until_it_closes() {
+        // The root folder has no parent and cannot be written as a file.
+        let tool = id("example", "tool");
+        let mut store = FailedUpdates::at(Path::new("/"));
+        store.remember(&[(tool.clone(), "2.0".into())], &[]);
+        assert!(store.skips(&tool, "2.0"));
+        assert!(!FailedUpdates::at(Path::new("/")).skips(&tool, "2.0"));
+    }
 }

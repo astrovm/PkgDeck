@@ -357,10 +357,13 @@ impl Walk<'_> {
             let path = dir.join(&name);
             if kind.is_file() {
                 if let Some(owner) = owner {
-                    if let Ok(changed) = fs::symlink_metadata(&path).and_then(|m| m.modified()) {
-                        let project = &mut self.projects[owner];
-                        project.newest = project.newest.max(changed);
-                    }
+                    // A missing file leaves the time alone. `newest` starts at
+                    // the epoch and only moves forward, so the epoch is a no-op.
+                    let changed = fs::symlink_metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let project = &mut self.projects[owner];
+                    project.newest = project.newest.max(changed);
                 }
                 continue;
             }
@@ -1674,6 +1677,7 @@ mod tests {
         };
         assert!(backend.cleanup_plan(&wrong_backend, &cancel).is_err());
         let mut ignore = |_: Progress| {};
+        ignore(Progress::Message("looked".into()));
         let refresh = Operation::Refresh {
             backend: "projects".into(),
         };
@@ -2700,5 +2704,81 @@ mod tests {
         let homeless = Projects::new(Host::new(Runtime::Native, BTreeMap::new()));
         assert!(homeless.cleanup_gone(&trees(&["~/.trees/done (feature)".into()])));
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn swift_build_folders_cache_roots_and_nameless_paths() {
+        let mut swift = std::collections::BTreeSet::new();
+        assert!(!build_folder(".build", &swift));
+        swift.insert("Package.swift".into());
+        assert!(build_folder(".build", &swift));
+
+        let home = scratch("named");
+        let bin = tools(&home, "");
+        let cache = home.join("xdg-cache");
+        let rooted = host(&home, &bin, &[("XDG_CACHE_HOME", cache.as_path())]);
+        #[cfg(target_os = "macos")]
+        let expected = home.join("Library/Caches");
+        #[cfg(not(target_os = "macos"))]
+        let expected = cache.clone();
+        assert_eq!(cache_root(&rooted), Some(expected));
+
+        fs::create_dir_all(home.join("code")).unwrap();
+        let backend = Projects::new(rooted);
+        let cancel = Cancellation::default();
+        let item = backend
+            .build_item(
+                &Project {
+                    root: PathBuf::from("/"),
+                    repository: false,
+                    folders: vec![home.join("code")],
+                    newest: SystemTime::UNIX_EPOCH,
+                },
+                SystemTime::now(),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(item.title, "/ build files");
+        let tree = backend
+            .worktree_item(
+                Path::new("/"),
+                &[Worktree {
+                    path: home.join("wt"),
+                    missing: true,
+                    branch: None,
+                }],
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(tree.title, "/ worktrees");
+
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(backend.git_run(&home, &["status"], &cancelled).is_err());
+
+        let git = bin.join("git");
+        fs::remove_file(&git).unwrap();
+        crate::test_support::write_executable(&git, "#!/bin/sh\nprintf '160000 abc 0\tmissing'\n")
+            .unwrap();
+        assert!(backend.submodules(&home, &cancel).unwrap().is_empty());
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_folder_on_another_disk_is_left_and_a_missing_build_has_no_time() {
+        let root = scratch("other-disk");
+        fs::create_dir_all(root.join("child")).unwrap();
+        fs::write(root.join("note"), b"x").unwrap();
+        let cancel = Cancellation::default();
+        let mut walk = Walk {
+            cancel: &cancel,
+            home: None,
+            device: u64::MAX,
+            projects: vec![],
+        };
+        walk.visit(&root, 0, None);
+        assert!(walk.projects.is_empty());
+        assert_eq!(last_build(&root.join("missing")), SystemTime::UNIX_EPOCH);
+        fs::remove_dir_all(root).unwrap();
     }
 }

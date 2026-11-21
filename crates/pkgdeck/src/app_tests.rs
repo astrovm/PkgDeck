@@ -2277,3 +2277,46 @@ fn a_section_drops_rows_it_holds_for_another_one() {
     assert!(app.shown_rows().is_empty());
     assert!(app.items.is_empty());
 }
+
+#[test]
+fn idle_choices_cover_the_branches_a_busy_window_skips() {
+    let mut app = app();
+    app.sort = Some((Column::Name, false));
+    app.save_settings();
+    assert_eq!(app.settings.sort_column, "name");
+    assert!(!app.settings.sort_ascending);
+
+    let now = Instant::now();
+    app.hover_warm = Some((0, now - Duration::from_secs(1)));
+    app.warmed = Some(0);
+    app.tick(now);
+    assert!(app.hover_warm.is_none());
+    assert_eq!(app.warmed, Some(0));
+
+    app.drawer_open = true;
+    app.toast_action(ToastAction::Details);
+    assert!(app.drawer_open);
+
+    app.page = Page::Installed;
+    app.selected = Some("gone".into());
+    app.retained = Some(vec![]);
+    app.restore_selection();
+    assert_eq!(app.selected.as_deref(), Some("gone"));
+
+    app.opened = None;
+    app.selected = None;
+    app.retained = None;
+    app.run_page_action();
+    app.propose("pin");
+    app.open_file(std::path::Path::new("relative"));
+    assert!(!app.opening);
+
+    app.page = Page::Installed;
+    rows(&mut app, json!([row("htop", json!({}))]));
+    app.choose(0, false);
+    app.items[0].variants = vec![0];
+    app.sort = Some((Column::Version, true));
+    app.choose_scope(0);
+    assert!(app.scope_choices.is_empty());
+    assert_eq!(app.settings.sort_column, "version");
+}

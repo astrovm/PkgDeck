@@ -247,3 +247,43 @@ pub(super) fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<Str
     ids.dedup();
     ids
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(target_os = "linux")]
+    use rustix::fs::{Mode, OFlags};
+
+    // The directory sits just under Linux PATH_MAX (4096). macOS rejects
+    // that directory before the too-long list name can be created.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_list_whose_path_is_too_long_to_resolve_is_still_scanned() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-icons-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // The folder fits in a path; the list in it does not.
+        let mut yaml = base.clone();
+        while yaml.as_os_str().len() + 51 < 4090 {
+            yaml.push("d".repeat(50));
+        }
+        std::fs::create_dir_all(&yaml).unwrap();
+        let name = format!("{}.yml.gz", "a".repeat(243));
+        let dir =
+            rustix::fs::open(&yaml, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).unwrap();
+        rustix::fs::openat(
+            &dir,
+            name.as_str(),
+            OFlags::CREATE | OFlags::WRONLY,
+            Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+        let mut listed = vec![];
+        let map = dep11_cached(None, &yaml, |files| {
+            listed = files.to_vec();
+            dep11_scan(files)
+        });
+        assert!(map.is_empty());
+        assert_eq!(listed, [yaml.join(&name)]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+}

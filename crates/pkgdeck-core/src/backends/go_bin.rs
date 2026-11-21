@@ -779,6 +779,10 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         /// GOBIN is unset, so programs go to GOPATH's first entry.
         gopath_only: bool,
+        /// GOBIN is unset and GOPATH is relative: no usable folder.
+        no_bin_dir: bool,
+        /// A program disappears right after go reads it.
+        vanish: bool,
         /// `go install` succeeds without writing anything.
         inert: bool,
         /// Commands starting with this fail, and how.
@@ -797,6 +801,8 @@ mod tests {
                 latest: Arc::default(),
                 calls: Arc::default(),
                 gopath_only: false,
+                no_bin_dir: false,
+                vanish: false,
                 inert: false,
                 fail: None,
             }
@@ -870,6 +876,9 @@ mod tests {
                 .as_slice()
             {
                 ["version"] => Ok(done("go version go1.25.1 linux/arm64\n", 0)),
+                ["env", "-json", "GOBIN", "GOPATH"] if self.no_bin_dir => {
+                    Ok(done("{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"go\"\n}\n", 0))
+                }
                 ["env", "-json", "GOBIN", "GOPATH"] if self.gopath_only => Ok(done(
                     &format!(
                         "{{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"{}:/else\"\n}}\n",
@@ -896,7 +905,12 @@ mod tests {
                 ["version", "-m", "--", file] => {
                     let name = file.strip_prefix(&format!("{dir}/")).unwrap();
                     match self.block(name) {
-                        Some(text) => Ok(done(&text, 0)),
+                        Some(text) => {
+                            if self.vanish {
+                                std::fs::remove_file(file).unwrap();
+                            }
+                            Ok(done(&text, 0))
+                        }
                         None => Err(ExecutionError::Failed(done("", 1))),
                     }
                 }
@@ -1369,6 +1383,78 @@ mod tests {
         assert!(error.to_string().contains("changed; refresh"), "{error}");
         assert!(fake.dir.join("stringer").exists());
         assert!(!fake.calls().iter().any(|c| c.starts_with("install")));
+    }
+
+    #[test]
+    fn without_gobin_or_an_absolute_gopath_nothing_is_listed() {
+        let mut fake = installed_fake("nobin");
+        fake.no_bin_dir = true;
+        let error = backend(fake)
+            .installed(&Cancellation::default())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("neither GOBIN nor an absolute GOPATH"));
+    }
+
+    #[test]
+    fn a_module_that_fails_its_check_is_reported_once() {
+        let fake = installed_fake("twice");
+        fake.build(
+            "gone-too",
+            "github.com/a/gone/cmd/too",
+            "github.com/a/gone",
+            "v1.0.0",
+        );
+        let mut go = backend(fake);
+        assert_eq!(go.installed(&Cancellation::default()).unwrap().len(), 5);
+        assert_eq!(go.query_errors().len(), 1);
+    }
+
+    #[test]
+    fn a_program_that_vanishes_before_removal_is_an_error() {
+        let mut fake = installed_fake("vanish");
+        let mut go = backend(fake.clone());
+        let rows = go.installed(&Cancellation::default()).unwrap();
+        let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
+        fake.vanish = true;
+        let mut go = backend(fake);
+        let error = go
+            .execute(
+                &Operation::Remove(stringer.id.clone()),
+                &Cancellation::default(),
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::Execution(ExecutionError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn installing_a_path_go_cannot_find_fails() {
+        let fake = installed_fake("unknown");
+        let mut go = backend(fake.clone());
+        let id = PackageId {
+            backend: ID.into(),
+            name: "x".into(),
+            architecture: "unknown".into(),
+            scope: user_scope(),
+            remote: None,
+            reference: Some("github.com/nobody/x".into()),
+        };
+        assert!(go
+            .execute(
+                &Operation::Install(id),
+                &Cancellation::default(),
+                &mut ignore
+            )
+            .is_err());
+        assert!(fake
+            .calls()
+            .contains(&"install -- github.com/nobody/x@latest".into()));
+        assert!(!fake.dir.join("x").exists());
     }
 
     #[test]

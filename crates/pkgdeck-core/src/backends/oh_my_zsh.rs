@@ -393,12 +393,13 @@ mod tests {
 
     /// Runs the real `git`, with `HOME`, `ZSH` and `ZSH_CUSTOM` from `env`.
     /// A command whose arguments contain `fail` fails as `failure` does;
-    /// one that contains `skip` succeeds without running.
+    /// one that contains the first part of `answer` prints the second
+    /// without running.
     #[derive(Clone, Default)]
     struct Git {
         env: BTreeMap<&'static str, OsString>,
         fail: Option<Failure>,
-        skip: Option<&'static str>,
+        answer: Option<(&'static str, &'static [u8])>,
         calls: Arc<Mutex<Vec<String>>>,
     }
     impl DevTool for Git {
@@ -422,11 +423,11 @@ mod tests {
                     return Err(error());
                 }
             }
-            if self.skip.is_some_and(|needle| line.contains(needle)) {
+            if let Some((_, stdout)) = self.answer.filter(|(needle, _)| line.contains(needle)) {
                 return Ok(Completion {
                     code: Some(0),
                     signal: None,
-                    stdout: vec![],
+                    stdout: stdout.to_vec(),
                     stderr: vec![],
                     truncated: false,
                     cancellation_deferred: false,
@@ -799,11 +800,11 @@ mod tests {
             &root.join("custom/themes/agnoster"),
             "agnoster.zsh-theme",
         );
-        let backend = |fail: Option<Failure>, skip: Option<&'static str>| {
+        let backend = |fail: Option<Failure>, answer: Option<(&'static str, &'static [u8])>| {
             OhMyZsh::new(DevTools(Git {
                 env: BTreeMap::from([("HOME", f.home.path().into())]),
                 fail,
-                skip,
+                answer,
                 ..Git::default()
             }))
         };
@@ -827,10 +828,17 @@ mod tests {
                 Err(EngineError::Execution(ExecutionError::Invalid(_)))
             ));
         }
+        // Output that isn't text, and a count that isn't a number.
+        for answer in [("--short=12 HEAD", &b"\xff"[..]), ("rev-list", b"")] {
+            assert!(matches!(
+                backend(None, Some(answer)).installed(&cancel),
+                Err(EngineError::InvalidResponse { .. })
+            ));
+        }
 
         // A pull that reports success but leaves the checkout behind.
         commit(&f.core, "news");
-        let mut stuck = backend(None, Some("pull"));
+        let mut stuck = backend(None, Some(("pull", b"")));
         stuck.arm_update_check(Some(1));
         stuck.refresh_update_index(&cancel).unwrap();
         let core = stuck.installed(&cancel).unwrap().remove(0);

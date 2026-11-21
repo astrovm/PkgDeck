@@ -15,7 +15,7 @@ use std::{
 };
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -105,7 +105,10 @@ pub struct AppImage {
 
 impl AppImage {
     pub fn native() -> Self {
-        let host = Host::current();
+        Self::for_host(&Host::current())
+    }
+    /// The AppImages of `host`'s data folder and Homebrew Caskrooms.
+    fn for_host(host: &Host) -> Self {
         let data = host
             .var("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -193,10 +196,16 @@ impl AppImage {
     /// file manager does.
     pub fn run_file(&self, path: &Path) -> Result<(), EngineError> {
         let command = self.run_command(path, rustix::process::getuid().as_raw())?;
-        let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
-            .then(|| Path::new("flatpak-spawn"));
-        desktop_exec::spawn(&command, bridge)
+        Self::spawn(&command)
+    }
+    /// Start `command` on its own, on the host when PkgDeck is a Flatpak.
+    fn spawn(command: &desktop_exec::Command) -> Result<(), EngineError> {
+        desktop_exec::spawn(command, Self::bridge(Host::current().runtime))
             .map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
+    }
+    /// What starts a program outside the sandbox `runtime` is.
+    fn bridge(runtime: crate::host::Runtime) -> Option<&'static Path> {
+        (runtime == crate::host::Runtime::Flatpak).then(|| Path::new("flatpak-spawn"))
     }
     /// How `path` starts. A file `uid` owns that can't run yet is allowed
     /// to, as a file manager's "allow executing" does.
@@ -339,15 +348,31 @@ impl AppImage {
         }
         Ok(())
     }
+    /// [`Self::copy_bounded`] to a file, then to the disk.
+    fn copy_durably(
+        input: &mut impl Read,
+        output: &mut fs::File,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        Self::copy_bounded(input, output, cancel)?;
+        output.sync_all().map_err(|e| Self::invalid(e.to_string()))
+    }
+    /// Makes `temporary` executable and puts it at `target` with `put`.
+    fn place(
+        temporary: &Path,
+        target: &Path,
+        put: fn(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<(), EngineError> {
+        fs::set_permissions(temporary, fs::Permissions::from_mode(0o755))
+            .and_then(|()| put(temporary, target))
+            .map_err(|e| Self::invalid(e.to_string()))
+    }
     fn has_update_metadata(path: &Path) -> Result<bool, EngineError> {
-        let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
-        let len = file
-            .metadata()
+        let len = fs::metadata(path)
             .map_err(|e| Self::invalid(e.to_string()))?
             .len();
-        let mut header = [0_u8; 64];
-        file.read_exact(&mut header)
-            .map_err(|e| Self::invalid(e.to_string()))?;
+        let file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
+        let header = Self::read_at(&file, 0, 64)?;
         let offset = u64::from_le_bytes(header[40..48].try_into().unwrap());
         let entry_size = u16::from_le_bytes(header[58..60].try_into().unwrap()) as u64;
         let count = u16::from_le_bytes(header[60..62].try_into().unwrap()) as u64;
@@ -365,11 +390,7 @@ impl AppImage {
         {
             return Err(Self::invalid("invalid ELF section table"));
         }
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| Self::invalid(e.to_string()))?;
-        let mut entries = vec![0_u8; (entry_size * count) as usize];
-        file.read_exact(&mut entries)
-            .map_err(|e| Self::invalid(e.to_string()))?;
+        let entries = Self::read_at(&file, offset, entry_size * count)?;
         let names = &entries[(names_index * 64) as usize..((names_index + 1) * 64) as usize];
         let names_offset = u64::from_le_bytes(names[24..32].try_into().unwrap());
         let names_size = u64::from_le_bytes(names[32..40].try_into().unwrap());
@@ -380,11 +401,7 @@ impl AppImage {
         {
             return Err(Self::invalid("invalid ELF section names"));
         }
-        file.seek(SeekFrom::Start(names_offset))
-            .map_err(|e| Self::invalid(e.to_string()))?;
-        let mut strings = vec![0_u8; names_size as usize];
-        file.read_exact(&mut strings)
-            .map_err(|e| Self::invalid(e.to_string()))?;
+        let strings = Self::read_at(&file, names_offset, names_size)?;
         for entry in entries.as_chunks::<64>().0 {
             let index = u32::from_le_bytes(entry[..4].try_into().unwrap()) as usize;
             if strings
@@ -401,15 +418,19 @@ impl AppImage {
                 {
                     return Err(Self::invalid("invalid AppImage update metadata"));
                 }
-                file.seek(SeekFrom::Start(data_offset))
-                    .map_err(|e| Self::invalid(e.to_string()))?;
-                let mut data = vec![0_u8; data_size as usize];
-                file.read_exact(&mut data)
-                    .map_err(|e| Self::invalid(e.to_string()))?;
+                let data = Self::read_at(&file, data_offset, data_size)?;
                 return Ok(data.iter().any(|byte| !matches!(byte, 0 | b' ' | b'\n')));
             }
         }
         Ok(false)
+    }
+    /// The `len` bytes of `file` at `offset`.
+    fn read_at(file: &fs::File, offset: u64, len: u64) -> Result<Vec<u8>, EngineError> {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0_u8; len as usize];
+        file.read_exact_at(&mut bytes, offset)
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        Ok(bytes)
     }
     /// The `Exec=` value's program part: the managed file, quoted.
     fn exec_program(destination: &Path) -> String {
@@ -584,14 +605,16 @@ impl AppImage {
     }
     /// `~/…` for paths in the home folder, as people know them.
     fn shown_path(path: &Path) -> String {
-        Host::current()
-            .var("HOME")
-            .and_then(|home| {
-                path.strip_prefix(home)
-                    .ok()
-                    .map(|rest| format!("~/{}", rest.display()))
-            })
-            .unwrap_or_else(|| path.display().to_string())
+        Self::shown_under(path, Host::current().var("HOME"))
+    }
+    /// `path`, with `~` for `home`.
+    fn shown_under(path: &Path, home: Option<std::ffi::OsString>) -> String {
+        home.and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|rest| format!("~/{}", rest.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string())
     }
     fn existing_import(
         destination: &Path,
@@ -935,8 +958,8 @@ impl AppImage {
             .as_deref()
             .is_some_and(|value| value.starts_with("artifact:appimage:"))
         {
-            let staged = crate::artifact::stage(id, cancel)?
-                .ok_or_else(|| Self::invalid("missing AppImage"))?;
+            // An `artifact:` reference always stages or fails.
+            let staged = crate::artifact::stage(id, cancel)?.expect("an artifact reference");
             let mut local = id.clone();
             local.name = staged.path().to_string_lossy().into_owned();
             local.reference = Some(Self::digest(staged.path(), cancel)?);
@@ -997,16 +1020,10 @@ impl AppImage {
                 .create_new(true)
                 .open(&temporary)
                 .map_err(|e| Self::invalid(e.to_string()))?;
-            Self::copy_bounded(&mut input, &mut output, cancel)?;
-            output.flush().map_err(|e| Self::invalid(e.to_string()))?;
-            output
-                .sync_all()
-                .map_err(|e| Self::invalid(e.to_string()))?;
+            Self::copy_durably(&mut input, &mut output, cancel)?;
             drop(output);
             Self::verify_digest(&temporary, digest, cancel)?;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-                .map_err(|e| Self::invalid(e.to_string()))?;
-            fs::hard_link(&temporary, &destination).map_err(|e| Self::invalid(e.to_string()))?;
+            Self::place(&temporary, &destination, |from, to| fs::hard_link(from, to))?;
             let fallback_name = source
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1252,10 +1269,7 @@ impl AppImage {
                 .environment
                 .push(("APPIMAGE_EXTRACT_AND_RUN".into(), "1".into()));
         }
-        let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
-            .then(|| Path::new("flatpak-spawn"));
-        desktop_exec::spawn(&command, bridge)
-            .map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
+        Self::spawn(&command)
     }
     /// Saved GitHub projects, by managed file name.
     fn sources_file(&self) -> PathBuf {
@@ -1548,9 +1562,7 @@ impl AppImage {
                     "the new AppImage is for another kind of computer",
                 ));
             }
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-                .and_then(|()| fs::rename(&temporary, target))
-                .map_err(|e| Self::invalid(e.to_string()))
+            Self::place(&temporary, target, |from, to| fs::rename(from, to))
         })();
         let _ = fs::remove_file(&temporary);
         result
@@ -1658,6 +1670,11 @@ impl AppImage {
             return Ok(updater.clone());
         }
         let executable = std::env::current_exe().map_err(|e| Self::invalid(e.to_string()))?;
+        Self::updater_beside(&executable)
+    }
+    /// The updater bundled with the PkgDeck at `executable`, in the
+    /// `lib/pkgdeck` folder beside its `bin` folder.
+    fn updater_beside(executable: &Path) -> Result<PathBuf, EngineError> {
         let helper = executable
             .parent()
             .and_then(Path::parent)
@@ -1928,8 +1945,9 @@ impl Backend for AppImage {
         let name = contents.name.clone().unwrap_or_else(|| {
             source
                 .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| id.name.clone())
+                .unwrap_or(source.as_os_str())
+                .to_string_lossy()
+                .into_owned()
         });
         let mut notes = vec![];
         let mut changes = vec![];
@@ -4789,6 +4807,160 @@ esac
             broken.execute(&Operation::Upgrade(managed.id), &cancel, &mut ignore),
             Err(EngineError::Execution(_))
         ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_native_folders_come_from_the_host() {
+        use crate::host::Runtime;
+        use std::collections::BTreeMap;
+        let nowhere = AppImage::for_host(&Host::new(Runtime::Native, BTreeMap::new()));
+        assert_eq!(
+            nowhere.root,
+            Path::new("/nonexistent/pkgdeck-host-data-unavailable/pkgdeck/appimages")
+        );
+        assert_eq!(
+            nowhere.caskrooms,
+            [PathBuf::from("/home/linuxbrew/.linuxbrew/Caskroom")]
+        );
+        let home = AppImage::for_host(&Host::new(
+            Runtime::Native,
+            BTreeMap::from([("HOME".into(), "/home/someone".into())]),
+        ));
+        assert_eq!(
+            home.applications,
+            Path::new("/home/someone/.local/share/applications")
+        );
+    }
+
+    #[test]
+    fn programs_start_through_flatpak_spawn_only_from_a_flatpak() {
+        use crate::host::Runtime;
+        assert_eq!(
+            AppImage::bridge(Runtime::Flatpak),
+            Some(Path::new("flatpak-spawn"))
+        );
+        assert_eq!(AppImage::bridge(Runtime::Native), None);
+    }
+
+    #[test]
+    fn read_and_write_failures_are_errors() {
+        let base = test_base("io");
+        let cancel = Cancellation::default();
+        // A folder opens, but reading it fails.
+        assert!(AppImage::digest(&base, &cancel).is_err());
+        assert!(AppImage::copy_bounded(
+            &mut fs::File::open(&base).unwrap(),
+            &mut std::io::sink(),
+            &cancel
+        )
+        .is_err());
+        let mut full: &mut [u8] = &mut [];
+        assert!(AppImage::copy_bounded(&mut &b"data"[..], &mut full, &cancel).is_err());
+        // A file one byte long has no 64-byte ELF header.
+        let short = base.join("short");
+        fs::write(&short, b"x").unwrap();
+        assert!(AppImage::has_update_metadata(&short).is_err());
+        assert!(AppImage::has_update_metadata(&base.join("missing")).is_err());
+        assert!(AppImage::read_at(&fs::File::open(&short).unwrap(), 1, 1).is_err());
+        // Only an empty folder can be replaced by a rename.
+        let target = base.join("target");
+        fs::create_dir_all(target.join("inside")).unwrap();
+        let error = AppImage::place(&short, &target, |from, to| fs::rename(from, to));
+        assert!(error.is_err());
+        assert!(short.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_copy_that_cannot_reach_the_disk_is_an_error() {
+        // /dev/null takes the bytes but can't be synced.
+        let mut null = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let error = AppImage::copy_durably(&mut &b"data"[..], &mut null, &Cancellation::default());
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn missing_files_have_no_contents_and_odd_names_are_not_managed() {
+        use std::os::unix::ffi::OsStrExt;
+        let base = test_base("odd");
+        let backend = AppImage::new(base.join("owned"), base.join("applications"), 1000);
+        assert_eq!(
+            *backend.contents(&base.join("missing.AppImage")),
+            Contents::default()
+        );
+        let odd = base.join(std::ffi::OsStr::from_bytes(b"pkgdeck-\xff.AppImage"));
+        assert_eq!(
+            backend.package(odd),
+            Err(AppImage::invalid("managed filename is not UTF-8"))
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn paths_in_home_are_shown_from_the_tilde() {
+        let path = Path::new("/home/someone/Apps/app.AppImage");
+        assert_eq!(
+            AppImage::shown_under(path, Some("/home/someone".into())),
+            "~/Apps/app.AppImage"
+        );
+        assert_eq!(
+            AppImage::shown_under(path, Some("/home/other".into())),
+            "/home/someone/Apps/app.AppImage"
+        );
+        assert_eq!(
+            AppImage::shown_under(path, None),
+            "/home/someone/Apps/app.AppImage"
+        );
+    }
+
+    #[test]
+    fn the_updater_is_looked_for_beside_the_bin_folder() {
+        assert_eq!(
+            AppImage::updater_beside(Path::new("/pkgdeck")),
+            Err(AppImage::invalid("cannot locate bundled AppImage updater"))
+        );
+        let base = test_base("updater");
+        assert_eq!(
+            AppImage::updater_beside(&base.join("bin/pkgdeck")),
+            Err(AppImage::invalid("bundled AppImage updater is unavailable"))
+        );
+        let helper = base.join("lib/pkgdeck/appimageupdatetool.AppImage");
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::write(&helper, b"").unwrap();
+        assert_eq!(
+            AppImage::updater_beside(&base.join("bin/pkgdeck")),
+            Ok(helper)
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_unwritable_managed_folder_stops_the_import() {
+        // Needs a non-root user: root ignores directory permissions.
+        let base = test_base("readonly-root");
+        let source = base.join("external.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        let mut backend = AppImage::new(root.clone(), base.join("applications"), 1000);
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let error = backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut ignore)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Permission denied"), "{error}");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(base).unwrap();
     }
 }

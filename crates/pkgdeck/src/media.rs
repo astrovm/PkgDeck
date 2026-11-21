@@ -301,4 +301,17 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn a_missing_curl_is_the_download_error() {
+        let dir = temp("no-curl");
+        let error = download(
+            std::path::Path::new("/pkgdeck-missing-curl"),
+            "https://example.invalid/a.png",
+            &dir.join("out"),
+        )
+        .unwrap_err();
+        assert!(error.contains("No such file or directory"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

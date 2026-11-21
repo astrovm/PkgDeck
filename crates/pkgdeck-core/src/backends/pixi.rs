@@ -650,7 +650,7 @@ mod tests {
 
 [envs.ripgrep]
 channels = ["conda-forge", "bioconda"]
-dependencies = { ripgrep = ">=14,<15", "other" = { version = "==1.0", channel = "x" } }
+dependencies = { ripgrep = ">=14,<15", "other" = { version = "==1.0", channel = "x" }, local = { path = "." } }
 exposed = { rg = "rg" }
 
 [envs."python-tools"]
@@ -659,6 +659,7 @@ channels = ["conda-forge"]
 [envs."python-tools".dependencies]
 python = "3.12.*"
 ruff = { version = "*" }
+tool = { path = "./tool" }
 "#,
         );
         assert_eq!(
@@ -669,6 +670,9 @@ ruff = { version = "*" }
         assert_eq!(manifest["ripgrep"].specs["other"], "==1.0");
         assert_eq!(manifest["python-tools"].specs["python"], "3.12.*");
         assert_eq!(manifest["python-tools"].specs["ruff"], "*");
+        // Dependencies without a version spec are left out.
+        assert!(!manifest["ripgrep"].specs.contains_key("local"));
+        assert!(!manifest["python-tools"].specs.contains_key("tool"));
     }
 
     #[test]

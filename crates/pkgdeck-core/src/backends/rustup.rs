@@ -783,6 +783,38 @@ mod tests {
     }
 
     #[test]
+    fn unpinned_toolchains_use_saved_folders_and_the_home_rustup() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-rustup-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".rustup/toolchains/1.80.0-aarch64-apple-darwin")).unwrap();
+        #[derive(Clone)]
+        struct OnlyHome(Fake, PathBuf);
+        impl Transport for OnlyHome {
+            fn dev_tool(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                cancel: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.dev_tool(executable, args, cancel, write)
+            }
+            fn env(&self, name: &str) -> Option<OsString> {
+                (name == "HOME").then(|| self.1.clone().into())
+            }
+        }
+        let mut rustup = Rustup::new(OnlyHome(fake(), root.clone()));
+        let keys: Vec<_> = rustup
+            .cleanup(&Cancellation::default())
+            .unwrap()
+            .iter()
+            .map(|item| item.id.key.clone())
+            .collect();
+        assert!(keys.iter().any(|key| key.contains("1.80.0")), "{keys:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn toolchains_channels_pins_and_rustup_itself() {
         let fake = fake();
         let mut rustup = Rustup::new(fake.clone());

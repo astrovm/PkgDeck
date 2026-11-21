@@ -1773,6 +1773,13 @@ mod tests {
             cancellation_deferred: false,
         }
     }
+    #[test]
+    fn forgetting_a_version_without_a_store_clears_only_memory() {
+        let versions = Versions::new(None);
+        versions.seen().insert("fp".into(), ok("1"));
+        versions.forget(StandaloneTool::Codex);
+        assert!(versions.seen().is_empty());
+    }
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
@@ -2612,6 +2619,7 @@ mod tests {
             .unwrap()
             .unwrap();
         for text in [
+            "not json",
             r#"{"installer":"npm"}"#,
             r#"{"installer":"internal","error":"offline"}"#,
             r#"{"installer":"internal"}"#,
@@ -2850,30 +2858,24 @@ mod tests {
             let id = backend
                 .package(&fixture.installed.lock().unwrap().clone().unwrap(), None)
                 .id;
-            let mut messages = vec![];
+            let mut said = vec![];
             backend
                 .execute(
                     &Operation::Upgrade(id),
                     &Cancellation::default(),
-                    &mut |progress| {
-                        if let Progress::Message(text) = progress {
-                            messages.push(text);
-                        }
-                    },
+                    &mut |progress| said.push(progress),
                 )
                 .unwrap();
             assert_eq!(
                 fixture.installed.lock().unwrap().as_ref().unwrap().version,
                 Version::new(2, 0, 0)
             );
-            assert!(messages.last().unwrap().contains("updated to 2.0.0"));
+            let says = |progress: &Progress, text: &str| matches!(progress, Progress::Message(message) if message.contains(text));
+            assert!(says(said.last().unwrap(), "updated to 2.0.0"), "{said:?}");
             if let Some(expected) = expected {
-                assert!(
-                    messages.iter().any(|text| text.contains(expected)),
-                    "{messages:?}"
-                );
+                assert!(said.iter().any(|p| says(p, expected)), "{said:?}");
             } else {
-                assert_eq!(messages.len(), 3, "{messages:?}");
+                assert_eq!(said.len(), 3, "{said:?}");
             }
         }
     }
@@ -3025,6 +3027,68 @@ mod tests {
         );
         drop(file);
         assert!(!root.exists());
+    }
+    #[test]
+    fn a_poisoned_version_list_keeps_working() {
+        let versions = Versions::new(None);
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _seen = versions.seen();
+                panic!("poisons the lock");
+            });
+            assert!(holder.join().is_err());
+        });
+        assert!(versions.seen().is_empty());
+    }
+    #[test]
+    fn failed_version_answers_are_asked_again() {
+        let temp = Temp::new();
+        let launcher = temp.script("tool", "#!/bin/sh\n");
+        let versions = Versions::new(None);
+        let runs = std::cell::Cell::new(0);
+        let failed = || {
+            runs.set(runs.get() + 1);
+            Ok(Completion {
+                code: Some(3),
+                ..ok("")
+            })
+        };
+        for _ in 0..2 {
+            let answer = versions.read(StandaloneTool::Amp, &launcher, failed);
+            assert_eq!(answer.unwrap().code, Some(3));
+        }
+        assert_eq!(runs.get(), 2);
+    }
+    #[test]
+    fn failed_release_checks_are_errors() {
+        let temp = Temp::new();
+        let native = temp.native();
+        let cancel = Cancellation::default();
+        // Without an answer to give, the curl shim fails.
+        for tool in [StandaloneTool::Cua, StandaloneTool::OpenCode] {
+            temp.install(tool);
+            let installation = native.locate(tool, &cancel).unwrap().unwrap();
+            assert!(native.latest(tool, &installation, &cancel).is_err());
+        }
+    }
+    #[test]
+    fn an_installer_needs_its_shell() {
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.write("installer", "echo installed\n");
+        let error = native
+            .run_installer(
+                "https://example.invalid/install.sh",
+                "no-such-shell",
+                &[],
+                &[],
+                &Cancellation::default(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no-such-shell not found"),
+            "{error}"
+        );
     }
     #[test]
     fn versions_are_asked_once_per_binary() {

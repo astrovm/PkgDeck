@@ -452,6 +452,21 @@ mod tests {
             ["homebrew-cask", "macports"]
         );
         assert!(protected_sources(&[refresh("homebrew-cask")]).is_empty());
+        // macOS updates and the App Store reach sudo only to update.
+        let upgrade = |backend: &str| {
+            Operation::Upgrade(PackageId {
+                backend: backend.into(),
+                name: "one".into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            })
+        };
+        assert_eq!(
+            protected_sources(&[upgrade("macos-updates"), upgrade("mas"), refresh("mas")]),
+            ["macos-updates", "mas"]
+        );
         // A plan that can't be turned into commands protects nothing.
         let unknown_cleanup = Operation::Clean(pkgdeck_core::package::CleanupId {
             backend: "apt".into(),

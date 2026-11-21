@@ -466,6 +466,20 @@ mod tests {
     }
 
     #[test]
+    fn searches_list_matching_profile_entries_without_offering_them_again() {
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
+            ..Fake::default()
+        };
+        let rows = backend(fake)
+            .search("Hello", &Cancellation::default())
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.name, "hello");
+        assert_eq!(rows[0].installed_version.as_deref(), Some("2.12.3"));
+    }
+
+    #[test]
     fn installs_offer_the_exact_attribute_and_work_on_older_nix() {
         for old_nix in [false, true] {
             let fake = Fake {

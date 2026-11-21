@@ -253,12 +253,17 @@ pub fn write_new(path: &Path, manifest: &Manifest) -> Result<(), ManifestError> 
             MAX_BYTES / 1024 / 1024
         )));
     }
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|e| file_error("create", path, &e))?;
-    file.write_all(&bytes)
+    write_lines(file, &bytes, path)
+}
+
+/// Write `bytes` and a final newline to `file`, the new file at `path`.
+fn write_lines(mut file: impl Write, bytes: &[u8], path: &Path) -> Result<(), ManifestError> {
+    file.write_all(bytes)
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|e| file_error("write", path, &e))
 }
@@ -539,7 +544,39 @@ mod tests {
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(json.contains("\"scope\":\"user\""));
         assert!(!json.contains("4242"));
+        // Only the picked packages are saved.
+        let other = package(
+            "org.example.Other",
+            Scope::User { uid: 4242 },
+            Some("flathub"),
+        );
+        let picked = export(
+            &[selected.clone(), other],
+            std::slice::from_ref(&selected.id),
+        )
+        .unwrap();
+        assert_eq!(picked, manifest);
         assert!(export(&[], &[selected.id]).is_err());
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_written_names_the_file_and_the_reason() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-unwritable-list-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "").unwrap();
+        // Opened only to read, so every write fails.
+        let file = File::open(&path).unwrap();
+        let error = write_lines(file, b"{}", &path).unwrap_err();
+        assert_eq!(
+            error,
+            ManifestError::Io(format!(
+                "Can't write {}: bad file descriptor.",
+                path.display()
+            ))
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

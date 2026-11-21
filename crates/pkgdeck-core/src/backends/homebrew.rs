@@ -1274,3 +1274,118 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         Some(results.into_iter().flatten().collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Answers every `brew` command with what `answer` prints for it.
+    struct Brew(fn(&str) -> &'static [u8]);
+    impl Transport for Brew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: (self.0)(&line.join(" ")).to_vec(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+    const PREFIX: &str = "/home/linuxbrew/.linuxbrew";
+
+    #[test]
+    fn output_that_is_not_text_is_invalid() {
+        let cancel = Cancellation::default();
+        assert!(Homebrew::new(Brew(|_| b"\xff")).detect(&cancel).is_err());
+        assert!(Homebrew::new(Brew(|_| b"\xff")).cleanup(&cancel).is_err());
+    }
+
+    #[test]
+    fn nothing_to_clean_offers_no_cleanup() {
+        let items = Homebrew::new(Brew(|_| b"\n"))
+            .cleanup(&Cancellation::default())
+            .unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn casks_need_the_detected_prefix() {
+        let error = HomebrewCask::new(Brew(|_| br#"{"casks":[]}"#))
+            .installed(&Cancellation::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("prefix not detected"));
+    }
+
+    #[test]
+    fn installed_casks_without_a_home_folder_have_no_icon() {
+        let mut casks = HomebrewCask::new(Brew(|_| {
+            br#"{"casks":[{"full_token":"firefox","name":["Firefox"],"desc":"Web browser","homepage":null,"version":"2.0","installed":"2.0","outdated":false}]}"#
+        }));
+        casks.prefix = Some(PREFIX.into());
+        let rows = casks.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[0].display_name, "Firefox");
+        assert_eq!(rows[0].icon, None);
+    }
+
+    #[test]
+    fn an_installed_cask_looks_in_the_home_applications_folder() {
+        let home = std::env::temp_dir().join(format!("pkgdeck-cask-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("Applications")).unwrap();
+        struct BrewHome(PathBuf);
+        impl Transport for BrewHome {
+            fn brew(
+                &self,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: br#"{"casks":[{"full_token":"firefox","name":["Firefox"],"desc":"Web browser","homepage":null,"version":"2.0","installed":"2.0","outdated":false}]}"#.to_vec(),
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+            fn env(&self, name: &str) -> Option<OsString> {
+                (name == "HOME").then(|| self.0.clone().into())
+            }
+        }
+        let mut casks = HomebrewCask::new(BrewHome(home.clone()));
+        casks.prefix = Some(PREFIX.into());
+        let rows = casks.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[0].icon, None);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cask_info_that_is_not_json_blocks_adoption() {
+        let mut casks = HomebrewCask::new(Brew(|_| b"not json"));
+        casks.prefix = Some(PREFIX.into());
+        casks.adoption = Some(Box::new(adopt::tests::fake()));
+        let id = PackageId {
+            backend: "homebrew-cask".into(),
+            name: "visual-studio-code".into(),
+            architecture: std::env::consts::ARCH.into(),
+            scope: Scope::Environment {
+                path: PREFIX.into(),
+            },
+            remote: None,
+            reference: None,
+        };
+        assert!(matches!(
+            casks.operation_plan(&Operation::Install(id), &Cancellation::default()),
+            Err(EngineError::InvalidResponse { .. })
+        ));
+    }
+}

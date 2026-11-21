@@ -1038,4 +1038,107 @@ mod tests {
         ));
         fs::remove_dir_all(base).unwrap();
     }
+    #[test]
+    fn download_needs_curl() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-artifact-nocurl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let error = download(
+            "https://example.invalid/pkg.rpm",
+            &base.join("out"),
+            1024,
+            &Cancellation::default(),
+            &fixture_host(&base),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("curl isn't installed"),
+            "{error}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn a_snap_whose_name_is_not_a_snap_is_refused() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-artifact-snapname-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("not-a-snap");
+        fs::write(&file, b"0123456789abcdef").unwrap();
+        let error = materialize(
+            file.to_str().unwrap(),
+            Kind::Snap,
+            &Cancellation::default(),
+            &Host::current(),
+        )
+        .err()
+        .map(|error| error.to_string())
+        .expect("a snap with a bad name was accepted");
+        assert!(error.contains("invalid Snap filename"), "{error}");
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn a_staged_assertion_that_is_not_a_file_fails_inspection() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-artifact-assert-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("Demo.flatpak");
+        fs::write(
+            &file,
+            crate::flatpak_bundle::tests::app(
+                "app/org.example.Synthetic/x86_64/stable",
+                Some("1.0"),
+            ),
+        )
+        .unwrap();
+        let staged = Staged {
+            path: file,
+            assertion: Some(base.clone()),
+        };
+        let error = inspect_staged(
+            &staged,
+            "Demo.flatpak",
+            Kind::Flatpak,
+            &Cancellation::default(),
+            &Host::current(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("regular package file"),
+            "{error}"
+        );
+        drop(staged);
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn a_short_snap_assertion_fails_while_it_is_checked() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-artifact-short-assert-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        tool(
+            &base,
+            "snap",
+            "printf 'name: synthetic-snap\\nversion: 3.0\\nsummary: Synthetic Snap\\n'",
+        );
+        let path = base.join("sample.snap");
+        fs::write(&path, b"synthetic package payload").unwrap();
+        let assertion = base.join("sample.assert");
+        fs::write(&assertion, b"synthetic signed assertion").unwrap();
+        let host = fixture_host(&base);
+        let cancel = Cancellation::default();
+        let package = inspect_with_host(path.to_str().unwrap(), &cancel, &host).unwrap();
+        // Shorter than a hash reads, so the check after the package hash fails.
+        fs::write(&assertion, b"tiny").unwrap();
+        let error = stage_with_host(&package.id, &cancel, &host)
+            .err()
+            .map(|error| error.to_string())
+            .expect("a short assertion was accepted");
+        assert!(error.contains("regular package file"), "{error}");
+        fs::remove_dir_all(base).unwrap();
+    }
 }

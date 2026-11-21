@@ -109,6 +109,9 @@ LLVM folder.
 
 - Coverage is written to `coverage/lcov.info`. Set `CARGO_TARGET_DIR` to use a
   separate build cache.
+- `scripts/coverage-reset.sh` runs before each coverage build. It removes the
+  coverage build folder when another rustc built it: test binaries of an older
+  toolchain would join the report with zero counts.
 - `scripts/check-qt-free.sh` makes sure Qt never comes back: it checks the
   Cargo dependencies and what the final `pkd` binary links.
 - Script tests use fake commands and temporary log folders. Real package

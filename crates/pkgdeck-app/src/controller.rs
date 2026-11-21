@@ -454,8 +454,9 @@ enum Payload {
         tasks: Vec<(CleanupItem, Outcome, Option<String>)>,
         started_at: u64,
     },
-    /// How cleanup tasks that waited for a build ended when tried again.
-    RetriedCleans(Batch),
+    /// How cleanup tasks that waited for a build ended when tried again:
+    /// the tasks, and one step for each.
+    RetriedCleans(Vec<CleanupItem>, Batch),
 }
 enum Reply {
     Progress(String),
@@ -568,10 +569,7 @@ impl ProgressState {
         };
         let label = format!(
             "Update {}",
-            self.names
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| id.name.clone())
+            self.names.get(&id).expect("`with_rows` names every row")
         );
         let step = self.step(&Operation::UpgradeAll {
             backend: backend.into(),
@@ -1332,14 +1330,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             for item in &items {
                 engine.remember_cleanup_plan(item.clone());
             }
-            let operations = Job::RetryCleans(items).operations();
-            Ok(Payload::RetriedCleans(batch(
-                engine,
-                &operations,
-                Vec::new(),
-                cancel,
-                send,
-            )))
+            let operations = Job::RetryCleans(items.clone()).operations();
+            let ran = batch(engine, &operations, Vec::new(), cancel, send);
+            Ok(Payload::RetriedCleans(items, ran))
         }
         Job::AutoUpgrade(operations, removals) => {
             // Nobody reviews this run. Unless removals are allowed, APT goes
@@ -3112,10 +3105,16 @@ fn notice_subject(operations: &[Operation], names: &Names, succeeded: bool) -> V
     }
     subject
 }
+/// Both are JSON objects: `notice` and `notice_subject` build them so.
 fn with_subject(mut notice: Value, subject: Value) -> Value {
-    if let (Some(notice), Value::Object(subject)) = (notice.as_object_mut(), subject) {
-        notice.extend(subject);
-    }
+    let subject = subject
+        .as_object()
+        .expect("a notice subject is a JSON object")
+        .clone();
+    notice
+        .as_object_mut()
+        .expect("a notice is a JSON object")
+        .extend(subject);
     notice
 }
 /// What Retry runs again after a failure: the one change, or only the
@@ -3564,18 +3563,13 @@ impl ViewStore {
             .iter()
             .any(|view| key.starts_with(view))
     }
+    /// `views.json` in PkgDeck's user cache folder, which also decides
+    /// when there is none (no home, `PKGDECK_NO_CACHE`, or root).
     fn default_path() -> Option<PathBuf> {
-        if cfg!(test)
-            || rustix::process::geteuid().is_root()
-            || std::env::var_os("PKGDECK_NO_CACHE").is_some()
-        {
+        if cfg!(test) {
             return None;
         }
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .filter(|p| std::path::Path::new(p).is_absolute())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-        Some(base.join("pkgdeck/views.json"))
+        pkgdeck_core::cache::Store::user().map(|store| store.dir().join("views.json"))
     }
     fn open(path: PathBuf) -> Self {
         Self {
@@ -4174,9 +4168,12 @@ fn note_replaced_copy(notice: &mut Value, job: &Job, opened: Option<&Package>) {
     };
     notice["undo"] = json!(false);
     notice["undo_action"] = json!("");
-    if let Some(title) = notice["title"].as_str() {
-        notice["title"] = json!(title.replacen("Install", word, 1));
-    }
+    // `write_notice` gives every success notice a title.
+    let title = notice["title"]
+        .as_str()
+        .expect("a success notice has a title")
+        .replacen("Install", word, 1);
+    notice["title"] = json!(title);
 }
 /// Where a Flatpak opened from a file or link installs, as the word its
 /// **User** / **System** choice shows. Empty for anything else, and for
@@ -7071,7 +7068,7 @@ impl ffi::PackageController {
         match result {
             Ok(Payload::BackgroundUpdates(report)) => self.as_mut().finish_background_check(report),
             // Settled where the retry's reply arrives, behind everything.
-            Ok(Payload::RetriedCleans(_)) => {}
+            Ok(Payload::RetriedCleans(..)) => {}
             Ok(Payload::AutoCleaned {
                 cleaned,
                 failed,
@@ -7357,13 +7354,14 @@ impl ffi::PackageController {
                 let noun = if count == 1 { "AppImage" } else { "AppImages" };
                 let summary = format!("Manage {count} {noun} with PkgDeck\n{}", notes.join("\n"));
                 let body = format!("{}\n\n{}", notes.join("\n"), moves.join("\n"));
-                for (package, operation, _) in &plans {
+                // Each move installs its own row (`plan_appimage_adoption`),
+                // so the row's name is the move's name too.
+                for (package, _, _) in &plans {
                     let name = package.display_name.clone();
-                    let names = &mut self.as_mut().rust_mut().names;
-                    if let Operation::Install(id) = operation {
-                        names.insert(id.clone(), name.clone());
-                    }
-                    names.insert(package.id.clone(), name);
+                    self.as_mut()
+                        .rust_mut()
+                        .names
+                        .insert(package.id.clone(), name);
                 }
                 let mut writes = plans
                     .into_iter()
@@ -7796,9 +7794,8 @@ impl ffi::PackageController {
                     let _ = sender.send(Reply::DetailsPreview(details.clone()));
                     crate::metadata::details(&mut details.package, &token, natives.metadata);
                 }
-                if matches!(reply, Reply::Done(_) | Reply::DetailsPreview(_)) {
-                    let _ = sender.send(reply);
-                }
+                // A details job replies only `Done` (see `execute`).
+                let _ = sender.send(reply);
             };
             match natives.job_engine(&scope, false, authorization, &token) {
                 Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
@@ -8289,10 +8286,8 @@ impl ffi::PackageController {
                 if self.rust().background {
                     if !cancel.requested() {
                         match reply {
-                            Reply::Done(Ok(Payload::RetriedCleans(ran))) => {
-                                if let Job::RetryCleans(items) = &job {
-                                    self.as_mut().finish_retried_cleans(items, &ran);
-                                }
+                            Reply::Done(Ok(Payload::RetriedCleans(items, ran))) => {
+                                self.as_mut().finish_retried_cleans(&items, &ran)
                             }
                             // Tasks a retry couldn't start keep waiting.
                             Reply::Done(Err(_)) if matches!(job, Job::RetryCleans(_)) => {}

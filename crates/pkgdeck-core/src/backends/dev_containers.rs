@@ -948,6 +948,9 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
         /// `rm` fails with this.
         rm_failure: Option<ExecutionError>,
         home: Option<PathBuf>,
+        data_home: Option<PathBuf>,
+        /// `distrobox upgrade` prints nothing.
+        silent: bool,
     }
     fn done(text: &str, code: i32) -> Completion {
         Completion {
@@ -961,7 +964,14 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
     }
     impl Transport for Fake {
         fn env(&self, name: &str) -> Option<OsString> {
-            (name == "HOME").then(|| self.home.clone().map(Into::into))?
+            let value = match name {
+                "HOME" => &self.home,
+                _ => {
+                    assert_eq!(name, "XDG_DATA_HOME");
+                    &self.data_home
+                }
+            };
+            value.clone().map(Into::into)
         }
         fn dev_tool(
             &self,
@@ -995,10 +1005,12 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
                     if self.vanish {
                         self.list.lock().unwrap().clear();
                     }
-                    Ok(done(
-                        "OK: 26166 distinct packages available\nOK: 537 MiB in 376 packages\n",
-                        0,
-                    ))
+                    let output = if self.silent {
+                        ""
+                    } else {
+                        "OK: 26166 distinct packages available\nOK: 537 MiB in 376 packages\n"
+                    };
+                    Ok(done(output, 0))
                 }
                 (_, "rm") => {
                     assert!(write);
@@ -1170,8 +1182,22 @@ nothexnothex | bad | Up | x\n";
             }
         );
         assert_eq!(backend.exports("dbx-fedora"), Exports::default());
-        assert_eq!(backend.launcher_icon("dbx-fedora"), Some(icon));
+        assert_eq!(backend.launcher_icon("dbx-fedora"), Some(icon.clone()));
         assert_eq!(backend.launcher_icon("alpine-box"), None);
+        // XDG_DATA_HOME wins when it is absolute; a relative one is ignored.
+        let data_home = |path: PathBuf, home: Option<PathBuf>| {
+            DevContainers::distrobox(Fake {
+                data_home: Some(path),
+                home,
+                ..fake()
+            })
+            .launcher_icon("dbx-fedora")
+        };
+        assert_eq!(
+            data_home(home.join(".local/share"), None),
+            Some(icon.clone())
+        );
+        assert_eq!(data_home("relative".into(), Some(home.clone())), Some(icon));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1246,6 +1272,22 @@ nothexnothex | bad | Up | x\n";
             )
             .unwrap_err();
         assert!(error.to_string().contains("no longer listed"), "{error}");
+        // Without output, nothing is repeated after the step itself.
+        let mut messages = vec![];
+        DevContainers::distrobox(Fake {
+            silent: true,
+            ..self::fake()
+        })
+        .execute(&Operation::Upgrade(rows[0].id.clone()), &cancel, &mut |p| {
+            messages.push(p)
+        })
+        .unwrap();
+        assert_eq!(
+            messages,
+            [Progress::Message(
+                "Updating the packages in alpine-box with distrobox upgrade…".into()
+            )]
+        );
     }
 
     #[test]
@@ -1399,6 +1441,7 @@ nothexnothex | bad | Up | x\n";
     fn availability_follows_the_tool() {
         let cancel = Cancellation::default();
         let available = DevContainers::toolbox(fake()).detect(&cancel).unwrap();
+        let present = DevContainers::distrobox(fake()).detect(&cancel).unwrap();
         let missing = DevContainers::distrobox(Fake {
             missing: true,
             ..fake()
@@ -1406,14 +1449,23 @@ nothexnothex | bad | Up | x\n";
         .detect(&cancel)
         .unwrap();
         if cfg!(target_os = "linux") {
+            assert_eq!(present, available);
             assert_eq!(available, Availability::Available);
             assert_eq!(
                 missing,
                 Availability::Unavailable("distrobox not found".into())
             );
         } else {
-            assert!(matches!(available, Availability::Unavailable(_)));
-            assert!(matches!(missing, Availability::Unavailable(_)));
+            // Each tool names itself. Off Linux neither one is probed.
+            assert_eq!(
+                available,
+                Availability::Unavailable("Toolbx containers run on Linux".into())
+            );
+            assert_eq!(
+                present,
+                Availability::Unavailable("Distrobox containers run on Linux".into())
+            );
+            assert_eq!(missing, present);
         }
     }
 

@@ -1621,14 +1621,15 @@ impl<T: Transport> DevTool<T> {
                     Some(requested) => format!("Global mise tool, version {requested}"),
                     None => "Global mise tool".into(),
                 };
-                let mut details =
-                    self.detail(home, name, summary, None, install.version, Some(candidate));
-                if !check_updates {
-                    if let Ok(details) = &mut details {
-                        details.package.update = UpdateAvailability::Unknown;
-                        details.package.candidate_version = None;
-                    }
-                }
+                let details = self
+                    .detail(home, name, summary, None, install.version, Some(candidate))
+                    .map(|mut details| {
+                        if !check_updates {
+                            details.package.update = UpdateAvailability::Unknown;
+                            details.package.candidate_version = None;
+                        }
+                        details
+                    });
                 Some(details)
             })
             .collect()
@@ -1964,10 +1965,7 @@ impl<T: Transport> DevTool<T> {
     ) -> Result<OperationOutcome, EngineError> {
         let name = self.target(target)?;
         progress(Progress::Message(format!("Updating {name}…")));
-        let home = self
-            .home
-            .clone()
-            .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+        let home = self.home.clone().expect("target() checks the home");
         let result = match self.kind {
             DevKind::Cargo => self.cargo_reinstall(&home, name, cancel)?,
             DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
@@ -2778,10 +2776,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 ],
                 DevKind::Pip => {
                     let name = self.target(target)?;
-                    let home = self
-                        .home
-                        .clone()
-                        .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                    let home = self.home.clone().expect("target() checks the home");
                     progress(Progress::Message(format!(
                         "Running {id}. If you cancel, PkgDeck waits for it to finish."
                     )));
@@ -2827,10 +2822,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 ],
                 DevKind::Pip => {
                     let name = self.target(target)?;
-                    let home = self
-                        .home
-                        .clone()
-                        .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                    let home = self.home.clone().expect("target() checks the home");
                     progress(Progress::Message(format!(
                         "Running {id}. If you cancel, PkgDeck waits for it to finish."
                     )));
@@ -2866,12 +2858,21 @@ mod release_age {
     type Run = (String, Vec<String>, Vec<(String, String)>);
     /// Answers `--version` with what it's given, and remembers every run.
     #[derive(Default)]
-    struct Manager {
+    pub(super) struct Manager {
         version: &'static str,
         env: BTreeMap<String, OsString>,
+        /// What other commands print, by their arguments; nothing otherwise.
+        outputs: Vec<(&'static str, &'static [u8])>,
         runs: Mutex<Vec<Run>>,
     }
     impl Manager {
+        /// A manager that prints `outputs` for those commands.
+        pub(super) fn answering(outputs: Vec<(&'static str, &'static [u8])>) -> Self {
+            Self {
+                outputs,
+                ..Self::default()
+            }
+        }
         fn answer(
             &self,
             executable: &str,
@@ -2885,7 +2886,11 @@ mod release_age {
                 }
                 self.version.as_bytes().to_vec()
             } else {
-                vec![]
+                let line = args.join(" ");
+                self.outputs
+                    .iter()
+                    .find(|(known, _)| *known == line)
+                    .map_or(vec![], |(_, output)| output.to_vec())
             };
             self.runs.lock().unwrap().push((
                 executable.into(),
@@ -3121,5 +3126,136 @@ mod release_age {
         ] {
             assert_eq!(version_in(text), version, "{text:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod manager_answers {
+    use super::release_age::Manager;
+    use super::*;
+
+    fn home(path: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(path))
+    }
+
+    #[test]
+    fn homes_need_text_answers_and_pipx_needs_a_home() {
+        let cancel = Cancellation::default();
+        let error = DevTool::pipx(&Manager::default()).home(&cancel);
+        assert_eq!(
+            error,
+            Err(ExecutionError::Disabled("pipx home not found".into()))
+        );
+        let manager = Manager::answering(vec![
+            ("tool dir", b"\xff"),
+            ("config --global home", b"\xff"),
+            ("env", b"\xff"),
+            ("root --global", b"\xff"),
+        ]);
+        for tool in [
+            DevTool::uv(&manager),
+            DevTool::composer(&manager),
+            DevTool::gem(&manager),
+            DevTool::npm(&manager),
+        ] {
+            let error = tool.home(&cancel).unwrap_err();
+            assert!(
+                matches!(&error, ExecutionError::Invalid(reason) if reason.contains("utf-8")),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn work_without_a_detected_home_is_refused() {
+        let cancel = Cancellation::default();
+        let manager = Manager::default();
+        for mut tool in [
+            DevTool::mise(&manager),
+            DevTool::cargo(&manager),
+            DevTool::npm(&manager),
+        ] {
+            let backend = tool.kind.id().to_owned();
+            let error = tool
+                .execute(&Operation::UpgradeAll { backend }, &cancel, &mut |_| {})
+                .unwrap_err();
+            assert!(error.to_string().contains("manager home not detected"));
+        }
+        let error = DevTool::cargo(&manager)
+            .lookup("ripgrep", &cancel)
+            .unwrap_err();
+        assert!(error.to_string().contains("manager home not detected"));
+    }
+
+    #[test]
+    fn a_broken_pip_update_list_is_an_error() {
+        let manager = Manager::answering(vec![
+            ("list --format=json", b"[]"),
+            ("list --outdated --format=json", b"not json"),
+        ]);
+        let mut pip = DevTool::pip(&manager);
+        pip.home = home("/venv");
+        let error = pip
+            .inventory(Updates::All, &Cancellation::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, EngineError::InvalidResponse { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_gem_installed_twice_is_listed_at_its_highest_version() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-gems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("specifications")).unwrap();
+        // Sorted as text, 10.0 comes before 9.0.
+        for version in ["10.0", "9.0"] {
+            std::fs::write(
+                base.join(format!("specifications/rake-{version}.gemspec")),
+                "",
+            )
+            .unwrap();
+        }
+        let manager = Manager::default();
+        let mut gem = DevTool::gem(&manager);
+        gem.home = Some(base.clone());
+        let listed = gem
+            .inventory(Updates::All, &Cancellation::default())
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].package.installed_version.as_deref(), Some("10.0"));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn mise_offers_no_exact_name_it_cannot_install() {
+        let manager = Manager::answering(vec![
+            ("ls --global --json", b"{}"),
+            ("registry --json", b"[]"),
+        ]);
+        let mut mise = DevTool::mise(&manager);
+        mise.home = home("/mise");
+        let found = mise.search("not a tool", &Cancellation::default()).unwrap();
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn bun_reads_the_version_it_would_install() {
+        let cancel = Cancellation::default();
+        let manager = Manager::answering(vec![(
+            "add --global left-pad@latest --dry-run",
+            b"installed left-pad@\ninstalled left-pad@1.3.0 with binaries\n",
+        )]);
+        let bun = DevTool::bun(&manager);
+        assert_eq!(
+            bun.bun_upgrade_version("left-pad", &cancel).unwrap(),
+            "1.3.0"
+        );
+        let manager = Manager::answering(vec![("add --global left-pad@latest --dry-run", b"\xff")]);
+        let error = DevTool::bun(&manager)
+            .bun_upgrade_version("left-pad", &cancel)
+            .unwrap_err();
+        assert!(error.to_string().contains("utf-8"), "{error}");
     }
 }

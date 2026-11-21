@@ -18,10 +18,10 @@ base64 = "=0.23.1"
 hex = "=0.4.3"
 jiff = "=1.0.0"
 signal-hook = "=0.4.6"
-rustix = { version = "=1.1.6", features = ["fs", "process", "event", "system"] }
+rustix = { version = "=1.1.6", features = ["fs", "process", "event", "pipe", "system"] }
 pkgdeck-core = { path = "crates/pkgdeck-core" }
-clap = { version = "=4.6.7", features = ["derive"] }
-clap_complete = "=4.6.11"
+clap = { version = "=4.6.8", features = ["derive"] }
+clap_complete = "=4.6.12"
 unicode-width = "=0.2.3"
 
 [workspace.lints.rust]

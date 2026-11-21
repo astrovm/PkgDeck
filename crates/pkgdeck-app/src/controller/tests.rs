@@ -1045,6 +1045,40 @@ fn every_opened_flatpak_chooses_where_it_installs_on_its_page_and_in_review() {
     }
 }
 #[test]
+fn activity_names_are_kept_only_for_changes_that_name_something() {
+    let mut names = Names::new();
+    let all = Operation::UpgradeAll {
+        backend: "apt".into(),
+    };
+    names.keep(&[all], &[Some("APT".into())]);
+    assert!(names.is_empty());
+}
+#[test]
+fn a_review_changes_where_an_opened_flatpak_installs_after_its_page_closes() {
+    let mut controller = ffi::create_controller();
+    let mut controller = controller.pin_mut();
+    let mut package = synthetic_package("org.example.Demo", "Demo");
+    package.id.backend = "flatpak".into();
+    package.id.scope = Scope::User {
+        uid: rustix::process::getuid().as_raw(),
+    };
+    package.id.reference = Some(format!(
+        "artifact:flatpak:{}::/tmp/Demo.flatpak",
+        "ab".repeat(32)
+    ));
+    package.installed_version = None;
+    controller.as_mut().apply(Ok(opened_payload(package)));
+    controller.as_mut().install_opened();
+    controller.as_mut().close_opened();
+    controller.as_mut().set_open_flatpak_scope(true);
+    assert!(controller.rust().opened_package.is_none());
+    assert!(matches!(
+        &controller.rust().pending,
+        Some(Job::Write(Operation::Install(id), None)) if id.scope == Scope::System
+    ));
+    controller.as_mut().confirm(false);
+}
+#[test]
 fn replacing_an_installed_copy_says_so_and_offers_no_undo() {
     let mut package = synthetic_package("org.example.Demo", "Demo");
     package.id.backend = "flatpak".into();
@@ -2338,6 +2372,22 @@ fn stale_snapshot_stays_whole_while_its_refresh_streams() {
     controller.as_mut().rust_mut().queued = None;
     controller.as_mut().rust_mut().worker = Some(Worker {
         handle: thread::spawn(|| thread::sleep(Duration::from_millis(200))),
+        receiver,
+        cancel: Cancellation::default(),
+        job: Job::Load("Installed".into(), "".into()),
+    });
+    controller.as_mut().poll();
+    assert!(controller.rows().to_string().contains("cached package"));
+    // So is the last one, sent as the refresh ends.
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Reply::Partial(PackageReport::default()))
+        .unwrap();
+    sender
+        .send(Reply::Done(Err(EngineError::Cancelled)))
+        .unwrap();
+    controller.as_mut().rust_mut().worker = Some(Worker {
+        handle: thread::spawn(|| {}),
         receiver,
         cancel: Cancellation::default(),
         job: Job::Load("Installed".into(), "".into()),
@@ -4534,6 +4584,12 @@ fn a_better_name_from_details_updates_cached_sections_too() {
         .rust_mut()
         .view_cache
         .insert(cache_key("Installed", "", &[], false), cached);
+    // A section without it stays as it was.
+    controller
+        .as_mut()
+        .rust_mut()
+        .view_cache
+        .insert(cache_key("Updates", "", &[], false), cached_view("other"));
     let mut named = package;
     named.display_name = "Example App".into();
     controller
@@ -4553,6 +4609,15 @@ fn a_better_name_from_details_updates_cached_sections_too() {
         .unwrap();
     assert!(cached.rows.to_string().contains("Example App"));
     assert_eq!(cached.packages[0].display_name, "Example App");
+    let other = controller
+        .rust()
+        .view_cache
+        .get(&cache_key("Updates", "", &[], false))
+        .unwrap();
+    assert_eq!(
+        other.rows.to_string(),
+        cached_view("other").rows.to_string()
+    );
 }
 #[test]
 fn updates_wait_for_an_installed_preload_and_cancel_older_reads() {
@@ -8285,6 +8350,32 @@ fn jobs_without_a_worker_engine_path_answer_directly() {
         replies.last(),
         Some(Reply::Done(Err(EngineError::UnknownBackend(backend)))) if backend == "apt"
     ));
+    // With APT there, its review carries the dry run's plan.
+    engine
+        .register(AptPlanFixture { removals: vec![] })
+        .unwrap();
+    let replies = run_job(
+        &mut engine,
+        Job::PlanUpgrade(vec![upgrade("apt")], 1, None),
+        &cancel,
+    );
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Ok(Payload::UpgradePreview(_, 1, Some(plan), None))))
+            if plan.upgrades == ["synthetic"]
+    ));
+    // An inventory file that can't be read can't be previewed.
+    let replies = run_job(
+        &mut engine,
+        Job::ManifestPreview(path.with_extension("missing")),
+        &cancel,
+    );
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Err(EngineError::Execution(
+            ExecutionError::Invalid(_)
+        ))))
+    ));
     let clean = vec![Operation::Clean(CleanupId {
         backend: "fwupd".into(),
         key: "cache".into(),
@@ -9859,6 +9950,23 @@ fn engine_errors_become_one_plain_sentence() {
     "Couldn't read /Users/me/Applications/Locked (permission denied). The other apps are still listed."
 );
     assert_eq!(failure_kind(&skipped), "partial");
+    // Each way the inventory names what it skipped is partial too.
+    for reason in [
+        "skipped entry in /Applications: disk read failed",
+        "skipped entry /Applications/Broken.app: disk read failed",
+    ] {
+        let entry = EngineError::InvalidResponse {
+            backend: "macos-apps".into(),
+            reason: reason.into(),
+        };
+        assert_eq!(failure_kind(&entry), "partial", "{reason}");
+    }
+    // Anything else the inventory says is a failure.
+    let unread = EngineError::InvalidResponse {
+        backend: "macos-apps".into(),
+        reason: "disk read failed".into(),
+    };
+    assert_eq!(failure_kind(&unread), "failed");
     // mas asks for the password itself, whatever PkgDeck's setting is.
     let denied = EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied);
     for sudo in [false, true] {
@@ -10741,6 +10849,10 @@ fn followed_output_moves_the_running_update_all_on() {
     let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
     assert_eq!(progress["label"], "Updating Beta App…");
     assert_eq!(progress["current"], target_row(&package.id));
+    // A line that names no package leaves it where it was.
+    controller.as_mut().follow_output("Nothing to see here");
+    let unchanged: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
+    assert_eq!(unchanged, progress);
     drop(release);
     controller.as_mut().rust_mut().progress_state = None;
     controller.as_mut().follow_output("==> Upgrading beta");
@@ -11481,7 +11593,7 @@ fn adoption_confirms_in_plain_words_and_offers_no_undo() {
         Some("Obsidian")
     );
     // Removing the cask afterwards would delete the app the user had.
-    let job = Job::Write(operation.clone(), Some(Box::new(plan)));
+    let job = Job::Write(operation.clone(), Some(Box::new(plan.clone())));
     let notice = write_notice(
         &job,
         &Ok(Payload::Written(OperationOutcome::default())),
@@ -11492,7 +11604,7 @@ fn adoption_confirms_in_plain_words_and_offers_no_undo() {
     assert_eq!(notice["undo"], false);
     assert_eq!(notice["undo_action"], "");
     let plain = write_notice(
-        &Job::Write(operation, None),
+        &Job::Write(operation.clone(), None),
         &Ok(Payload::Written(OperationOutcome::default())),
         false,
         &controller.rust().names,
@@ -11516,6 +11628,22 @@ fn adoption_confirms_in_plain_words_and_offers_no_undo() {
     assert!(refusal["detail"].as_str().unwrap().contains("another copy"));
     controller.as_mut().confirm(false);
     assert!(controller.rust().pending.is_none());
+    // Once the checked copy is gone from the list, the cask's name stands in.
+    controller.as_mut().rust_mut().packages = vec![];
+    let mut named = cask;
+    named.display_name = "Obsidian (cask)".into();
+    controller.as_mut().apply(Ok(Payload::AdoptionPreview(
+        Box::new(named),
+        operation,
+        Box::new(plan),
+    )));
+    let data: Value = serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+    let summary = data["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Manage Obsidian (cask) with Homebrew"),
+        "{summary}"
+    );
+    controller.as_mut().confirm(false);
 }
 
 /// A package from the synthetic system: installed, with an update.
@@ -14975,7 +15103,7 @@ fn a_retry_settles_only_the_tasks_it_ran() {
     // A retry's result settles nothing when it reaches the foreground.
     controller
         .as_mut()
-        .apply(Ok(Payload::RetriedCleans(Batch::default())));
+        .apply(Ok(Payload::RetriedCleans(vec![], Batch::default())));
     assert_eq!(controller.rust().waiting_cleans.len(), 2);
     // A task Clean no longer lists has no review to wait with.
     controller.as_mut().wait_for_builds(
@@ -15449,10 +15577,20 @@ fn app_data_plans_and_runs_through_the_engine() {
         backend: "flatpak".into(),
         key: "data:org.example.Other".into(),
     };
-    let replies = run_job(&mut engine, Job::PlanCleanup(missing), &cancel);
+    let replies = run_job(&mut engine, Job::PlanCleanup(missing.clone()), &cancel);
     assert!(matches!(
         replies.last(),
         Some(Reply::Done(Err(EngineError::NotFound)))
+    ));
+    // One that is gone by the review drops out of it.
+    let replies = run_job(
+        &mut engine,
+        Job::PlanCleanAll(vec![Operation::Clean(missing)]),
+        &cancel,
+    );
+    assert!(matches!(
+        replies.last(),
+        Some(Reply::Done(Ok(Payload::CleanPreview(_, fresh)))) if fresh.is_empty()
     ));
     // A queued one is checked again, though the Clean page doesn't list it.
     // Other operations are left to the engine's own check.
@@ -15643,4 +15781,141 @@ fn system_error_codes_and_parts_of_pkgdeck_stay_out_of_sentences() {
         plain_error(&invalid, None, false),
         "Invalid repository name."
     );
+}
+
+#[test]
+fn closing_the_window_keeps_the_engine_a_running_change_uses() {
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().engine = Some(Engine::default());
+    controller.as_mut().rust_mut().worker = Some(fake_worker(Job::Repositories(None), vec![]));
+    controller.as_mut().set_window_open(false);
+    assert!(controller.rust().engine.is_some());
+    settle(&mut controller);
+}
+#[test]
+fn automatic_updates_keep_a_cask_password_wait_until_casks_list_again() {
+    let mut app = synthetic_package("mail-app", "Mail App");
+    app.id.backend = "homebrew-cask".into();
+    app.installed_version = Some("1".into());
+    app.candidate_version = Some("3".into());
+    app.update = UpdateAvailability::Available;
+    let temp = pkgdeck_tools::Temp::new();
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().activity_store =
+        Some(ActivityStore::at(temp.0.join("activity.json")));
+    controller.as_mut().rust_mut().natives.hold = never_hold;
+    controller.as_mut().set_auto_update(true);
+    controller
+        .as_mut()
+        .rust_mut()
+        .needs_password
+        .remember(&[("mail-app".into(), "2".into())], &[]);
+    // While casks can't be read, the one that asked for a password waits.
+    let failed = PackageReport {
+        packages: vec![app.clone()],
+        failures: vec![BackendFailure {
+            backend: "homebrew-cask".into(),
+            error: EngineError::Cancelled,
+        }],
+        successful_sources: vec![],
+    };
+    assert_eq!(controller.as_mut().schedule_auto_update(&failed), None);
+    assert!(controller.rust().needs_password.skips("mail-app", "2"));
+    // Once they list a newer version, it updates at that version.
+    let listed = PackageReport {
+        packages: vec![app.clone()],
+        failures: vec![],
+        successful_sources: vec!["homebrew-cask".into()],
+    };
+    assert!(controller.as_mut().schedule_auto_update(&listed).is_some());
+    assert!(!controller.rust().needs_password.skips("mail-app", "2"));
+    assert_eq!(
+        controller
+            .rust()
+            .cask_versions
+            .get(&app.id)
+            .map(String::as_str),
+        Some("3")
+    );
+}
+#[test]
+fn activity_that_cannot_be_read_keeps_what_it_showed() {
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    let before = controller.activity().to_string();
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Err(std::io::Error::other("unreadable")))
+        .unwrap();
+    controller.as_mut().rust_mut().activity_worker = Some(ActivityWorker {
+        handle: thread::spawn(|| {}),
+        receiver,
+    });
+    controller.as_mut().poll();
+    assert_eq!(controller.activity().to_string(), before);
+    assert!(controller.rust().activity_worker.is_none());
+}
+#[test]
+fn cancelling_a_revalidation_with_no_running_check_discards_it() {
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().rust_mut().revalidating = Some(Confirmed {
+        job: Job::Write(
+            Operation::Refresh {
+                backend: "fixture".into(),
+            },
+            None,
+        ),
+        activity_id: None,
+        cleanup_preview: vec![],
+    });
+    controller.as_mut().cancel_queued();
+    assert!(controller.rust().revalidating.is_none());
+    assert!(controller.rust().discard_revalidation);
+}
+#[test]
+fn a_catalog_check_that_lands_after_sources_loaded_keeps_their_catalog() {
+    let mut controller = idle_controller();
+    let mut controller = controller.pin_mut();
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(vec![Source {
+            backend: "apt".into(),
+            capabilities: vec![Capability::Search],
+            availability: Ok(Availability::Available),
+        }])
+        .unwrap();
+    controller.as_mut().rust_mut().catalog_worker = Some(CatalogWorker {
+        handle: thread::spawn(|| {}),
+        receiver,
+        cancel: Cancellation::default(),
+    });
+    controller.as_mut().rust_mut().catalog_checked = true;
+    let before = controller.source_catalog().to_string();
+    controller.as_mut().poll();
+    assert!(controller.rust().catalog_worker.is_none());
+    assert_eq!(controller.source_catalog().to_string(), before);
+}
+#[test]
+fn a_finished_refresh_records_its_time_even_without_a_readable_report_state() {
+    let mut controller = synthetic_controller();
+    let mut controller = controller.pin_mut();
+    controller.as_mut().set_report_state("".into());
+    controller.as_mut().rust_mut().worker = Some(fake_worker(
+        Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        ),
+        vec![Reply::Done(Ok(Payload::Written(
+            OperationOutcome::default(),
+        )))],
+    ));
+    controller.as_mut().poll();
+    let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+    assert!(state["last_success"]["apt"].is_u64(), "{state}");
+    settle(&mut controller);
 }
