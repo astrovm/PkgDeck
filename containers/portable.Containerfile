@@ -3,7 +3,7 @@
 # 22.04 is the oldest Ubuntu LTS in standard support, and its glibc 2.35 sets
 # the minimum. The APT headers are left out on purpose: the packages ship the APT
 # reader from scripts/bundle-apt.sh, built with a newer APT.
-FROM docker.io/library/rust:1.99.1-slim@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS rust
+FROM docker.io/library/rust:1.100.0-slim@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS rust
 FROM docker.io/library/ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
 ENV DEBIAN_FRONTEND=noninteractive
 COPY scripts/ci/apt-mirrors.sh /opt/pkgdeck/apt-mirrors.sh
